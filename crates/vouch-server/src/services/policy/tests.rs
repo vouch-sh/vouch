@@ -1440,3 +1440,362 @@ fn test_as_editable_strips_comments_and_id() {
             .unwrap_or_else(|e| panic!("copy of '{}' must validate: {e:?}", policy.slug));
     }
 }
+
+// ============================================================
+// Multi-rule policy attribution (regression for rule-index mapping)
+// ============================================================
+
+/// `rule_count` parses policy text (the schema-independent phase) and
+/// returns the number of Dogwood rules it contains — one per `forbid` or
+/// `permit` statement. This is the count `compose_org_set` uses to size
+/// `refs`, so it must agree with what lowering actually emits.
+#[test]
+fn test_rule_count_matches_policy_statements() {
+    // Base permits: two `permit` statements.
+    assert_eq!(rule_count(BASE_ALLOW), preconfigured::BASE_ALLOW_RULES);
+    // Every preconfigured policy is a single rule.
+    for policy in PRECONFIGURED_POLICIES {
+        assert_eq!(
+            rule_count(policy.policy_text),
+            1,
+            "preconfigured policy '{}' should be one rule",
+            policy.slug
+        );
+    }
+    // A single forbid is one rule.
+    assert_eq!(
+        rule_count(&requirement("context.device.disk_encryption_enabled")),
+        1
+    );
+    // Two forbids in one text are two rules.
+    let two_rules = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    assert_eq!(rule_count(&two_rules), 2);
+    // Three forbids are three rules.
+    let three_rules = format!(
+        "{two_rules}\n{}",
+        requirement("context.device.screen_lock_enabled"),
+    );
+    assert_eq!(rule_count(&three_rules), 3);
+    // A `permit` + `forbid` mix is two rules (permits count too: Dogwood
+    // assigns them a rule_index).
+    let mixed = format!(
+        "permit (principal, action == Vouch::Action::\"IssueToken\", resource);\n{}",
+        requirement("context.device.firewall_enabled"),
+    );
+    assert_eq!(rule_count(&mixed), 2);
+}
+
+/// The `BASE_ALLOW_RULES` constant must match the actual rule count of
+/// `base_allow.dw` — the composed set's forbids start at this index, so a
+/// stale constant would shift every attribution.
+#[test]
+fn test_base_allow_rules_constant_matches_actual() {
+    assert_eq!(
+        rule_count(BASE_ALLOW),
+        preconfigured::BASE_ALLOW_RULES,
+        "BASE_ALLOW_RULES must match the rule count of base_allow.dw"
+    );
+}
+
+/// A custom policy with multiple `forbid` statements is valid Dogwood:
+/// `validate_policy_text` checks syntax and types, not rule count. This
+/// pins that acceptance so the attribution fix is exercised against the
+/// same text an admin can actually save.
+#[test]
+fn test_multi_rule_custom_policy_validates() {
+    let multi_rule = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    validate_policy_text(&multi_rule)
+        .unwrap_or_else(|e| panic!("multi-rule custom policy must validate: {e:?}"));
+}
+
+/// `refs` must carry one entry per Dogwood rule in the composed set, not
+/// one per policy text. Dogwood assigns `rule_index` per rule in the
+/// composed set, so `refs.len()` must equal the lowered set's total rule
+/// count — otherwise `refs.get(rule_index)` returns `None` for rules
+/// beyond the per-text entries.
+#[test]
+fn test_refs_align_with_lowered_rule_count() {
+    let policy_schema = schema::policy_schema().expect("schema");
+    let check = |slugs: &[String], custom: &[db::CustomPosturePolicy], label: &str| {
+        let set = compose_org_set(slugs, custom);
+        let lowered =
+            LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+                .unwrap_or_else(|e| panic!("'{label}': composed set must lower: {e}"));
+        let total_rules = lowered.rules().count();
+        assert_eq!(
+            set.refs.len(),
+            total_rules,
+            "'{label}': refs must have one entry per Dogwood rule \
+             (refs={}, rules={})",
+            set.refs.len(),
+            total_rules,
+        );
+    };
+
+    // Base permits only.
+    check(&[], &[], "base only");
+
+    // All preconfigured policies active.
+    let all_slugs: Vec<String> = PRECONFIGURED_POLICIES
+        .iter()
+        .map(|p| p.slug.as_str().to_string())
+        .collect();
+    check(&all_slugs, &[], "all preconfigured");
+
+    // Single-rule custom policy.
+    let single = vec![custom_policy(
+        "single",
+        &requirement("context.device.disk_encryption_enabled"),
+    )];
+    check(&[], &single, "single-rule custom");
+
+    // Multi-rule custom policy (two forbids in one text).
+    let multi_text = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let multi = vec![custom_policy("multi", &multi_text)];
+    check(&[], &multi, "multi-rule custom");
+
+    // Mixed: a preconfigured policy + a single-rule custom + a multi-rule
+    // custom, all active together.
+    check(
+        &["disk_encryption".to_string()],
+        &[
+            custom_policy("single", &requirement("context.device.firewall_enabled")),
+            custom_policy("multi", &multi_text),
+        ],
+        "mixed",
+    );
+}
+
+/// The core regression: a multi-rule custom policy whose **second** `forbid`
+/// triggers must be attributed to the custom policy by name. Before the
+/// fix, `refs` had one entry per policy text, so `refs.get(rule_index)`
+/// returned `None` for the second rule — an unattributed deny.
+#[test]
+fn test_multi_rule_custom_policy_second_rule_attributed() {
+    let multi_rule_text = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let custom = vec![custom_policy("multi_rule", &multi_rule_text)];
+    let set = compose_org_set(&[], &custom);
+
+    // The composed set has 2 base permits + 2 forbids = 4 rules.
+    let policy_schema = schema::policy_schema().expect("schema");
+    let lowered =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+            .expect("must lower");
+    assert_eq!(lowered.rules().count(), 4, "2 base permits + 2 forbids");
+    assert_eq!(
+        set.refs.len(),
+        4,
+        "refs must have one entry per rule, not per policy text"
+    );
+
+    // Posture where the first forbid's requirement is met (disk_encryption
+    // enabled) but the second's is not (firewall disabled): the second
+    // forbid fires at rule_index 3, which must map to the custom policy.
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(true);
+    posture.firewall_enabled = Some(false);
+
+    let now = jiff::Timestamp::now().as_second();
+    let decision = engine::evaluate(lowered, &set.refs, &[], "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+
+    match decision {
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Custom { name })) => {
+            assert_eq!(
+                name, "multi_rule",
+                "the second forbid's deny must be attributed to the custom policy"
+            );
+        }
+        engine::OrgDecision::Deny(None) => {
+            panic!(
+                "BUG: second forbid's deny is unattributed \
+                 (refs.len()={}, expected 4)",
+                set.refs.len()
+            );
+        }
+        engine::OrgDecision::Allow => panic!("firewall disabled must deny"),
+        engine::OrgDecision::Deny(Some(other)) => {
+            panic!("unexpected denying policy: {other:?}");
+        }
+    }
+}
+
+/// The first rule of a multi-rule custom policy must still be attributed
+/// correctly — the fix adds entries for *all* rules, not just extra ones.
+#[test]
+fn test_multi_rule_custom_policy_first_rule_attributed() {
+    let multi_rule_text = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let custom = vec![custom_policy("multi_rule", &multi_rule_text)];
+    let set = compose_org_set(&[], &custom);
+
+    // Posture where the first forbid's requirement is NOT met (disk
+    // encryption disabled) but the second's IS (firewall enabled): the
+    // first forbid fires at rule_index 2.
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(false);
+    posture.firewall_enabled = Some(true);
+
+    let policy_schema = schema::policy_schema().expect("schema");
+    let lowered =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+            .expect("must lower");
+    let now = jiff::Timestamp::now().as_second();
+    let decision = engine::evaluate(lowered, &set.refs, &[], "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+
+    match decision {
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Custom { name })) => {
+            assert_eq!(name, "multi_rule", "first forbid must be attributed too");
+        }
+        engine::OrgDecision::Deny(None) => panic!("BUG: first forbid unattributed"),
+        engine::OrgDecision::Allow => panic!("disk encryption disabled must deny"),
+        engine::OrgDecision::Deny(Some(other)) => {
+            panic!("unexpected denying policy: {other:?}");
+        }
+    }
+}
+
+/// When both rules of a multi-rule policy fire, the deny must be attributed
+/// to the custom policy — either rule's index maps to the same policy name.
+#[test]
+fn test_multi_rule_custom_policy_both_rules_attributed() {
+    let multi_rule_text = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let custom = vec![custom_policy("multi_rule", &multi_rule_text)];
+    let set = compose_org_set(&[], &custom);
+
+    // Both requirements unmet: both forbids fire.
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(false);
+    posture.firewall_enabled = Some(false);
+
+    let policy_schema = schema::policy_schema().expect("schema");
+    let lowered =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+            .expect("must lower");
+    let now = jiff::Timestamp::now().as_second();
+    let decision = engine::evaluate(lowered, &set.refs, &[], "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+
+    match decision {
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Custom { name })) => {
+            assert_eq!(name, "multi_rule", "both rules map to the same policy");
+        }
+        engine::OrgDecision::Deny(None) => panic!("BUG: deny unattributed when both rules fire"),
+        engine::OrgDecision::Allow => panic!("both requirements unmet must deny"),
+        engine::OrgDecision::Deny(Some(other)) => {
+            panic!("unexpected denying policy: {other:?}");
+        }
+    }
+}
+
+/// A multi-rule custom policy that is satisfied (neither forbid fires)
+/// must still allow — the fix must not change enforcement, only attribution.
+#[test]
+fn test_multi_rule_custom_policy_allows_when_satisfied() {
+    let multi_rule_text = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let custom = vec![custom_policy("multi_rule", &multi_rule_text)];
+    let set = compose_org_set(&[], &custom);
+
+    // Both requirements met: neither forbid fires.
+    let posture = sample_posture();
+
+    let policy_schema = schema::policy_schema().expect("schema");
+    let lowered =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+            .expect("must lower");
+    let now = jiff::Timestamp::now().as_second();
+    let decision = engine::evaluate(lowered, &set.refs, &[], "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+
+    assert!(
+        matches!(decision, engine::OrgDecision::Allow),
+        "both requirements met must allow, got {decision:?}"
+    );
+}
+
+/// Build a `CustomPosturePolicy` for tests with the given name and text.
+fn custom_policy(name: &str, policy_text: &str) -> db::CustomPosturePolicy {
+    db::CustomPosturePolicy {
+        id: format!("id-{name}"),
+        name: name.to_string(),
+        description: None,
+        policy_text: policy_text.to_string(),
+        active: true,
+        org_id: "org-1".to_string(),
+        builder_spec: None,
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }
+}

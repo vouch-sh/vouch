@@ -43,6 +43,7 @@ pub(crate) enum PolicyRef {
 }
 
 /// Outcome of one decision.
+#[derive(Debug)]
 pub(crate) enum OrgDecision {
     Allow,
     /// Denied; the first determining forbid, when it maps to a known rule.
