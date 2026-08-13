@@ -9,7 +9,9 @@ use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError};
-use crate::services::auth::{ClientAuthProof, GrantProof, TokenIssuanceProof};
+use crate::services::auth::{
+    ClientAuthProof, GrantProof, SenderConstraintProof, TokenIssuanceProof,
+};
 use crate::services::oidc::{
     ScopeSet,
     client_credentials::{ClientCredentialsBindings, exchange_client_credentials},
@@ -489,10 +491,6 @@ async fn resolve_non_jwt_auth(
 }
 
 /// Handle authorization code grant.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear RFC 6749 section 4.1.3 authorization-code grant validation"
-)]
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
     client_cert: crate::handlers::extractors::OptionalClientCert,
@@ -617,8 +615,8 @@ async fn handle_authorization_code_grant(
         return *resp;
     }
 
-    // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
-    let sender_constraint = match crate::services::oidc::fapi::validate_fapi_token_request(
+    // Every sender-constraint requirement registered for this client.
+    let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
@@ -628,40 +626,6 @@ async fn handle_authorization_code_grant(
         Ok(witness) => witness,
         Err(e) => return e.into_oauth_response().into_response(),
     };
-
-    // RFC 9449 Section 5: When the client requires DPoP-bound access tokens,
-    // a valid DPoP proof MUST be present. The client explicitly opted into
-    // DPoP binding via dpop_bound_access_tokens=true, so mTLS alone does
-    // not satisfy this — the access token must carry a jkt confirmation.
-    if authenticated_client.client.dpop_bound_access_tokens && dpop_proof.is_none() {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Client requires DPoP-bound access tokens \
-             but no DPoP proof was provided",
-        )
-        .into_oauth_response()
-        .into_response();
-    }
-
-    // RFC 8705 Section 3: When the client requires certificate-bound access
-    // tokens, a client certificate MUST be present. Without a cert the token
-    // would be issued without a cnf.x5t#S256 binding, violating the client's
-    // registered constraint. DPoP is accepted as an alternative sender
-    // constraint mechanism.
-    if authenticated_client
-        .client
-        .tls_client_certificate_bound_access_tokens
-        && !has_mtls_cert
-        && dpop_proof.is_none()
-    {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Client requires certificate-bound access tokens \
-             but no client certificate was presented",
-        )
-        .into_oauth_response()
-        .into_response();
-    }
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
@@ -777,7 +741,7 @@ async fn handle_client_credentials_grant(
 
     // FAPI 2.0 Section 5.2.2: sender-constrained access tokens required
     // (DPoP or mTLS), same as every other grant a FAPI client can reach.
-    let sender_constraint = match crate::services::oidc::fapi::validate_fapi_token_request(
+    let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
@@ -974,7 +938,7 @@ async fn handle_token_exchange_grant(
     // (DPoP or mTLS) on every grant a FAPI client can use — without this, a
     // FAPI client could exchange a bound subject_token for an unbound one.
     // Mirrors `handle_authorization_code_grant`.
-    let sender_constraint = match crate::services::oidc::fapi::validate_fapi_token_request(
+    let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
@@ -1165,7 +1129,7 @@ async fn handle_fido2_assertion_grant(
     let has_mtls_cert = client_cert.0.is_some();
 
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
-    let sender_constraint = match crate::services::oidc::fapi::validate_fapi_token_request(
+    let sender_constraint = match SenderConstraintProof::validate(
         &jwt_authenticated.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),

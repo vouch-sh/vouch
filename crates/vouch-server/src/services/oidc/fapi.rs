@@ -8,7 +8,6 @@
 
 use crate::db::{OAuthClient, TokenEndpointAuthMethod};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use crate::services::auth::SenderConstraintProof;
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
 pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
@@ -91,9 +90,9 @@ pub struct SenderConstraints {
 pub(crate) fn validate_fapi_token_request(
     client: &OAuthClient,
     constraints: SenderConstraints,
-) -> ServiceResult<SenderConstraintProof> {
+) -> ServiceResult<()> {
     if !client.is_fapi() {
-        return Ok(SenderConstraintProof::fapi_checked());
+        return Ok(());
     }
 
     // FAPI 2.0 Section 5.2.2: Sender-constrained tokens required (DPoP or mTLS)
@@ -104,7 +103,7 @@ pub(crate) fn validate_fapi_token_request(
         ));
     }
 
-    Ok(SenderConstraintProof::fapi_checked())
+    Ok(())
 }
 
 /// Validate that an algorithm is allowed for a FAPI 2.0 client.

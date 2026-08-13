@@ -445,33 +445,66 @@ impl JwtClientAuthProof {
     }
 }
 
-/// Witness that FAPI 2.0 sender-constraint requirements were settled for this
-/// issuance.
+/// Witness that every sender-constraint requirement applying to an issuance
+/// was checked.
 ///
-/// FAPI 2.0 Section 5.2.2 requires access tokens issued to a FAPI client to be
-/// sender-constrained (DPoP or mTLS). Requiring this witness on
-/// [`TokenIssuanceProof`] means a grant cannot mint a token without deciding
-/// which case it is in — the enforcement is not a call a new grant can forget.
-///
-/// Both constructors are named for the case they assert, so which one a grant
-/// picked is visible at the call site and in review.
+/// Requiring this on [`TokenIssuanceProof`] means a grant cannot mint a token
+/// without deciding which case it is in — the enforcement is not a call a new
+/// grant can forget. Both constructors are named for the case they assert, so
+/// the choice is visible at the call site and in review.
 #[derive(Debug)]
 pub(crate) struct SenderConstraintProof {
     _private: (),
 }
 
 impl SenderConstraintProof {
-    /// The request was checked against a registered client's `fapi_profile`.
+    /// Check every sender-constraint requirement registered for `client`.
     ///
-    /// Produced by
-    /// [`crate::services::oidc::fapi::validate_fapi_token_request`], which is
-    /// the only caller that should construct it.
-    pub(crate) fn fapi_checked() -> Self {
-        Self { _private: () }
+    /// Three independent requirements, all enforced here so that no grant
+    /// enforces a different subset:
+    /// - FAPI 2.0 Section 5.2.2 — a FAPI client's tokens must be
+    ///   sender-constrained by DPoP or mTLS.
+    /// - RFC 9449 Section 5 — a client that registered
+    ///   `dpop_bound_access_tokens` must present a DPoP proof. mTLS does not
+    ///   substitute: the client asked for a `cnf.jkt` binding specifically.
+    /// - RFC 8705 Section 3 — a client that registered
+    ///   `tls_client_certificate_bound_access_tokens` must present a
+    ///   certificate, with DPoP accepted as an alternative constraint.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ServiceError::OAuth` with `invalid_request` if a registered
+    /// requirement is unmet.
+    pub(crate) fn validate(
+        client: &db::OAuthClient,
+        constraints: crate::services::oidc::fapi::SenderConstraints,
+    ) -> ServiceResult<Self> {
+        crate::services::oidc::fapi::validate_fapi_token_request(client, constraints)?;
+
+        if client.dpop_bound_access_tokens && !constraints.dpop {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Client requires DPoP-bound access tokens \
+                 but no DPoP proof was provided",
+            ));
+        }
+
+        if client.tls_client_certificate_bound_access_tokens
+            && !constraints.mtls_cert
+            && !constraints.dpop
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Client requires certificate-bound access tokens \
+                 but no client certificate was presented",
+            ));
+        }
+
+        Ok(Self { _private: () })
     }
 
-    /// There is no registered OAuth client whose profile could constrain this
-    /// issuance.
+    /// There is no registered OAuth client whose registration could constrain
+    /// this issuance.
     ///
     /// Browser sessions, enrollment bootstrap/completion, and the
     /// certification-test bypass mint tokens for a user rather than for a

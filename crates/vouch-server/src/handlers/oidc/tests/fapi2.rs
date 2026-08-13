@@ -1730,3 +1730,50 @@ async fn test_fapi2_client_credentials_with_dpop_issues_bound_token() {
         "client_credentials token must carry cnf.jkt bound to the DPoP proof key"
     );
 }
+
+/// A client that registered `dpop_bound_access_tokens` must present a DPoP
+/// proof on the client_credentials grant, exactly as on the authorization-code
+/// and device grants. mTLS does not substitute: the client asked for a
+/// `cnf.jkt` binding specifically.
+#[tokio::test]
+async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "cc-dpop-bound@example.com").await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            // Not a FAPI client: the binding flag alone must be enforced.
+            dpop_bound_access_tokens: true,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dpop_bound_access_tokens client must not receive an unbound token: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "body: {resp_body}");
+}

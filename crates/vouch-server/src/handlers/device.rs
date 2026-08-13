@@ -372,12 +372,11 @@ pub(crate) async fn device_token(
                 None => None,
             };
 
-            // FAPI 2.0 Section 5.2.2: sender-constrained access tokens
-            // required (DPoP or mTLS). Mirrors `handle_authorization_code_grant`.
-            // The built-in CLI flow carries no registered client_id, so there
-            // is no `fapi_profile` to enforce against.
+            // Every sender-constraint requirement registered for this
+            // client. The built-in CLI flow carries no registered client_id,
+            // so there is no registration to enforce against.
             let sender_constraint = match oauth_client {
-                Some(ref oc) => match crate::services::oidc::fapi::validate_fapi_token_request(
+                Some(ref oc) => match SenderConstraintProof::validate(
                     oc,
                     crate::services::oidc::fapi::SenderConstraints {
                         dpop: dpop_proof.is_some(),
@@ -389,48 +388,6 @@ pub(crate) async fn device_token(
                 },
                 None => SenderConstraintProof::no_registered_client(),
             };
-
-            if let Some(ref oc) = oauth_client {
-                // RFC 9449: When the client requires DPoP-bound access
-                // tokens, a valid DPoP proof MUST be present. The client
-                // explicitly opted into DPoP binding via
-                // `dpop_bound_access_tokens=true`, so mTLS alone does not
-                // satisfy this — the access token must carry a `cnf.jkt`.
-                if oc.dpop_bound_access_tokens && dpop_proof.is_none() {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: "invalid_request".to_string(),
-                            error_description: Some(
-                                "Client requires DPoP-bound access tokens \
-                                 but no DPoP proof was provided"
-                                    .to_string(),
-                            ),
-                        },
-                    ));
-                }
-
-                // RFC 8705 Section 3: When the client requires
-                // certificate-bound access tokens, a client certificate
-                // MUST be present. DPoP is accepted as an alternative
-                // sender-constraint mechanism.
-                if oc.tls_client_certificate_bound_access_tokens
-                    && !has_mtls_cert
-                    && dpop_proof.is_none()
-                {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: "invalid_request".to_string(),
-                            error_description: Some(
-                                "Client requires certificate-bound access \
-                                 tokens but no client certificate was presented"
-                                    .to_string(),
-                            ),
-                        },
-                    ));
-                }
-            }
 
             // RFC 8705 Section 3: Bind the access token to the mTLS
             // certificate thumbprint only when the client has opted in.
