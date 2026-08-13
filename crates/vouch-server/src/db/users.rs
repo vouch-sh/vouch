@@ -163,6 +163,53 @@ pub async fn get_users_by_ids(
         .collect())
 }
 
+/// Failure modes of [`delete_user`].
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteUserError {
+    /// Another transaction changed the organization row while this delete was
+    /// choosing a successor for the user's org-scoped applications.
+    #[error("organization changed during delete")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for DeleteUserError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Pick the org admin that inherits a departing user's org-scoped
+/// applications.
+///
+/// Returns the lowest-sorting active org admin in `org_id`, excluding
+/// `departing_user_id`. Sorting by ID makes the choice deterministic, so
+/// concurrent deletions in the same organization agree on a successor.
+/// Returns `None` when the user has no org or the org has no other active
+/// admin — in that case the caller unlinks rather than transfers.
+async fn org_admin_successor(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: Option<&str>,
+    departing_user_id: &str,
+) -> Result<Option<String>> {
+    let Some(org_id) = org_id else {
+        return Ok(None);
+    };
+
+    let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
+    let mut admin_ids: Vec<String> = members
+        .into_iter()
+        .filter(|m| m.data.is_org_admin && m.data.active && m.id != departing_user_id)
+        .map(|m| m.id)
+        .collect();
+    admin_ids.sort();
+    Ok(admin_ids.into_iter().next())
+}
+
 /// Delete a user and all associated data atomically.
 ///
 /// Wraps all cascade deletes in a single transaction so that a partial
@@ -174,13 +221,19 @@ pub async fn get_users_by_ids(
 /// 3. Delete authenticators (and their related device_auth refs)
 /// 4. Delete SSH issued certificate records
 /// 5. Delete token exchanges
-/// 6. Unlink OAuth clients (set user_id to None)
+/// 6. Transfer org-scoped OAuth clients to an org admin; unlink the rest
 /// 7. Delete the user
 ///
 /// Note: SSH revocation records (`SshRevokedCertDoc`) are intentionally
 /// NOT deleted — they must outlive the user so SSH servers can still
 /// check the KRL. They expire naturally via `expires_at`.
-pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
+///
+/// # Returns
+///
+/// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
+/// user with `user_id` was found — callers surface the latter as a 404 and
+/// must not record a deletion audit event.
+pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, DeleteUserError> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
     use super::documents::oauth::OAuthClientDoc;
@@ -203,9 +256,10 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
         // dead code: `tx.delete` returns `Ok(())` regardless of whether
         // anything was removed. Mirrors `delete_scim_group` /
         // `delete_custom_policy`.
-        let Some(_) = tx.get::<UserDoc>(user_id).await? else {
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
+        let org_id = user_doc.data.org_id.clone();
 
         // 1. Delete sessions
         tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
@@ -232,11 +286,57 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
         tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
             .await?;
 
-        // 6. Unlink OAuth clients (set user_id to None)
+        // 6. Reassign org-scoped OAuth clients; unlink the rest.
+        //
+        // Application management is creator-only: every check compares the
+        // caller against `Some(client.user_id)`. Clearing `user_id` therefore
+        // strands an organization's applications permanently — no one can
+        // rotate their secrets, update redirect URIs, or delete them. An
+        // org-scoped application belongs to the organization rather than to
+        // the individual, so it transfers to an active org admin, keeping it
+        // both manageable and discoverable in that admin's normal list.
+        // Personal and public applications have no other legitimate owner
+        // and are unlinked.
+        let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
         tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = None;
+            d.user_id = match (d.access_scope, successor.as_deref()) {
+                (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
+                    Some(admin_id.to_string())
+                }
+                _ => None,
+            };
         })
         .await?;
+
+        // Serialize deletions within an organization on the org row.
+        //
+        // Choosing a successor reads the org's members, and a predicate read
+        // is exactly what concurrent transactions do not conflict on under
+        // READ COMMITTED. Two admins deleted at once would each pick the
+        // other — both reads predate both deletions — and the applications
+        // would land on a user row that no longer exists. Writing the org
+        // row makes those transactions collide: the loser retries, re-reads
+        // members without the winner, and picks someone who still exists.
+        // Enrollment claims its admin slot against the same row for the same
+        // reason.
+        //
+        // Every delete of a member of an org takes this write, not only the
+        // ones that transfer: the user being deleted may itself be the
+        // successor a concurrent delete just chose. Deleting a user is a rare
+        // administrative action, so serializing per organization costs
+        // little.
+        if let Some(ref org_id) = org_id
+            && let Some(org_doc) = tx
+                .get::<super::documents::organization::OrganizationDoc>(org_id)
+                .await?
+        {
+            let won = tx
+                .compare_and_update(org_id, org_doc.version, &org_doc.data)
+                .await?;
+            if !won {
+                return Err(DeleteUserError::OccConflict);
+            }
+        }
 
         // 7. Delete the user
         tx.delete(user_id).await?;
