@@ -1527,3 +1527,432 @@ async fn test_update_application_post_logout_redirect_uris_roundtrip() {
         "https://example.com/logged-out"
     );
 }
+
+// ========================================================================
+// Org-admin fallback for orphaned org-scoped applications
+//
+// When an application creator is deleted, `delete_user` unlinks their OAuth
+// clients by setting `user_id = None` (db/users.rs). The application keeps
+// its `org_id` and remains active for OAuth flows, but the ownership check
+// `user_id.as_deref() != Some(sub)` would reject every caller (since
+// `None != Some(x)` is always true). Org admins of the matching org may now
+// manage such orphaned org-scoped apps; see `verify_management_access`.
+// ========================================================================
+
+/// Fixture for orphaned org-scoped application tests.
+struct OrphanSetup {
+    app_id: String,
+    admin_token: String,
+    org_id: String,
+}
+
+/// Build an orphaned org-scoped application: a non-admin org member (alice)
+/// creates the app, then alice is deleted — unlinking the client
+/// (`user_id = None`) while leaving it org-scoped and active. Returns the
+/// app id, an org-admin bearer token (bob), and the org id.
+async fn setup_orphaned_org_app(state: &crate::AppState) -> OrphanSetup {
+    let org = create_test_org(&state.store, "orphan.example.com").await;
+    let alice =
+        create_test_user_in_org(&state.store, "alice@orphan.example.com", &org.id, false).await;
+    let bob = create_test_user_in_org(&state.store, "bob@orphan.example.com", &org.id, true).await;
+    let bob_auth = create_test_authenticator(&state.store, &bob.id).await;
+    let bob_token = create_test_session(state, &bob.id, &bob.email, &bob_auth).await;
+
+    let client = create_test_client(
+        &state.store,
+        &alice.id,
+        TestClientSpec {
+            name: "Org App".to_string(),
+            access_scope: crate::db::AccessScope::Organization,
+            org_id: Some(org.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Delete the creator — unlinks the OAuth client but leaves it org-scoped.
+    crate::db::delete_user(&state.store, &alice.id)
+        .await
+        .expect("delete creator");
+
+    // Confirm the precondition: the app is unlinked but still org-scoped.
+    let orphan = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        .await
+        .expect("fetch orphan")
+        .expect("orphan exists");
+    assert_eq!(
+        orphan.user_id, None,
+        "creator unlink should set user_id = None"
+    );
+    assert_eq!(orphan.org_id, Some(org.id.clone()));
+    assert_eq!(orphan.access_scope, crate::db::AccessScope::Organization);
+
+    OrphanSetup {
+        app_id: client.app_id,
+        admin_token: bearer(&bob_token),
+        org_id: org.id,
+    }
+}
+
+#[tokio::test]
+async fn test_org_admin_can_get_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["id"].as_str().unwrap(), setup.app_id);
+    assert_eq!(json["access_scope"].as_str().unwrap(), "organization");
+}
+
+#[tokio::test]
+async fn test_org_admin_can_update_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", setup.app_id),
+        Some(r#"{"name": "Rotated by Admin"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &setup.admin_token),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["name"].as_str().unwrap(), "Rotated by Admin");
+}
+
+#[tokio::test]
+async fn test_org_admin_can_delete_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The app is gone — even the admin now gets 404.
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_org_admin_can_add_secret_to_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", setup.app_id),
+        r#"{"description": "Admin-rotated secret"}"#,
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(json.get("secret_id").is_some());
+    assert!(
+        json["client_secret"]
+            .as_str()
+            .unwrap()
+            .starts_with("vouch_")
+    );
+}
+
+#[tokio::test]
+async fn test_org_admin_can_list_secrets_of_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    // The initial secret created with the client is still present.
+    assert!(!json["secrets"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_org_admin_can_delete_secret_of_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    // Add a second secret so the original is not the last active one
+    // (delete_secret_api rejects deleting the last active secret).
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", setup.app_id),
+        r#"{}"#,
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let added: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let added_id = added["secret_id"].as_str().unwrap();
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}/secrets/{added_id}", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_org_admin_can_revoke_tokens_of_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    let (status, _body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/revoke", setup.app_id),
+        r#"{}"#,
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // All secrets should now be revoked.
+    let (status, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", setup.app_id),
+        &[("Authorization", &setup.admin_token)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let any_active = json["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["active"].as_bool() == Some(true));
+    assert!(!any_active, "no active secrets should remain after revoke");
+}
+
+#[tokio::test]
+async fn test_org_member_non_admin_cannot_manage_orphaned_org_scoped_application() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    // Carol is an org member (not an admin) of the same org.
+    let carol = create_test_user_in_org(
+        &state.store,
+        "carol@orphan.example.com",
+        &setup.org_id,
+        false,
+    )
+    .await;
+    let carol_auth = create_test_authenticator(&state.store, &carol.id).await;
+    let carol_token = create_test_session(&state, &carol.id, &carol.email, &carol_auth).await;
+    let auth = bearer(&carol_token);
+
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", setup.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    // Non-admins may not manage orphaned apps — 404 (not 403) to avoid leaking.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_org_admin_of_different_org_cannot_manage_orphaned_app() {
+    let (app, state) = test_app().await;
+    let setup = setup_orphaned_org_app(&state).await;
+
+    // Dave is an org admin, but of a *different* organization.
+    let other_org = create_test_org(&state.store, "other-org.example.com").await;
+    let dave = create_test_user_in_org(
+        &state.store,
+        "dave@other-org.example.com",
+        &other_org.id,
+        true,
+    )
+    .await;
+    let dave_auth = create_test_authenticator(&state.store, &dave.id).await;
+    let dave_token = create_test_session(&state, &dave.id, &dave.email, &dave_auth).await;
+    let auth = bearer(&dave_token);
+
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", setup.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    // Cross-org access is blocked — 404.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_org_admin_cannot_manage_owned_org_scoped_app_before_creator_deleted() {
+    // Before the creator is deleted the app is still owned (`user_id = Some`),
+    // so the org-admin fallback must NOT apply — the direct owner alone may
+    // manage it. This guards against broadening access to owned apps.
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "owned-org.example.com").await;
+    let alice =
+        create_test_user_in_org(&state.store, "alice@owned.example.com", &org.id, false).await;
+    let bob = create_test_user_in_org(&state.store, "bob@owned.example.com", &org.id, true).await;
+    let bob_auth = create_test_authenticator(&state.store, &bob.id).await;
+    let bob_token = create_test_session(&state, &bob.id, &bob.email, &bob_auth).await;
+
+    let client = create_test_client(
+        &state.store,
+        &alice.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Organization,
+            org_id: Some(org.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    // alice is intentionally NOT deleted.
+
+    let auth = bearer(&bob_token);
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_org_admin_cannot_manage_orphaned_personal_application() {
+    // The fallback applies only to org-scoped apps. A personal-scoped app
+    // whose creator was deleted has no org to fall back to, so it remains
+    // owner-only (and thus unmanageable once orphaned).
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "personal-org.example.com").await;
+    let alice =
+        create_test_user_in_org(&state.store, "alice@personal.example.com", &org.id, false).await;
+    let bob =
+        create_test_user_in_org(&state.store, "bob@personal.example.com", &org.id, true).await;
+    let bob_auth = create_test_authenticator(&state.store, &bob.id).await;
+    let bob_token = create_test_session(&state, &bob.id, &bob.email, &bob_auth).await;
+
+    let client = create_test_client(
+        &state.store,
+        &alice.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Personal,
+            org_id: None,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    crate::db::delete_user(&state.store, &alice.id)
+        .await
+        .expect("delete creator");
+
+    let auth = bearer(&bob_token);
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_org_admin_cannot_manage_orphaned_public_application() {
+    // Same as the personal case but for Public-scoped apps: no org_id, so
+    // the org-admin fallback does not apply.
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "public-org.example.com").await;
+    let alice =
+        create_test_user_in_org(&state.store, "alice@public.example.com", &org.id, false).await;
+    let bob = create_test_user_in_org(&state.store, "bob@public.example.com", &org.id, true).await;
+    let bob_auth = create_test_authenticator(&state.store, &bob.id).await;
+    let bob_token = create_test_session(&state, &bob.id, &bob.email, &bob_auth).await;
+
+    let client = create_test_client(
+        &state.store,
+        &alice.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    crate::db::delete_user(&state.store, &alice.id)
+        .await
+        .expect("delete creator");
+
+    let auth = bearer(&bob_token);
+    let (status, _body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_direct_owner_still_manages_own_org_scoped_application() {
+    // Regression guard: the direct-owner path is unchanged for org-scoped
+    // apps. A non-admin creator manages their own app without deletion.
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "owner-org.example.com").await;
+    let alice =
+        create_test_user_in_org(&state.store, "alice@owner.example.com", &org.id, false).await;
+    let alice_auth = create_test_authenticator(&state.store, &alice.id).await;
+    let alice_token = create_test_session(&state, &alice.id, &alice.email, &alice_auth).await;
+
+    let client = create_test_client(
+        &state.store,
+        &alice.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Organization,
+            org_id: Some(org.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let auth = bearer(&alice_token);
+    let (status, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["id"].as_str().unwrap(), client.app_id);
+}

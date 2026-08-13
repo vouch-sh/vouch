@@ -71,6 +71,46 @@ async fn load_active_user_for_scope(
     Ok(user)
 }
 
+/// Verify that the caller identified by `token_sub` may manage `client`.
+///
+/// The direct owner always passes. When the creator has been unlinked
+/// (`user_id = None`, which [`db::delete_user`] sets on creator deletion) an
+/// org-scoped application would otherwise be permanently unmanageable:
+/// `None != Some(any_id)` rejects every caller, including org admins. As a
+/// recovery path, an org admin of the application's organization may manage
+/// such an orphaned org-scoped application, mirroring the admin access they
+/// already have over other org-scoped resources (members, domains, policies).
+///
+/// Non-owners receive `404 not_found` (not `403`) so the application's
+/// existence is not leaked — preserving the prior behavior.
+async fn verify_management_access(
+    state: &AppState,
+    client: &db::OAuthClient,
+    token_sub: &str,
+) -> Result<(), ServiceError> {
+    // Direct owner.
+    if client.user_id.as_deref() == Some(token_sub) {
+        return Ok(());
+    }
+
+    // Org-admin fallback, only for orphaned org-scoped applications.
+    if client.user_id.is_none()
+        && client.access_scope == AccessScope::Organization
+        && client.org_id.is_some()
+    {
+        let user = crate::handlers::session::load_active_user(state, token_sub).await?;
+        if user.is_org_admin && user.org_id == client.org_id {
+            return Ok(());
+        }
+    }
+
+    Err(ServiceError::api(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "Application not found",
+    ))
+}
+
 /// Create a new application (API).
 /// POST /api/v1/applications
 pub(crate) async fn create_application_api(
@@ -224,13 +264,7 @@ pub(crate) async fn get_application_api(
         })?;
 
     // Verify ownership
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     Ok(Json(ApplicationResponse::from(client)))
 }
@@ -276,13 +310,7 @@ pub(crate) async fn update_application_api(
         })?;
 
     // Verify ownership
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     // Parse access scope if provided
     let access_scope = req
@@ -403,13 +431,7 @@ pub(crate) async fn delete_application_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     db::delete_oauth_client(&state.store, &app_id)
         .await
@@ -449,13 +471,7 @@ pub(crate) async fn add_secret_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     if !client.application_type.requires_secret() {
         return Err(ServiceError::api(
@@ -539,13 +555,7 @@ pub(crate) async fn list_secrets_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     let now = jiff::Timestamp::now();
     let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
@@ -596,13 +606,7 @@ pub(crate) async fn delete_secret_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     let secret = db::get_oauth_client_secret_by_id(&state.store, &secret_id)
         .await
@@ -707,13 +711,7 @@ pub(crate) async fn revoke_tokens_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    verify_management_access(&state, &client, &token.sub).await?;
 
     // Revoke all secrets (effectively revoking all tokens)
     db::revoke_all_oauth_client_secrets(&state.store, &app_id)
