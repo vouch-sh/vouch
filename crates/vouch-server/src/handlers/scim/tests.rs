@@ -2854,3 +2854,90 @@ async fn test_scim_patch_group_replace_members() {
         "previous member (user_a) must be removed after replace"
     );
 }
+
+/// E2E regression for the SCIM group-member concurrent-add race through the
+/// full HTTP stack: two concurrent `PATCH /scim/v2/Groups/{id}` requests
+/// adding the same member must result in exactly one membership, and both
+/// must return 200 OK (the operation is idempotent).
+///
+/// Exercises the full axum router → SCIM auth middleware → handler →
+/// `add_scim_group_member` → `DocumentStore::insert_with_id` path, verifying
+/// the deterministic-ID fix holds end-to-end and not just at the DB layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_patch_group_add_member_concurrent_same_user() {
+    let (app, state) = test_app().await;
+    let token =
+        create_test_scim_token(&state.store, "test-concurrent-add-member", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user.
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"concurrent-add@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create a group without members.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"ConcurrentGroup"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Build the same PATCH body for both concurrent requests.
+    let patch_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"add","path":"members","value":[{{"value":"{}"}}]}}]}}"#,
+        user_id
+    );
+    let uri = format!("/scim/v2/Groups/{}", group_id);
+    let headers: [(&str, &str); 2] = [
+        ("Content-Type", "application/json"),
+        ("Authorization", &auth_header),
+    ];
+
+    // Fire two concurrent PATCH requests adding the same member.
+    let (r1, r2) = tokio::join!(
+        http_request(&app, "PATCH", &uri, Some(patch_body.clone()), &headers),
+        http_request(&app, "PATCH", &uri, Some(patch_body), &headers),
+    );
+
+    // Both must return 200 OK — the operation is idempotent.
+    assert_eq!(
+        r1.0,
+        StatusCode::OK,
+        "first concurrent PATCH add must return 200: {}",
+        r1.1
+    );
+    assert_eq!(
+        r2.0,
+        StatusCode::OK,
+        "second concurrent PATCH add must return 200: {}",
+        r2.1
+    );
+
+    // GET the group: the member must appear exactly once.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().expect("members array");
+    let count = members.iter().filter(|m| m["value"] == user_id).count();
+    assert_eq!(
+        count, 1,
+        "member must appear exactly once after concurrent add, got {}",
+        count
+    );
+}
