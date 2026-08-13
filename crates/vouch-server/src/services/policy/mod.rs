@@ -40,7 +40,7 @@ pub(crate) use remediation::remediation_for_slug;
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use dogwood_language::{
-    Authorizer, Decision, Event, EventBuilder, LoweredPolicySet, Validator, Value,
+    Authorizer, Decision, Event, EventBuilder, LoweredPolicySet, ParsedPolicySet, Validator, Value,
 };
 use preconfigured::BASE_ALLOW;
 use vouch_common::posture::DevicePosture;
@@ -335,6 +335,18 @@ struct OrgPolicySet {
     refs: Vec<engine::PolicyRef>,
 }
 
+/// Count the Dogwood rules in one policy text by parsing it (the
+/// schema-independent phase — needs only the static service schema, not the
+/// action schema). Dogwood assigns a `rule_index` per rule in the composed
+/// set, so `refs` must carry one entry per emitted rule, not one per text.
+/// Returns 1 on parse failure: a stored policy that no longer parses is
+/// caught by the precheck (which denies with its name), so a miscount here
+/// never reaches evaluation. The 1-rule fallback matches the common case
+/// and keeps `refs` aligned for any single-rule policies that follow.
+fn rule_count(text: &str) -> usize {
+    ParsedPolicySet::parse(text, schema::service_schema()).map_or(1, |p| p.policy_count())
+}
+
 fn compose_org_set(
     active_slugs: &[String],
     active_custom: &[db::CustomPosturePolicy],
@@ -346,16 +358,23 @@ fn compose_org_set(
             && let Some(policy) = PRECONFIGURED_POLICIES.iter().find(|p| p.slug == slug)
         {
             texts.push(policy.policy_text);
-            refs.push(engine::PolicyRef::Policy(
-                engine::DenyingPolicy::Preconfigured(slug),
-            ));
+            let ref_entry = engine::PolicyRef::Policy(engine::DenyingPolicy::Preconfigured(slug));
+            // One ref per rule: a policy text with multiple `forbid`/`permit`
+            // statements emits multiple rule indices, and each must map back
+            // to the policy that authored it.
+            for _ in 0..rule_count(policy.policy_text) {
+                refs.push(ref_entry.clone());
+            }
         }
     }
     for custom in active_custom {
         texts.push(custom.policy_text.as_str());
-        refs.push(engine::PolicyRef::Policy(engine::DenyingPolicy::Custom {
+        let ref_entry = engine::PolicyRef::Policy(engine::DenyingPolicy::Custom {
             name: custom.name.clone(),
-        }));
+        });
+        for _ in 0..rule_count(&custom.policy_text) {
+            refs.push(ref_entry.clone());
+        }
     }
     OrgPolicySet {
         composed: compose(&texts),
