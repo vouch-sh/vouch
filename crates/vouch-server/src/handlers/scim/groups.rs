@@ -367,11 +367,34 @@ async fn apply_member_op(
             Ok(())
         }
         ScimPatchOpType::Remove => {
-            let Some(user_id) = parse_member_filter(path) else {
-                return Ok(());
+            // Two forms reach here: a path filter naming one member,
+            // `members[value eq "…"]`, and `path: "members"` carrying the
+            // members to drop in `value`, which is what Entra sends.
+            //
+            // A bare `remove` of `members` with no filter and no value means
+            // "remove every member" in RFC 7644 §3.5.2.2. It stays a no-op:
+            // emptying a group is an authorization change, and one arriving
+            // as an operation with nothing naming what to remove is more
+            // likely a malformed request than an intended purge.
+            let user_ids: Vec<String> = match parse_member_filter(path) {
+                Some(user_id) => vec![user_id],
+                None => op
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_array())
+                    .map(|members| {
+                        members
+                            .iter()
+                            .filter_map(|m| m.get("value").and_then(|v| v.as_str()))
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
-            if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
-                tracing::warn!("Failed to remove member: {e}");
+            for user_id in user_ids {
+                if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
+                    tracing::warn!("Failed to remove member: {e}");
+                }
             }
             Ok(())
         }
@@ -429,6 +452,13 @@ pub(crate) async fn patch_group(
         external_id: group.external_id.clone(),
     };
 
+    // Every attribute operation is validated before any membership is
+    // written. Membership writes go straight to the database while attribute
+    // operations accumulate in `patched`, so applying them as they were read
+    // would let an operation rejected later in the request — removing the
+    // required `displayName`, say — return 400 with group membership already
+    // changed. Members are collected here and applied below, in request order.
+    let mut member_ops = Vec::new();
     for op in &patch.operations {
         // A value filter may follow the attribute name, as in
         // `members[value eq "…"]`.
@@ -438,14 +468,17 @@ pub(crate) async fn patch_group(
                 .is_some_and(|attribute| attribute.eq_ignore_ascii_case("members"))
         });
         if let Some(path) = members_path {
-            if let Err(response) = apply_member_op(&state.store, &id, &auth.org_id, path, op).await
-            {
-                return response;
-            }
+            member_ops.push((path, op));
             continue;
         }
         if let Err(invalid) = apply_patch_op(GROUP_ATTRIBUTES, &mut patched, op) {
             return invalid.into_response();
+        }
+    }
+
+    for (path, op) in member_ops {
+        if let Err(response) = apply_member_op(&state.store, &id, &auth.org_id, path, op).await {
+            return response;
         }
     }
 

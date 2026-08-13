@@ -84,7 +84,7 @@ across it:
 | User | `externalId` | sets it | clears it |
 | Group | `displayName` | sets it; empty is rejected | rejected |
 | Group | `externalId` | sets it | clears it |
-| Group | `members` | `add` appends members, `replace` swaps the whole set | `members[value eq "<user-id>"]` removes one member |
+| Group | `members` | `add` appends members, `replace` swaps the whole set | removes the members named by `members[value eq "<user-id>"]` or by a `value` list |
 
 An operation with no `path` — a value object such as `{"op": "replace", "value": {"active": false}}` —
 sets every attribute in the table the object carries. Attribute names are matched
@@ -99,9 +99,13 @@ body is the resource as stored — check it when an attribute appears not to syn
 The two removals marked rejected return `400` with `"scimType": "invalidValue"`, because the
 attribute has no absent state to fall back to: `active` on a User (either default would change the
 user's access on its own) and `displayName` on a Group (RFC 7643 requires it). A rejected operation
-leaves the record untouched — Vouch writes it only once every operation in the request is accepted.
-Group membership is the exception: member additions and removals are applied as they are processed,
-so a later rejected operation in the same request does not undo them.
+leaves the record untouched — Vouch writes it only once every operation in the request is accepted,
+membership included, so a `400` means nothing in the request was applied.
+
+A `remove` of `members` that names nothing — no `members[value eq "…"]` filter and no `value` list —
+is ignored rather than emptying the group. RFC 7644 reads that as "remove every member"; emptying a
+group changes who has access, and an operation that names no member is more often a malformed
+request than an intended purge. Send an explicit `value` list, or `replace` with the set you want.
 
 Setting `active` to `false` is the one attribute update with effects beyond the record: it
 invalidates the user's sessions, revokes their SSH certificates, and clears their GitHub refresh

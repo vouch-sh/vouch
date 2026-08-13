@@ -3904,3 +3904,205 @@ async fn test_scim_patch_group_add_member_concurrent_same_user() {
         count
     );
 }
+
+/// A pathless bulk merge carrying both `name.formatted` and its alias
+/// `displayName` stores the canonical path's value. Applying every alias in
+/// table order would let `displayName` overwrite it — and a `null` alias
+/// clear a name the canonical path had just set.
+#[tokio::test]
+async fn test_patch_user_bulk_prefers_canonical_path_over_alias() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-bulk-alias", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "bulk-alias@test-org.example.com", "name": {"formatted": "Original"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    // Both names present: the canonical `name.formatted` must win.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"name": {"formatted": "Canonical"}, "displayName": "Alias"}}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "Canonical",
+        "the canonical path must win over its alias: {body}"
+    );
+
+    // A null alias must not clear the value the canonical path sets.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"name": {"formatted": "Still Set"}, "displayName": null}}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "Still Set",
+        "a null alias must not clear the canonical value: {body}"
+    );
+}
+
+/// A group PATCH whose member operation precedes an operation that fails
+/// validation must not change membership: the request is rejected whole.
+#[tokio::test]
+async fn test_scim_patch_group_rejected_op_leaves_membership_unchanged() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-partial-apply", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Partial Apply"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "partial-apply@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Add a member, then remove the required displayName in the same request.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "add", "path": "members", "value": [{{"value": "{user_id}"}}]}}, {{"op": "remove", "path": "displayName"}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "removing the required displayName must be rejected: {body}"
+    );
+
+    // The rejected request must not have added the member.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        members, 0,
+        "a rejected PATCH must not leave membership changed: {body}"
+    );
+}
+
+/// Entra sends member removals as `path: "members"` with the members in
+/// `value`, rather than a `members[value eq "…"]` filter. Both forms remove.
+#[tokio::test]
+async fn test_scim_patch_group_remove_members_by_value_list() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-remove-value", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Remove By Value"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "remove-by-value@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "add", "path": "members", "value": [{{"value": "{user_id}"}}]}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "add member failed: {body}");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "remove", "path": "members", "value": [{{"value": "{user_id}"}}]}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "remove by value list failed: {body}"
+    );
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().map_or(0, Vec::len);
+    assert_eq!(members, 0, "member must have been removed: {body}");
+}

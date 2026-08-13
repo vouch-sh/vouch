@@ -105,6 +105,13 @@ pub(crate) fn apply_patch_op<S>(
 
 /// Merges the value object of an operation with no `path`: every attribute
 /// the object presents is stored, addressed by its dotted path.
+///
+/// An attribute reachable under several paths takes the first one the object
+/// presents, in table order, so the canonical path wins over its aliases. A
+/// bulk object carrying both `name.formatted` and `displayName` — including
+/// one holding `null` to clear the attribute the other sets — would otherwise
+/// resolve by table position rather than by which name the attribute is
+/// actually stored under.
 fn merge<S>(
     table: &[Attribute<S>],
     state: &mut S,
@@ -117,6 +124,7 @@ fn merge<S>(
                 .try_fold(value, |current, segment| current.get(segment));
             if let Some(presented) = presented {
                 (attribute.set)(state, path, presented)?;
+                break;
             }
         }
     }
