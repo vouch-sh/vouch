@@ -386,6 +386,28 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
+            // RFC 9449 §7.2: `ApiWithHeaders` carries the same 401 bearer-token
+            // errors as `Api` (emitted by `extract_resource_token` for DPoP
+            // nonce refresh) plus response headers like `DPoP-Nonce`. The tuple
+            // return type cannot convey headers; preserve the error code and
+            // status here so callers that do not need headers (e.g., token/PAR
+            // endpoints with their own nonce handling) still get the right
+            // error instead of a 500 `server_error`. Callers that need the
+            // headers (e.g., `/oauth/register` via `into_registration_response`)
+            // extract them before calling this method.
+            Self::ApiWithHeaders {
+                status,
+                code,
+                message,
+                ..
+            } if status == StatusCode::UNAUTHORIZED => (
+                status,
+                Json(OAuthErrorResponse {
+                    error: code,
+                    error_description: Some(message),
+                    error_uri: None,
+                }),
+            ),
             Self::Forbidden(_) => (
                 StatusCode::FORBIDDEN,
                 Json(OAuthErrorResponse {
@@ -895,6 +917,52 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             "issuer_error",
             "Failed to construct the organization issuer",
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json.error, "server_error");
+        assert!(
+            json.error_description
+                .as_deref()
+                .is_none_or(|d| !d.contains("issuer")),
+            "internal error detail must not leak: {json:?}"
+        );
+    }
+
+    /// RFC 9449 §7.2: `ServiceError::ApiWithHeaders` carrying a 401
+    /// `use_dpop_nonce` (emitted by `extract_resource_token` when a DPoP-bound
+    /// token replays a consumed nonce) MUST be preserved by
+    /// `into_oauth_response()` instead of falling through to a 500
+    /// `server_error`. The headers themselves cannot be conveyed through the
+    /// tuple return type — callers that need them extract them separately —
+    /// but the error code and status must survive.
+    #[test]
+    fn test_api_with_headers_401_preserved_in_oauth_response() {
+        let err = ServiceError::api_with_header(
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce",
+            "Authorization server requires nonce in DPoP proof",
+            ("DPoP-Nonce", "fresh-nonce-value"),
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json.error, "use_dpop_nonce");
+        assert_eq!(
+            json.error_description,
+            Some("Authorization server requires nonce in DPoP proof".to_string())
+        );
+    }
+
+    /// Non-401 `ServiceError::ApiWithHeaders` errors, like non-401
+    /// `ServiceError::Api`, carry internal codes that are not registered OAuth
+    /// error codes and must collapse to the generic 500 `server_error`.
+    #[test]
+    fn test_api_with_headers_non_401_still_collapses_to_server_error() {
+        let err = ServiceError::api_with_header(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "issuer_error",
+            "Failed to construct the organization issuer",
+            ("DPoP-Nonce", "should-not-leak"),
         );
         let (status, json) = err.into_oauth_response();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);

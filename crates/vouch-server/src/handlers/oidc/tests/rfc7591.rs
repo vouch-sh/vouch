@@ -1508,3 +1508,230 @@ async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
         "Response must include client_id"
     );
 }
+
+// ========================================================================
+// RFC 9449 §7.2 — DPoP nonce refresh at the registration endpoint
+//
+// A DPoP-bound token (cnf.jkt) presented with a replayed nonce at
+// POST /oauth/register MUST get a 401 `use_dpop_nonce` response carrying a
+// fresh `DPoP-Nonce` header so the client can retry. Before the fix,
+// `ServiceError::ApiWithHeaders` (returned by `extract_resource_token`) fell
+// through `into_oauth_response`'s catch-all and became a 500 `server_error`.
+// ========================================================================
+
+/// RFC 9449 §7.2 + RFC 7591: A DPoP-bound token that replays an
+/// already-consumed nonce at `POST /oauth/register` MUST be rejected with
+/// `401 use_dpop_nonce` and a fresh `DPoP-Nonce` header — not a 500
+/// `server_error`.
+#[tokio::test]
+async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+
+    // Generate and consume a nonce to simulate replay.
+    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce)
+        .await
+        .expect("consume nonce");
+
+    // DPoP proof reuses the consumed nonce.
+    let register_uri = format!("{}/oauth/register", state.config().base_url);
+    let proof = create_dpop_proof(
+        &key,
+        &jwk,
+        "POST",
+        &register_uri,
+        Some(&nonce),
+        Some(&token),
+    );
+    let auth = format!("DPoP {token}");
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP Test"
+    });
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    // Status: 401 (not 500).
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP nonce replay should return 401, got 500: {}",
+        response.body
+    );
+
+    // Body: use_dpop_nonce error code (not server_error).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "use_dpop_nonce",
+        "error code must be use_dpop_nonce, not server_error: {}",
+        response.body
+    );
+
+    // Header: fresh DPoP-Nonce for client retry (RFC 9449 §7.2).
+    let fresh_nonce = response
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header must be present on use_dpop_nonce");
+    assert!(!fresh_nonce.is_empty(), "fresh nonce must not be empty");
+    assert_ne!(
+        fresh_nonce, nonce,
+        "fresh nonce must differ from the replayed nonce"
+    );
+
+    // Header: WWW-Authenticate challenge (RFC 6750 §3.1).
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .expect("WWW-Authenticate must be present on 401");
+    assert!(
+        www_auth.contains("error=\"use_dpop_nonce\""),
+        "WWW-Authenticate must carry error=\"use_dpop_nonce\": {www_auth}"
+    );
+}
+
+/// RFC 9449 retry flow at the registration endpoint: a valid request
+/// consumes the nonce; replaying the nonce yields `401 use_dpop_nonce` + a
+/// fresh nonce; retrying with the fresh nonce succeeds with 201 Created.
+#[tokio::test]
+async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-dpop-retry@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let register_uri = format!("{}/oauth/register", state.config().base_url);
+    let auth = format!("DPoP {token}");
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP Retry"
+    });
+
+    // 1. Valid request with a fresh nonce → 201 Created (consumes the nonce).
+    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    let proof1 = create_dpop_proof(
+        &key,
+        &jwk,
+        "POST",
+        &register_uri,
+        Some(&nonce),
+        Some(&token),
+    );
+    let resp1 = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof1),
+        ],
+    )
+    .await;
+    assert_eq!(
+        resp1.status,
+        StatusCode::CREATED,
+        "first request should succeed and consume the nonce: {}",
+        resp1.body
+    );
+
+    // 2. Replay the same nonce (fresh jti) → 401 use_dpop_nonce + fresh nonce.
+    let body2 = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP Retry 2"
+    });
+    let proof2 = create_dpop_proof(
+        &key,
+        &jwk,
+        "POST",
+        &register_uri,
+        Some(&nonce),
+        Some(&token),
+    );
+    let resp2 = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body2.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof2),
+        ],
+    )
+    .await;
+    assert_eq!(
+        resp2.status,
+        StatusCode::UNAUTHORIZED,
+        "replayed nonce must be rejected with 401: {}",
+        resp2.body
+    );
+    let fresh_nonce = resp2
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header on use_dpop_nonce");
+    assert_ne!(
+        fresh_nonce, nonce,
+        "fresh nonce must differ from replayed one"
+    );
+
+    // 3. Retry with the fresh nonce (fresh jti) → 201 Created.
+    let body3 = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP Retry 3"
+    });
+    let proof3 = create_dpop_proof(
+        &key,
+        &jwk,
+        "POST",
+        &register_uri,
+        Some(fresh_nonce),
+        Some(&token),
+    );
+    let resp3 = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body3.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof3),
+        ],
+    )
+    .await;
+    assert_eq!(
+        resp3.status,
+        StatusCode::CREATED,
+        "retry with fresh nonce should succeed: {}",
+        resp3.body
+    );
+}
