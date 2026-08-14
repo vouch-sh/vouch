@@ -596,9 +596,15 @@ pub(crate) async fn device_token(
                 redact_email(&user_email)
             );
 
+            // RFC 9449 Section 5: token_type is "DPoP" when the token is
+            // sender-constrained (bound to a DPoP proof key), otherwise
+            // "Bearer". RFC-compliant clients that require DPoP protection
+            // MUST discard a response advertising a different token_type.
+            let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
+
             Ok(Json(DeviceTokenResponse {
                 access_token: token.expose_secret().to_string(),
-                token_type: "Bearer".to_string(),
+                token_type: token_type.to_string(),
                 expires_in,
                 email: user_email,
             }))
@@ -967,6 +973,7 @@ mod tests {
             "Should return access_token"
         );
         assert!(resp.get("token_type").is_some(), "Should return token_type");
+        // No DPoP proof was presented, so RFC 9449 Section 5 requires "Bearer".
         assert_eq!(resp["token_type"], "Bearer");
         assert!(resp.get("expires_in").is_some(), "Should return expires_in");
 

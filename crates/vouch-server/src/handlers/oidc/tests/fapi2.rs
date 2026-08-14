@@ -1264,6 +1264,11 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
         "FAPI device flow with DPoP must succeed: {resp_body}"
     );
     let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        resp["token_type"].as_str(),
+        Some("DPoP"),
+        "a DPoP-bound token must be advertised as token_type=DPoP: {resp_body}"
+    );
     let access_token = resp["access_token"].as_str().expect("access_token");
 
     // The token MUST be DPoP-bound (cnf.jkt matches the proof key).
@@ -1454,6 +1459,11 @@ async fn test_fapi2_device_flow_non_fapi_client_with_dpop_issues_bound_token() {
         "Non-FAPI device flow with DPoP must succeed: {resp_body}"
     );
     let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        resp["token_type"].as_str(),
+        Some("DPoP"),
+        "a DPoP-bound token must be advertised as token_type=DPoP: {resp_body}"
+    );
     let access_token = resp["access_token"].as_str().expect("access_token");
     let claims = decode_jwt_payload(access_token);
     assert_eq!(

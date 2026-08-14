@@ -149,7 +149,7 @@ pub struct DeviceTokenRequest {
 pub struct DeviceTokenResponse {
     /// JWT access token.
     pub access_token: String,
-    /// Token type (always "Bearer").
+    /// Token type ("Bearer" or "DPoP" for sender-constrained tokens).
     pub token_type: String,
     /// Seconds until token expires.
     pub expires_in: u64,
