@@ -17,7 +17,7 @@ Examine every code path that constructs a token response struct (`TokenResponse`
    or equivalently testing `dpop_proof.is_some()`. A grant handler that reaches token issuance without this conditional is suspect.
 
 The grants to check in this codebase:
-- `crates/vouch-server/src/handlers/device.rs` — `device_token` (the site of the confirmed bug)
+- `crates/vouch-server/src/handlers/device.rs` — `device_token`
 - `crates/vouch-server/src/services/oidc/token.rs` — `exchange_authorization_code`
 - `crates/vouch-server/src/services/oidc/client_credentials.rs` — `exchange_client_credentials`
 - `crates/vouch-server/src/services/oidc/exchange.rs` — `exchange_token` (access-token path)
@@ -26,27 +26,6 @@ The grants to check in this codebase:
 Note: the ID-token path in `exchange.rs` (`issue_id_token`) legitimately returns `"Bearer"` because no DPoP-bound access token is issued there; do not flag it.
 
 ## Violation examples
-
-**Device flow hardcodes Bearer after threading dpop_jkt into the token (confirmed bug, `handlers/device.rs`)**
-```rust
-// dpop_jkt is derived from the validated DPoP proof above and passed to
-// create_oauth_access_token — the token carries cnf.jkt — but the response says Bearer.
-let session_result = create_oauth_access_token(
-    &state,
-    CreateOAuthTokenParams {
-        dpop_jkt: dpop_jkt.as_deref(), // Some("...") when DPoP proof was present
-        // ...
-    },
-    proof,
-).await?;
-
-Ok(Json(DeviceTokenResponse {
-    access_token: token.expose_secret().to_string(),
-    token_type: "Bearer".to_string(), // BUG: hardcoded; should be "DPoP" when dpop_jkt is Some
-    expires_in,
-    email: user_email,
-}))
-```
 
 **Generic pattern — hardcoded Bearer after DPoP validation**
 ```rust
@@ -62,7 +41,7 @@ Ok(TokenResponse {
 
 ## Correct patterns
 
-**Compute token_type from dpop_jkt (used in `client_credentials.rs`, `exchange.rs`, `fido2_grant.rs`, `token.rs`)**
+**Compute token_type from dpop_jkt (used in `client_credentials.rs`, `exchange.rs`, `fido2_grant.rs`, `token.rs`, `device.rs`)**
 ```rust
 // RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
 let token_type = if bindings.dpop_jkt.is_some() {
