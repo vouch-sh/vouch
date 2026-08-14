@@ -127,27 +127,36 @@ pub fn into_oauth_response(self) -> (StatusCode, Json<OAuthErrorResponse>) {
 }
 ```
 
-**When a wrapper helper needs headers, handle the variant before calling `into_oauth_response`:**
+**When a wrapper helper needs headers, pre-extract them before calling `into_oauth_response` and reattach after response construction:**
 
 ```rust
 fn into_registration_response(err: crate::error::ServiceError) -> Response {
-    // Pre-extract ApiWithHeaders before into_oauth_response loses the headers
-    if let ServiceError::ApiWithHeaders { status, code, message, headers } = err {
-        let oauth_body = Json(OAuthErrorResponse {
-            error: code,
-            error_description: Some(message),
-            error_uri: None,
-        });
-        let mut response = (status, oauth_body).into_response();
+    // Pre-extract headers — into_oauth_response's tuple return type cannot convey them.
+    let extra_headers = match &err {
+        ServiceError::ApiWithHeaders { headers, .. } => Some(headers.clone()),
+        _ => None,
+    };
+
+    let (status, json) = err.into_oauth_response();
+    let mut response = if status == StatusCode::UNAUTHORIZED {
+        // ... build WWW-Authenticate challenge (RFC 6750 §3.1) ...
+        (status, [(WWW_AUTHENTICATE, www_auth)], json).into_response()
+    } else {
+        (status, json).into_response()
+    };
+
+    // Reattach headers (e.g., DPoP-Nonce) AFTER response construction so the
+    // 401 WWW-Authenticate wrapping still runs for ApiWithHeaders 401s.
+    if let Some(headers) = extra_headers {
         for (name, value) in headers {
             response.headers_mut().append(name, value);
         }
-        return response;
     }
-    let (status, json) = err.into_oauth_response();
-    // ... rest of 401 WWW-Authenticate wrapping
+    response
 }
 ```
+
+Do NOT early-return on `ApiWithHeaders` before the 401 path — that would skip the `WWW-Authenticate` header that RFC 6750 §3.1 requires on every 401, including `use_dpop_nonce` challenges.
 
 ## Scope
 
