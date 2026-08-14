@@ -178,9 +178,20 @@ fn missing_token_response() -> Response {
 /// This wraps [`ServiceError::into_oauth_response`] and, for 401 responses,
 /// appends a `WWW-Authenticate: Bearer error="invalid_token", ...` header as
 /// required by RFC 6750 Section 3.1 for protected resources.
+///
+/// `ServiceError::ApiWithHeaders` (emitted by `extract_resource_token` for
+/// DPoP nonce refresh — RFC 9449 §7.2) carries additional response headers like
+/// `DPoP-Nonce` that `into_oauth_response`'s tuple return type cannot convey.
+/// Those headers are extracted before the error is consumed and reattached to
+/// the built response so the client can retry with a fresh nonce.
 fn into_registration_response(err: crate::error::ServiceError) -> Response {
+    let extra_headers = match &err {
+        ServiceError::ApiWithHeaders { headers, .. } => Some(headers.clone()),
+        _ => None,
+    };
+
     let (status, json) = err.into_oauth_response();
-    if status == StatusCode::UNAUTHORIZED {
+    let mut response = if status == StatusCode::UNAUTHORIZED {
         let description = json
             .error_description
             .clone()
@@ -203,7 +214,14 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
             .into_response()
     } else {
         (status, json).into_response()
+    };
+
+    if let Some(headers) = extra_headers {
+        for (name, value) in headers {
+            response.headers_mut().append(name, value);
+        }
     }
+    response
 }
 
 #[cfg(test)]
@@ -300,5 +318,60 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_client_metadata");
+    }
+
+    /// RFC 9449 §7.2: `ServiceError::ApiWithHeaders` carrying a 401
+    /// `use_dpop_nonce` (emitted by `extract_resource_token` when a DPoP-bound
+    /// token replays a consumed nonce) MUST be preserved by
+    /// `into_registration_response` — the response must carry the original 401
+    /// status, the `use_dpop_nonce` error code in the body, a `WWW-Authenticate`
+    /// header (RFC 6750 §3.1), AND the `DPoP-Nonce` header so the client can
+    /// retry with a fresh nonce. Before the fix, `ApiWithHeaders` fell through
+    /// `into_oauth_response`'s catch-all and became a 500 `server_error`.
+    #[tokio::test]
+    async fn into_registration_response_preserves_api_with_headers_on_401() {
+        use axum::body::to_bytes;
+
+        let err = crate::error::ServiceError::api_with_header(
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce",
+            "Authorization server requires nonce in DPoP proof",
+            ("DPoP-Nonce", "fresh-nonce-value"),
+        );
+        let response = into_registration_response(err);
+
+        // Status preserved — not collapsed to 500.
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce must remain 401, not 500"
+        );
+
+        // DPoP-Nonce header preserved for client retry (RFC 9449 §7.2).
+        let nonce = response
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(nonce, "fresh-nonce-value");
+
+        // WWW-Authenticate header present (RFC 6750 §3.1).
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert!(
+            www_auth.contains("error=\"use_dpop_nonce\""),
+            "WWW-Authenticate must carry error=\"use_dpop_nonce\": {www_auth}"
+        );
+
+        // Body carries the OAuth error code, not server_error.
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"], "use_dpop_nonce",
+            "error code must be use_dpop_nonce, not server_error"
+        );
     }
 }
