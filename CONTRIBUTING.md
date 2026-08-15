@@ -358,6 +358,16 @@ sha256sum out/target/*/release/vouch-server
 
 For container images, the release workflow also sets `provenance: true` and `sbom: true` on the Docker build, generating SLSA provenance attestations that can be verified with `cosign` or `gh attestation verify`.
 
+All release artifacts are built and attested inside a reusable workflow (`.github/workflows/reusable-build.yml`), so their provenance meets SLSA Build Level 3: the Sigstore certificate records the reusable workflow as the signer identity, which verifiers can pin:
+
+```bash
+gh attestation verify vouch-v<version>-<target>.tar.gz \
+  --owner vouch-sh \
+  --signer-workflow vouch-sh/vouch/.github/workflows/reusable-build.yml
+```
+
+This applies to releases built after the reusable workflow was introduced; older releases carry attestations without the reusable-workflow signer identity and fail `--signer-workflow` verification.
+
 ### Local Reproducibility
 
 For local builds to match CI output, ensure:
