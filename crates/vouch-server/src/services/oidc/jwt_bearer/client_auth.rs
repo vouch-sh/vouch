@@ -412,6 +412,7 @@ mod tests {
             resource_documentation: None,
             resource_policy_uri: None,
             resource_tos_uri: None,
+            security_contact: "security@vouch.sh".to_string(),
             cli_download_macos: None,
             cli_download_linux: None,
             cli_download_windows: None,
