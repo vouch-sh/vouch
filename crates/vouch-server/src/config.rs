@@ -331,6 +331,11 @@ pub struct Args {
     #[arg(long, env = "VOUCH_RESOURCE_TOS_URI")]
     pub resource_tos_uri: Option<String>,
 
+    /// Security contact email for `/.well-known/security.txt`
+    /// (RFC 9116 `Contact`). Defaults to "security@vouch.sh" when unset.
+    #[arg(long, env = "VOUCH_SECURITY_CONTACT")]
+    pub security_contact: Option<String>,
+
     /// CLI download URL for macOS.
     #[arg(long, env = "VOUCH_CLI_DOWNLOAD_MACOS")]
     pub cli_download_macos: Option<String>,
@@ -669,6 +674,9 @@ pub struct ServerConfig {
     /// (RFC 9728 §2 `resource_tos_uri`).
     /// Defaults to `"https://vouch.sh/terms/"`.
     pub resource_tos_uri: Option<String>,
+    /// Security contact email for `/.well-known/security.txt`
+    /// (RFC 9116 `Contact`). Defaults to `"security@vouch.sh"`.
+    pub security_contact: String,
     /// CLI download URL for macOS.
     pub cli_download_macos: Option<String>,
     /// CLI download URL for Linux.
@@ -917,6 +925,8 @@ impl ServerConfig {
             resource_tos_uri: args
                 .resource_tos_uri
                 .or_else(|| Some("https://vouch.sh/terms/".to_string())),
+            security_contact: vouch_common::env::non_empty(args.security_contact)
+                .unwrap_or_else(|| "security@vouch.sh".to_string()),
             cli_download_macos: args.cli_download_macos,
             cli_download_linux: args.cli_download_linux,
             cli_download_windows: args.cli_download_windows,

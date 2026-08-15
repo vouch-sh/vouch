@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Tests for the lightweight static pages served by the auth server:
-//! - `/privacy`, `/terms` (`handlers/legal.rs`)
+//! - `/privacy`, `/terms`, `/.well-known/security.txt` (`handlers/legal.rs`)
 //! - `/install` (`handlers/install.rs`)
 //! - `/integrations` (`handlers/integrations.rs`)
 
@@ -55,6 +55,46 @@ mod legal {
             .to_str()
             .expect("location utf8");
         assert_eq!(location, "https://vouch.sh/terms/");
+    }
+}
+
+mod security_txt {
+    use super::*;
+
+    #[tokio::test]
+    async fn serves_rfc9116_document_unsigned() {
+        let harness = TestHarness::new().await;
+        // http_get_full sends no RFC 9421 signature; a 200 proves the route
+        // stays reachable without one.
+        let resp = http_get_full(&harness.router, "/.well-known/security.txt", &[]).await;
+
+        assert_eq!(resp.status, StatusCode::OK);
+        let content_type = resp
+            .headers
+            .get("content-type")
+            .expect("content-type header")
+            .to_str()
+            .expect("content-type utf8");
+        assert!(content_type.starts_with("text/plain"));
+        assert!(resp.body.contains("Contact: mailto:security@vouch.sh\r\n"));
+        assert!(
+            resp.body
+                .contains("Canonical: https://test.example.com/.well-known/security.txt\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn expires_is_rfc3339_and_in_the_future() {
+        let harness = TestHarness::new().await;
+        let resp = http_get_full(&harness.router, "/.well-known/security.txt", &[]).await;
+
+        let expires_field = resp
+            .body
+            .lines()
+            .find_map(|line| line.strip_prefix("Expires: "))
+            .expect("Expires field present");
+        let expires: jiff::Timestamp = expires_field.trim().parse().expect("RFC 3339 timestamp");
+        assert!(expires > jiff::Timestamp::now());
     }
 }
 

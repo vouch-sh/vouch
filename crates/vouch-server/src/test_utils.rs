@@ -76,6 +76,7 @@ pub fn test_config() -> ServerConfig {
         resource_documentation: Some("https://vouch.sh/docs/".to_string()),
         resource_policy_uri: Some("https://vouch.sh/privacy/".to_string()),
         resource_tos_uri: Some("https://vouch.sh/terms/".to_string()),
+        security_contact: "security@vouch.sh".to_string(),
         cli_download_macos: None,
         cli_download_linux: None,
         cli_download_windows: None,

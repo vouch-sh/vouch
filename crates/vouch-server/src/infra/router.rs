@@ -772,6 +772,13 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         // Legal pages (redirect to vouch.sh)
         .route("/privacy", get(handlers::legal::privacy_page))
         .route("/terms", get(handlers::legal::terms_page))
+        // Vulnerability disclosure contact (RFC 9116). Lives in the UI group
+        // because the API group's blanket no-store headers would contradict
+        // the document's own Expires field.
+        .route(
+            "/.well-known/security.txt",
+            get(handlers::legal::security_txt),
+        )
         // Integrations page
         .route(
             "/integrations",

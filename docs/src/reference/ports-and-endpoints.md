@@ -57,6 +57,7 @@ Three things regularly surprise operators here:
 | `/.well-known/openid-configuration` | GET | None |
 | `/.well-known/oauth-authorization-server` | GET | None |
 | `/.well-known/oauth-protected-resource` | GET | None |
+| `/.well-known/security.txt` | GET | None |
 | `/oauth/jwks` | GET | None |
 | `/saml/metadata` | GET | None |
 

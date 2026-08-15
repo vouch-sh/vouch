@@ -176,6 +176,15 @@ These optional variables configure descriptive metadata published in the OAuth 2
 > The same applies to the `/privacy` and `/terms` UI routes, which are fixed redirects to
 > `vouch.sh`. Override those at your reverse proxy if you need your own.
 
+## Vulnerability Disclosure (RFC 9116)
+
+The server publishes a security.txt document at `/.well-known/security.txt` with `Contact`,
+`Expires` (rolling, 30 days ahead), and `Canonical` (built from the base URL) fields.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_SECURITY_CONTACT` | No | `security@vouch.sh` | Contact email published in `security.txt`. Self-hosters should set this — the default routes vulnerability reports about your deployment to Vouch's security team. |
+
 ## CLI Download URLs
 
 These optional variables configure download links displayed in the server UI.
