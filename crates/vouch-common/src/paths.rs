@@ -203,14 +203,16 @@ fn validate_private_dir(dir: &Path, metadata: &std::fs::Metadata) -> std::io::Re
 
 /// Create `dir` atomically with owner-only permissions (`mkdir(2)` with mode
 /// `0700` on Unix — no separate chmod step for an attacker to race).
+#[cfg(unix)]
 fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(dir)
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+/// Create `dir`; Windows has no mode bits, so this is a plain `mkdir`.
+#[cfg(not(unix))]
+fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().create(dir)
 }
 
 /// Real UID of the current process.
