@@ -71,8 +71,8 @@ test-coverage: ## Generate test coverage report (requires cargo-llvm-cov)
 test-mutants: ## Run mutation testing (requires cargo-mutants)
 	$(CARGO) mutants --workspace --timeout 60 --output mutants.out
 
-audit: ## Check dependencies for security advisories and license issues
-	$(CARGO) deny check advisories licenses sources
+audit: ## Check dependencies for security advisories, bans, and license issues
+	$(CARGO) deny check advisories bans licenses sources
 
 ##@ Docker
 

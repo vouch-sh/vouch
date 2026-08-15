@@ -1,7 +1,7 @@
 # cargo-deny configuration
 # https://embarkstudios.github.io/cargo-deny/
 #
-# Run locally: cargo deny check licenses advisories sources
+# Run locally: cargo deny check advisories bans licenses sources
 
 [graph]
 all-features = true
@@ -56,7 +56,11 @@ expression = "Apache-2.0"
 license-files = []
 
 [bans]
-multiple-versions = "deny"
+# Duplicate versions are reported but not gate-breaking: dependency bumps that
+# transiently split a crate would otherwise fail required checks on unrelated
+# PRs in the merge queue. Wildcards stay hard-deny (the workspace pins exact
+# versions, so this should never fire).
+multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 
@@ -107,8 +111,6 @@ skip = [
     { crate = "http-body:>=0.4,<0.5", reason = "aws-sdk still uses http-body 0.4 internally" },
     # itertools version split
     { crate = "itertools@0.13.0", reason = "some dependencies still on itertools 0.13" },
-    # pastey version split
-    { crate = "pastey@0.1.1", reason = "transitive dependency version split" },
     # rand 0.9 vs 0.10 (a pinned 0.9.4 skip went stale when 0.9.5 shipped)
     { crate = "rand:>=0.9,<0.10", reason = "some crates still on rand 0.9" },
     { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
@@ -147,7 +149,7 @@ skip = [
 skip-tree = [
     # windows-sys bumps frequently; many crates lag behind. Rather than tracking
     # each transitive dep individually, skip the entire tree for older versions.
-    { crate = "windows-sys:>=0.59,<0.60", reason = "foundational Windows crate that bumps frequently; many deps lag behind" },
+    { crate = "windows-sys:<0.61", reason = "foundational Windows crate that bumps frequently; many deps lag behind" },
 ]
 
 [sources]
