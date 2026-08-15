@@ -96,7 +96,7 @@ pub fn write_cookie(cookie: &SessionCookie) -> Result<()> {
     // Ensure parent directory exists with owner-only (0700) permissions, matching
     // the rest of vouch's state directory (audit log, migrated layout).
     if let Some(parent) = path.parent() {
-        crate::paths::ensure_private_dir(parent)
+        crate::paths::prepare_private_dir(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 

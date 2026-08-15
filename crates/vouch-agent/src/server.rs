@@ -7,7 +7,7 @@ use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method, Request, Response,
     StoreSessionParams, StoreSshCredentialsParams,
 };
-use crate::socket::{bind_socket, ensure_vouch_dir, socket_path, validate_vouch_dir_ownership};
+use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
@@ -53,12 +53,8 @@ impl AgentServer {
     ///
     /// Returns `AgentError::SocketPath` if the socket cannot be created.
     pub async fn run(&self) -> Result<()> {
-        // Ensure vouch directory exists
-        ensure_vouch_dir()?;
-
-        // Validate directory ownership and symlink safety
-        validate_vouch_dir_ownership()?;
-
+        // The runtime directory is prepared (validated + 0700) once at
+        // startup in main, before either listener binds into it.
         let path = socket_path()?;
         let listener = bind_socket(&path).await?;
 
@@ -77,67 +73,24 @@ impl AgentServer {
 
         loop {
             tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, _)) => {
-                            // Verify peer UID matches our UID (like gpg-agent/libassuan)
-                            match crate::socket::get_peer_credentials(&stream) {
-                                Ok(peer) => {
-                                    let my_uid = crate::socket::current_uid();
-                                    if peer.uid != my_uid {
-                                        warn!(
-                                            peer_uid = peer.uid,
-                                            peer_pid = peer.pid,
-                                            expected_uid = my_uid,
-                                            "Rejecting IPC connection: UID mismatch"
-                                        );
-                                        audit::log_event(AuditEvent::ConnectionRejected {
-                                            peer_uid: peer.uid,
-                                            peer_pid: peer.pid,
-                                            reason: "uid mismatch".to_string(),
-                                        });
-                                        continue;
-                                    }
-                                }
-                                Err(e) => {
-                                    // Fail closed: the 0600 socket mode is the
-                                    // primary gate, but the UID check is the
-                                    // defense-in-depth layer against permission
-                                    // misconfiguration. On Linux (SO_PEERCRED)
-                                    // and macOS (LOCAL_PEERCRED) retrieval
-                                    // failure is anomalous, not expected, so we
-                                    // reject rather than allow an unverified peer.
-                                    warn!("Rejecting IPC connection: could not verify peer credentials: {e}");
-                                    audit::log_event(AuditEvent::ConnectionRejected {
-                                        peer_uid: 0,
-                                        peer_pid: 0,
-                                        reason: "peer credential retrieval failed".to_string(),
-                                    });
-                                    continue;
-                                }
-                            }
-
-                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    warn!("Connection limit reached ({MAX_CONNECTIONS}), rejecting");
-                                    continue;
-                                }
-                            };
-                            let state = Arc::clone(&self.state);
-                            let ssh_state = Arc::clone(&self.ssh_state);
-                            tokio::spawn(async move {
-                                // Hold the permit for the full connection task; it auto-releases on drop.
-                                let _permit = permit;
-                                if let Err(e) = handle_connection(stream, state, ssh_state).await {
-                                    debug!("Connection error: {e}");
-                                }
-                            });
+                conn = accept_authorized(&listener, SocketKind::Ipc) => {
+                    let Some(conn) = conn else { continue };
+                    let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("Connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                            continue;
                         }
-                        Err(e) => {
-                            error!("Accept error: {e}");
+                    };
+                    let state = Arc::clone(&self.state);
+                    let ssh_state = Arc::clone(&self.ssh_state);
+                    tokio::spawn(async move {
+                        // Hold the permit for the full connection task; it auto-releases on drop.
+                        let _permit = permit;
+                        if let Err(e) = handle_connection(conn, state, ssh_state).await {
+                            debug!("Connection error: {e}");
                         }
-                    }
+                    });
                 }
                 _ = shutdown.changed() => {
                     info!("Agent received shutdown signal, stopping listener");
@@ -167,12 +120,13 @@ struct RawRequest {
     params: Option<serde_json::Value>,
 }
 
-/// Handle a single client connection.
+/// Handle a single client connection whose peer has been verified.
 async fn handle_connection(
-    mut stream: UnixStream,
+    conn: AuthorizedStream,
     state: Arc<AgentState>,
     ssh_state: Arc<SshAgentState>,
 ) -> Result<()> {
+    let mut stream = conn.into_stream();
     loop {
         // Read length-prefixed message, bounding how long an idle or
         // stalled client can hold this connection task open.

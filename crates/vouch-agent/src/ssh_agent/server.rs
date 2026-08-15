@@ -2,12 +2,11 @@
 //! SSH Agent server.
 
 use crate::error::{AgentError, Result};
-use crate::socket::bind_socket;
+use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket};
 use crate::wire;
 use std::sync::Arc;
-use tokio::net::UnixStream;
 use tokio::sync::{Semaphore, watch};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum number of concurrent SSH agent connections.
 const MAX_SSH_CONNECTIONS: usize = 64;
@@ -56,29 +55,23 @@ impl SshAgentServer {
 
         loop {
             tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, _)) => {
-                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    warn!("SSH connection limit reached ({MAX_SSH_CONNECTIONS}), rejecting");
-                                    continue;
-                                }
-                            };
-                            let state = Arc::clone(&self.state);
-                            let agent_state = self.agent_state.clone();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                if let Err(e) = handle_ssh_connection(stream, state, agent_state).await {
-                                    debug!("SSH agent connection error: {e}");
-                                }
-                            });
+                conn = accept_authorized(&listener, SocketKind::SshAgent) => {
+                    let Some(conn) = conn else { continue };
+                    let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("SSH connection limit reached ({MAX_SSH_CONNECTIONS}), rejecting");
+                            continue;
                         }
-                        Err(e) => {
-                            error!("SSH agent accept error: {e}");
+                    };
+                    let state = Arc::clone(&self.state);
+                    let agent_state = self.agent_state.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        if let Err(e) = handle_ssh_connection(conn, state, agent_state).await {
+                            debug!("SSH agent connection error: {e}");
                         }
-                    }
+                    });
                 }
                 _ = shutdown.changed() => {
                     info!("SSH agent received shutdown signal, stopping listener");
@@ -91,12 +84,13 @@ impl SshAgentServer {
     }
 }
 
-/// Handle a single SSH agent connection.
+/// Handle a single SSH agent connection whose peer has been verified.
 async fn handle_ssh_connection(
-    mut stream: UnixStream,
+    conn: AuthorizedStream,
     state: Arc<SshAgentState>,
     agent_state: Option<Arc<crate::state::AgentState>>,
 ) -> Result<()> {
+    let mut stream = conn.into_stream();
     loop {
         // Read length-prefixed message, bounding how long an idle or
         // stalled client can hold this connection task open.
@@ -142,5 +136,46 @@ impl Drop for SshAgentServer {
         if let Ok(path) = ssh_agent_socket_path() {
             std::fs::remove_file(path).ok();
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    /// End-to-end over a real socket: a same-UID client passes
+    /// `accept_authorized` and gets an identities reply, proving the peer
+    /// check does not break the happy path.
+    #[tokio::test]
+    async fn same_uid_client_gets_identities_reply() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ssh-agent-test.sock");
+        let listener = bind_socket(&path).await.expect("bind socket");
+        let state = SshAgentState::new();
+
+        let server = tokio::spawn(async move {
+            if let Some(conn) = accept_authorized(&listener, SocketKind::SshAgent).await {
+                let _connection = handle_ssh_connection(conn, state, None).await;
+            }
+        });
+
+        let mut client = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect to socket");
+        wire::write_message(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES])
+            .await
+            .expect("write request");
+        let reply = wire::read_message(&mut client)
+            .await
+            .expect("read reply")
+            .expect("reply present");
+        assert!(!reply.is_empty(), "expected an identities answer");
+
+        drop(client);
+        server.abort();
     }
 }
