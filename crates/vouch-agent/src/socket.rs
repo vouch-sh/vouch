@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Socket path and lifecycle utilities.
+//! Socket path, lifecycle, and peer-authorization utilities.
 
+use crate::audit::{self, AuditEvent};
 use crate::error::{AgentError, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::{error, warn};
 
 /// Default socket filename.
 const SOCKET_FILENAME: &str = "agent.sock";
@@ -31,27 +34,19 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(vouch_dir()?.join(SOCKET_FILENAME))
 }
 
-/// Ensure the vouch directory exists with proper permissions.
+/// Prepare the vouch runtime directory: validated lstat-first, `0700`, owned
+/// by the current user. Must run once at startup, before either the IPC or
+/// SSH agent socket binds into it — a hijacked path is rejected without
+/// being modified.
 ///
 /// # Errors
 ///
-/// Returns `AgentError::SocketPath` if the directory cannot be created or permissions cannot be set.
-pub(crate) fn ensure_vouch_dir() -> Result<()> {
+/// Returns `AgentError::SocketPath` if the directory cannot be created or
+/// fails validation (symlink, foreign owner, not a directory).
+pub fn prepare_vouch_dir() -> Result<()> {
     let dir = vouch_dir()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AgentError::SocketPath(format!("failed to create {}: {e}", dir.display())))?;
-
-    // Always set directory permissions to 0700, even if the directory already existed
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(&dir, perms).map_err(|e| {
-        AgentError::SocketPath(format!(
-            "failed to set permissions on {}: {e}",
-            dir.display()
-        ))
-    })?;
-
-    Ok(())
+    vouch_common::paths::prepare_private_dir(&dir)
+        .map_err(|e| AgentError::SocketPath(format!("runtime directory {}: {e}", dir.display())))
 }
 
 /// Remove the socket file if it exists.
@@ -145,45 +140,121 @@ pub(crate) fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredential
     })
 }
 
-/// Validate that the vouch runtime directory is safe to use.
-///
-/// Checks that the socket directory is not a symlink and is owned by the
-/// current user. Prevents symlink attacks where an attacker pre-creates the
-/// directory pointing to an attacker-controlled location.
-///
-/// # Errors
-///
-/// Returns `AgentError::SocketPath` if the directory fails validation.
-pub(crate) fn validate_vouch_dir_ownership() -> Result<()> {
-    let dir = vouch_dir()?;
+/// Which agent listener a connection arrived on.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketKind {
+    /// JSON-RPC IPC socket (`agent.sock`).
+    Ipc,
+    /// SSH agent protocol socket (`ssh-agent.sock`).
+    SshAgent,
+}
 
-    // Use symlink_metadata (lstat) — does NOT follow symlinks
-    let metadata = std::fs::symlink_metadata(&dir)
-        .map_err(|e| AgentError::SocketPath(format!("cannot stat {}: {e}", dir.display())))?;
-
-    // Reject symlinks
-    if metadata.file_type().is_symlink() {
-        return Err(AgentError::SocketPath(format!(
-            "{} is a symlink — refusing to use it (possible symlink attack)",
-            dir.display()
-        )));
+impl SocketKind {
+    /// Stable label used in log messages (matches the serialized form).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SocketKind::Ipc => "ipc",
+            SocketKind::SshAgent => "ssh_agent",
+        }
     }
+}
 
-    // Verify ownership matches current user
-    use std::os::unix::fs::MetadataExt;
-    let dir_uid = metadata.uid();
-    let my_uid = current_uid();
-    if dir_uid != my_uid {
-        return Err(AgentError::SocketPath(format!(
-            "{} is owned by UID {dir_uid}, but agent is running as UID {my_uid}",
-            dir.display()
-        )));
+/// A connection whose peer UID has been verified to match this process.
+///
+/// Constructible only via [`accept_authorized`], so connection handlers
+/// cannot be handed an unverified stream.
+pub(crate) struct AuthorizedStream(UnixStream);
+
+impl AuthorizedStream {
+    /// Unwrap the verified connection for protocol handling.
+    pub(crate) fn into_stream(self) -> UnixStream {
+        self.0
     }
+}
 
-    Ok(())
+/// Why a peer failed [`authorize_peer`].
+#[derive(Debug)]
+enum PeerRejection {
+    /// Peer UID differs from the expected UID.
+    UidMismatch(PeerCredentials),
+    /// Peer credentials could not be retrieved (fail closed).
+    CredentialsUnavailable(AgentError),
+}
+
+/// Verify that the connecting peer's UID matches `expected_uid`.
+fn authorize_peer(
+    stream: &UnixStream,
+    expected_uid: u32,
+) -> std::result::Result<PeerCredentials, PeerRejection> {
+    let peer = get_peer_credentials(stream).map_err(PeerRejection::CredentialsUnavailable)?;
+    if peer.uid != expected_uid {
+        return Err(PeerRejection::UidMismatch(peer));
+    }
+    Ok(peer)
+}
+
+/// Accept one connection on `listener` and verify the peer's UID matches this
+/// process (like gpg-agent/libassuan). The 0600 socket mode is the primary
+/// gate; the UID check is the defense-in-depth layer against permission
+/// misconfiguration, so credential-retrieval failure fails closed.
+///
+/// Rejections are logged and audited as `connection_rejected`, then yield
+/// `None` (dropping the stream closes it); accept errors are logged and also
+/// yield `None`, so callers simply `continue` their loop. Cancel-safe for
+/// `tokio::select!`: the only await point is `UnixListener::accept`, which is
+/// itself cancel-safe.
+pub(crate) async fn accept_authorized(
+    listener: &UnixListener,
+    kind: SocketKind,
+) -> Option<AuthorizedStream> {
+    let stream = match listener.accept().await {
+        Ok((stream, _addr)) => stream,
+        Err(e) => {
+            error!("{} accept error: {e}", kind.as_str());
+            return None;
+        }
+    };
+    match authorize_peer(&stream, current_uid()) {
+        Ok(_peer) => Some(AuthorizedStream(stream)),
+        Err(PeerRejection::UidMismatch(peer)) => {
+            warn!(
+                socket = kind.as_str(),
+                peer_uid = peer.uid,
+                peer_pid = peer.pid,
+                expected_uid = current_uid(),
+                "Rejecting connection: UID mismatch"
+            );
+            audit::log_event(AuditEvent::ConnectionRejected {
+                socket: kind,
+                peer_uid: peer.uid,
+                peer_pid: peer.pid,
+                reason: "uid mismatch".to_string(),
+            });
+            None
+        }
+        Err(PeerRejection::CredentialsUnavailable(e)) => {
+            warn!(
+                socket = kind.as_str(),
+                "Rejecting connection: could not verify peer credentials: {e}"
+            );
+            audit::log_event(AuditEvent::ConnectionRejected {
+                socket: kind,
+                peer_uid: 0,
+                peer_pid: 0,
+                reason: "peer credential retrieval failed".to_string(),
+            });
+            None
+        }
+    }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 
@@ -194,5 +265,21 @@ mod tests {
         let path = path.ok();
         assert!(path.is_some());
         assert!(path.is_some_and(|p| p.ends_with("agent.sock")));
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_accepts_same_uid() {
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let peer = authorize_peer(&a, current_uid()).expect("same-UID peer is authorized");
+        assert_eq!(peer.uid, current_uid());
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_rejects_uid_mismatch() {
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        match authorize_peer(&a, current_uid().wrapping_add(1)) {
+            Err(PeerRejection::UidMismatch(peer)) => assert_eq!(peer.uid, current_uid()),
+            other => panic!("expected UidMismatch, got {other:?}"),
+        }
     }
 }

@@ -56,8 +56,10 @@ pub enum AuditEvent {
     },
     /// All cached credentials were cleared.
     CredentialCacheCleared,
-    /// An IPC connection was rejected due to peer credential mismatch.
+    /// A connection was rejected due to peer credential mismatch.
     ConnectionRejected {
+        /// Which listener the connection arrived on (`ipc` or `ssh_agent`).
+        socket: crate::socket::SocketKind,
         /// UID of the rejected peer.
         peer_uid: u32,
         /// PID of the rejected peer (0 if unavailable).
@@ -105,13 +107,9 @@ fn write_event(record: &AuditRecord) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::other("audit log path has no parent"))?;
 
-    // Ensure the state directory exists with owner-only permissions.
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _chmod = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
+    // Ensure the state directory exists, validated (lstat-first, no symlink,
+    // owned by us) and owner-only.
+    vouch_common::paths::prepare_private_dir(dir)?;
 
     // Rotate if file exceeds max size
     if let Ok(metadata) = std::fs::metadata(&log_path)

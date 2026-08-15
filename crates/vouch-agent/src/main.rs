@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use vouch_agent::daemon;
 use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
-use vouch_agent::socket::remove_socket;
+use vouch_agent::socket::{prepare_vouch_dir, remove_socket};
 use vouch_agent::ssh_agent::{SshAgentServer, SshAgentState, ssh_agent_socket_path};
 use vouch_agent::state::AgentState;
 #[expect(
@@ -172,6 +172,14 @@ fn main() -> ExitCode {
 
 /// Run the agent servers.
 async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
+    // Prepare the runtime directory before either listener binds a socket
+    // into it: lstat-first validation rejects a hijacked path without
+    // modifying it.
+    if let Err(e) = prepare_vouch_dir() {
+        error!("Runtime directory validation failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
     // Create agent state
     let state = AgentState::new();
 

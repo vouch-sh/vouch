@@ -134,15 +134,96 @@ pub fn client_key_file() -> Option<PathBuf> {
     data_dir().map(|d| d.join("client_key.json"))
 }
 
-/// Create `dir` (and parents) with owner-only `0700` permissions on Unix.
-pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+/// Create or validate `dir` as a private, owner-only (`0700`) directory.
+///
+/// Validates with `lstat` before any write so a symlink planted at `dir` is
+/// rejected without modifying its target. A missing final component is
+/// created with `mkdir(2)` mode `0700` directly — never create-then-chmod —
+/// which fails with `AlreadyExists` on a planted symlink instead of
+/// following it. On the pre-existing branch a small lstat-to-chmod window
+/// remains; closing it would need dirfd-relative operations (unsafe code or
+/// a new dependency), and every supported layout puts `dir` under a
+/// user-owned parent, so the residual race is defense-in-depth only.
+///
+/// # Errors
+///
+/// Returns an error if `dir` is a symlink, is not a directory, is owned by
+/// another user, or cannot be created with owner-only permissions.
+pub fn prepare_private_dir(dir: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => return validate_private_dir(dir, &metadata),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match create_dir_owner_only(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lost a create race — either a concurrent vouch process
+            // (legitimate) or a just-planted symlink (validated next).
+            validate_private_dir(dir, &std::fs::symlink_metadata(dir)?)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Reject `dir` unless it is a non-symlink directory owned by the current
+/// user, then tighten its mode to `0700` on Unix.
+fn validate_private_dir(dir: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(format!(
+            "{} is a symlink — refusing to use it (possible symlink attack)",
+            dir.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} exists but is not a directory",
+            dir.display()
+        )));
+    }
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
+        let dir_uid = metadata.uid();
+        let my_uid = current_uid();
+        if dir_uid != my_uid {
+            return Err(std::io::Error::other(format!(
+                "{} is owned by UID {dir_uid}, but this process runs as UID {my_uid}",
+                dir.display()
+            )));
+        }
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// Create `dir` atomically with owner-only permissions (`mkdir(2)` with mode
+/// `0700` on Unix — no separate chmod step for an attacker to race).
+#[cfg(unix)]
+fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+/// Create `dir`; Windows has no mode bits, so this is a plain `mkdir`.
+#[cfg(not(unix))]
+fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().create(dir)
+}
+
+/// Real UID of the current process.
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "libc::getuid is always safe with no side effects"
+)]
+fn current_uid() -> u32 {
+    // SAFETY: getuid() reads the process's real UID with no side effects.
+    unsafe { libc::getuid() }
 }
 
 /// Move `from` to `to`, preserving permission bits.
@@ -153,7 +234,7 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 /// never deleted after a failed or partial move.
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
-        ensure_private_dir(parent)?;
+        prepare_private_dir(parent)?;
     }
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
@@ -420,19 +501,66 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn ensure_private_dir_sets_owner_only_permissions() -> std::io::Result<()> {
+    fn prepare_private_dir_sets_owner_only_permissions() -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir()?;
         let dir = tmp.path().join("state/vouch");
 
-        ensure_private_dir(&dir)?;
+        prepare_private_dir(&dir)?;
 
         let mode = std::fs::metadata(&dir)?.permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o700,
             "directory should be owner-only, got {mode:04o}"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prepare_private_dir_tightens_existing_permissions() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let dir = tmp.path().join("vouch");
+        std::fs::create_dir(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+
+        prepare_private_dir(&dir)?;
+
+        let mode = std::fs::metadata(&dir)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "existing directory should be tightened");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prepare_private_dir_rejects_symlink_without_touching_target() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target)?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+        let link = tmp.path().join("vouch");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        assert!(prepare_private_dir(&link).is_err());
+
+        // The hijack target's permissions must be unchanged.
+        let mode = std::fs::metadata(&target)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "symlink target must not be modified");
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_private_dir_rejects_regular_file() -> std::io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let path = tmp.path().join("vouch");
+        std::fs::write(&path, b"not a directory")?;
+
+        assert!(prepare_private_dir(&path).is_err());
         Ok(())
     }
 }
