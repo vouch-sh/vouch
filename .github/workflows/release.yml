@@ -924,14 +924,14 @@ jobs:
             ### Container Image
 
             ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
             ```
 
             ### Verify Attestations
 
             ```bash
             # Container image
-            gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} \
+            gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
               --owner ${{ github.repository_owner }} \
               --signer-workflow vouch-sh/vouch/.github/workflows/reusable-build.yml
 
