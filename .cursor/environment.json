@@ -1,0 +1,13 @@
+{
+  // Cursor Cloud agent environment for Vouch. Uses the default Ubuntu image;
+  // `.cursor/install.sh` is the counterpart to `.claude/hooks/session-setup.sh`.
+  // Secrets (VOUCH_JWT_SECRET, VOUCH_IDPS, …) belong in the Cloud Agents dashboard.
+  "name": "vouch",
+  "install": "bash .cursor/install.sh",
+  "ports": [
+    {
+      "name": "vouch-server",
+      "port": 3000
+    }
+  ]
+}

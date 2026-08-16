@@ -13,17 +13,17 @@ export AWS_LC_FIPS_SYS_CC=clang
 export AWS_LC_FIPS_SYS_CXX=clang++
 ```
 
-These are already configured in `~/.bashrc` on the Cloud VM.
+Cursor Cloud agents use `.cursor/environment.json` on the default Ubuntu image. Its `install` script (`.cursor/install.sh`) is the counterpart to `.claude/hooks/session-setup.sh`: it installs those packages, rustup, the TailwindCSS CLI, and `prek` when missing, persists `AWS_LC_FIPS_SYS_CC`/`CXX`, and then runs `rustup show`, `cargo fetch --locked`, and `make css-build`. Do not start `vouch-server` from `start`/`terminals` — it needs `VOUCH_IDPS` and other secrets from the Cloud Agents dashboard.
 
-On Claude Code sessions, `.claude/hooks/session-setup.sh` runs at session start and installs the system packages, rustup, the TailwindCSS CLI, and `prek` when missing (each step skips silently if the network policy blocks its download).
+On Claude Code sessions, `.claude/hooks/session-setup.sh` runs at session start and installs the same tools when missing (each step skips silently if the network policy blocks its download).
 
 ### TailwindCSS
 
 The server UI requires the **standalone** TailwindCSS v4 CLI binary (not npm). It is installed at `/usr/local/bin/tailwindcss`. Run `make css-build` before starting the server or building the project. (On Claude Code remote containers, where GitHub release downloads may be blocked, the session hook falls back to installing the same CLI from the npm registry — this does not add a node toolchain to the project.)
 
-### Disk space (Claude Code remote containers)
+### Disk space (cloud agents)
 
-Writable disk is a fixed per-session allowance, and a full `--all-features` build of this workspace is large. The session hook disables incremental compilation in these containers (`~/.cargo/config.toml`), which roughly halves `target/` (~14 GB vs ~30 GB per full build cycle). On "no space left on device", delete `target/` subdirectories you no longer need — deletes still succeed while writes fail.
+Writable disk is a fixed per-session allowance, and a full `--all-features` build of this workspace is large. Both the Cursor Cloud `install` script and the Claude session hook set `incremental = false` in `~/.cargo/config.toml`. That roughly halves `target/` (~14 GB vs ~30 GB per full build cycle). On "no space left on device", delete `target/` subdirectories you no longer need — deletes still succeed while writes fail.
 
 ### Running the server locally
 
