@@ -89,8 +89,30 @@ ensure_export() {
   fi
 }
 
-ensure_export AWS_LC_FIPS_SYS_CC clang
-ensure_export AWS_LC_FIPS_SYS_CXX clang++
+remove_export() {
+  key=$1
+  unset "${key}" || true
+  [ -f "${HOME}/.bashrc" ] && sed -i -E "/^export ${key}=/d" "${HOME}/.bashrc"
+}
+
+# aws-lc-fips-sys builds a CMake C/C++ project for the FIPS module, so its build
+# needs a C++ compiler that can link libstdc++ on this image. Stock Ubuntu's
+# default (g++) does; only fall back to clang when the default can't link but
+# clang++ can. Forcing clang++ unconditionally breaks images whose clang install
+# can't find libstdc++ ("/usr/bin/ld: cannot find -lstdc++"), which fails the
+# aws-lc-fips-sys build even though gcc would have compiled it. Leaving CC/CXX
+# unset lets cc-rs/cmake use the working system default.
+probe_cxx() { printf 'int main(){return 0;}\n' | "$1" -x c++ - -o /dev/null 2>/dev/null; }
+if probe_cxx c++ || probe_cxx g++; then
+  remove_export AWS_LC_FIPS_SYS_CC
+  remove_export AWS_LC_FIPS_SYS_CXX
+elif probe_cxx clang++; then
+  ensure_export AWS_LC_FIPS_SYS_CC clang
+  ensure_export AWS_LC_FIPS_SYS_CXX clang++
+else
+  echo "install: no C++ compiler can link libstdc++; aws-lc-fips-sys will not build" >&2
+  exit 1
+fi
 ensure_export CARGO_INCREMENTAL 0
 
 cargo_config="${HOME}/.cargo/config.toml"

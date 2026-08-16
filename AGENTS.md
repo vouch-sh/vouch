@@ -6,14 +6,16 @@ See `CLAUDE.md` for full project overview, architecture, code conventions, and c
 
 ### System dependencies
 
-The build requires `libssl-dev`, `libudev-dev`, `cmake`, `golang-go`, `clang`, and `pkg-config` on Linux. The `aws-lc-rs` FIPS build also needs these environment variables set:
+The build requires `libssl-dev`, `libudev-dev`, `cmake`, `golang-go`, `clang`, and `pkg-config` on Linux. The `aws-lc-rs` FIPS build (`aws-lc-fips-sys`) compiles a CMake C/C++ project, so it needs a C++ toolchain that can link `libstdc++`. The system default (`g++`) builds it on stock Ubuntu. Only on images where the default can't link but `clang` can, point the FIPS build at clang:
 
 ```
 export AWS_LC_FIPS_SYS_CC=clang
 export AWS_LC_FIPS_SYS_CXX=clang++
 ```
 
-Cursor Cloud agents use `.cursor/environment.json` on the default Ubuntu image. Its `install` script (`.cursor/install.sh`) is the counterpart to `.claude/hooks/session-setup.sh`: it installs those packages, rustup, the TailwindCSS CLI, and `prek` when missing, persists `AWS_LC_FIPS_SYS_CC`/`CXX`, and then runs `rustup show`, `cargo fetch --locked`, and `make css-build`. Do not start `vouch-server` from `start`/`terminals` — it needs `VOUCH_IDPS` and other secrets from the Cloud Agents dashboard.
+Do not force clang unconditionally: on images whose clang install can't find `libstdc++` (`/usr/bin/ld: cannot find -lstdc++`) this breaks a build that `g++` would have completed.
+
+Cursor Cloud agents use `.cursor/environment.json` on the default Ubuntu image. Its `install` script (`.cursor/install.sh`) is the counterpart to `.claude/hooks/session-setup.sh`: it installs those packages, rustup, the TailwindCSS CLI, and `prek` when missing, selects a C/C++ toolchain that can build `aws-lc-fips-sys` (preferring the system default and falling back to clang only when needed), and then runs `rustup show`, `cargo fetch --locked`, and `make css-build`. Do not start `vouch-server` from `start`/`terminals` — it needs `VOUCH_IDPS` and other secrets from the Cloud Agents dashboard.
 
 On Claude Code sessions, `.claude/hooks/session-setup.sh` runs at session start and installs the same tools when missing (each step skips silently if the network policy blocks its download).
 
