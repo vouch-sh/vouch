@@ -1365,9 +1365,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.2"
+version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d262e149917187838d5b42777c8253bcb64500067342904e7d429499a6f277e"
+checksum = "509591b7bcd67f4ef775afad7662703b4935daaa6ec0e5605cfb1090b32a2b6d"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2242,7 +2242,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2454,7 +2454,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2527,9 +2527,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
+checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "fixedbitset"
@@ -2900,9 +2900,9 @@ dependencies = [
 
 [[package]]
 name = "granit-parser"
-version = "1.0.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c92814c286f45b5ed1498ce9547bc9637b473eba7037f8aee6a4d5a3c1e051c"
+checksum = "4ccd1be9ebf2bd5520dbfcfb72b70ef492f654061299a097056f3e73410e38ec"
 dependencies = [
  "arraydeque",
  "smallvec",
@@ -2921,9 +2921,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3983,9 +3983,9 @@ dependencies = [
 
 [[package]]
 name = "libredox"
-version = "0.1.19"
+version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2026a5056764a10b2bf5d56488cba40da507f5493a6a429340e2004d9ed085fa"
+checksum = "28d0a00925a9f930d679b6789b721e3a7f9ed110f41b86d2497caa780c3a070a"
 dependencies = [
  "libc",
 ]
@@ -4418,7 +4418,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5130,7 +5130,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5147,9 +5147,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.223"
+version = "2.1.224"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0dedad316e05de220cbf3fd8bfb69f3df8755dde2d7d479211827b595168a93"
+checksum = "d6fd4be744906217175e617ecbaff30e1d4574954e5ab2ad6ac0fead0e9abc3a"
 dependencies = [
  "psl-types",
 ]
@@ -5259,7 +5259,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5786,7 +5786,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5844,7 +5844,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6042,9 +6042,9 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "1.0.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af2c6921c8ce48fb1b052b457619d008834039d80325992ed3bc55bbe6c155ad"
+checksum = "a1ec1f5cac0eb96063c64b28705255a7ed6e7d77f95c1d25e9f8b8c928006ce1"
 dependencies = [
  "annotate-snippets",
  "base64 0.23.1",
@@ -6816,7 +6816,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6825,7 +6825,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7509,9 +7509,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -7539,7 +7539,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -7571,7 +7571,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -7633,7 +7633,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -7655,7 +7655,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -7671,7 +7671,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-i18n"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -7683,7 +7683,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "amzn-dogwood-language",
  "anyhow",
@@ -7769,7 +7769,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.8.4"
+version = "2026.8.5"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -8041,7 +8041,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
