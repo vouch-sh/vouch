@@ -8,7 +8,7 @@
 //! - Refresh access tokens using stored refresh tokens
 
 use super::{
-    GitHubError, GitHubResult, GitHubService, GitHubUser, exchange_oauth_code, get_github_user,
+    GitHubError, GitHubResult, GitHubService, exchange_oauth_code, get_github_user,
     refresh_oauth_token,
 };
 use crate::db;
@@ -25,16 +25,6 @@ pub(crate) struct LinkAccountParams<'a> {
     pub user_id: &'a str,
 }
 
-/// Result of successfully linking a GitHub account.
-#[allow(
-    dead_code,
-    reason = "kept for diagnostics; payload not currently consumed"
-)]
-pub(crate) struct LinkAccountResult {
-    /// The linked GitHub user info.
-    pub github_user: GitHubUser,
-}
-
 // ============================================================================
 // OAuth Implementation
 // ============================================================================
@@ -47,7 +37,7 @@ impl GitHubService<'_> {
     pub(crate) async fn link_user_account(
         &self,
         params: LinkAccountParams<'_>,
-    ) -> GitHubResult<LinkAccountResult> {
+    ) -> GitHubResult<()> {
         let app = self.require_app()?;
         let client_id = self.oauth_client_id()?;
         let client_secret = self.oauth_client_secret()?;
@@ -86,7 +76,7 @@ impl GitHubService<'_> {
             github_user.login
         );
 
-        Ok(LinkAccountResult { github_user })
+        Ok(())
     }
 
     /// Get a fresh GitHub access token for a user using their stored refresh token.
