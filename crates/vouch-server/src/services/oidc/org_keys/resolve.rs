@@ -24,24 +24,12 @@ type OrgKeysCacheMap = HashMap<String, (Instant, Arc<OrgKeySetSnapshot>)>;
 
 /// Cache of resolved per-org key set snapshots, keyed by org ID.
 ///
-/// The inner `Arc<Mutex<…>>` makes `OrgKeysCache` cheaply cloneable: the
-/// background cleanup task and request handlers share the same underlying map
-/// so cache invalidations propagate across both.
-///
 /// Every rotation transition must call `invalidate(org_id)` so the next
 /// request after a state change rebuilds from the DB rather than serving a
 /// stale snapshot.
 #[derive(Default)]
 pub struct OrgKeysCache {
     entries: Arc<Mutex<OrgKeysCacheMap>>,
-}
-
-impl Clone for OrgKeysCache {
-    fn clone(&self) -> Self {
-        Self {
-            entries: Arc::clone(&self.entries),
-        }
-    }
 }
 
 impl OrgKeysCache {
