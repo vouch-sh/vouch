@@ -230,41 +230,6 @@ impl AgentClient {
         Ok(())
     }
 
-    /// Clear SSH credentials from the agent.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AgentError::Protocol` if the request fails.
-    pub async fn clear_ssh_credentials(&mut self) -> Result<()> {
-        let response = self.call(Method::ClearSshCredentials, None).await?;
-
-        if let Some(error) = response.error {
-            return Err(AgentError::Protocol(error.message));
-        }
-
-        Ok(())
-    }
-
-    /// Check if SSH credentials are loaded.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AgentError::Protocol` if the request fails.
-    pub async fn has_ssh_credentials(&mut self) -> Result<bool> {
-        let response = self.call(Method::HasSshCredentials, None).await?;
-
-        if let Some(error) = response.error {
-            return Err(AgentError::Protocol(error.message));
-        }
-
-        let result = response
-            .result
-            .ok_or_else(|| AgentError::Protocol("missing result".to_string()))?;
-
-        result
-            .as_bool()
-            .ok_or_else(|| AgentError::Protocol("invalid result".to_string()))
-    }
     /// Cache a credential in the agent.
     ///
     /// # Errors
@@ -329,20 +294,5 @@ impl AgentClient {
         let credential: CachedCredential =
             serde_json::from_value(result).map_err(AgentError::from)?;
         Ok(Some(credential))
-    }
-
-    /// Clear all cached credentials.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AgentError::Protocol` if the request fails.
-    pub async fn clear_credential_cache(&mut self) -> Result<()> {
-        let response = self.call(Method::ClearCredentialCache, None).await?;
-
-        if let Some(error) = response.error {
-            return Err(AgentError::Protocol(error.message));
-        }
-
-        Ok(())
     }
 }
