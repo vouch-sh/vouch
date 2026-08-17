@@ -50,37 +50,6 @@ pub struct Request {
     pub params: Option<serde_json::Value>,
 }
 
-impl Request {
-    /// Create a new request.
-    pub fn new(id: u64, method: Method) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id,
-            method,
-            params: None,
-        }
-    }
-
-    /// Create a new request with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns `serde_json::Error` if params cannot be serialized.
-    pub fn with_params<T: Serialize>(
-        id: u64,
-        method: Method,
-        params: T,
-    ) -> Result<Self, serde_json::Error> {
-        let params = serde_json::to_value(params)?;
-        Ok(Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id,
-            method,
-            params: Some(params),
-        })
-    }
-}
-
 /// JSON-RPC 2.0 response.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -254,32 +223,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request_new() {
-        let req = Request::new(1, Method::Ping);
-
-        assert_eq!(req.jsonrpc, "2.0");
-        assert_eq!(req.id, 1);
-        assert_eq!(req.method, Method::Ping);
-        assert!(req.params.is_none());
-    }
-
-    #[test]
-    fn test_request_with_params() {
-        let params = StoreSessionParams {
-            token: SecretString::from("test_token"),
-            user_email: "test@example.com".to_string(),
-            expires_at: "2099-12-31T23:59:59Z".to_string(),
-            server_url: None,
-        };
-        let req = Request::with_params(2, Method::StoreSession, &params).unwrap();
-
-        assert_eq!(req.jsonrpc, "2.0");
-        assert_eq!(req.id, 2);
-        assert_eq!(req.method, Method::StoreSession);
-        assert!(req.params.is_some());
-    }
-
-    #[test]
     fn test_response_success() {
         let resp = Response::success(1, "pong").unwrap();
 
@@ -306,7 +249,12 @@ mod tests {
 
     #[test]
     fn test_request_serialization() {
-        let req = Request::new(42, Method::GetSession);
+        let req = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 42,
+            method: Method::GetSession,
+            params: None,
+        };
         let json = serde_json::to_string(&req).expect("serialization should succeed");
 
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
