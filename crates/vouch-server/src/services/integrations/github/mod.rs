@@ -45,7 +45,7 @@ use crate::db::store::DocumentStore;
 
 // Re-export commonly used types
 pub(crate) use app::{
-    GitHubApp, GitHubInstallationId, GitHubUser, exchange_oauth_code, get_github_user,
+    GitHubApp, GitHubInstallationId, exchange_oauth_code, get_github_user,
     list_user_accessible_installations, minimal_git_permissions, refresh_oauth_token,
 };
 pub(crate) use installations::{ConnectInstallationParams, ReconnectInstallationParams};
