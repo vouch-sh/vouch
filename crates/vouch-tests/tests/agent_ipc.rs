@@ -5,8 +5,7 @@
 //! serialization without requiring a running agent or Unix sockets.
 
 use vouch_agent::protocol::{
-    NOT_AUTHENTICATED, Response, SESSION_EXPIRED, StoreSessionParams,
-    StoreSshCredentialsParams,
+    NOT_AUTHENTICATED, Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
 };
 use vouch_agent::state::{AgentState, Session, SessionInfo};
 
