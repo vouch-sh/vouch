@@ -107,15 +107,6 @@ async fn resolve_jwks_uri(
     parse_jwks_value(&value)
 }
 
-/// Parse a JWKS JSON string.
-#[cfg(test)]
-fn parse_jwks(json: &str) -> ServiceResult<JwkSet> {
-    serde_json::from_str(json).map_err(|e| {
-        tracing::debug!("Failed to parse JWKS: {e}");
-        ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
-    })
-}
-
 /// Parse a JWKS from a `serde_json::Value`.
 fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
     serde_json::from_value(value.clone()).map_err(|e| {
@@ -326,8 +317,6 @@ fn build_decoding_key_from_jwk(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -405,84 +394,6 @@ mod tests {
             alg: alg.to_string(),
             kid: kid.map(String::from),
         }
-    }
-
-    // =======================================================================
-    // parse_jwks tests
-    // =======================================================================
-
-    #[test]
-    fn test_parse_jwks_valid_ec_key() {
-        let json =
-            format!(r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}"}}]}}"#,);
-        let jwks = parse_jwks(&json).expect("should parse valid EC JWKS");
-        assert_eq!(jwks.keys.len(), 1);
-        assert_eq!(jwks.keys[0].kty, "EC");
-        assert_eq!(jwks.keys[0].crv.as_deref(), Some("P-256"));
-        assert_eq!(jwks.keys[0].x.as_deref(), Some(EC_X));
-        assert_eq!(jwks.keys[0].y.as_deref(), Some(EC_Y));
-    }
-
-    #[test]
-    fn test_parse_jwks_valid_rsa_key() {
-        let json = format!(r#"{{"keys":[{{"kty":"RSA","n":"{RSA_N}","e":"{RSA_E}"}}]}}"#,);
-        let jwks = parse_jwks(&json).expect("should parse valid RSA JWKS");
-        assert_eq!(jwks.keys.len(), 1);
-        assert_eq!(jwks.keys[0].kty, "RSA");
-        assert_eq!(jwks.keys[0].n.as_deref(), Some(RSA_N));
-        assert_eq!(jwks.keys[0].e.as_deref(), Some(RSA_E));
-    }
-
-    #[test]
-    fn test_parse_jwks_empty_keys_array() {
-        let json = r#"{"keys":[]}"#;
-        let jwks = parse_jwks(json).expect("should parse empty JWKS");
-        assert!(jwks.keys.is_empty());
-    }
-
-    #[test]
-    fn test_parse_jwks_invalid_json() {
-        let result = parse_jwks("not json");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid JWKS format")
-        );
-    }
-
-    #[test]
-    fn test_parse_jwks_missing_keys_field() {
-        let result = parse_jwks(r#"{"not_keys": []}"#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_jwks_multiple_keys() {
-        let json = format!(
-            r#"{{"keys":[
-                {{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}","kid":"ec-1"}},
-                {{"kty":"RSA","n":"{RSA_N}","e":"{RSA_E}","kid":"rsa-1"}}
-            ]}}"#,
-        );
-        let jwks = parse_jwks(&json).expect("should parse multi-key JWKS");
-        assert_eq!(jwks.keys.len(), 2);
-        assert_eq!(jwks.keys[0].kid.as_deref(), Some("ec-1"));
-        assert_eq!(jwks.keys[1].kid.as_deref(), Some("rsa-1"));
-    }
-
-    #[test]
-    fn test_parse_jwks_preserves_optional_fields() {
-        let json = format!(
-            r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}",
-                "kid":"key-1","alg":"ES256","use":"sig"}}]}}"#,
-        );
-        let jwks = parse_jwks(&json).expect("should parse JWKS with optional fields");
-        let key = &jwks.keys[0];
-        assert_eq!(key.kid.as_deref(), Some("key-1"));
-        assert_eq!(key.alg.as_deref(), Some("ES256"));
-        assert_eq!(key.use_.as_deref(), Some("sig"));
     }
 
     // =======================================================================
