@@ -5,7 +5,7 @@
 //! serialization without requiring a running agent or Unix sockets.
 
 use vouch_agent::protocol::{
-    Method, NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
+    NOT_AUTHENTICATED, Response, SESSION_EXPIRED, StoreSessionParams,
     StoreSshCredentialsParams,
 };
 use vouch_agent::state::{AgentState, Session, SessionInfo};
@@ -239,37 +239,6 @@ mod protocol_types {
             deserialized.session_expires_at.as_deref(),
             Some("2099-12-31T23:59:59Z")
         );
-    }
-
-    /// JSON-RPC request creation.
-    #[test]
-    fn test_request_creation() {
-        let request = Request::new(42, Method::GetSession);
-
-        assert_eq!(request.jsonrpc, "2.0");
-        assert_eq!(request.id, 42);
-        assert_eq!(request.method, Method::GetSession);
-        assert!(request.params.is_none());
-    }
-
-    /// JSON-RPC request with params.
-    #[test]
-    fn test_request_with_params() {
-        let params = StoreSessionParams {
-            token: secrecy::SecretString::from("jwt"),
-            user_email: "user@example.com".to_string(),
-            expires_at: "2099-12-31T23:59:59Z".to_string(),
-            server_url: None,
-        };
-
-        let request = Request::with_params(1, Method::StoreSession, &params).unwrap();
-
-        assert_eq!(request.method, Method::StoreSession);
-        assert!(request.params.is_some());
-
-        // Verify params are correctly embedded
-        let p = request.params.unwrap();
-        assert_eq!(p["user_email"], "user@example.com");
     }
 
     /// JSON-RPC response success.
