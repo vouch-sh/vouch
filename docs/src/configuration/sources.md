@@ -32,7 +32,7 @@ For production deployments, Vouch supports loading configuration from an S3 obje
 - **Centralized management** — Single source of truth for multi-instance deployments
 - **Dynamic updates** — Configuration changes without server restart (for supported fields)
 - **TLS hot-reload** — Automatic certificate rotation without downtime
-- **Secrets management** — Leverage S3 encryption and IAM for credential protection
+- **Secrets management** — S3 encryption and IAM protect the document's secrets
 
 **Enabling S3 Configuration:**
 
@@ -108,7 +108,7 @@ As an alternative to managing local key material, Vouch supports AWS KMS for sig
 | `VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID` | RSA-3072 (`RSA_3072`) | `VOUCH_OIDC_RSA_SIGNING_KEY` |
 | `VOUCH_JWT_HMAC_KMS_KEY_ID` | HMAC-256 (`HMAC_256`) | `VOUCH_JWT_SECRET` |
 
-Multi-region keys (`mrk-` prefix) are recommended for high availability. KMS key IDs can also be set in the S3 config (`ssh_ca_kms_key_id`, `oidc_signing_kms_key_id`, `jwt_hmac_kms_key_id`).
+Use multi-region keys (`mrk-` prefix) for high availability. KMS key IDs can also be set in the S3 config (`ssh_ca_kms_key_id`, `oidc_signing_kms_key_id`, `jwt_hmac_kms_key_id`).
 
 See [Key Management](keys.md) for generation and rotation details.
 
@@ -121,7 +121,7 @@ See [Key Management](keys.md) for generation and rotation details.
 
 Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, SAML settings, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
 
-Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
+Changes to non-hot-reloadable fields in S3 are silently ignored; restart the server to apply them.
 
 ## TLS Certificate Hot-Reload
 

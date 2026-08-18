@@ -94,7 +94,7 @@ Set your orchestrator's termination grace period above 30 seconds so it does not
 drain — Kubernetes defaults to 30, which leaves no margin.
 
 The background cleanup and S3 polling tasks are aborted rather than drained; an interrupted cleanup
-pass simply resumes on the next instance's next tick.
+pass resumes on the next instance's next tick.
 
 ## Regional and multi-region notes
 

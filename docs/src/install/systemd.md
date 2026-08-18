@@ -18,7 +18,7 @@ The package installs:
 - Binary at `/usr/bin/vouch-server`
 - Systemd unit at `/etc/systemd/system/vouch-server.service`
 - Default config at `/etc/vouch/vouch.env`
-- Data directory at `/data` (with appropriate permissions)
+- Data directory at `/data` (owned by the `vouch` user, mode `700`)
 
 ## Configure
 

@@ -35,7 +35,7 @@ In an air-gapped environment:
 - Internal identity provider (no Google Workspace)
 - Time sync from isolated NTP or GPS
 
-Vouch's built-in SSH CA and local-first architecture make it well-suited for these constraints.
+Vouch fits these constraints: the SSH CA is built in, and all state lives in a local database, so nothing depends on an external service.
 
 ## Architecture
 

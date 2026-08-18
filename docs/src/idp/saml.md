@@ -119,7 +119,7 @@ VOUCH_ALLOWED_DOMAINS=example.com
 ### Okta
 
 - Metadata URL: found in the Okta SAML app's **Sign On** tab under **Metadata URL**
-- Email attribute: typically `email` or configure in the Okta attribute statements
+- Email attribute: `email`, set in the Okta attribute statements
 - Set the Single Sign-On URL to `https://auth.example.com/saml/acs` and Audience URI to your SP entity ID
 
 ### Google Workspace
@@ -132,12 +132,12 @@ VOUCH_ALLOWED_DOMAINS=example.com
 
 **"Failed to fetch SAML IdP metadata"**
 - Verify the metadata URL is correct and reachable from the server
-- Check that the URL returns valid XML (not an HTML login page)
-- Ensure the server can make outbound HTTPS requests
+- Verify the URL returns valid XML (not an HTML login page)
+- Confirm the server can make outbound HTTPS requests
 
 **Signature verification errors**
 - Confirm the IdP's signing certificate in the metadata is current and not expired
-- Ensure the server clock is synchronized (NTP). SAML assertions have time-based validity windows.
+- Confirm the server clock is NTP-synchronized. SAML assertions have time-based validity windows.
 
 **Email not extracted from assertion**
 - Check the SAML assertion attributes using debug logging (`RUST_LOG=vouch_server=debug`)

@@ -84,7 +84,7 @@ VOUCH_IDP_CORP_SAML_EMAIL_ATTRIBUTE=http://schemas.xmlsoap.org/ws/2005/05/identi
 VOUCH_IDP_CORP_SAML_DOMAIN_ATTRIBUTE=department
 ```
 
-Notes on slug-to-env-var conversion: hyphens in the slug become underscores in env-var names. `corp-saml` becomes `VOUCH_IDP_CORP_SAML_TYPE`, etc.
+Hyphens in the slug become underscores in env-var names: `corp-saml` becomes `VOUCH_IDP_CORP_SAML_*`.
 
 ### S3 configuration
 

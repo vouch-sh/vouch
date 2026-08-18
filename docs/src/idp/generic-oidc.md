@@ -70,26 +70,26 @@ If not set, users from any email domain can enroll (provided they authenticate w
 
 ## Tested Providers
 
-The following providers have been tested with Vouch:
+These providers are tested with Vouch:
 
-| Provider | Status | Notes |
-|----------|--------|-------|
-| Google Workspace | Tested | See [dedicated guide](google-workspace.md) |
-| Microsoft Entra ID | Tested | See [dedicated guide](entra-id.md) |
-| Okta | Tested | Use the Org Authorization Server or a custom one |
-| Keycloak | Tested | Requires a configured realm with client credentials |
-| Auth0 | Tested | Use the tenant issuer URL with trailing slash |
+| Provider | Notes |
+|----------|-------|
+| Google Workspace | See [dedicated guide](google-workspace.md) |
+| Microsoft Entra ID | See [dedicated guide](entra-id.md) |
+| Okta | Use the Org Authorization Server or a custom one |
+| Keycloak | Requires a configured realm with client credentials |
+| Auth0 | Use the tenant issuer URL with trailing slash |
 
 ## Troubleshooting
 
 **"Failed to fetch upstream OIDC discovery document"**
 - Verify the issuer URL is correct and reachable from the server
-- Check that the URL uses HTTPS (HTTP is only allowed for `localhost`)
+- Verify the URL uses HTTPS (HTTP is only allowed for `localhost`)
 - Confirm the discovery endpoint returns valid JSON
 
 **"Issuer mismatch"**
 - The `issuer` field in the discovery document must exactly match the configured `VOUCH_IDP_<SLUG>_ISSUER` value (trailing slashes matter). Entra `/organizations/v2.0` is special-cased automatically — its discovery document returns a `{tenantid}` template that vouch handles transparently. The `/common/v2.0` endpoint is not supported; see [Microsoft Entra ID](./entra-id.md#why-personal-microsoft-accounts-arent-supported).
 
 **Token errors after authentication**
-- Ensure the client secret is correct and not expired
+- Verify the client secret is correct and not expired
 - Verify the redirect URI registered with the IdP exactly matches `https://<your-vouch-domain>/oauth/callback`

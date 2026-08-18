@@ -93,7 +93,7 @@ VOUCH_ALLOWED_DOMAINS=example.com
 ## Step 5: Test
 
 1. Run `vouch enroll` on a workstation
-2. The browser should redirect to the Microsoft sign-in page
+2. The browser redirects to the Microsoft sign-in page
 3. After signing in, complete the WebAuthn registration with your YubiKey
 
 ## Why personal Microsoft accounts aren't supported
@@ -110,7 +110,7 @@ As a consequence, the `https://login.microsoftonline.com/common/v2.0` issuer is 
 
 **`InvalidIssuer` at the callback**
 
-Make sure the configured issuer ends in `/v2.0`. The v1 endpoints use a different token format and are not compatible with standard OIDC discovery.
+The configured issuer must end in `/v2.0`. The v1 endpoints use a different token format and are not compatible with standard OIDC discovery.
 
 **`Email address is not verified by the identity provider` after sign-in**
 

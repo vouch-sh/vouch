@@ -86,7 +86,7 @@ OIDC IdPs auto-discover authorization, token, and JWKS endpoints from `{issuer}/
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing access tokens and ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart (not recommended for production). |
+| `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing access tokens and ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart, and issued tokens fail verification after a restart or across instances. |
 | `VOUCH_OIDC_RSA_SIGNING_KEY` | No | _(auto-generate)_ | OIDC RSA signing key content (base64-encoded PEM format, RSA-3072). Used for signing ID tokens with RS256 algorithm per OIDC Core Section 3.1.3.7 and all AWS credential tokens (`/v1/credentials/aws/token`, serving both STS `AssumeRoleWithWebIdentity` and IAM Identity Center `CreateTokenWithIAM`). Minimum 3072-bit key enforced. If not set, an ephemeral key is generated on each server restart — AWS token verification then breaks after restarts and across multiple instances, so any deployment using the AWS integration must set this (or the KMS variant). |
 
 ## AWS KMS
@@ -168,7 +168,7 @@ These optional variables configure descriptive metadata published in the OAuth 2
 | `VOUCH_RESOURCE_POLICY_URI` | No | `https://vouch.sh/privacy/` | URL of the resource's data-use policy. |
 | `VOUCH_RESOURCE_TOS_URI` | No | `https://vouch.sh/terms/` | URL of the resource's terms of service. |
 
-> **Self-hosters should override the last three.** Their defaults point at Vouch's own site, so a
+> **Override the last three on a self-hosted deployment.** Their defaults point at Vouch's own site, so a
 > deployment that leaves them alone publishes Vouch's documentation, privacy policy, and terms as
 > its own in a document clients read to learn who operates the resource. Point them at your
 > organization's pages.
@@ -183,7 +183,7 @@ The server publishes a security.txt document at `/.well-known/security.txt` with
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_SECURITY_CONTACT` | No | `security@vouch.sh` | Contact email published in `security.txt`. Self-hosters should set this — the default routes vulnerability reports about your deployment to Vouch's security team. |
+| `VOUCH_SECURITY_CONTACT` | No | `security@vouch.sh` | Contact email published in `security.txt`. Set this on a self-hosted deployment — the default routes vulnerability reports about your deployment to Vouch's security team. |
 
 ## CLI Download URLs
 

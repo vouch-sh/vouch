@@ -90,38 +90,36 @@ docker images | grep vouch
 
 ## Step 4: Secure Key Generation
 
-**This is a critical security operation. Follow your organization's key ceremony procedures.**
-
-Vouch requires several cryptographic keys for different purposes. All key generation should be performed on a trusted, air-gapped workstation. See the [Key Ceremony](airgap-key-ceremony.md) chapter for detailed instructions on generating each key.
+Generate every key on a trusted, air-gapped workstation, following your organization's key ceremony procedures. See the [Key Ceremony](airgap-key-ceremony.md) chapter for per-key instructions.
 
 ### Key Overview
 
 | Key | Type | Format | Required | Purpose |
 |-----|------|--------|----------|---------|
-| JWT Secret | Symmetric | UTF-8 (32+ chars) | **Yes** | Sign OAuth tokens and sessions |
+| JWT Secret | Symmetric | UTF-8 (32+ chars) | **Yes** | Signs internal state tokens (authorization codes, WebAuthn state, CSRF) |
 | SSH CA Key | Ed25519 | Base64-encoded OpenSSH PEM | Optional | Sign SSH certificates |
 | OIDC Signing Key | P-256 ECDSA | Base64-encoded PKCS#8 PEM | Optional* | Sign OIDC ID tokens |
 | TLS Certificate | RSA/EC | Base64-encoded PEM | Optional | HTTPS encryption |
 | TLS Private Key | RSA/EC | Base64-encoded PEM | Optional | HTTPS encryption |
 
-*Auto-generates ephemeral key if not provided (not recommended for production).
+*When unset, the server generates an ephemeral key at startup; issued tokens then fail verification after a restart.
 
-> **Note:** All PEM-formatted keys and certificates must be base64-encoded when passed via environment variables. This ensures proper handling of newlines and special characters.
+> Base64-encode all PEM keys and certificates passed via environment variables — multi-line PEM content does not survive as an environment-variable value.
 
 ## Step 5: Database Setup
 
-Vouch uses SQLite by default, which is suitable for single-node deployments. The database is created automatically on first startup.
+Vouch defaults to SQLite, which backs a single node. The database is created automatically on first startup.
 
 ```bash
 # SQLite (default, single-node)
 export VOUCH_DATABASE_URL="sqlite:/data/vouch.db?mode=rwc"
 
-# Create data directory with appropriate permissions
+# Create the data directory, readable only by the service user
 mkdir -p /data
 chmod 700 /data
 ```
 
-For high-availability deployments, a local PostgreSQL instance is supported:
+For multi-node deployments, use PostgreSQL on the internal network:
 
 ```bash
 # PostgreSQL (multi-node, must be reachable on the internal network)
@@ -279,7 +277,7 @@ enclave than anywhere else:
 
 ## Step 7: Deploy Services
 
-There are several options for deploying the Vouch server.
+Deploy the server with systemd, Docker Compose, or Helm.
 
 ### Option A: Systemd Service (RPM Install)
 

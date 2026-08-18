@@ -6,7 +6,7 @@
 
 1. **Read the release notes** for breaking changes
 2. **Back up the database** before upgrading
-3. **Test in staging** if possible
+3. **Test in staging** before production
 
 ### Server Update
 
@@ -45,20 +45,21 @@ sudo dnf upgrade vouch    # RHEL/Fedora
 
 ### Rollback
 
-If an update causes issues:
+To roll back:
 
 1. Stop the server
-2. Restore the database from pre-upgrade backup
+2. Restore the database from the pre-upgrade backup
 3. Install the previous version
 4. Start the server
 
-> **Note**: Database migrations may not be reversible. Always back up before upgrading.
+> Database migrations have no rollback step — restoring the pre-upgrade backup is the rollback.
+> Back up before upgrading.
 
 ## Version Compatibility
 
 - The server is backward-compatible with older CLI versions
 - Upgrade the server first, then clients
-- Major version bumps may require simultaneous client updates (documented in release notes)
+- Release notes call out major versions that require simultaneous client updates
 
 ## Release Channels
 

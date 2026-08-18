@@ -70,7 +70,7 @@ env:
 # - VOUCH_IDP_GOOGLE_CLIENT_SECRET
 existingSecret: ""
 
-# Or create a new secret (not recommended for production)
+# Or create a new secret (puts secret values in this file; use existingSecret in production)
 secrets: {}
   # VOUCH_JWT_SECRET: ""
 
