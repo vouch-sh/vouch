@@ -20,7 +20,7 @@
     {# User info #}
     <span class="text-gray-400">{{ auth.user_email.as_deref().unwrap_or("") }}</span>
     <form method="POST" action="/logout" class="inline">
-        <button type="submit" class="text-gray-500 hover:text-gray-300">{{ page.tr("nav-sign-out") }}</button>
+        <button type="submit" class="text-gray-400 hover:text-gray-300">{{ page.tr("nav-sign-out") }}</button>
     </form>
 </div>
 {% endif %}

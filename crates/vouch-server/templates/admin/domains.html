@@ -18,7 +18,7 @@
                     <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
                     <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
                     <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
-                    <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-domains") }}</a>
+                    <a href="/admin/domains" aria-current="page" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-domains") }}</a>
                     <a href="/admin/subdomain" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-subdomain") }}</a>
                 </nav>
             </div>
@@ -26,13 +26,13 @@
         </div>
 
         {% if let Some(msg) = flash_message %}
-        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
+        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm" role="alert">
             {{ msg }}
         </div>
         {% endif %}
 
         {% if let Some(msg) = flash_success %}
-        <div class="mb-4 px-4 py-3 rounded bg-green-900/30 border border-green-800 text-green-300 text-sm">
+        <div class="mb-4 px-4 py-3 rounded bg-green-900/30 border border-green-800 text-green-300 text-sm" role="status">
             {{ msg }}
         </div>
         {% endif %}
@@ -48,11 +48,11 @@
             <form method="POST" action="/admin/domains" class="flex items-end gap-3">
                 <div class="flex-1">
                     <label for="domain" class="block text-xs text-gray-400 mb-1">{{ self.tr("admin-domains-domain-label") }}</label>
-                    <input type="text" id="domain" name="domain" maxlength="253" required placeholder="example.com" class="w-full px-3 py-2 rounded bg-gray-800 border border-gray-700 text-gray-200 text-sm placeholder-gray-600 focus:outline-none focus:border-vouch-accent">
+                    <input type="text" id="domain" name="domain" maxlength="253" required placeholder="example.com" class="w-full px-3 py-2 rounded bg-gray-800 border border-gray-500 text-gray-200 text-sm placeholder-gray-400 focus:border-vouch-accent">
                 </div>
-                <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-domains-add") }}</button>
+                <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-vouch-bg font-medium hover:bg-vouch-accent-hover">{{ self.tr("admin-domains-add") }}</button>
             </form>
-            <p class="mt-3 text-xs text-gray-500">{{ self.tr("admin-domains-add-help") }}</p>
+            <p class="mt-3 text-xs text-gray-400">{{ self.tr("admin-domains-add-help") }}</p>
         </div>
         {% endif %}
 
@@ -60,11 +60,11 @@
             <table class="w-full text-sm">
                 <thead>
                     <tr class="border-b border-vouch-border text-left text-gray-400">
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-domain") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-status") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added-by") }}</th>
-                        <th class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-domain") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-status") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added-by") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -73,7 +73,7 @@
                         <td class="px-4 py-3 text-gray-200 font-mono">
                             {{ row.domain }}
                             {% if let Some(unicode) = row.unicode %}
-                            <div class="text-xs text-gray-500 font-mono mt-0.5" title="{{ self.tr("admin-domains-idn-title") }}">↳ {{ unicode }}</div>
+                            <div class="text-xs text-gray-400 font-mono mt-0.5" title="{{ self.tr("admin-domains-idn-title") }}">↳ {{ unicode }}</div>
                             {% endif %}
                         </td>
                         <td class="px-4 py-3 whitespace-nowrap">
@@ -112,11 +112,11 @@
                         <td colspan="5" class="px-4 py-3 text-xs text-gray-400">
                             <p class="mb-2">{{ self.tr("admin-domains-txt-prefix") }} <code class="text-gray-300">{{ row.domain }}</code>{{ self.tr("admin-domains-txt-mid") }} <em>{{ self.tr("admin-domains-verify") }}</em>:</p>
                             <div class="font-mono text-gray-200 bg-gray-950 px-3 py-2 rounded border border-gray-800 break-all">
-                                <div><span class="text-gray-500">{{ self.tr("admin-domains-dns-name") }}</span> _vouch-verification.{{ row.domain }}</div>
-                                <div><span class="text-gray-500">{{ self.tr("admin-domains-dns-type") }}</span> TXT</div>
+                                <div><span class="text-gray-400">{{ self.tr("admin-domains-dns-name") }}</span> _vouch-verification.{{ row.domain }}</div>
+                                <div><span class="text-gray-400">{{ self.tr("admin-domains-dns-type") }}</span> TXT</div>
                                 <div class="flex items-start gap-2">
-                                    <span><span class="text-gray-500">{{ self.tr("admin-domains-dns-value") }}</span> {{ token }}</span>
-                                    <button type="button" data-copy-text="{{ token }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="{{ self.tr("admin-domains-copy-token-title") }}">
+                                    <span><span class="text-gray-400">{{ self.tr("admin-domains-dns-value") }}</span> {{ token }}</span>
+                                    <button type="button" data-copy-text="{{ token }}" class="shrink-0 p-1 text-gray-400 hover:text-gray-200 transition-colors" title="{{ self.tr("admin-domains-copy-token-title") }}">
                                         <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                                         </svg>

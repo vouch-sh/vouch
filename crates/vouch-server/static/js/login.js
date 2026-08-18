@@ -83,6 +83,7 @@
             status.textContent = t('login-js-error', { message: webauthnError(err) });
             btn.disabled = false;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            btn.focus();
         }
     }
 

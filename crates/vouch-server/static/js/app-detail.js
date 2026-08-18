@@ -27,6 +27,17 @@
             viewMode.classList.toggle('hidden');
             editMode.classList.toggle('hidden');
             editBtn.classList.toggle('hidden');
+
+            var editing = !editMode.classList.contains('hidden');
+            editBtn.setAttribute('aria-expanded', editing ? 'true' : 'false');
+            // Move focus with the mode switch: the Edit button hides itself, so
+            // focus would otherwise fall back to <body> unannounced.
+            if (editing) {
+                var firstField = editMode.querySelector('input, textarea, select');
+                if (firstField) firstField.focus();
+            } else {
+                editBtn.focus();
+            }
         }
 
         if (editBtn) {
@@ -146,10 +157,19 @@
                 errorEl.textContent = message;
                 errorEl.classList.remove('hidden');
                 textarea.classList.add('border-vouch-error');
+                textarea.setAttribute('aria-invalid', 'true');
             } else {
                 errorEl.classList.add('hidden');
                 textarea.classList.remove('border-vouch-error');
+                textarea.removeAttribute('aria-invalid');
             }
+        }
+
+        // Center the offending field; no animation for reduced-motion users
+        var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        function scrollToField(el) {
+            el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+            el.focus();
         }
 
         if (redirectTextarea && redirectError) {
@@ -296,8 +316,7 @@
                     if (redirectErr) {
                         e.preventDefault();
                         showFieldError(redirectError, redirectTextarea, redirectErr);
-                        redirectTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        redirectTextarea.focus();
+                        scrollToField(redirectTextarea);
                         hasError = true;
                     }
                 }
@@ -308,8 +327,7 @@
                         e.preventDefault();
                         showFieldError(resourceError, resourceTextarea, resourceErr);
                         if (!hasError) {
-                            resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            resourceTextarea.focus();
+                            scrollToField(resourceTextarea);
                         }
                         hasError = true;
                     }
@@ -321,8 +339,7 @@
                         e.preventDefault();
                         showFieldError(postLogoutError, postLogoutTextarea, postLogoutErr);
                         if (!hasError) {
-                            postLogoutTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            postLogoutTextarea.focus();
+                            scrollToField(postLogoutTextarea);
                         }
                         hasError = true;
                     }
@@ -335,8 +352,7 @@
                         e.preventDefault();
                         showFieldError(editJwksError, editJwksTextarea, jwksErr);
                         if (!hasError) {
-                            editJwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            editJwksTextarea.focus();
+                            scrollToField(editJwksTextarea);
                         }
                         hasError = true;
                     }
@@ -346,8 +362,7 @@
                         e.preventDefault();
                         showFieldError(editJwksUriError, editJwksUriInput, jwksUriErr);
                         if (!hasError) {
-                            editJwksUriInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            editJwksUriInput.focus();
+                            scrollToField(editJwksUriInput);
                         }
                         hasError = true;
                     }
@@ -359,8 +374,7 @@
                         var msg = t('appcreate-js-fapi-required');
                         showFieldError(editJwksError, editJwksTextarea, msg);
                         if (!hasError) {
-                            editJwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            editJwksTextarea.focus();
+                            scrollToField(editJwksTextarea);
                         }
                         hasError = true;
                     }

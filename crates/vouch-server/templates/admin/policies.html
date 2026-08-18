@@ -18,7 +18,7 @@
                 <nav class="flex flex-wrap gap-3 text-sm whitespace-nowrap">
                     <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
                     <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
-                    <a href="/admin/policies" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-policies") }}</a>
+                    <a href="/admin/policies" aria-current="page" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-policies") }}</a>
                     <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
                     <a href="/admin/domains" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-domains") }}</a>
                     <a href="/admin/subdomain" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-subdomain") }}</a>
@@ -28,7 +28,7 @@
         </div>
 
         {% if let Some(msg) = flash_message %}
-        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
+        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm" role="alert">
             {{ msg }}
         </div>
         {% endif %}
@@ -39,8 +39,8 @@
         <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{{ self.tr("admin-policies-list-heading") }}</h2>
             <div class="flex items-center gap-3">
-                <span class="text-xs text-gray-500">{{ self.tr("admin-policies-counts").arg("custom", custom_count).arg("maxCustom", max_custom).arg("active", active_count).arg("maxActive", max_active) }}</span>
-                <button type="button" id="btn-new-policy" class="px-2.5 py-1 text-xs rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-policies-new-btn") }}</button>
+                <span class="text-xs text-gray-400">{{ self.tr("admin-policies-counts").arg("custom", custom_count).arg("maxCustom", max_custom).arg("active", active_count).arg("maxActive", max_active) }}</span>
+                <button type="button" id="btn-new-policy" class="px-2.5 py-1 text-xs rounded bg-vouch-accent text-vouch-bg font-medium hover:bg-vouch-accent-hover">{{ self.tr("admin-policies-new-btn") }}</button>
             </div>
         </div>
 
@@ -54,14 +54,14 @@
                         <label for="policy-name" class="block text-xs text-gray-400 mb-1">{{ self.tr("apps-detail-name") }}</label>
                         <input type="text" id="policy-name" name="policy_name" required maxlength="100"
                             autocomplete="off" data-1p-ignore
-                            class="w-full px-3 py-1.5 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-sm focus:border-vouch-accent focus:outline-none"
+                            class="w-full px-3 py-1.5 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-sm focus:border-vouch-accent"
                             placeholder="{{ self.tr("admin-policies-name-placeholder") }}">
                     </div>
                     <div class="mb-3">
-                        <label for="policy-description" class="block text-xs text-gray-400 mb-1">{{ self.tr("apps-detail-description") }} <span class="text-gray-600">{{ self.tr("admin-policies-optional") }}</span></label>
+                        <label for="policy-description" class="block text-xs text-gray-400 mb-1">{{ self.tr("apps-detail-description") }} <span class="text-gray-400">{{ self.tr("admin-policies-optional") }}</span></label>
                         <input type="text" id="policy-description" name="policy_description" maxlength="500"
                             autocomplete="off" data-1p-ignore
-                            class="w-full px-3 py-1.5 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-sm focus:border-vouch-accent focus:outline-none"
+                            class="w-full px-3 py-1.5 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-sm focus:border-vouch-accent"
                             placeholder="{{ self.tr("admin-policies-desc-placeholder") }}">
                     </div>
 
@@ -78,7 +78,7 @@
                                 {{ self.tr("admin-policies-applies-exchange") }}
                             </label>
                         </div>
-                        <p class="text-xs text-gray-600 mt-1">{{ self.tr("admin-policies-applies-hint") }}</p>
+                        <p class="text-xs text-gray-400 mt-1">{{ self.tr("admin-policies-applies-hint") }}</p>
                     </fieldset>
 
                     {# Guided builder #}
@@ -96,7 +96,7 @@
                                 </label>
                             </div>
                         </fieldset>
-                        <p id="builder-polarity" class="text-xs text-gray-500 mb-2"
+                        <p id="builder-polarity" class="text-xs text-gray-400 mb-2"
                             data-device="{{ self.tr("admin-policies-polarity-device") }}"
                             data-history="{{ self.tr("admin-policies-polarity-history") }}"></p>
                         <div id="builder-rows" class="space-y-2 mb-2"></div>
@@ -104,8 +104,8 @@
                             <button type="button" id="btn-add-check" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600">{{ self.tr("admin-policies-add-check") }}</button>
                             <button type="button" id="btn-add-osfloor" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600">{{ self.tr("admin-policies-add-osfloor") }}</button>
                         </div>
-                        <p id="window-cap-note" class="text-xs text-yellow-500/80 mb-3 hidden">{{ self.tr("admin-policies-window-cap-note") }}</p>
-                        <p id="login-recency-note" class="text-xs text-yellow-500/80 mb-3 hidden"
+                        <p id="window-cap-note" role="status" class="text-xs text-yellow-500/80 mb-3 hidden">{{ self.tr("admin-policies-window-cap-note") }}</p>
+                        <p id="login-recency-note" role="status" class="text-xs text-yellow-500/80 mb-3 hidden"
                             data-lockout="{{ self.tr("admin-policies-warn-login-lockout") }}"
                             data-cooldown="{{ self.tr("admin-policies-warn-login-cooldown") }}"></p>
                     </div>
@@ -116,20 +116,20 @@
                             <label for="policy-expression" class="text-xs text-gray-400" id="preview-label"
                                 data-preview="{{ self.tr("admin-policies-preview-label") }}"
                                 data-text="{{ self.tr("admin-policies-rule-label") }}"></label>
-                            <span class="text-gray-600 text-xs font-normal hidden" id="rule-hint">{{ self.tr("admin-policies-rule-hint") }}</span>
-                            <button type="button" id="btn-edit-text" class="text-xs text-gray-500 hover:text-gray-300 underline decoration-dotted ml-auto">{{ self.tr("admin-policies-edit-as-text") }}</button>
-                            <a href="https://dogwood-policy.github.io/dogwood/" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-400" title="{{ self.tr("admin-policies-ref-title") }}">
-                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <span class="text-gray-400 text-xs font-normal hidden" id="rule-hint">{{ self.tr("admin-policies-rule-hint") }}</span>
+                            <button type="button" id="btn-edit-text" class="text-xs text-gray-400 hover:text-gray-300 underline decoration-dotted ml-auto">{{ self.tr("admin-policies-edit-as-text") }}</button>
+                            <a href="https://dogwood-policy.github.io/dogwood/" target="_blank" rel="noopener noreferrer" class="p-1.5 text-gray-400 hover:text-gray-300" title="{{ self.tr("admin-policies-ref-title") }}" aria-label="{{ self.tr("admin-policies-ref-title") }}">
+                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             </a>
                         </div>
                         <pre id="policy-preview" class="w-full px-3 py-2 bg-vouch-bg border border-vouch-border rounded text-gray-400 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words min-h-16"></pre>
                         <textarea id="policy-expression" name="policy_text" maxlength="4096" rows="10"
-                            class="w-full px-3 py-1.5 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-sm font-mono leading-relaxed resize-y focus:border-vouch-accent focus:outline-none hidden"
+                            class="w-full px-3 py-1.5 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-sm font-mono leading-relaxed resize-y focus:border-vouch-accent hidden"
                             placeholder='forbid (principal, action == Vouch::Action::"IssueToken", resource)&#10;unless {&#10;    context.device.os == "macos" &amp;&amp; context.device.os_version_num >= 15000000&#10;};'></textarea>
                     </div>
 
                     {# Validation status #}
-                    <div id="policy-validation" class="mb-3 hidden">
+                    <div id="policy-validation" role="status" class="mb-3 hidden">
                         <div id="policy-valid" class="hidden px-3 py-1.5 rounded bg-green-900/20 border border-green-800/50 text-xs">
                             <span class="font-medium text-green-400">{{ self.tr("admin-policies-valid") }}</span>
                             <span id="policy-test-result" class="ml-1"></span>
@@ -142,7 +142,7 @@
 
                     <div class="flex items-center gap-2">
                         <button type="submit" id="btn-save-policy" disabled
-                            class="px-3 py-1.5 text-xs rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">{{ self.tr("common-save") }}</button>
+                            class="px-3 py-1.5 text-xs rounded bg-vouch-accent text-vouch-bg font-medium hover:bg-vouch-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">{{ self.tr("common-save") }}</button>
                         <button type="button" id="btn-cancel-policy"
                             class="px-3 py-1.5 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600">{{ self.tr("common-cancel") }}</button>
                     </div>
@@ -156,35 +156,35 @@
             <details class="group">
                 <summary class="px-4 py-3 flex items-center justify-between gap-3 cursor-pointer list-none">
                     <div class="flex items-center gap-2 min-w-0">
-                        <svg class="w-3.5 h-3.5 text-gray-600 shrink-0 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                        <svg aria-hidden="true" class="w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
                         {% if policy.slug == "disk_encryption" %}
-                        {{ pi::disk_encryption("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::disk_encryption("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "firewall" %}
-                        {{ pi::firewall("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::firewall("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "screen_lock" %}
-                        {{ pi::screen_lock("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::screen_lock("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "endpoint_protection" %}
-                        {{ pi::endpoint_protection("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::endpoint_protection("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "mdm_enrollment" %}
-                        {{ pi::mdm_enrollment("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::mdm_enrollment("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "platform_integrity" %}
-                        {{ pi::platform_integrity("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::platform_integrity("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "os_recency" %}
-                        {{ pi::os_recency("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::os_recency("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "issuance_rate_limit" %}
-                        {{ pi::issuance_rate_limit("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::issuance_rate_limit("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "exchange_rate_limit" %}
-                        {{ pi::exchange_rate_limit("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::exchange_rate_limit("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "failed_login_burst" %}
-                        {{ pi::failed_login_burst("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::failed_login_burst("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "token_exchange_step_up" %}
-                        {{ pi::token_exchange_step_up("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::token_exchange_step_up("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "exchange_ip_consistency" %}
-                        {{ pi::exchange_ip_consistency("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::exchange_ip_consistency("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else if policy.slug == "logout_invalidates_exchange" %}
-                        {{ pi::logout_invalidates_exchange("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::logout_invalidates_exchange("w-5 h-5 text-gray-400 shrink-0") }}
                         {% else %}
-                        {{ pi::custom_policy("w-5 h-5 text-gray-500 shrink-0") }}
+                        {{ pi::custom_policy("w-5 h-5 text-gray-400 shrink-0") }}
                         {% endif %}
                         <div class="min-w-0">
                             <span class="text-gray-200 text-sm font-medium">
@@ -200,7 +200,7 @@
                                 {% endif %}
                             </span>
                             {% if !policy.description.is_empty() %}
-                            <p class="text-gray-500 text-xs mt-0.5">{{ policy.description }}</p>
+                            <p class="text-gray-400 text-xs mt-0.5">{{ policy.description }}</p>
                             {% endif %}
                         </div>
                     </div>
@@ -213,29 +213,29 @@
                             {% if policy.active %}
                             <button type="submit" class="px-2.5 py-1 text-xs rounded bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-800/50" title="{{ self.tr("admin-policies-on").attr("title") }}">{{ self.tr("admin-policies-on") }}</button>
                             {% else %}
-                            <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-500 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-off").attr("title") }}">{{ self.tr("admin-policies-off") }}</button>
+                            <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-off").attr("title") }}">{{ self.tr("admin-policies-off") }}</button>
                             {% endif %}
                         </form>
                         {% if !policy.builtin %}
-                        <button type="button" class="btn-edit-policy p-1 text-gray-500 hover:text-vouch-accent transition-colors"
-                            title="{{ self.tr("common-edit") }}"
+                        <button type="button" class="btn-edit-policy p-1 text-gray-400 hover:text-vouch-accent transition-colors"
+                            title="{{ self.tr("common-edit") }}" aria-label="{{ self.tr("common-edit") }}"
                             data-id="{{ policy.key }}"
                             data-name="{{ policy.name }}"
                             data-description="{{ policy.description }}"
                             data-expression="{{ policy.policy_text }}"
                             {% if let Some(spec) = policy.builder_spec %}data-builder-spec="{{ spec }}"{% endif %}>
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125"/></svg>
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125"/></svg>
                         </button>
                         <form method="POST" action="/admin/policies/custom/{{ policy.key }}/delete" data-confirm-message="{{ self.tr("admin-policies-delete-confirm") }}" class="inline">
-                            <button type="submit" class="p-1 text-gray-500 hover:text-red-400 transition-colors" title="{{ self.tr("common-delete") }}">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>
+                            <button type="submit" class="p-1 text-gray-400 hover:text-red-400 transition-colors" title="{{ self.tr("common-delete") }}" aria-label="{{ self.tr("common-delete") }}">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>
                             </button>
                         </form>
                         {% endif %}
                     </div>
                 </summary>
                 <div class="px-4 pb-3 pt-0 ml-[3.125rem]">
-                    <pre class="text-gray-600 text-xs font-mono mb-2 whitespace-pre-wrap break-words">{{ policy.policy_text }}</pre>
+                    <pre class="text-gray-400 text-xs font-mono mb-2 whitespace-pre-wrap break-words">{{ policy.policy_text }}</pre>
                     {% if policy.builtin %}
                     <button type="button" class="btn-copy-policy mb-2 px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600"
                         data-name="{{ policy.name }}"
@@ -243,43 +243,43 @@
                         data-expression="{{ policy.editable_text }}">{{ self.tr("admin-policies-copy-btn") }}</button>
                     {% endif %}
                     {% if policy.slug == "disk_encryption" %}
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-macos") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-windows") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-linux") }}</p>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-disk-macos") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-disk-windows") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-disk-linux") }}</p>
                     </div>
                     {% else if policy.slug == "firewall" %}
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-firewall-macos") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-firewall-windows") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-firewall-linux") }}</p>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-firewall-macos") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-firewall-windows") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-firewall-linux") }}</p>
                     </div>
                     {% else if policy.slug == "screen_lock" %}
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-screenlock-macos") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-screenlock-windows") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-screenlock-linux") }}</p>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-screenlock-macos") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-screenlock-windows") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-screenlock-linux") }}</p>
                     </div>
                     {% else if policy.slug == "endpoint_protection" %}
-                    <div class="text-xs text-gray-500 space-y-1">
+                    <div class="text-xs text-gray-400 space-y-1">
                         <p>{{ self.tr("admin-policies-endpoint-desc") }}</p>
                     </div>
                     {% else if policy.slug == "mdm_enrollment" %}
-                    <div class="text-xs text-gray-500 space-y-1">
+                    <div class="text-xs text-gray-400 space-y-1">
                         <p>{{ self.tr("admin-policies-mdm-note") }}</p>
                     </div>
                     {% else if policy.slug == "platform_integrity" %}
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-macos") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-windows") }}</p>
-                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-linux") }}</p>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-platform-macos") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-platform-windows") }}</p>
+                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-platform-linux") }}</p>
                     </div>
                     {% else if policy.slug == "os_recency" %}
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} os_version_num &ge; 14000000 (Sonoma+)</p>
-                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} os_build_num &ge; 26100 (24H2+)</p>
-                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-osrecency-linux") }}</p>
-                        <p class="mt-1 text-gray-600"><span class="font-mono">os_version_num</span> {{ self.tr("admin-policies-semver-explain") }} (<span class="font-mono">"15.3.1" &rarr; 15003001</span>)</p>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-400 shrink-0") }} os_version_num &ge; 14000000 (Sonoma+)</p>
+                        <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-400 shrink-0") }} os_build_num &ge; 26100 (24H2+)</p>
+                        <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-400 shrink-0") }} {{ self.tr("admin-policies-osrecency-linux") }}</p>
+                        <p class="mt-1 text-gray-400"><span class="font-mono">os_version_num</span> {{ self.tr("admin-policies-semver-explain") }} (<span class="font-mono">"15.3.1" &rarr; 15003001</span>)</p>
                     </div>
                     {% endif %}
                 </div>
@@ -294,62 +294,62 @@
                     {{ self.tr("admin-policies-fieldref-summary") }}
                 </summary>
                 <div class="px-4 pb-4 pt-1 border-t border-vouch-border">
-                    <p class="text-xs text-gray-500 mb-2">{{ self.tr("admin-policies-sample-device-note") }}</p>
+                    <p class="text-xs text-gray-400 mb-2">{{ self.tr("admin-policies-sample-device-note") }}</p>
                     <table class="w-full text-xs">
                         <thead>
-                            <tr class="text-left text-gray-500 border-b border-vouch-border/50">
-                                <th class="py-1.5 pr-3 font-medium">{{ self.tr("admin-policies-fieldref-th-field") }}</th>
-                                <th class="py-1.5 pr-3 font-medium">{{ self.tr("apps-list-th-type") }}</th>
-                                <th class="py-1.5 font-medium">{{ self.tr("admin-policies-fieldref-th-test") }}</th>
+                            <tr class="text-left text-gray-400 border-b border-vouch-border/50">
+                                <th scope="col" class="py-1.5 pr-3 font-medium">{{ self.tr("admin-policies-fieldref-th-field") }}</th>
+                                <th scope="col" class="py-1.5 pr-3 font-medium">{{ self.tr("apps-list-th-type") }}</th>
+                                <th scope="col" class="py-1.5 font-medium">{{ self.tr("admin-policies-fieldref-th-test") }}</th>
                             </tr>
                         </thead>
                         <tbody class="font-mono text-gray-400">
                             {% for group in field_groups %}
                             <tr class="border-b border-vouch-border/30">
-                                <td colspan="3" class="pt-2 pb-1 font-sans text-gray-500 font-medium">{{ group.label }}</td>
+                                <td colspan="3" class="pt-2 pb-1 font-sans text-gray-400 font-medium">{{ group.label }}</td>
                             </tr>
                             {% for row in group.rows %}
                             <tr class="border-b border-vouch-border/30">
                                 <td class="py-1 pr-3">context.device.{{ row.name }}</td>
-                                <td class="py-1 pr-3 text-gray-600 font-sans">{{ row.type_label }}</td>
-                                <td class="py-1 text-gray-500">{{ row.sample }}</td>
+                                <td class="py-1 pr-3 text-gray-400 font-sans">{{ row.type_label }}</td>
+                                <td class="py-1 text-gray-400">{{ row.sample }}</td>
                             </tr>
                             {% endfor %}
                             {% endfor %}
                         </tbody>
                     </table>
-                    <div class="mt-3 pt-3 border-t border-vouch-border/50 text-xs text-gray-600">
-                        <span class="text-gray-500 font-medium">{{ self.tr("admin-policies-example-rules") }}</span>
-                        <span class="font-mono text-gray-500 ml-1">forbid (principal, action, resource) unless { context.device.os == "macos" &amp;&amp; context.device.os_version_num >= 15000000 };</span>
+                    <div class="mt-3 pt-3 border-t border-vouch-border/50 text-xs text-gray-400">
+                        <span class="text-gray-400 font-medium">{{ self.tr("admin-policies-example-rules") }}</span>
+                        <span class="font-mono text-gray-400 ml-1">forbid (principal, action, resource) unless { context.device.os == "macos" &amp;&amp; context.device.os_version_num >= 15000000 };</span>
                         <span class="mx-1">&middot;</span>
-                        <span class="font-mono text-gray-500">forbid (principal, action, resource) unless { context.device.edr_count > 0 && context.device.firewall_enabled };</span>
+                        <span class="font-mono text-gray-400">forbid (principal, action, resource) unless { context.device.edr_count > 0 && context.device.firewall_enabled };</span>
                     </div>
 
                     {# Event history fields, for hand-written temporal rules #}
                     <div class="mt-4 pt-3 border-t border-vouch-border/50">
                         <p class="text-sm text-gray-300 font-medium mb-1">{{ self.tr("admin-policies-eventref-heading") }}</p>
-                        <p class="text-xs text-gray-500 mb-2">{{ self.tr("admin-policies-eventref-note") }}</p>
+                        <p class="text-xs text-gray-400 mb-2">{{ self.tr("admin-policies-eventref-note") }}</p>
                         <table class="w-full text-xs">
                             <thead>
-                                <tr class="text-left text-gray-500 border-b border-vouch-border/50">
-                                    <th class="py-1.5 pr-3 font-medium">{{ self.tr("admin-policies-fieldref-th-field") }}</th>
-                                    <th class="py-1.5 font-medium">{{ self.tr("apps-list-th-type") }}</th>
+                                <tr class="text-left text-gray-400 border-b border-vouch-border/50">
+                                    <th scope="col" class="py-1.5 pr-3 font-medium">{{ self.tr("admin-policies-fieldref-th-field") }}</th>
+                                    <th scope="col" class="py-1.5 font-medium">{{ self.tr("apps-list-th-type") }}</th>
                                 </tr>
                             </thead>
                             <tbody class="font-mono text-gray-400">
                                 {% for group in event_groups %}
                                 <tr class="border-b border-vouch-border/30">
-                                    <td colspan="2" class="pt-2 pb-1 text-gray-500">Vouch::Action::"{{ group.action }}"::response</td>
+                                    <td colspan="2" class="pt-2 pb-1 text-gray-400">Vouch::Action::"{{ group.action }}"::response</td>
                                 </tr>
                                 {% for field in group.fields %}
                                 <tr class="border-b border-vouch-border/30">
                                     <td class="py-1 pr-3 pl-4">{{ field.path }}</td>
-                                    <td class="py-1 text-gray-600 font-sans">{{ field.type_label }}</td>
+                                    <td class="py-1 text-gray-400 font-sans">{{ field.type_label }}</td>
                                 </tr>
                                 {% endfor %}
                                 {% if group.fields.is_empty() %}
                                 <tr class="border-b border-vouch-border/30">
-                                    <td colspan="2" class="py-1 pl-4 text-gray-600 font-sans">{{ self.tr("admin-policies-eventref-none") }}</td>
+                                    <td colspan="2" class="py-1 pl-4 text-gray-400 font-sans">{{ self.tr("admin-policies-eventref-none") }}</td>
                                 </tr>
                                 {% endif %}
                                 {% endfor %}
@@ -372,16 +372,16 @@
 <template id="tpl-device-row">
     <div class="builder-row flex items-start gap-2" data-row="device">
         <div class="flex flex-wrap items-center gap-2 flex-1 min-w-0">
-            <select class="row-field px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none"></select>
-            <select class="row-op px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none"></select>
-            <select class="row-value-select px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none hidden"></select>
-            <input type="text" class="row-value-text px-2 py-1 w-40 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none hidden" maxlength="200">
-            <input type="number" class="row-value-number px-2 py-1 w-24 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none hidden">
-            <input type="text" class="row-value-version px-2 py-1 w-24 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none hidden" placeholder="15.3">
-            <span class="row-hint text-xs text-gray-600"></span>
+            <select aria-label="{{ self.tr("admin-policies-row-field-label") }}" class="row-field px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent"></select>
+            <select aria-label="{{ self.tr("admin-policies-row-op-label") }}" class="row-op px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent"></select>
+            <select aria-label="{{ self.tr("admin-policies-row-value-label") }}" class="row-value-select px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent hidden"></select>
+            <input type="text" aria-label="{{ self.tr("admin-policies-row-value-label") }}" class="row-value-text px-2 py-1 w-40 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent hidden" maxlength="200">
+            <input type="number" aria-label="{{ self.tr("admin-policies-row-value-label") }}" class="row-value-number px-2 py-1 w-24 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent hidden">
+            <input type="text" aria-label="{{ self.tr("admin-policies-row-value-label") }}" class="row-value-version px-2 py-1 w-24 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent hidden" placeholder="15.3">
+            <span class="row-hint text-xs text-gray-400"></span>
         </div>
-        <button type="button" class="row-remove p-1 mt-1.5 text-gray-500 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        <button type="button" class="row-remove p-1.5 mt-1 text-gray-400 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}" aria-label="{{ self.tr("common-delete") }}">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
         </button>
     </div>
 </template>
@@ -391,24 +391,24 @@
         <div class="flex flex-wrap items-center gap-3 flex-1 min-w-0">
             <span class="text-xs text-gray-400">{{ self.tr("admin-policies-osfloor-label") }}</span>
             <span class="flex items-center gap-1.5">
-                <input type="checkbox" class="floor-enable accent-vouch-accent" data-os="macos" checked>
+                <input type="checkbox" aria-label="{{ self.tr("admin-policies-floor-enable-label").arg("os", "macOS") }}" class="floor-enable accent-vouch-accent" data-os="macos" checked>
                 <span class="text-xs text-gray-300">macOS</span>
-                <input type="text" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none" data-os="macos" placeholder="15.0">
+                <input type="text" aria-label="{{ self.tr("admin-policies-floor-min-label").arg("os", "macOS") }}" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent" data-os="macos" placeholder="15.0">
             </span>
             <span class="flex items-center gap-1.5">
-                <input type="checkbox" class="floor-enable accent-vouch-accent" data-os="linux">
+                <input type="checkbox" aria-label="{{ self.tr("admin-policies-floor-enable-label").arg("os", "Linux") }}" class="floor-enable accent-vouch-accent" data-os="linux">
                 <span class="text-xs text-gray-300">Linux</span>
-                <input type="text" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none" data-os="linux" placeholder="22.4">
+                <input type="text" aria-label="{{ self.tr("admin-policies-floor-min-label").arg("os", "Linux") }}" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent" data-os="linux" placeholder="22.4">
             </span>
             <span class="flex items-center gap-1.5">
-                <input type="checkbox" class="floor-enable accent-vouch-accent" data-os="windows">
+                <input type="checkbox" aria-label="{{ self.tr("admin-policies-floor-enable-label").arg("os", "Windows") }}" class="floor-enable accent-vouch-accent" data-os="windows">
                 <span class="text-xs text-gray-300">{{ self.tr("admin-policies-osfloor-windows-build") }}</span>
-                <input type="text" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs font-mono focus:border-vouch-accent focus:outline-none" data-os="windows" placeholder="26100">
+                <input type="text" aria-label="{{ self.tr("admin-policies-floor-min-label").arg("os", "Windows") }}" class="floor-min px-2 py-1 w-20 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs font-mono focus:border-vouch-accent" data-os="windows" placeholder="26100">
             </span>
-            <span class="row-hint text-xs text-gray-600"></span>
+            <span class="row-hint text-xs text-gray-400"></span>
         </div>
-        <button type="button" class="row-remove p-1 mt-1.5 text-gray-500 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        <button type="button" class="row-remove p-1.5 mt-1 text-gray-400 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}" aria-label="{{ self.tr("common-delete") }}">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
         </button>
     </div>
 </template>
@@ -416,31 +416,31 @@
 <template id="tpl-history-row">
     <div class="builder-row flex items-start gap-2" data-row="history">
         <div class="flex flex-wrap items-center gap-2 flex-1 min-w-0">
-            <select class="row-event px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none"></select>
-            <select class="row-shape px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none">
+            <select aria-label="{{ self.tr("admin-policies-row-event-label") }}" class="row-event px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent"></select>
+            <select aria-label="{{ self.tr("admin-policies-row-shape-label") }}" class="row-shape px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent">
                 <option value="happened_within">{{ self.tr("admin-policies-shape-happened") }}</option>
                 <option value="not_happened_within">{{ self.tr("admin-policies-shape-not-happened") }}</option>
                 <option value="count_at_least">{{ self.tr("admin-policies-shape-count") }}</option>
                 <option value="not_since">{{ self.tr("admin-policies-shape-not-since") }}</option>
             </select>
             <span class="row-count-wrap flex items-center gap-1 hidden">
-                <input type="number" class="row-threshold px-2 py-1 w-16 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none" min="1" value="5">
-                <span class="text-xs text-gray-500">{{ self.tr("admin-policies-times-in-last") }}</span>
+                <input type="number" aria-label="{{ self.tr("admin-policies-row-threshold-label") }}" class="row-threshold px-2 py-1 w-16 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent" min="1" value="5">
+                <span class="text-xs text-gray-400">{{ self.tr("admin-policies-times-in-last") }}</span>
             </span>
-            <input type="number" class="row-window-amount px-2 py-1 w-16 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none" min="1" value="1">
-            <select class="row-window-unit px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none">
+            <input type="number" aria-label="{{ self.tr("admin-policies-row-window-amount-label") }}" class="row-window-amount px-2 py-1 w-16 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent" min="1" value="1">
+            <select aria-label="{{ self.tr("admin-policies-row-window-unit-label") }}" class="row-window-unit px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent">
                 <option value="m">{{ self.tr("admin-policies-unit-m") }}</option>
                 <option value="h" selected>{{ self.tr("admin-policies-unit-h") }}</option>
                 <option value="s">{{ self.tr("admin-policies-unit-s") }}</option>
                 <option value="d">{{ self.tr("admin-policies-unit-d") }}</option>
             </select>
             <span class="row-cancel-wrap flex items-center gap-1 hidden">
-                <span class="text-xs text-gray-500">{{ self.tr("admin-policies-followed-by") }}</span>
-                <select class="row-cancel px-2 py-1 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-xs focus:border-vouch-accent focus:outline-none"></select>
+                <span class="text-xs text-gray-400">{{ self.tr("admin-policies-followed-by") }}</span>
+                <select aria-label="{{ self.tr("admin-policies-row-cancel-label") }}" class="row-cancel px-2 py-1 bg-vouch-bg border border-gray-500 rounded text-gray-200 text-xs focus:border-vouch-accent"></select>
             </span>
         </div>
-        <button type="button" class="row-remove p-1 mt-1.5 text-gray-500 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        <button type="button" class="row-remove p-1.5 mt-1 text-gray-400 hover:text-red-400 shrink-0" title="{{ self.tr("common-delete") }}" aria-label="{{ self.tr("common-delete") }}">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
         </button>
     </div>
 </template>

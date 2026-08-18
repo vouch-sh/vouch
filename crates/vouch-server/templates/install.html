@@ -15,7 +15,7 @@
 
         <!-- Prerequisites -->
         <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
-            <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">{{ self.tr("install-prereqs-label") }}</div>
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">{{ self.tr("install-prereqs-label") }}</h2>
             <ul class="text-sm text-gray-400 space-y-1">
                 <li>{{ self.tr("install-prereq-key") }}</li>
                 <li>{{ self.tr("install-prereq-server-prefix") }} <code class="text-gray-300">{{ server_url }}</code>)</li>
@@ -26,40 +26,40 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step1-title") }}</span>
+                <h2 class="text-lg font-semibold text-gray-200">{{ self.tr("install-step1-title") }}</h2>
             </div>
             <div class="ml-11">
-                <div class="flex gap-2 mb-2">
-                    <button class="tab tab-active" data-tab="macos">macOS</button>
-                    <button class="tab" data-tab="apt">Debian / Ubuntu</button>
-                    <button class="tab" data-tab="rpm">Fedora / RHEL</button>
-                    <button class="tab" data-tab="windows">Windows</button>
+                <div class="flex gap-2 mb-2" role="tablist" aria-label="{{ self.tr("install-tabs-label") }}">
+                    <button class="tab tab-active" id="macos-tab-btn" role="tab" aria-selected="true" aria-controls="macos-tab" data-tab="macos">macOS</button>
+                    <button class="tab" id="apt-tab-btn" role="tab" aria-selected="false" aria-controls="apt-tab" data-tab="apt">Debian / Ubuntu</button>
+                    <button class="tab" id="rpm-tab-btn" role="tab" aria-selected="false" aria-controls="rpm-tab" data-tab="rpm">Fedora / RHEL</button>
+                    <button class="tab" id="windows-tab-btn" role="tab" aria-selected="false" aria-controls="windows-tab" data-tab="windows">Windows</button>
                 </div>
 
-                <div id="macos-tab" class="tab-content">
+                <div id="macos-tab" class="tab-content" role="tabpanel" aria-labelledby="macos-tab-btn">
                     <div class="code-block relative">
-                        <span class="text-gray-500 mr-2">$</span>brew install vouch-sh/tap/vouch
+                        <span class="text-gray-400 mr-2">$</span>brew install vouch-sh/tap/vouch
                         <button data-copy-text="brew install vouch-sh/tap/vouch" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">{{ self.tr("common-copy") }}</button>
                     </div>
                 </div>
 
-                <div id="apt-tab" class="tab-content hidden">
+                <div id="apt-tab" class="tab-content hidden" role="tabpanel" aria-labelledby="apt-tab-btn">
                     <div class="code-block text-sm space-y-1">
-                        <div class="text-gray-500">{{ self.tr("install-comment-gpg") }}</div>
+                        <div class="text-gray-400">{{ self.tr("install-comment-gpg") }}</div>
                         <div>curl -fsSL https://packages.vouch.sh/gpg/vouch.asc \</div>
                         <div class="pl-4">| gpg --dearmor \</div>
                         <div class="pl-4">| sudo tee /usr/share/keyrings/vouch-archive-keyring.gpg &gt; /dev/null</div>
-                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-add-repo") }}</div>
+                        <div class="mt-2 text-gray-400">{{ self.tr("install-comment-add-repo") }}</div>
                         <div>echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/vouch-archive-keyring.gpg] https://packages.vouch.sh/apt stable main" \</div>
                         <div class="pl-4">| sudo tee /etc/apt/sources.list.d/vouch.list &gt; /dev/null</div>
-                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-install") }}</div>
+                        <div class="mt-2 text-gray-400">{{ self.tr("install-comment-install") }}</div>
                         <div>sudo apt-get update &amp;&amp; sudo apt-get install -y vouch</div>
                     </div>
                 </div>
 
-                <div id="rpm-tab" class="tab-content hidden">
+                <div id="rpm-tab" class="tab-content hidden" role="tabpanel" aria-labelledby="rpm-tab-btn">
                     <div class="code-block text-sm space-y-1">
-                        <div class="text-gray-500">{{ self.tr("install-comment-add-repo") }}</div>
+                        <div class="text-gray-400">{{ self.tr("install-comment-add-repo") }}</div>
                         <div>sudo tee /etc/yum.repos.d/vouch.repo &lt;&lt; 'EOF'</div>
                         <div>[vouch]</div>
                         <div>name=Vouch</div>
@@ -68,15 +68,15 @@
                         <div>gpgkey=https://packages.vouch.sh/gpg/vouch.asc</div>
                         <div>enabled=1</div>
                         <div>EOF</div>
-                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-install") }}</div>
+                        <div class="mt-2 text-gray-400">{{ self.tr("install-comment-install") }}</div>
                         <div>sudo dnf install -y vouch</div>
                     </div>
                 </div>
 
-                <div id="windows-tab" class="tab-content hidden">
+                <div id="windows-tab" class="tab-content hidden" role="tabpanel" aria-labelledby="windows-tab-btn">
                     <div class="bg-amber-900/30 border-l-4 border-amber-500 p-4 rounded-r-lg mb-4">
                         <div class="flex items-start gap-3">
-                            <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                            <svg aria-hidden="true" class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                                 <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>
                             </svg>
                             <div>
@@ -129,11 +129,11 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">2</span>
-                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step2-title") }}</span>
+                <h2 class="text-lg font-semibold text-gray-200">{{ self.tr("install-step2-title") }}</h2>
             </div>
             <div class="ml-11">
                 <div class="code-block relative" data-server-url="{{ server_url }}">
-                    <span class="text-gray-500 mr-2">$</span><span id="step2-command">vouch enroll --server {{ server_url }}</span>
+                    <span class="text-gray-400 mr-2">$</span><span id="step2-command">vouch enroll --server {{ server_url }}</span>
                     <button id="step2-copy-btn" data-copy-text="vouch enroll --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">{{ self.tr("common-copy") }}</button>
                 </div>
                 <p class="mt-2 text-sm text-gray-400">{{ self.tr("install-step2-body") }}</p>
@@ -144,12 +144,12 @@
         <div>
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">3</span>
-                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step3-title") }}</span>
+                <h2 class="text-lg font-semibold text-gray-200">{{ self.tr("install-step3-title") }}</h2>
             </div>
             <div class="ml-11">
                 <div class="code-block">
-                    <div class="text-gray-500">{{ self.tr("install-step3-comment") }}</div>
-                    <div><span class="text-gray-500">$</span> <span id="step3-command">vouch login</span></div>
+                    <div class="text-gray-400">{{ self.tr("install-step3-comment") }}</div>
+                    <div><span class="text-gray-400">$</span> <span id="step3-command">vouch login</span></div>
                     <div>{{ self.tr("install-step3-prompt-pin") }}</div>
                     <div>{{ self.tr("install-step3-prompt-touch") }}</div>
                     <div class="text-vouch-accent">{{ self.tr("install-step3-authenticated") }}</div>

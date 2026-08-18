@@ -11,7 +11,7 @@
 <div class="max-w-3xl mx-auto p-6">
     <div class="mb-6">
         <a href="/applications" class="inline-flex items-center gap-1.5 text-vouch-accent hover:text-vouch-accent-hover text-sm">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            <svg aria-hidden="true" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
             {{ self.tr("apps-detail-back") }}
         </a>
     </div>
@@ -28,7 +28,7 @@
                 {% endif %}
             </div>
             <div class="flex items-center gap-4">
-                <button type="button" id="edit-btn" class="text-vouch-accent hover:text-vouch-accent-hover text-sm font-medium">{{ self.tr("common-edit") }}</button>
+                <button type="button" id="edit-btn" aria-expanded="false" aria-controls="edit-mode" class="text-vouch-accent hover:text-vouch-accent-hover text-sm font-medium">{{ self.tr("common-edit") }}</button>
                 <form action="/applications/{{ app.id }}/delete" method="POST" data-confirm="{{ self.tr("apps-detail-delete-confirm") }}">
                     <button type="submit" class="text-vouch-error hover:opacity-80 text-sm font-medium">{{ self.tr("common-delete") }}</button>
                 </form>
@@ -62,7 +62,7 @@
                         {% endmatch %}">
                         {{ app.access_scope.display_name() }}
                     </span>
-                    <span class="text-xs text-gray-500 ml-2">{{ app.access_scope.description() }}</span>
+                    <span class="text-xs text-gray-400 ml-2">{{ app.access_scope.description() }}</span>
                 </dd>
 
                 <dt class="text-gray-400">{{ self.tr("apps-detail-auth-method") }}</dt>
@@ -71,16 +71,16 @@
                         {{ app.token_endpoint_auth_method }}
                     </span>
                     {% if app.token_endpoint_auth_method == "client_secret_basic" || app.token_endpoint_auth_method == "client_secret_post" %}
-                    <a href="https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1" target="_blank" rel="noopener noreferrer" title="RFC 6749 Section 2.3.1 — Client Password" class="text-gray-500 hover:text-gray-300 transition-colors">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    <a href="https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1" target="_blank" rel="noopener noreferrer" title="RFC 6749 Section 2.3.1 — Client Password" aria-label="RFC 6749 Section 2.3.1 — Client Password" class="text-gray-400 hover:text-gray-300 transition-colors">
+                        <svg aria-hidden="true" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
                     </a>
                     {% elif app.token_endpoint_auth_method == "private_key_jwt" %}
-                    <a href="https://www.rfc-editor.org/rfc/rfc7523" target="_blank" rel="noopener noreferrer" title="RFC 7523 — JWT Profile for Client Authentication" class="text-gray-500 hover:text-gray-300 transition-colors">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    <a href="https://www.rfc-editor.org/rfc/rfc7523" target="_blank" rel="noopener noreferrer" title="RFC 7523 — JWT Profile for Client Authentication" aria-label="RFC 7523 — JWT Profile for Client Authentication" class="text-gray-400 hover:text-gray-300 transition-colors">
+                        <svg aria-hidden="true" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
                     </a>
                     {% elif app.token_endpoint_auth_method == "none" %}
-                    <a href="https://www.rfc-editor.org/rfc/rfc7591#section-2" target="_blank" rel="noopener noreferrer" title="RFC 7591 Section 2 — Public Client (no authentication)" class="text-gray-500 hover:text-gray-300 transition-colors">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    <a href="https://www.rfc-editor.org/rfc/rfc7591#section-2" target="_blank" rel="noopener noreferrer" title="RFC 7591 Section 2 — Public Client (no authentication)" aria-label="RFC 7591 Section 2 — Public Client (no authentication)" class="text-gray-400 hover:text-gray-300 transition-colors">
+                        <svg aria-hidden="true" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
                     </a>
                     {% endif %}
                 </dd>
@@ -91,7 +91,7 @@
                     <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-[#0d2d1f] text-[#3ecf8e]">
                         {{ self.tr("apps-detail-fapi-badge") }}
                     </span>
-                    <span class="text-xs text-gray-500 ml-2">{{ self.tr("apps-detail-fapi-desc") }}</span>
+                    <span class="text-xs text-gray-400 ml-2">{{ self.tr("apps-detail-fapi-desc") }}</span>
                 </dd>
                 {% endif %}
 
@@ -112,11 +112,11 @@
             <!-- JWKS / JWKS URI (for FAPI clients) -->
             {% if app.fapi_profile == "fapi2_security" %}
             <div class="border-t border-vouch-border pt-4">
-                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-detail-client-keys") }}</label>
+                <h2 class="block text-sm text-gray-400 mb-2 font-normal">{{ self.tr("apps-detail-client-keys") }}</h2>
                 {% match app.jwks %}
                 {% when Some with (jwks_val) %}
                 <div class="mb-2">
-                    <span class="text-xs text-gray-500">{{ self.tr("apps-detail-inline-jwks") }}</span>
+                    <span class="text-xs text-gray-400">{{ self.tr("apps-detail-inline-jwks") }}</span>
                     <pre class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 font-mono text-xs text-gray-300 overflow-x-auto mt-1">{{ jwks_val }}</pre>
                 </div>
                 {% when None %}
@@ -124,7 +124,7 @@
                 {% match app.jwks_uri %}
                 {% when Some with (uri_val) %}
                 <div>
-                    <span class="text-xs text-gray-500">{{ self.tr("apps-create-jwks-uri-label") }}</span>
+                    <span class="text-xs text-gray-400">{{ self.tr("apps-create-jwks-uri-label") }}</span>
                     <code class="block bg-vouch-raised border border-vouch-border px-3 py-2 rounded-md font-mono text-xs text-gray-300 break-all mt-1">{{ uri_val }}</code>
                 </div>
                 {% when None %}
@@ -134,9 +134,9 @@
 
             <!-- Redirect URIs -->
             <div class="border-t border-vouch-border pt-4">
-                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-create-redirect-label") }}</label>
+                <h2 class="block text-sm text-gray-400 mb-2 font-normal">{{ self.tr("apps-create-redirect-label") }}</h2>
                 {% if app.redirect_uris.is_empty() %}
-                <p class="text-sm text-gray-500">{{ self.tr("apps-detail-no-redirect") }}</p>
+                <p class="text-sm text-gray-400">{{ self.tr("apps-detail-no-redirect") }}</p>
                 {% else %}
                 <ul class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 space-y-0.5">
                     {% for uri in app.redirect_uris %}
@@ -149,7 +149,7 @@
             <!-- Resource URIs (RFC 8707) -->
             {% if !app.resource_uris.is_empty() %}
             <div class="border-t border-vouch-border pt-4">
-                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-detail-resource-uris") }}</label>
+                <h2 class="block text-sm text-gray-400 mb-2 font-normal">{{ self.tr("apps-detail-resource-uris") }}</h2>
                 <ul class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 space-y-0.5">
                     {% for uri in app.resource_uris %}
                     <li class="font-mono text-sm text-gray-300 break-all">{{ uri }}</li>
@@ -162,7 +162,7 @@
             {% if let Some(uris) = &app.post_logout_redirect_uris %}
             {% if !uris.is_empty() %}
             <div class="border-t border-vouch-border pt-4">
-                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-create-postlogout-label") }}</label>
+                <h2 class="block text-sm text-gray-400 mb-2 font-normal">{{ self.tr("apps-create-postlogout-label") }}</h2>
                 <ul class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 space-y-0.5">
                     {% for uri in uris %}
                     <li class="font-mono text-sm text-gray-300 break-all">{{ uri }}</li>
@@ -178,8 +178,8 @@
                 <div class="flex items-center justify-between mb-3">
                     {% let secrets_count_str = secrets_count.to_string() %}
                     <div>
-                        <label class="text-sm text-gray-400">{{ self.tr("apps-detail-client-secrets") }}</label>
-                        <span class="text-xs text-gray-500 ml-2">({{ self.tr("apps-detail-secrets-count").arg("count", secrets_count_str.as_str()).arg("max", "2") }})</span>
+                        <h2 class="inline text-sm text-gray-400 font-normal">{{ self.tr("apps-detail-client-secrets") }}</h2>
+                        <span class="text-xs text-gray-400 ml-2">({{ self.tr("apps-detail-secrets-count").arg("count", secrets_count_str.as_str()).arg("max", "2") }})</span>
                     </div>
                     {% if secrets_count < 2 %}
                     <form action="/applications/{{ app.id }}/secrets" method="POST">
@@ -191,7 +191,7 @@
                     {% endif %}
                 </div>
                 {% if secrets.is_empty() %}
-                <p class="text-sm text-gray-500">{{ self.tr("apps-detail-no-secrets") }}</p>
+                <p class="text-sm text-gray-400">{{ self.tr("apps-detail-no-secrets") }}</p>
                 {% else %}
                 <div class="space-y-2">
                     {% for secret in secrets %}
@@ -203,7 +203,7 @@
                             {% else %}
                             <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-error-bg text-vouch-error">{{ self.tr("apps-detail-secret-revoked") }}</span>
                             {% endif %}
-                            <span class="ml-2 text-xs text-gray-500">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
+                            <span class="ml-2 text-xs text-gray-400">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
                         </div>
                         {% if secret.active && secrets_count > 1 %}
                         <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
@@ -223,12 +223,12 @@
             <!-- Usage Statistics -->
             {% if !usage_stats.is_empty() %}
             <div class="border-t border-vouch-border pt-4">
-                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-detail-usage-stats") }}</label>
+                <h2 class="block text-sm text-gray-400 mb-2 font-normal">{{ self.tr("apps-detail-usage-stats") }}</h2>
                 <div class="grid grid-cols-2 gap-3">
                     {% for stat in usage_stats %}
                     <div class="bg-vouch-raised border border-vouch-border rounded-lg p-3">
                         <div class="text-2xl font-bold text-gray-200">{{ stat.count }}</div>
-                        <div class="text-xs text-gray-500">{{ stat.event_type }}</div>
+                        <div class="text-xs text-gray-400">{{ stat.event_type }}</div>
                     </div>
                     {% endfor %}
                 </div>
@@ -252,35 +252,36 @@
 
             <div>
                 <label for="redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-redirect-label") }}</label>
-                <textarea name="redirect_uris" id="redirect_uris" rows="3"
+                <textarea name="redirect_uris" id="redirect_uris" rows="3" aria-describedby="redirect-uri-error"
                     class="input-field mt-1 font-mono">{% for uri in app.redirect_uris %}{{ uri }}
 {% endfor %}</textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-detail-one-uri") }}</p>
-                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-detail-one-uri") }}</p>
+                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <div>
                 <label for="resource_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-resource-label") }}</label>
-                <textarea name="resource_uris" id="resource_uris" rows="2"
+                <textarea name="resource_uris" id="resource_uris" rows="2" aria-describedby="resource-uri-error"
                     class="input-field mt-1 font-mono">{% for uri in app.resource_uris %}{{ uri }}
 {% endfor %}</textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-detail-resource-help") }}</p>
-                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-detail-resource-help") }}</p>
+                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <div>
                 <label for="post_logout_redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-postlogout-label") }}</label>
-                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2"
+                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2" aria-describedby="post-logout-redirect-uri-error"
                     class="input-field mt-1 font-mono">{% if let Some(uris) = &app.post_logout_redirect_uris %}{% for uri in uris %}{{ uri }}
 {% endfor %}{% endif %}</textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-postlogout-help") }}</p>
-                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-postlogout-help") }}</p>
+                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <!-- Security Profile (only for confidential types) -->
             {% if app.application_type == "web" || app.application_type == "service" %}
             <div id="edit-security-profile-section">
-                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</label>
+                <fieldset>
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</legend>
                 <div class="space-y-2">
                     <label class="flex items-start p-2 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="fapi_profile" value=""
@@ -288,7 +289,7 @@
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-standard") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-detail-standard-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-detail-standard-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-2 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -297,39 +298,40 @@
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-fapi") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-detail-fapi-short-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-detail-fapi-short-desc") }}</span>
                         </div>
                     </label>
                 </div>
+                </fieldset>
 
                 <!-- FAPI JWKS fields -->
                 <div id="edit-fapi-jwks-section" class="{% if app.fapi_profile != "fapi2_security" %}hidden{% endif %} mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
                     <div>
                         <label for="edit-jwks" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-label") }}</label>
-                        <textarea name="jwks" id="edit-jwks" rows="4"
+                        <textarea name="jwks" id="edit-jwks" rows="4" aria-describedby="edit-jwks-error"
                             class="input-field mt-1 font-mono text-xs"
                             placeholder='{"keys": [{"kty": "EC", "crv": "P-256", ...}]}'>{% match app.jwks %}{% when Some with (j) %}{{ j }}{% when None %}{% endmatch %}</textarea>
-                        <div id="edit-jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                        <div id="edit-jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
                     </div>
                     <div class="flex items-center gap-3">
                         <div class="flex-1 border-t border-vouch-border"></div>
-                        <span class="text-xs text-gray-500">{{ self.tr("common-or") }}</span>
+                        <span class="text-xs text-gray-400">{{ self.tr("common-or") }}</span>
                         <div class="flex-1 border-t border-vouch-border"></div>
                     </div>
                     <div>
                         <label for="edit-jwks-uri" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-uri-label") }}</label>
-                        <input type="url" name="jwks_uri" id="edit-jwks-uri"
+                        <input type="url" name="jwks_uri" id="edit-jwks-uri" aria-describedby="edit-jwks-uri-error"
                             class="input-field mt-1 font-mono"
                             placeholder="https://example.com/.well-known/jwks.json"
                             value="{% match app.jwks_uri %}{% when Some with (u) %}{{ u }}{% when None %}{% endmatch %}">
-                        <div id="edit-jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                        <div id="edit-jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
                     </div>
                 </div>
             </div>
             {% endif %}
 
-            <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-access-label") }}</label>
+            <fieldset>
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-access-label") }}</legend>
                 <div class="space-y-2">
                     {% if auth.has_org %}
                     <label class="flex items-center p-2 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -358,7 +360,7 @@
                         </div>
                     </label>
                 </div>
-            </div>
+            </fieldset>
 
             <div class="flex justify-end gap-3">
                 <button type="button" id="cancel-edit-btn" class="px-4 py-2 text-gray-400 hover:text-gray-200 text-sm font-medium transition-colors">

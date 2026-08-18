@@ -218,8 +218,15 @@
 
     async function addNewKey(btn) {
         var originalText = btn.textContent;
+        // Mirror progress into the sr-only live region so screen readers hear
+        // the ceremony prompts; the disabled button's text swap alone is silent.
+        var statusEl = document.getElementById('key-reg-status');
+        function setStatus(text) {
+            btn.textContent = text;
+            if (statusEl) statusEl.textContent = text;
+        }
         btn.disabled = true;
-        btn.textContent = t('keys-js-reg-starting');
+        setStatus(t('keys-js-reg-starting'));
 
         try {
             var startResp = await fetch('/enroll/webauthn/start', {
@@ -234,7 +241,7 @@
             }
 
             var options = await startResp.json();
-            btn.textContent = t('keys-js-reg-touch');
+            setStatus(t('keys-js-reg-touch'));
 
             var challenge = base64urlToBuffer(options.challenge);
             var userId = base64urlToBuffer(options.user_id);
@@ -271,7 +278,7 @@
                 }
             });
 
-            btn.textContent = t('keys-js-reg-completing');
+            setStatus(t('keys-js-reg-completing'));
 
             var attestationResponse = credential.response;
             var completeResp = await fetch('/enroll/webauthn/complete', {
@@ -297,6 +304,8 @@
             alert(webauthnError(err));
             btn.disabled = false;
             btn.textContent = originalText;
+            if (statusEl) statusEl.textContent = '';
+            btn.focus();
         }
     }
 })();
