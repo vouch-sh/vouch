@@ -1,10 +1,10 @@
 # Key Ceremony
 
-This chapter details the cryptographic key generation procedures required for an air-gapped Vouch deployment. All key generation should be performed on a trusted, air-gapped workstation following your organization's key ceremony procedures.
+This chapter covers generating the keys an air-gapped Vouch deployment needs. Generate every key on a trusted, air-gapped workstation, following your organization's key ceremony procedures.
 
 ## JWT Secret Generation (Required)
 
-The JWT secret is used to sign all OAuth tokens and session cookies. It must be at least 32 characters.
+The JWT secret signs internal state tokens — authorization codes, WebAuthn challenge state, and CSRF tokens. It must be at least 32 characters.
 
 ```bash
 # Generate cryptographically secure 64-character secret
@@ -23,7 +23,7 @@ head -c 48 /dev/urandom | base64
 
 ## SSH CA Key Generation (Ed25519)
 
-The SSH CA signs user SSH certificates. If not provided, SSH certificate issuance will be disabled.
+The SSH CA signs user SSH certificates. Provision the key deliberately: if none is provided, the server generates one at `./ssh_ca_key` on first start (see the auto-generation warning in [Key Management](../configuration/keys.md#ssh-ca-key)). Set `VOUCH_SSH_CA_KEY_PATH=""` to disable the SSH CA.
 
 ```bash
 # Generate Ed25519 SSH CA key pair (no passphrase for automated use)
@@ -56,7 +56,7 @@ export VOUCH_SSH_CA_KEY_PATH="/secrets/ssh_ca_key"
 
 ## OIDC Signing Key Generation (P-256 ECDSA)
 
-The OIDC signing key signs ID tokens using ES256 algorithm. If not provided, an ephemeral key is generated on each server restart (not recommended for production as it invalidates all existing tokens).
+The OIDC signing key signs ID tokens using the ES256 algorithm. If unset, the server generates an ephemeral key at each start, and every previously issued token fails verification.
 
 ```bash
 # Generate P-256 EC private key in PKCS#8 format
@@ -103,7 +103,7 @@ export VOUCH_OIDC_RSA_SIGNING_KEY="$(base64 -i oidc_rsa_key.pem | tr -d '\n')"
 
 ## TLS Certificate Generation
 
-For production, use certificates signed by your internal CA. For testing, self-signed certificates can be used.
+For production, use certificates signed by your internal CA. For testing, use a self-signed certificate.
 
 ```bash
 # Generate EC private key and self-signed certificate

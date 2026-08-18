@@ -1,6 +1,6 @@
 # Key Management
 
-Vouch uses several cryptographic keys. This page covers their lifecycle and rotation.
+Vouch uses seven kinds of cryptographic keys. This page covers their lifecycle and rotation.
 
 ## Key Inventory
 
@@ -56,7 +56,7 @@ looking for the `-----BEGIN` header. The file at `VOUCH_SSH_CA_KEY_PATH` must be
 > certificates, while `/health` stays green. Prefer `VOUCH_SSH_CA_KEY` or
 > `VOUCH_SSH_CA_KMS_KEY_ID` for anything beyond a single-node install — neither auto-generates.
 
-When using KMS, the server calls `kms:Sign` with Ed25519. The KMS key must be an asymmetric signing key with `ECC_EDWARDS_CURVE_25519` key spec. Multi-region keys (`mrk-` prefix) are recommended for high availability.
+When using KMS, the server calls `kms:Sign` with Ed25519. The KMS key must be an asymmetric signing key with `ECC_EDWARDS_CURVE_25519` key spec. Use a multi-region key (`mrk-` prefix) for high availability.
 
 ### Rotation
 
@@ -68,7 +68,7 @@ SSH CA key rotation requires coordinated updates:
 4. Restart the server
 5. After all existing certificates expire (max 8 hours), remove the old public key from hosts
 
-> **Important**: During rotation, hosts should trust both old and new CA public keys to avoid disruption.
+> **Important**: During rotation, keep both the old and new CA public keys in `TrustedUserCAKeys` until step 5 — removing the old key early invalidates certificates that have not yet expired.
 
 ### Public Key Distribution
 
@@ -105,7 +105,7 @@ VOUCH_OIDC_SIGNING_KMS_KEY_ID=mrk-abcd1234efgh5678
 
 If neither is set, an ephemeral key is generated on startup. This means tokens cannot be verified after a server restart unless the same key is provided.
 
-When using KMS, the server calls `kms:Sign` with P-256 ECDSA (`ECC_NIST_P256` key spec). Multi-region keys (`mrk-` prefix) are recommended.
+When using KMS, the server calls `kms:Sign` with P-256 ECDSA (`ECC_NIST_P256` key spec). Use a multi-region key (`mrk-` prefix) for high availability.
 
 ### Generation
 
@@ -144,7 +144,7 @@ Access tokens are always signed with ES256 (the OIDC Signing Key above).
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out oidc_rsa_key.pem
 ```
 
-A minimum key size of 3072 bits is enforced. Keys smaller than 3072 bits are rejected at startup.
+The server rejects keys smaller than 3072 bits at startup.
 
 ### Configuration
 
@@ -163,7 +163,7 @@ When using KMS, the key must be:
 - Key usage: `SIGN_VERIFY`
 - Signing algorithm: `RSASSA_PKCS1_V1_5_SHA_256`
 
-Multi-region keys (`mrk-` prefix) are recommended.
+Use a multi-region key (`mrk-` prefix) for high availability.
 
 ### Rotation
 
@@ -189,7 +189,7 @@ VOUCH_JWT_SECRET="$(openssl rand -base64 48)"
 VOUCH_JWT_HMAC_KMS_KEY_ID=mrk-5678abcd1234efgh
 ```
 
-When using KMS, the server uses `kms:GenerateMac` and `kms:VerifyMac` with HMAC-SHA256. The KMS key must be a `HMAC_256` key type. Multi-region keys (`mrk-` prefix) are recommended.
+When using KMS, the server uses `kms:GenerateMac` and `kms:VerifyMac` with HMAC-SHA256. The KMS key must be a `HMAC_256` key type. Use a multi-region key (`mrk-` prefix) for high availability.
 
 ### Generation (local secret)
 

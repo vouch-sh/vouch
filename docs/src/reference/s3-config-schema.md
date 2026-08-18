@@ -159,7 +159,7 @@ All certificate and key fields in the S3 configuration must be **base64-encoded 
 base64 -i cert.pem | tr -d '\n'
 ```
 
-This ensures proper handling of newlines and special characters within JSON values.
+Base64 encoding keeps multi-line PEM content in a single JSON string value.
 
 ## Hot-Reloadable vs Startup-Only Fields
 

@@ -23,7 +23,7 @@ export VOUCH_TLS_CERT="$(base64 -i cert.pem | tr -d '\n')"
 export VOUCH_TLS_KEY="$(base64 -i key.pem | tr -d '\n')"
 ```
 
-Both `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY` must be set together. If only one is provided, the server will fail to start.
+Both `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY` must be set together. If only one is set, the server fails to start.
 
 ### TLS Properties
 

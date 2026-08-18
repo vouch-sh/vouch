@@ -1,6 +1,6 @@
 # SCIM Provisioning
 
-Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisioning from external identity providers. SCIM is a **launch requirement** for enterprise deployments.
+Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisioning from external identity providers.
 
 ## Setup
 
@@ -123,13 +123,13 @@ When a user is de-provisioned via SCIM (e.g., employee leaves the organization):
 | User record deleted | Immediate | User cannot re-enroll or authenticate |
 | Audit event logged | Immediate | De-provisioning recorded with SCIM token info |
 
-**Key principle**: De-provisioning is immediate and complete. When someone leaves via SCIM, they lose all Vouch access instantly — no waiting for session expiration.
+Nothing waits for session expiry: access ends when the IdP sends the delete.
 
 ## SCIM Endpoint Authentication
 
 SCIM endpoints require bearer token authentication:
 
-**Endpoint**: `POST /scim/v2/Users`, `DELETE /scim/v2/Users/:id`, etc.
+**Endpoint**: every `/scim/v2/*` route — `Users` and `Groups`, with `GET`, `POST`, `PATCH`, and `DELETE`.
 
 **Authentication**:
 - Bearer token in the `Authorization` header
@@ -156,8 +156,8 @@ User creation validates domain ownership inside a transaction keyed on the
 organization record, so heavy concurrent provisioning (an IdP bulk-syncing
 many users at once) or simultaneous domain changes can occasionally collide.
 When the server exhausts its internal retries it responds with
-`503 Service Unavailable` and a `Retry-After` header rather than an error:
-this is transient backpressure, not a fault. Okta and Entra retry such
+`503 Service Unavailable` and a `Retry-After` header: this is transient
+backpressure, not a fault. Okta and Entra retry such
 responses automatically; no operator action is needed unless 503s persist,
 which indicates sustained contention on the organization (for example, a
 domain-management script running during a bulk sync).

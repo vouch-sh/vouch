@@ -55,7 +55,7 @@ key, region, and that the instance role has `s3:GetObject` and `s3:HeadObject`.
 
 **`Failed to start mTLS listener`**
 The mTLS listener starts automatically whenever TLS is configured, and a bind failure on its port
-is fatal. Usually the port is already in use; change it with `VOUCH_MTLS_PORT`.
+is fatal. The most common cause is another process on the port; change it with `VOUCH_MTLS_PORT`.
 
 **The server starts but binds the wrong port.**
 Not an error. When TLS is configured, `VOUCH_LISTEN_ADDR` is ignored and the server binds 443 and
@@ -92,8 +92,8 @@ redirect. On Linux, binding below 1024 needs `CAP_NET_BIND_SERVICE`.
 **"Failed to fetch upstream OIDC discovery document"**
 
 1. Verify the configured `VOUCH_IDP_<SLUG>_ISSUER` is correct and reachable: `curl -s $VOUCH_IDP_<SLUG>_ISSUER/.well-known/openid-configuration | jq .issuer`
-2. Check that the issuer URL uses HTTPS (HTTP is only allowed for `localhost`)
-3. Ensure the server can make outbound HTTPS requests (check firewall/proxy)
+2. Verify the issuer URL uses HTTPS (HTTP is only allowed for `localhost`)
+3. Confirm the server can make outbound HTTPS requests (firewall, proxy)
 
 **"Issuer mismatch" during OIDC discovery**
 - The `issuer` field in the discovery document must exactly match `VOUCH_IDP_<SLUG>_ISSUER` (trailing slashes matter)
@@ -103,13 +103,13 @@ redirect. On Linux, binding below 1024 needs `CAP_NET_BIND_SERVICE`.
 
 **"Failed to fetch SAML IdP metadata"**
 - Verify the configured `VOUCH_IDP_<SLUG>_METADATA_URL` is correct and reachable
-- Check that the URL returns XML, not an HTML login page
-- Ensure the server can make outbound HTTPS requests
+- Verify the URL returns XML, not an HTML login page
+- Confirm the server can make outbound HTTPS requests
 
 **SAML signature verification errors**
 - Confirm the IdP's signing certificate in the metadata is current and not expired
-- Ensure the server clock is synchronized via NTP — SAML assertions have time-based validity windows (typically 5 minutes of skew tolerance)
-- Check the IdP assertion signing algorithm matches what the server expects
+- Confirm the server clock is NTP-synchronized — SAML assertions have time-based validity windows (5 minutes of skew tolerance is common)
+- Verify the IdP assertion signing algorithm matches what the server expects
 
 **"Duplicate IdP slug"**
 - Every entry in `VOUCH_IDPS` / `idps[].id` must be unique. Rename one of them.

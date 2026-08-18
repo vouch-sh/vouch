@@ -108,12 +108,12 @@ If the JWT secret changes (lost or compromised):
 
 1. Stop the server
 2. Restore from backup
-3. Users who enrolled after the backup will need to re-enroll
+3. Users who enrolled after the backup must re-enroll
 4. Start the server
 
 ## Disaster Recovery Testing
 
-Periodically test your recovery procedures:
+Test the recovery procedures before you need them:
 
 1. Restore a database backup to a test environment
 2. Start a test server with production keys

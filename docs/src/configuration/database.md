@@ -1,6 +1,6 @@
 # Database Setup
 
-Vouch supports three database backends. Choose based on your deployment requirements.
+Vouch supports three database backends.
 
 ## SQLite (Default)
 
@@ -82,4 +82,4 @@ Database migrations are embedded in the server binary and run automatically on s
 | PostgreSQL | `pg_dump` | Daily |
 | Aurora DSQL | AWS automated backups | Continuous |
 
-Always back up before upgrading the Vouch server, as migrations may modify the schema.
+Back up before upgrading the Vouch server: migrations modify the schema, and restoring a backup is the only rollback.

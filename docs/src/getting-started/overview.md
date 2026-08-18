@@ -4,12 +4,12 @@ This section covers deploying the Vouch server for your organization. The server
 
 ## Deployment Checklist
 
-Before deploying, ensure you have:
+Before deploying, you need:
 
 - [ ] **Domain name** — A domain for your Vouch server (e.g., `auth.example.com`)
 - [ ] **TLS certificate** — Valid certificate for your domain (or use Let's Encrypt)
 - [ ] **Database** — SQLite (single node) or PostgreSQL (multi-node)
-- [ ] **Identity provider** — Google Workspace
+- [ ] **Identity provider** — At least one upstream OIDC or SAML IdP (Google Workspace, Entra ID, Okta, or any compliant provider)
 - [ ] **JWT secret** — Cryptographically random string, minimum 32 characters (or use AWS KMS HMAC)
 - [ ] **SSH CA key** (optional) — Ed25519 key pair for signing SSH certificates (or use AWS KMS)
 - [ ] **OIDC signing key** (optional) — P-256 EC key for signing ID tokens (or use AWS KMS)
@@ -46,11 +46,11 @@ Before deploying, ensure you have:
 
 ## Deployment Methods
 
-| Method | Best For | Guide |
-|--------|----------|-------|
-| [Systemd](../install/systemd.md) | Bare metal, VMs, single-node | Production |
-| [Docker](../install/docker.md) | Container-based deployments | Production |
-| [Kubernetes](../install/kubernetes.md) | Multi-node, high availability | Production |
+| Method | Best for |
+|--------|----------|
+| [Systemd](../install/systemd.md) | Bare metal, VMs, single-node |
+| [Docker](../install/docker.md) | Container-based deployments |
+| [Kubernetes](../install/kubernetes.md) | Multi-node, high availability |
 
 ## Configuration
 
@@ -64,7 +64,7 @@ VOUCH_JWT_SECRET=<64-char-secret>    # Session signing secret
 VOUCH_DATABASE_URL=sqlite:vouch.db?mode=rwc  # Database
 ```
 
-For production, you'll also want:
+For production, also set:
 
 ```bash
 VOUCH_TLS_CERT=<base64-encoded-pem>  # TLS certificate
@@ -77,7 +77,7 @@ VOUCH_IDP_GOOGLE_CLIENT_ID=...
 VOUCH_IDP_GOOGLE_CLIENT_SECRET=...
 ```
 
-For AWS deployments, you can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](../configuration/sources.md) for KMS options.
+AWS deployments can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](../configuration/sources.md) for KMS options.
 
 ## Sizing
 
@@ -87,12 +87,12 @@ For AWS deployments, you can use KMS for all signing operations instead of manag
 | Memory | 256 MB | 512 MB |
 | Disk | 1 GB (SQLite) | 10 GB (PostgreSQL) |
 
-The server is single-process, async (tokio). Per-session memory overhead is minimal (~2 KB for token metadata). The primary bottleneck is database I/O during token issuance and session validation.
+The server is single-process, async (tokio). Per-session memory overhead is ~2 KB of token metadata. The primary bottleneck is database I/O during token issuance and session validation.
 
 **Database guidance:**
-- **SQLite** — suitable for single-node deployments under ~500 users
-- **PostgreSQL** — recommended for multi-node or >500 users
-- **Aurora DSQL** — for AWS deployments requiring managed infrastructure
+- **SQLite** — single-node deployments under ~500 users
+- **PostgreSQL** — multi-node deployments, or more than 500 users
+- **Aurora DSQL** — AWS deployments using managed database infrastructure
 
 ## Next Steps
 

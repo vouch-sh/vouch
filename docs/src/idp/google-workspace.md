@@ -71,7 +71,7 @@ VOUCH_ALLOWED_DOMAINS=example.com,subsidiary.com
 ## Step 4: Test
 
 1. Run `vouch enroll` on a workstation
-2. The browser should redirect to Google sign-in
+2. The browser redirects to Google sign-in
 3. After signing in, complete the WebAuthn registration with your YubiKey
 
 ## Claims Mapping
@@ -88,7 +88,7 @@ VOUCH_ALLOWED_DOMAINS=example.com,subsidiary.com
 - Verify the redirect URI exactly matches `https://<your-vouch-domain>/oauth/callback`
 
 **"This app is not verified"**
-- Ensure the OAuth consent screen is set to **Internal** for Google Workspace
+- Set the OAuth consent screen to **Internal** for Google Workspace
 
 **Users from wrong domain can enroll**
 - Set `VOUCH_ALLOWED_DOMAINS` to restrict enrollment to specific email domains

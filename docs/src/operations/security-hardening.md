@@ -93,8 +93,8 @@ Applied to every response, with no configuration:
 | `Cache-Control` | `no-cache` (API routes additionally get `no-store, must-revalidate`) |
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` — **only when TLS is configured** |
 
-Note that HSTS is emitted only when Vouch itself terminates TLS. If you terminate at a proxy, the
-proxy must add HSTS.
+HSTS is emitted only when Vouch itself terminates TLS. If you terminate at a proxy, the proxy must
+add HSTS.
 
 ### Content Security Policy
 
