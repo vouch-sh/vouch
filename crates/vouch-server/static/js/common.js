@@ -50,9 +50,14 @@
                 var original = btn.innerHTML;
                 btn.innerHTML = t('common-js-copied');
                 btn.classList.add('text-vouch-success');
+                // Announce via the sr-only live region in base.html — the
+                // button's own label swap is not reliably read out.
+                var copyStatus = document.getElementById('copy-status');
+                if (copyStatus) copyStatus.textContent = t('common-js-copied');
                 setTimeout(function() {
                     btn.innerHTML = original;
                     btn.classList.remove('text-vouch-success');
+                    if (copyStatus) copyStatus.textContent = '';
                 }, 2000);
             });
         });

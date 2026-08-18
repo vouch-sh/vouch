@@ -9,13 +9,14 @@
         <p class="text-gray-400 text-sm mb-6">{{ self.tr("device-body") }}</p>
 
         {% if let Some(err) = error %}
-        <div class="alert-error mb-4">{{ err }}</div>
+        <div class="alert-error mb-4" role="alert">{{ err }}</div>
         {% endif %}
 
         <form method="POST" action="/device">
-            <input type="text" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus
+            <label for="user_code" class="sr-only">{{ self.tr("device-code-label") }}</label>
+            <input type="text" id="user_code" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus
                    {% if let Some(code) = user_code %}value="{{ code }}"{% endif %}
-                   autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+                   autocomplete="one-time-code" autocorrect="off" autocapitalize="characters" spellcheck="false"
                    class="input-code mb-4">
             <button type="submit" class="btn-primary w-full">{{ self.tr("device-continue") }}</button>
         </form>

@@ -15,7 +15,7 @@
                 <h1 class="text-2xl font-bold text-gray-200">{{ self.tr("admin-nav-audit") }}</h1>
                 <nav class="flex flex-wrap gap-3 text-sm whitespace-nowrap">
                     <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
-                    <a href="/admin/audit" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-audit") }}</a>
+                    <a href="/admin/audit" aria-current="page" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-audit") }}</a>
                     <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
                     <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
                     <a href="/admin/domains" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-domains") }}</a>
@@ -43,19 +43,19 @@
             <input type="hidden" name="filter" value="{{ f }}">
             {% endif %}
             <div>
-                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-email">{{ self.tr("admin-audit-filter-email-label") }}</label>
+                <label class="block text-xs text-gray-400 mb-1" for="audit-filter-email">{{ self.tr("admin-audit-filter-email-label") }}</label>
                 <input id="audit-filter-email" type="text" name="email" value="{{ email.as_deref().unwrap_or("") }}" placeholder="user@example.com" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs">
             </div>
             <div>
-                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-user-id">{{ self.tr("admin-audit-filter-user-id-label") }}</label>
+                <label class="block text-xs text-gray-400 mb-1" for="audit-filter-user-id">{{ self.tr("admin-audit-filter-user-id-label") }}</label>
                 <input id="audit-filter-user-id" type="text" name="user_id" value="{{ user_id.as_deref().unwrap_or("") }}" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
             </div>
             <div>
-                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-since">{{ self.tr("admin-audit-filter-since-label") }}</label>
+                <label class="block text-xs text-gray-400 mb-1" for="audit-filter-since">{{ self.tr("admin-audit-filter-since-label") }}</label>
                 <input id="audit-filter-since" type="text" name="since" value="{{ since.as_deref().unwrap_or("") }}" placeholder="2026-01-01T00:00:00Z" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
             </div>
             <div>
-                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-until">{{ self.tr("admin-audit-filter-until-label") }}</label>
+                <label class="block text-xs text-gray-400 mb-1" for="audit-filter-until">{{ self.tr("admin-audit-filter-until-label") }}</label>
                 <input id="audit-filter-until" type="text" name="until" value="{{ until.as_deref().unwrap_or("") }}" placeholder="2026-12-31T00:00:00Z" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
             </div>
             <button type="submit" class="px-3 py-1 rounded bg-vouch-accent/10 text-vouch-accent hover:bg-vouch-accent/20">{{ self.tr("admin-audit-filter-apply") }}</button>
@@ -68,12 +68,12 @@
             <table class="w-full text-sm">
                 <thead>
                     <tr class="border-b border-vouch-border text-left text-gray-400">
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-time") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-ip") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-event") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-domain") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-target") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-details") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-time") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-ip") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-event") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-domain") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-target") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-details") }}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -93,19 +93,19 @@
                         </td>
                         <td class="px-4 py-3 text-gray-400">{{ event.email_domain.as_deref().unwrap_or("-") }}</td>
                         <td class="px-4 py-3 text-gray-400">{{ event.target_email.as_deref().unwrap_or("-") }}</td>
-                        <td class="px-4 py-3 text-gray-500 text-xs font-mono max-w-xs truncate" title="{{ event.data }}">{{ event.data }}</td>
+                        <td class="px-4 py-3 text-gray-400 text-xs font-mono max-w-xs truncate" title="{{ event.data }}">{{ event.data }}</td>
                     </tr>
                     {% endfor %}
                     {% if events.is_empty() %}
                     <tr>
-                        <td colspan="6" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-audit-none") }}</td>
+                        <td colspan="6" class="px-4 py-8 text-center text-gray-400">{{ self.tr("admin-audit-none") }}</td>
                     </tr>
                     {% endif %}
                 </tbody>
             </table>
         </div>
 
-        <div class="mt-2 text-right text-xs text-gray-600">
+        <div class="mt-2 text-right text-xs text-gray-400">
             This product includes GeoLite2 data created by MaxMind, available from <a href="https://www.maxmind.com" target="_blank" rel="noreferrer noopener" class="hover:text-gray-400">maxmind.com</a>.
         </div>
 

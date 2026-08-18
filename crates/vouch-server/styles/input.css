@@ -47,11 +47,11 @@
   }
 
   .input-field {
-    @apply w-full px-4 py-3 bg-vouch-raised border border-vouch-border text-gray-200 rounded-md focus:border-vouch-accent focus:outline-none transition-colors;
+    @apply w-full px-4 py-3 bg-vouch-raised border border-gray-500 text-gray-200 placeholder-gray-400 rounded-md focus:border-vouch-accent transition-colors;
   }
 
   .input-code {
-    @apply w-full px-4 py-4 text-2xl text-center font-mono uppercase tracking-widest bg-vouch-raised border border-vouch-border text-gray-200 rounded-md focus:border-vouch-accent focus:outline-none transition-colors;
+    @apply w-full px-4 py-4 text-2xl text-center font-mono uppercase tracking-widest bg-vouch-raised border border-gray-500 text-gray-200 placeholder-gray-400 rounded-md focus:border-vouch-accent transition-colors;
   }
 
   .status-waiting {
@@ -63,7 +63,7 @@
   }
 
   .status-error {
-    @apply bg-vouch-error-bg border border-vouch-error text-vouch-error p-5 rounded-lg;
+    @apply bg-vouch-error-bg border border-vouch-error text-red-400 p-5 rounded-lg;
   }
 
   .alert-success {

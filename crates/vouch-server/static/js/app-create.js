@@ -137,40 +137,25 @@
             return null;
         }
 
-        // Show/hide redirect URI error
-        function showRedirectError(message) {
-            if (message) {
-                redirectError.textContent = message;
-                redirectError.classList.remove('hidden');
-                redirectTextarea.classList.add('border-vouch-error');
-            } else {
-                redirectError.classList.add('hidden');
-                redirectTextarea.classList.remove('border-vouch-error');
-            }
-        }
-
-        // Show/hide resource URI error
-        function showResourceError(message) {
-            if (message) {
-                resourceError.textContent = message;
-                resourceError.classList.remove('hidden');
-                resourceTextarea.classList.add('border-vouch-error');
-            } else {
-                resourceError.classList.add('hidden');
-                resourceTextarea.classList.remove('border-vouch-error');
-            }
-        }
-
-        // Show/hide a generic field error
+        // Show/hide a field error and mark the control invalid for assistive tech
         function showFieldError(errorEl, inputEl, message) {
             if (message) {
                 errorEl.textContent = message;
                 errorEl.classList.remove('hidden');
                 inputEl.classList.add('border-vouch-error');
+                inputEl.setAttribute('aria-invalid', 'true');
             } else {
                 errorEl.classList.add('hidden');
                 inputEl.classList.remove('border-vouch-error');
+                inputEl.removeAttribute('aria-invalid');
             }
+        }
+
+        // Center the offending field; no animation for reduced-motion users
+        var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        function scrollToField(el) {
+            el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+            el.focus();
         }
 
         // Whether the selected app type is confidential (supports FAPI)
@@ -255,12 +240,12 @@
                 if (this.value === 'service') {
                     redirectSection.style.display = 'none';
                     redirectTextarea.required = false;
-                    showRedirectError(null);
+                    showFieldError(redirectError, redirectTextarea, null);
                 } else {
                     redirectSection.style.display = 'block';
                     redirectTextarea.required = true;
                     if (redirectTextarea.value.trim()) {
-                        showRedirectError(validateRedirectUris());
+                        showFieldError(redirectError, redirectTextarea, validateRedirectUris());
                     }
                 }
                 updateSecurityProfileVisibility();
@@ -278,7 +263,7 @@
 
         // Validate redirect URIs on blur
         redirectTextarea.addEventListener('blur', function() {
-            showRedirectError(validateRedirectUris());
+            showFieldError(redirectError, redirectTextarea, validateRedirectUris());
         });
 
         // Clear redirect error styling when user starts typing
@@ -286,7 +271,7 @@
             if (redirectTextarea.classList.contains('border-vouch-error')) {
                 clearTimeout(redirectTextarea.validateTimeout);
                 redirectTextarea.validateTimeout = setTimeout(function() {
-                    showRedirectError(validateRedirectUris());
+                    showFieldError(redirectError, redirectTextarea, validateRedirectUris());
                 }, 500);
             }
         });
@@ -294,7 +279,7 @@
         // Validate resource URIs on blur
         resourceTextarea.addEventListener('blur', function() {
             if (resourceTextarea.value.trim()) {
-                showResourceError(validateResourceUris());
+                showFieldError(resourceError, resourceTextarea, validateResourceUris());
             }
         });
 
@@ -303,7 +288,7 @@
             if (resourceTextarea.classList.contains('border-vouch-error')) {
                 clearTimeout(resourceTextarea.validateTimeout);
                 resourceTextarea.validateTimeout = setTimeout(function() {
-                    showResourceError(validateResourceUris());
+                    showFieldError(resourceError, resourceTextarea, validateResourceUris());
                 }, 500);
             }
         });
@@ -360,19 +345,17 @@
             var redirectUriError = validateRedirectUris();
             if (redirectUriError) {
                 e.preventDefault();
-                showRedirectError(redirectUriError);
-                redirectTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                redirectTextarea.focus();
+                showFieldError(redirectError, redirectTextarea, redirectUriError);
+                scrollToField(redirectTextarea);
                 hasError = true;
             }
 
             var resourceUriError = validateResourceUris();
             if (resourceUriError) {
                 e.preventDefault();
-                showResourceError(resourceUriError);
+                showFieldError(resourceError, resourceTextarea, resourceUriError);
                 if (!hasError) {
-                    resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    resourceTextarea.focus();
+                    scrollToField(resourceTextarea);
                 }
                 hasError = true;
             }
@@ -382,8 +365,7 @@
                 e.preventDefault();
                 showFieldError(postLogoutError, postLogoutTextarea, postLogoutUriError);
                 if (!hasError) {
-                    postLogoutTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    postLogoutTextarea.focus();
+                    scrollToField(postLogoutTextarea);
                 }
                 hasError = true;
             }
@@ -395,8 +377,7 @@
                     e.preventDefault();
                     showFieldError(jwksError, jwksTextarea, jwksErr);
                     if (!hasError) {
-                        jwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        jwksTextarea.focus();
+                        scrollToField(jwksTextarea);
                     }
                     hasError = true;
                 }
@@ -406,8 +387,7 @@
                     e.preventDefault();
                     showFieldError(jwksUriError, jwksUriInput, jwksUriErr);
                     if (!hasError) {
-                        jwksUriInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        jwksUriInput.focus();
+                        scrollToField(jwksUriInput);
                     }
                     hasError = true;
                 }
@@ -418,8 +398,7 @@
                     var msg = t('appcreate-js-fapi-required');
                     showFieldError(jwksError, jwksTextarea, msg);
                     if (!hasError) {
-                        jwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        jwksTextarea.focus();
+                        scrollToField(jwksTextarea);
                     }
                     hasError = true;
                 }

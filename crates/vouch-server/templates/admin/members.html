@@ -14,7 +14,7 @@
             <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                 <h1 class="text-2xl font-bold text-gray-200">{{ self.tr("admin-members-heading") }}</h1>
                 <nav class="flex flex-wrap gap-3 text-sm whitespace-nowrap">
-                    <a href="/admin" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-members") }}</a>
+                    <a href="/admin" aria-current="page" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-members") }}</a>
                     <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
                     <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
                     <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
@@ -29,11 +29,11 @@
             <table class="w-full text-sm">
                 <thead>
                     <tr class="border-b border-vouch-border text-left text-gray-400">
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-email") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-role") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-status") }}</th>
-                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-keys") }}</th>
-                        <th class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-email") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-role") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-status") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium">{{ self.tr("admin-members-th-keys") }}</th>
+                        <th scope="col" class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -42,7 +42,7 @@
                         <td class="px-4 py-3 text-gray-200">
                             {{ member.email }}
                             {% if member.is_self %}
-                            <span class="text-xs text-gray-500 ml-1">{{ self.tr("admin-members-you") }}</span>
+                            <span class="text-xs text-gray-400 ml-1">{{ self.tr("admin-members-you") }}</span>
                             {% endif %}
                         </td>
                         <td class="px-4 py-3">
@@ -103,7 +103,7 @@
                     {% endfor %}
                     {% if members.is_empty() %}
                     <tr>
-                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-members-none") }}</td>
+                        <td colspan="5" class="px-4 py-8 text-center text-gray-400">{{ self.tr("admin-members-none") }}</td>
                     </tr>
                     {% endif %}
                 </tbody>

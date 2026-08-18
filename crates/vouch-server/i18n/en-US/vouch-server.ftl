@@ -302,6 +302,7 @@ success-cmd-github = # GitHub tokens
 device-page-title = { -product } - Device Verification
 device-heading = Enter Your Code
 device-body = Enter the code shown in your terminal to continue.
+device-code-label = Device code
 device-continue = Continue
 
 ## Identity provider chooser (select_idp.html)
@@ -372,6 +373,8 @@ install-page-title = Developer Setup - { -product }
 install-heading = Get Started with { -product }
 install-subtitle = Install the CLI and enroll your { -yubikey }
 install-prereqs-label = Prerequisites
+# Accessible name for the OS tab strip (role="tablist")
+install-tabs-label = Operating system
 install-prereq-key = FIDO2 { -security-key } ({ -yubikey } 5 series recommended)
 # DOCUMENTED FRAGMENT: followed by `<code>{{ server_url }}</code>)` in the
 # template — note the message ends with an open paren and the closing paren
@@ -755,6 +758,19 @@ admin-policies-add-check = + Add check
 admin-policies-add-osfloor = + Add OS version floor
 admin-policies-osfloor-label = OS version floor:
 admin-policies-osfloor-windows-build = Windows build
+# Screen-reader labels for the builder row controls; the rows read as prose
+# for sighted users, so these controls have no visible labels of their own.
+admin-policies-row-field-label = Device field
+admin-policies-row-op-label = Comparison
+admin-policies-row-value-label = Value
+admin-policies-row-event-label = Event
+admin-policies-row-shape-label = Condition
+admin-policies-row-threshold-label = Number of occurrences
+admin-policies-row-window-amount-label = Time window length
+admin-policies-row-window-unit-label = Time window unit
+admin-policies-row-cancel-label = Cancelling event
+admin-policies-floor-enable-label = Enable { $os } minimum
+admin-policies-floor-min-label = { $os } minimum
 admin-policies-window-cap-note = Windows are capped at 24 hours — history older than that is not kept.
 admin-policies-warn-login-lockout = This locks users out: the login being evaluated is not yet in the history it checks, so a user returning after the window is denied — and denied again on every retry. Require login recency on token exchange instead.
 admin-policies-warn-login-cooldown = This denies issuance because a login recently succeeded — a login cooldown. Users can obtain a token at most once per window.
@@ -943,6 +959,8 @@ admin-scim-audit-read-label = Also grant read-only audit log access ({ $scope })
 admin-scim-revoke-confirm = Revoke this API token? Any integration using it will stop working.
 admin-scim-none = No API tokens. Create one to enable identity provider provisioning or audit log access.
 admin-scim-warning = API tokens grant full read/write SCIM provisioning access and, if selected, read-only audit log access. A maximum of 2 tokens is allowed to support key rotation while limiting exposure.
+# Skip-navigation link at the top of every page (base.html)
+skip-to-content = Skip to main content
 footer-install = Install
 footer-docs = Docs
 footer-privacy = Privacy

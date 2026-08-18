@@ -25,7 +25,13 @@ document.addEventListener("DOMContentLoaded", function () {
       if (tokenEl && navigator.clipboard) {
         navigator.clipboard.writeText(tokenEl.textContent).then(function () {
           copyBtn.textContent = t("common-js-copied");
-          setTimeout(function () { copyBtn.textContent = t("common-copy"); }, 2000);
+          // Announce via the sr-only live region in base.html.
+          var copyStatus = document.getElementById("copy-status");
+          if (copyStatus) copyStatus.textContent = t("common-js-copied");
+          setTimeout(function () {
+            copyBtn.textContent = t("common-copy");
+            if (copyStatus) copyStatus.textContent = "";
+          }, 2000);
         });
       }
     });

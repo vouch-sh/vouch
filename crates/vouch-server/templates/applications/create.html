@@ -21,7 +21,7 @@
                 <input type="text" name="name" id="name" required
                     class="input-field mt-1"
                     placeholder="{{ self.tr("apps-create-name-placeholder") }}">
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-name-help") }}</p>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-name-help") }}</p>
             </div>
 
             <div>
@@ -31,15 +31,15 @@
                     placeholder="{{ self.tr("apps-create-desc-placeholder") }}"></textarea>
             </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-type-label") }}</label>
+            <fieldset>
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-type-label") }}</legend>
                 <div class="space-y-3">
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="application_type" value="web" checked
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-web") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-web-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-type-web-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -47,7 +47,7 @@
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-spa") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-spa-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-type-spa-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -55,7 +55,7 @@
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-native") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-native-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-type-native-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -63,52 +63,53 @@
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-service") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-service-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-type-service-desc") }}</span>
                         </div>
                     </label>
                 </div>
-            </div>
+            </fieldset>
 
             <div id="redirect-uris-section">
-                <label for="redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-redirect-label") }} <span class="text-vouch-error">*</span></label>
-                <textarea name="redirect_uris" id="redirect_uris" rows="3" required
+                <label for="redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-redirect-label") }} <span class="text-red-400">*</span></label>
+                <textarea name="redirect_uris" id="redirect_uris" rows="3" required aria-describedby="redirect-uri-error"
                     class="input-field mt-1 font-mono"
                     placeholder="https://example.com/callback
 http://localhost:3000/callback"></textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-redirect-help") }}</p>
-                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-redirect-help") }}</p>
+                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <div>
                 <label for="resource_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-resource-label") }}</label>
-                <textarea name="resource_uris" id="resource_uris" rows="2"
+                <textarea name="resource_uris" id="resource_uris" rows="2" aria-describedby="resource-uri-error"
                     class="input-field mt-1 font-mono"
                     placeholder="https://api.example.com
 https://data.example.com"></textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-resource-help") }}</p>
-                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-resource-help") }}</p>
+                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <div>
                 <label for="post_logout_redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-postlogout-label") }}</label>
-                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2"
+                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2" aria-describedby="post-logout-redirect-uri-error"
                     class="input-field mt-1 font-mono"
                     placeholder="https://example.com/logged-out
 http://localhost:3000/logged-out"></textarea>
-                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-postlogout-help") }}</p>
-                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-postlogout-help") }}</p>
+                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
             </div>
 
             <!-- Security Profile (shown only for confidential types: web, service) -->
             <div id="security-profile-section" class="hidden">
-                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</label>
+                <fieldset>
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</legend>
                 <div class="space-y-3">
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="fapi_profile" value="" checked
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-standard") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-secprofile-standard-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-secprofile-standard-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -116,10 +117,11 @@ http://localhost:3000/logged-out"></textarea>
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-fapi") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-secprofile-fapi-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-secprofile-fapi-desc") }}</span>
                         </div>
                     </label>
                 </div>
+                </fieldset>
 
                 <!-- FAPI JWKS fields (shown when FAPI selected) -->
                 <div id="fapi-jwks-section" class="hidden mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
@@ -128,30 +130,30 @@ http://localhost:3000/logged-out"></textarea>
                     </div>
                     <div>
                         <label for="jwks" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-label") }}</label>
-                        <textarea name="jwks" id="jwks" rows="4"
+                        <textarea name="jwks" id="jwks" rows="4" aria-describedby="jwks-error"
                             class="input-field mt-1 font-mono text-xs"
                             placeholder='{"keys": [{"kty": "EC", "crv": "P-256", ...}]}'></textarea>
-                        <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-jwks-help") }}</p>
-                        <div id="jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                        <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-jwks-help") }}</p>
+                        <div id="jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
                     </div>
                     <div class="flex items-center gap-3">
                         <div class="flex-1 border-t border-vouch-border"></div>
-                        <span class="text-xs text-gray-500">{{ self.tr("common-or") }}</span>
+                        <span class="text-xs text-gray-400">{{ self.tr("common-or") }}</span>
                         <div class="flex-1 border-t border-vouch-border"></div>
                     </div>
                     <div>
                         <label for="jwks_uri" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-uri-label") }}</label>
-                        <input type="url" name="jwks_uri" id="jwks_uri"
+                        <input type="url" name="jwks_uri" id="jwks_uri" aria-describedby="jwks-uri-error"
                             class="input-field mt-1 font-mono"
                             placeholder="https://example.com/.well-known/jwks.json">
-                        <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-jwks-uri-help") }}</p>
-                        <div id="jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                        <p class="mt-1 text-sm text-gray-400">{{ self.tr("apps-create-jwks-uri-help") }}</p>
+                        <div id="jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-red-400" role="alert"></div>
                     </div>
                 </div>
             </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-access-label") }}</label>
+            <fieldset>
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-access-label") }}</legend>
                 <div class="space-y-3">
                     {% if user_has_org %}
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -159,7 +161,7 @@ http://localhost:3000/logged-out"></textarea>
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-org") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-org-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-access-org-desc") }}</span>
                         </div>
                     </label>
                     {% endif %}
@@ -168,7 +170,7 @@ http://localhost:3000/logged-out"></textarea>
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-personal") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-personal-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-access-personal-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
@@ -176,11 +178,11 @@ http://localhost:3000/logged-out"></textarea>
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
                             <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-public") }}</span>
-                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-public-desc") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-access-public-desc") }}</span>
                         </div>
                     </label>
                 </div>
-            </div>
+            </fieldset>
 
             <div class="flex justify-end space-x-3">
                 <a href="/applications" class="px-4 py-2 border border-vouch-border rounded-md text-sm font-medium text-gray-300 hover:bg-vouch-raised transition-colors">

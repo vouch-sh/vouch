@@ -520,15 +520,22 @@ document.addEventListener("DOMContentLoaded", function () {
     clearValidation();
   }
 
+  var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
   function showPlayground() {
     playground.classList.remove("hidden");
-    playground.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    playground.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
     nameInput.focus();
   }
 
   function hidePlayground() {
+    // Hiding the container would silently drop focus to <body>; return it to
+    // the button that opens the playground. Skip when focus is elsewhere
+    // (e.g. the open-flow handlers call this as a reset step).
+    var hadFocus = playground.contains(document.activeElement);
     playground.classList.add("hidden");
     resetEditor(t("admin-policies-playground-title"));
+    if (hadFocus) btnNew.focus();
   }
 
   // Rebuild builder rows from a stored spec; false when the spec's shape
@@ -727,6 +734,9 @@ document.addEventListener("DOMContentLoaded", function () {
       row.remove();
       updateHistoryRemoveVisibility();
       schedule();
+      // The clicked button vanished with its row; keep focus in the builder.
+      var next = builderRows.querySelector(".row-remove:not(.hidden)") || btnAddCheck;
+      if (next) next.focus();
     }
   });
 
