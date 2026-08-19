@@ -101,16 +101,24 @@ impl AwsConfig {
     pub(crate) fn vouch_profiles_with_role(&self) -> Vec<VouchProfile> {
         let mut profiles = Vec::new();
         for profile in self.find_all_vouch_profiles() {
-            let Some(credential_process) = profile.credential_process.as_deref() else {
+            let Some(line) = profile
+                .credential_process
+                .as_deref()
+                .and_then(CredentialProcessLine::parse)
+            else {
                 continue;
             };
-            let Some(role_arn) = extract_role_from_credential_process(credential_process) else {
-                continue;
-            };
-            profiles.push(VouchProfile {
-                name: profile.name,
-                role_arn,
-            });
+            match line {
+                CredentialProcessLine::Role { role_arn, via: _ } => profiles.push(VouchProfile {
+                    name: profile.name,
+                    role_arn,
+                }),
+                CredentialProcessLine::IdentityCenter {
+                    application_arn: _,
+                    account: _,
+                    permission_set: _,
+                } => {}
+            }
         }
         profiles
     }
@@ -153,11 +161,22 @@ impl AwsConfig {
     #[must_use]
     pub(crate) fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<AwsProfile> {
         self.find_all_vouch_profiles().into_iter().find(|p| {
-            p.credential_process
+            match p
+                .credential_process
                 .as_deref()
-                .and_then(extract_role_from_credential_process)
-                .as_deref()
-                == Some(role_arn)
+                .and_then(CredentialProcessLine::parse)
+            {
+                Some(CredentialProcessLine::Role {
+                    role_arn: existing,
+                    via: _,
+                }) => existing == role_arn,
+                Some(CredentialProcessLine::IdentityCenter {
+                    application_arn: _,
+                    account: _,
+                    permission_set: _,
+                })
+                | None => false,
+            }
         })
     }
 
@@ -251,44 +270,136 @@ impl AwsConfig {
     }
 }
 
-/// Extract the AWS role ARN from a credential_process command.
+/// A vouch `credential_process` command line, as written to `~/.aws/config`.
 ///
-/// Looks for `--role <arn>` in the command string.
-#[must_use]
-pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
-    // Find --role and extract the next token
-    if let Some(role_start) = credential_process.find("--role") {
-        let after_flag = credential_process
-            .get(role_start.saturating_add(6)..)?
-            .trim_start();
-        // Role ARN is the next whitespace-delimited token
-        let role_arn = after_flag.split_whitespace().next()?;
-        if role_arn.starts_with("arn:aws") {
-            return Some(role_arn.to_string());
-        }
-    }
-    None
+/// This is the single source of truth for the wire format: profiles are
+/// generated with [`CredentialProcessLine::render`] and read back with
+/// [`CredentialProcessLine::parse`], so every consumer (status display,
+/// name-collision classification, the discovery sweep's org-boundary check)
+/// works on typed fields instead of substring extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CredentialProcessLine {
+    /// `--role <arn> [--via <management-role-arn>]` — an STS role profile,
+    /// vended directly or chained through a management role.
+    Role {
+        role_arn: String,
+        via: Option<String>,
+    },
+    /// `[--idc-application <arn>] --account <id> --permission-set <name>` —
+    /// an Identity Center permission-set profile. Discovery always writes
+    /// `--idc-application`; when absent, the credential command resolves
+    /// the configured org's Identity Center instead.
+    IdentityCenter {
+        application_arn: Option<String>,
+        account: String,
+        permission_set: String,
+    },
 }
 
-/// Extract an Identity Center target description from a credential_process command.
-///
-/// Looks for `--account <id> --permission-set <name>` and returns a pre-formatted
-/// `"IdC <account>/<permission-set>"` string for status display.
-#[must_use]
-pub(crate) fn extract_idc_target_from_credential_process(
-    credential_process: &str,
-) -> Option<String> {
-    fn extract_flag_value<'a>(s: &'a str, flag: &str) -> Option<&'a str> {
-        let start = s.find(flag)?;
-        let after = s.get(start.saturating_add(flag.len())..)?.trim_start();
-        // Value may be quoted; strip surrounding double-quotes if present.
-        let raw = after.split(|c: char| c.is_ascii_whitespace()).next()?;
-        Some(raw.trim_matches('"'))
+impl CredentialProcessLine {
+    /// Parse a `credential_process` command line.
+    ///
+    /// Tokenizes quote-aware (values may be double-quoted) and matches
+    /// flags as whole tokens, so `--account` can never match inside another
+    /// flag name and a trailing flag with no value is treated as absent.
+    /// Returns `None` for lines that are neither profile form — including a
+    /// `--role` whose value is not an ARN.
+    #[must_use]
+    pub(crate) fn parse(credential_process: &str) -> Option<Self> {
+        let mut role_arn = None;
+        let mut via = None;
+        let mut application_arn = None;
+        let mut account = None;
+        let mut permission_set = None;
+        let mut tokens = tokenize(credential_process).into_iter();
+        while let Some(token) = tokens.next() {
+            match token.as_str() {
+                "--role" => role_arn = tokens.next(),
+                "--via" => via = tokens.next(),
+                "--idc-application" => application_arn = tokens.next(),
+                "--account" => account = tokens.next(),
+                "--permission-set" => permission_set = tokens.next(),
+                _ => {}
+            }
+        }
+        // `arn:aws` also prefixes the GovCloud/China partitions
+        // (`arn:aws-us-gov:`, `arn:aws-cn:`).
+        if let Some(role_arn) = role_arn.filter(|arn| arn.starts_with("arn:aws")) {
+            return Some(Self::Role { role_arn, via });
+        }
+        if let (Some(account), Some(permission_set)) = (account, permission_set) {
+            return Some(Self::IdentityCenter {
+                application_arn,
+                account,
+                permission_set,
+            });
+        }
+        None
     }
 
-    let account = extract_flag_value(credential_process, "--account")?;
-    let ps = extract_flag_value(credential_process, "--permission-set")?;
-    Some(format!("IdC {account}/{ps}"))
+    /// Render the `credential_process` command line for this profile.
+    #[must_use]
+    pub(crate) fn render(&self, vouch_path: &std::path::Path) -> String {
+        match self {
+            Self::Role {
+                role_arn,
+                via: Some(via),
+            } => format!(
+                "\"{}\" credential aws --role {role_arn} --via {via}",
+                vouch_path.display()
+            ),
+            Self::Role {
+                role_arn,
+                via: None,
+            } => format!(
+                "\"{}\" credential aws --role {role_arn}",
+                vouch_path.display()
+            ),
+            // Permission-set names cannot contain whitespace or quotes
+            // (AWS allows only `[\w+=,.@-]`), so the value is unquoted;
+            // parse still accepts quoted values from older configs.
+            Self::IdentityCenter {
+                application_arn: Some(application_arn),
+                account,
+                permission_set,
+            } => format!(
+                "\"{}\" credential aws --idc-application {application_arn} \
+                 --account {account} --permission-set {permission_set}",
+                vouch_path.display()
+            ),
+            Self::IdentityCenter {
+                application_arn: None,
+                account,
+                permission_set,
+            } => format!(
+                "\"{}\" credential aws --account {account} --permission-set {permission_set}",
+                vouch_path.display()
+            ),
+        }
+    }
+}
+
+/// Split a command line into tokens, treating double-quoted spans as part
+/// of the enclosing token (quotes are dropped).
+fn tokenize(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in line.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_ascii_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 #[cfg(test)]
@@ -618,49 +729,143 @@ output = json
     }
 
     #[test]
-    fn test_extract_role_from_credential_process() {
+    fn test_parse_role_line() {
         assert_eq!(
-            extract_role_from_credential_process(
+            CredentialProcessLine::parse(
                 "/usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole"
             ),
-            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
+            Some(CredentialProcessLine::Role {
+                role_arn: "arn:aws:iam::123456789012:role/MyRole".to_string(),
+                via: None,
+            })
         );
-    }
-
-    #[test]
-    fn test_extract_role_with_extra_spaces() {
+        // Extra whitespace between flag and value.
         assert_eq!(
-            extract_role_from_credential_process(
+            CredentialProcessLine::parse(
                 "vouch credential aws --role   arn:aws:iam::999888777666:role/DevRole"
             ),
-            Some("arn:aws:iam::999888777666:role/DevRole".to_string())
+            Some(CredentialProcessLine::Role {
+                role_arn: "arn:aws:iam::999888777666:role/DevRole".to_string(),
+                via: None,
+            })
         );
-    }
-
-    #[test]
-    fn test_extract_role_govcloud() {
+        // GovCloud partition ARNs share the `arn:aws` prefix.
         assert_eq!(
-            extract_role_from_credential_process(
+            CredentialProcessLine::parse(
                 "vouch credential aws --role arn:aws-us-gov:iam::123456789012:role/GovRole"
             ),
-            Some("arn:aws-us-gov:iam::123456789012:role/GovRole".to_string())
+            Some(CredentialProcessLine::Role {
+                role_arn: "arn:aws-us-gov:iam::123456789012:role/GovRole".to_string(),
+                via: None,
+            })
         );
     }
 
     #[test]
-    fn test_extract_role_no_role_flag() {
+    fn test_parse_chained_role_line() {
         assert_eq!(
-            extract_role_from_credential_process("vouch credential aws"),
-            None
+            CredentialProcessLine::parse(
+                "\"/usr/local/bin/vouch\" credential aws --role arn:aws:iam::1:role/R \
+                 --via arn:aws:iam::2:role/vouch/Hub"
+            ),
+            Some(CredentialProcessLine::Role {
+                role_arn: "arn:aws:iam::1:role/R".to_string(),
+                via: Some("arn:aws:iam::2:role/vouch/Hub".to_string()),
+            })
+        );
+        // A trailing flag with no value is treated as absent, not empty.
+        assert_eq!(
+            CredentialProcessLine::parse("vouch credential aws --role arn:aws:iam::1:role/R --via"),
+            Some(CredentialProcessLine::Role {
+                role_arn: "arn:aws:iam::1:role/R".to_string(),
+                via: None,
+            })
         );
     }
 
     #[test]
-    fn test_extract_role_invalid_arn() {
+    fn test_parse_identity_center_line() {
+        // Older discovery runs quoted the permission-set name; parse must
+        // keep accepting those lines even though render no longer quotes.
         assert_eq!(
-            extract_role_from_credential_process("vouch credential aws --role not-an-arn"),
+            CredentialProcessLine::parse(
+                r#""/usr/local/bin/vouch" credential aws --idc-application arn:aws:sso::1:application/ssoins-x/apl-y --account 111111111111 --permission-set "Admin""#
+            ),
+            Some(CredentialProcessLine::IdentityCenter {
+                application_arn: Some("arn:aws:sso::1:application/ssoins-x/apl-y".to_string()),
+                account: "111111111111".to_string(),
+                permission_set: "Admin".to_string(),
+            })
+        );
+        // `--idc-application` is optional: the credential command resolves
+        // the configured org's Identity Center when it is absent.
+        assert_eq!(
+            CredentialProcessLine::parse(
+                "vouch credential aws --account 111111111111 --permission-set Admin"
+            ),
+            Some(CredentialProcessLine::IdentityCenter {
+                application_arn: None,
+                account: "111111111111".to_string(),
+                permission_set: "Admin".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_non_profile_lines() {
+        // No flags at all.
+        assert_eq!(CredentialProcessLine::parse("vouch credential aws"), None);
+        // A --role value that is not an ARN.
+        assert_eq!(
+            CredentialProcessLine::parse("vouch credential aws --role not-an-arn"),
             None
         );
+        // An Identity Center line needs both --account and --permission-set.
+        assert_eq!(
+            CredentialProcessLine::parse("vouch credential aws --account 111111111111"),
+            None
+        );
+    }
+
+    mod roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Every rendered role line parses back to itself.
+            #[test]
+            fn role_line_roundtrips(
+                account in "[0-9]{12}",
+                role_name in "[A-Za-z0-9+=,.@_-]{1,64}",
+                chained in proptest::bool::ANY,
+            ) {
+                let line = CredentialProcessLine::Role {
+                    role_arn: format!("arn:aws:iam::{account}:role/vouch/{role_name}"),
+                    via: chained
+                        .then(|| format!("arn:aws:iam::{account}:role/vouch/Hub")),
+                };
+                let rendered = line.render(std::path::Path::new("/usr/local/bin/vouch"));
+                prop_assert_eq!(CredentialProcessLine::parse(&rendered), Some(line));
+            }
+
+            /// Every rendered Identity Center line parses back to itself.
+            #[test]
+            fn identity_center_line_roundtrips(
+                account in "[0-9]{12}",
+                permission_set in "[A-Za-z0-9+=,.@_-]{1,32}",
+                pinned_application in proptest::bool::ANY,
+            ) {
+                let line = CredentialProcessLine::IdentityCenter {
+                    application_arn: pinned_application.then(|| format!(
+                        "arn:aws:sso::{account}:application/ssoins-1/apl-1"
+                    )),
+                    account,
+                    permission_set,
+                };
+                let rendered = line.render(std::path::Path::new("/usr/local/bin/vouch"));
+                prop_assert_eq!(CredentialProcessLine::parse(&rendered), Some(line));
+            }
+        }
     }
 
     #[test]

@@ -492,6 +492,7 @@ async fn assume_role_via_management_chain(
         // Plumbed but not yet fed: populating it requires a CreateTokenWithIAM
         // call on this path, which is deferred (#623).
         identity_context: None,
+        duration_seconds: 3600,
     })
     .await;
 
@@ -523,7 +524,7 @@ async fn assume_role_via_management_chain(
 /// session is not email-shaped (the `sub` is capped at 64 chars, so a very
 /// long email could also land here with a truncated domain — the printed
 /// statement is remediation text, not applied policy).
-fn source_identity_pattern(session: &str) -> String {
+pub(crate) fn source_identity_pattern(session: &str) -> String {
     // At the 64-char RoleSessionName cap the domain may be cut mid-way; a
     // derived pattern like `*@exampl` would look plausible but be wrong.
     // Fail closed with the obviously-editable placeholder instead.
@@ -545,7 +546,10 @@ fn source_identity_pattern(session: &str) -> String {
 /// Deliberately excludes `sts:RoleAuthorizedByIdp` — that condition key is
 /// defined only for `AssumeRoleWithWebIdentity` and can never match on a
 /// plain `AssumeRole` hop.
-fn chained_role_trust_statement(management_role_arn: &str, source_identity: &str) -> String {
+pub(crate) fn chained_role_trust_statement(
+    management_role_arn: &str,
+    source_identity: &str,
+) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "Effect": "Allow",
         "Principal": { "AWS": management_role_arn },
@@ -759,6 +763,10 @@ pub(crate) struct ManagementRoleSession {
     /// RS256 token pinned to the management role; doubles as the
     /// `CreateTokenWithIAM` jwt-bearer assertion.
     pub(crate) id_token: SecretString,
+    /// The token's `sub` claim — the `RoleSessionName` used on both chain
+    /// hops, so downstream probes appear in CloudTrail under the same
+    /// session identity as real vends.
+    pub(crate) role_session_name: String,
     /// The token's `email` claim — the Identity Store lookup key.
     /// `None` when the server did not include an email claim.
     pub(crate) user_email: Option<String>,
@@ -826,6 +834,7 @@ pub(crate) async fn assume_management_role(
     Ok(ManagementRoleSession {
         credentials,
         id_token,
+        role_session_name: session,
         user_email,
     })
 }
