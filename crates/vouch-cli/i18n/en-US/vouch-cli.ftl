@@ -808,22 +808,14 @@ aws-err-region-partition-mismatch =
 aws-err-target-role-trust-missing =
     AWS denied assuming { $role_arn } through the management role.
 
-    If the role's trust policy does not yet trust { -product }, ask an
-    administrator to add this statement to the role's trust-policy
-    Statement array (required for roles assigned via account access
-    manager, which only trust the account-access service by default):
+    If the role's trust policy does not yet trust { -product }, ask an administrator to add this statement to the role's trust-policy Statement array (required for roles assigned via account access manager, which only trust the account-access service by default):
 
     { $statement }
 
-    Keep the aws:SourceIdentity condition and adjust its pattern to your
-    organization's email domain — without it, anyone who can assume the
-    management role could assume this role.
+    Keep the aws:SourceIdentity condition and adjust its pattern to your organization's email domain — without it, anyone who can assume the management role could assume this role.
 
-    Also verify the management role { $management_role } has an IAM policy
-    allowing sts:AssumeRole on this role. If the trust statement is already
-    present, the denial may instead come from a service control policy, a
-    permissions boundary, or an aws:SourceIdentity condition that does not
-    match your identity.
+    Also verify the management role { $management_role } has an IAM policy allowing sts:AssumeRole on this role.
+    If the trust statement is already present, the denial may instead come from a service control policy, a permissions boundary, an aws:SourceIdentity condition that does not match your identity, or a role that does not currently exist.
 
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
@@ -1158,6 +1150,23 @@ setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
 setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
+setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (verified — the management role can assume it)
+setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } already exists (verified — the management role can assume it)
+setup-aws-entitlements-not-assumable-skipped =
+    Entitled role { $role_arn } is NOT assumable — profile [{ $profile }] was not written: the management role was denied sts:AssumeRole on this role.
+setup-aws-entitlements-existing-trust-missing =
+    Profile [{ $profile }] → { $role_arn } already exists but is NOT currently assumable: the management role was denied sts:AssumeRole on this role. The profile was kept.
+setup-aws-entitlements-trust-remediation =
+    Ask an administrator to add this statement to the role's trust-policy Statement array:
+
+    { $statement }
+
+    Keep the aws:SourceIdentity condition and adjust its pattern to your organization's email domain.
+    Also verify the management role { $management_role } has an IAM policy allowing sts:AssumeRole on this role.
+    AWS returns the same denial when the role does not currently exist (for example, infrastructure that is provisioned on demand).
+setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
+setup-aws-sweep-assignment-stale = Profile [{ $profile }] — its Identity Center assignment ({ $account } / { $permission_set }) no longer exists. The profile was kept; remove it manually if unwanted.
+setup-aws-sweep-summary = Checked { $checked } existing profiles; { $issues } not currently usable.
 setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
 # Numeric arms ride as FluentValue::Number so locales can plural-form the
 # noun (e.g. "0 profil/1 profil/2 profile" rules).

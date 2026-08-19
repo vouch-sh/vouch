@@ -180,6 +180,10 @@ pub(crate) struct AssumeRoleRequest<'a> {
     /// authorization). Only SigV4 `AssumeRole` accepts it —
     /// `AssumeRoleWithWebIdentity` does not (#623).
     pub identity_context: Option<&'a str>,
+    /// Session duration in seconds (AWS accepts 900–3600 for chained
+    /// sessions). Vending uses 3600; the entitlement assumability probe
+    /// uses 900 since its session is dropped unused.
+    pub duration_seconds: u32,
 }
 
 /// Call AWS STS `AssumeRole` using SigV4-signed form POST.
@@ -196,7 +200,7 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
 
     // Bind owned values to variables first — sign_and_send_form_post takes &[(&str, &str)]
     // so all values must outlive the params slice. This pattern mirrors redshift.rs.
-    let duration_str = "3600".to_string();
+    let duration_str = req.duration_seconds.to_string();
 
     // Build managed policy ARNs with partition-appropriate prefixes.
     let policy_arns: Vec<String> = req

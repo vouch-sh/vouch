@@ -17,10 +17,7 @@ pub(crate) mod sso_portal;
 pub(crate) mod sts;
 
 // Re-export commonly used types
-pub(crate) use config::{
-    AwsConfig, AwsProfile, VouchProfile, extract_idc_target_from_credential_process,
-    extract_role_from_credential_process,
-};
+pub(crate) use config::{AwsConfig, AwsProfile, CredentialProcessLine, VouchProfile};
 
 use vouch_cli::{tr, tr_args};
 
@@ -139,23 +136,27 @@ fn named_vouch_profile(config: &AwsConfig, name: &str) -> anyhow::Result<VouchPr
         );
     };
 
-    if let Some(role_arn) = extract_role_from_credential_process(&credential_process) {
-        return Ok(VouchProfile {
+    match CredentialProcessLine::parse(&credential_process) {
+        Some(CredentialProcessLine::Role { role_arn, via: _ }) => Ok(VouchProfile {
             name: name.to_string(),
             role_arn,
-        });
-    }
-
-    if let Some(target) = extract_idc_target_from_credential_process(&credential_process) {
-        return Err(CliError::ConfigError(tr_args!(
+        }),
+        Some(CredentialProcessLine::IdentityCenter {
+            application_arn: _,
+            account,
+            permission_set,
+        }) => Err(CliError::ConfigError(tr_args!(
             "aws-err-profile-is-identity-center",
             profile = name,
-            target = target,
+            target = format!("IdC {account}/{permission_set}"),
         ))
-        .into());
+        .into()),
+        None => Err(CliError::ConfigError(tr_args!(
+            "aws-err-profile-missing-role",
+            profile = name
+        ))
+        .into()),
     }
-
-    Err(CliError::ConfigError(tr_args!("aws-err-profile-missing-role", profile = name)).into())
 }
 
 /// Find a region from an explicit flag, a named profile, then the environment.
@@ -430,10 +431,17 @@ fn check_aws_status(
         .find_all_vouch_profiles()
         .into_iter()
         .map(|p| {
-            let target = p.credential_process.as_ref().and_then(|cp| {
-                extract_role_from_credential_process(cp)
-                    .or_else(|| config::extract_idc_target_from_credential_process(cp))
-            });
+            let target =
+                p.credential_process
+                    .as_deref()
+                    .and_then(|cp| match CredentialProcessLine::parse(cp)? {
+                        CredentialProcessLine::Role { role_arn, via: _ } => Some(role_arn),
+                        CredentialProcessLine::IdentityCenter {
+                            application_arn: _,
+                            account,
+                            permission_set,
+                        } => Some(format!("IdC {account}/{permission_set}")),
+                    });
             ProfileSummary {
                 name: p.name,
                 target,

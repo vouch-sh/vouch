@@ -10,6 +10,8 @@
 //! - Identity Center: `--management-role <arn> --identity-center-application <arn>
 //!   --region <region> [--discover]` — stores org + IdC, optionally enumerates.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result};
 use inquire::{Confirm, InquireError, Select, Text};
 use vouch_cli::{tr, tr_args, tr_println};
@@ -377,29 +379,21 @@ fn store_org(
 
 /// Write a `vouch credential aws --role <arn>` profile into `~/.aws/config`.
 ///
-/// When `management_role` differs from `role_arn`, the generated
-/// `credential_process` includes `--via <management_role>` so the CLI can
-/// chain through the correct management role in multi-org configurations.
 /// The `credential_process` line for an STS role profile.
 ///
 /// Includes `--via` when chaining through a management role that differs
-/// from the target role.
+/// from the target role, so the CLI chains through the correct management
+/// role in multi-org configurations.
 fn sts_credential_process(
     vouch_path: &std::path::Path,
     role_arn: &str,
     management_role: &str,
 ) -> String {
-    if management_role != role_arn {
-        format!(
-            "\"{}\" credential aws --role {role_arn} --via {management_role}",
-            vouch_path.display()
-        )
-    } else {
-        format!(
-            "\"{}\" credential aws --role {role_arn}",
-            vouch_path.display()
-        )
+    crate::integrations::aws::CredentialProcessLine::Role {
+        role_arn: role_arn.to_string(),
+        via: (management_role != role_arn).then(|| management_role.to_string()),
     }
+    .render(vouch_path)
 }
 
 fn write_sts_profile(
@@ -499,6 +493,7 @@ async fn run_discover(
     let mut aws_config = load_or_create_aws_config()?;
     let mut created_count: u32 = 0;
     let mut skipped_count: u32 = 0;
+    let mut assignments: BTreeSet<(String, String)> = BTreeSet::new();
 
     for account in &accounts {
         let roles = list_account_roles(&http_client, &idc.region, &idc_token, &account.account_id)
@@ -511,6 +506,7 @@ async fn run_discover(
             })?;
 
         for role in &roles {
+            assignments.insert((account.account_id.clone(), role.role_name.clone()));
             let safe_name = sanitize_profile_name(&account.account_name);
             let name_part = if safe_name.is_empty() {
                 account.account_id.clone()
@@ -534,13 +530,14 @@ async fn run_discover(
 
             aws_config.set_profile(&AwsProfile {
                 name: profile_name.clone(),
-                credential_process: Some(format!(
-                    "\"{}\" credential aws --idc-application {} --account {} --permission-set \"{}\"",
-                    vouch_path.display(),
-                    idc.application_arn,
-                    account.account_id,
-                    role.role_name,
-                )),
+                credential_process: Some(
+                    crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+                        application_arn: Some(idc.application_arn.clone()),
+                        account: account.account_id.clone(),
+                        permission_set: role.role_name.clone(),
+                    }
+                    .render(&vouch_path),
+                ),
                 region: None,
                 output: Some("json".to_string()),
             });
@@ -557,25 +554,32 @@ async fn run_discover(
     // Entitlement pass — best-effort: failures are debug-logged only and
     // the permission-set results above still land.
     let user_email = mgmt_session.user_email;
-    let creds = std::sync::Arc::new(mgmt_session.credentials);
-    if let Err(err) = discover_entitlements(
-        EntitlementDiscovery {
-            http_client: &http_client,
-            idc,
-            management_role,
-            user_email: user_email.as_deref(),
-            creds,
-            vouch_path: &vouch_path,
-            profile_prefix,
-        },
+    let role_session_name = mgmt_session.role_session_name;
+    let ctx = DiscoveryContext {
+        http_client: &http_client,
+        idc,
+        management_role,
+        role_session_name: &role_session_name,
+        user_email: user_email.as_deref(),
+        creds: std::sync::Arc::new(mgmt_session.credentials),
+        vouch_path: &vouch_path,
+        profile_prefix,
+    };
+    let probed = match discover_entitlements(
+        &ctx,
         &mut aws_config,
         &mut created_count,
         &mut skipped_count,
     )
     .await
     {
-        tracing::debug!("entitlement discovery skipped: {err:#}");
-    }
+        Ok(probed) => probed,
+        Err(err) => {
+            tracing::debug!("entitlement discovery skipped: {err:#}");
+            BTreeSet::new()
+        }
+    };
+    validate_existing_profiles(&ctx, &aws_config, &assignments, &probed).await;
 
     if created_count > 0 {
         aws_config.save()?;
@@ -590,11 +594,14 @@ async fn run_discover(
     Ok(())
 }
 
-/// Inputs to the account access manager entitlement pass.
-struct EntitlementDiscovery<'a> {
+/// Shared inputs for the entitlement pass and the existing-profile sweep.
+struct DiscoveryContext<'a> {
     http_client: &'a reqwest::Client,
     idc: &'a AwsIdentityCenter,
     management_role: &'a str,
+    /// The management session's `RoleSessionName` (the JWT `sub`), reused
+    /// for probe hops so CloudTrail shows one session identity per human.
+    role_session_name: &'a str,
     user_email: Option<&'a str>,
     creds: std::sync::Arc<crate::integrations::aws::sts::StsCredentials>,
     vouch_path: &'a std::path::Path,
@@ -609,12 +616,15 @@ struct EntitlementDiscovery<'a> {
 /// identity store) are debug-logged and return `Ok`; real failures propagate
 /// for the caller's debug log. Only findings are user-visible: added/skipped
 /// profile lines, dropped invalid entitlements, and partial-failure warnings.
+///
+/// Returns the role ARNs whose assumability was probed, so the
+/// existing-profile sweep does not probe them again.
 async fn discover_entitlements(
-    input: EntitlementDiscovery<'_>,
+    input: &DiscoveryContext<'_>,
     aws_config: &mut AwsConfig,
     created: &mut u32,
     skipped: &mut u32,
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
     use crate::integrations::aws::account_access::{self, AamPrincipal};
     use crate::integrations::aws::{identitystore, sso_admin};
     use vouch_common::aws::Partition;
@@ -625,19 +635,19 @@ async fn discover_entitlements(
             "entitlement discovery skipped: account access manager is not available \
              in the {region} region's partition"
         );
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
 
     let Some(email) = input.user_email else {
         tracing::debug!("entitlement discovery skipped: server token has no email claim");
-        return Ok(());
+        return Ok(BTreeSet::new());
     };
 
     let instances = sso_admin::list_instances(input.http_client, region, &input.creds).await?;
     let Some(identity_store_id) = resolve_identity_store(&instances, &input.idc.application_arn)
     else {
         tracing::debug!("entitlement discovery skipped: could not resolve the identity store");
-        return Ok(());
+        return Ok(BTreeSet::new());
     };
 
     let user_id = match identitystore::get_user_id(
@@ -652,7 +662,7 @@ async fn discover_entitlements(
         Ok(user_id) => user_id,
         Err(err) if crate::exit_code::aws_error_code_matches(&err, "ResourceNotFoundException") => {
             tracing::debug!("entitlement discovery skipped: no Identity Center user for {email}");
-            return Ok(());
+            return Ok(BTreeSet::new());
         }
         Err(err) => return Err(err),
     };
@@ -670,7 +680,7 @@ async fn discover_entitlements(
         account_access::list_applications(input.http_client, region, &input.creds).await?;
     if applications.is_empty() {
         tracing::debug!("entitlement discovery: no account access manager application");
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
 
     let mut principals = vec![AamPrincipal::User(user_id)];
@@ -709,7 +719,7 @@ async fn discover_entitlements(
         }
     }
 
-    let mut entitled = std::collections::BTreeMap::new();
+    let mut entitled = BTreeMap::new();
     let mut failed: u32 = 0;
     let mut first_error: Option<anyhow::Error> = None;
     while let Some(joined) = join_set.join_next().await {
@@ -753,22 +763,33 @@ async fn discover_entitlements(
         if failed == 0 {
             tracing::debug!("entitlement discovery: no entitlements for {email}");
         }
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
 
-    write_entitled_profiles(entitled.values(), &input, aws_config, created, skipped);
-    Ok(())
+    Ok(write_entitled_profiles(entitled.values(), input, aws_config, created, skipped).await)
 }
 
 /// Validate each entitled role and append its `--role`/`--via` profile,
 /// updating the shared discovery counters.
-fn write_entitled_profiles<'a>(
+///
+/// Every entitled role — candidate or already configured — is probed for
+/// assumability on every pass (the entitlement map does not imply the role
+/// trusts the management role, and a trust statement can be added or
+/// removed at any time). A new profile is written only when the probe does
+/// not confirm a denial, so `~/.aws/config` never gains a dead entry; an
+/// existing profile that fails the probe is reported but kept — removing
+/// operator config is not discovery's call.
+///
+/// Returns the role ARNs that were probed.
+async fn write_entitled_profiles<'a>(
     roles: impl Iterator<Item = &'a crate::integrations::aws::account_access::EntitledRole>,
-    input: &EntitlementDiscovery<'_>,
+    input: &DiscoveryContext<'_>,
     aws_config: &mut AwsConfig,
     created: &mut u32,
     skipped: &mut u32,
-) {
+) -> BTreeSet<String> {
+    // Validate names and collisions first, collecting the roles to probe.
+    let mut targets = Vec::new();
     for role in roles {
         let Some(profile_name) = entitled_role_profile_name(role, input.profile_prefix) else {
             tr_println!(
@@ -781,13 +802,12 @@ fn write_entitled_profiles<'a>(
         if let Some(existing) = aws_config.get_profile(&profile_name) {
             match classify_name_collision(&existing, &role.role_arn) {
                 // A prior discovery run already configured this role —
-                // benign, idempotent re-run.
-                NameCollision::SameRole => {
-                    tr_println!(
-                        "setup-aws-discover-skipped",
-                        profile = profile_name.as_str()
-                    );
-                }
+                // re-validate that the assumption still works.
+                NameCollision::SameRole => targets.push(ProbeTarget {
+                    role_arn: role.role_arn.clone(),
+                    profile_name,
+                    disposition: Disposition::Existing,
+                }),
                 // Cross-mechanism collision: the existing profile vends
                 // something else, and the entitlement was NOT configured.
                 NameCollision::Foreign => {
@@ -796,27 +816,301 @@ fn write_entitled_profiles<'a>(
                         profile = profile_name.as_str(),
                         role_arn = role.role_arn.as_str()
                     );
+                    *skipped = skipped.saturating_add(1);
                 }
             }
-            *skipped = skipped.saturating_add(1);
             continue;
         }
-        aws_config.set_profile(&AwsProfile {
-            name: profile_name.clone(),
-            credential_process: Some(sts_credential_process(
-                input.vouch_path,
-                &role.role_arn,
-                input.management_role,
-            )),
-            region: None,
-            output: Some("json".to_string()),
+        targets.push(ProbeTarget {
+            role_arn: role.role_arn.clone(),
+            profile_name,
+            disposition: Disposition::Added,
         });
+    }
+
+    // Probe concurrently, then report and write in input order. A confirmed
+    // denial gates the write of a new profile.
+    let mut probed = BTreeSet::new();
+    for (target, probe) in probe_targets(input, targets).await {
+        let usable = report_probe_outcome(input, &target, &probe);
+        match target.disposition {
+            Disposition::Added if usable => {
+                aws_config.set_profile(&AwsProfile {
+                    name: target.profile_name.clone(),
+                    credential_process: Some(sts_credential_process(
+                        input.vouch_path,
+                        &target.role_arn,
+                        input.management_role,
+                    )),
+                    region: None,
+                    output: Some("json".to_string()),
+                });
+                *created = created.saturating_add(1);
+            }
+            Disposition::Added | Disposition::Existing => {
+                *skipped = skipped.saturating_add(1);
+            }
+        }
+        probed.insert(target.role_arn);
+    }
+    probed
+}
+
+/// Whether the profile being reported was written this pass or already
+/// existed from a prior run — selects the status-line wording only.
+#[derive(Clone, Copy)]
+enum Disposition {
+    Added,
+    Existing,
+}
+
+/// A role profile awaiting an assumability probe.
+struct ProbeTarget {
+    role_arn: String,
+    profile_name: String,
+    disposition: Disposition,
+}
+
+/// Probe each target's chained `AssumeRole` hop — the same call vending
+/// performs, with the region resolved the same way vending resolves it —
+/// with bounded concurrency (the same fan-out shape as the entitlement
+/// queries above). Results return in input order so the printed report
+/// stays deterministic. One CloudTrail `AssumeRole` event per target; the
+/// 900-second minimum duration keeps the unused probe session as short as
+/// AWS allows.
+async fn probe_targets(
+    input: &DiscoveryContext<'_>,
+    targets: Vec<ProbeTarget>,
+) -> Vec<(
+    ProbeTarget,
+    Result<crate::integrations::aws::sts::StsCredentials>,
+)> {
+    use crate::integrations::aws::sts::{AssumeRoleRequest, assume_role};
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut join_set = tokio::task::JoinSet::new();
+    for (index, target) in targets.iter().enumerate() {
+        let semaphore = std::sync::Arc::clone(&semaphore);
+        let http_client = input.http_client.clone();
+        let creds = std::sync::Arc::clone(&input.creds);
+        let role_session_name = input.role_session_name.to_string();
+        let role_arn = target.role_arn.clone();
+        join_set.spawn(async move {
+            let probe = async {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .context("probe semaphore closed")?;
+                let region = crate::integrations::aws::resolve_region_with_fallback(&role_arn)?;
+                assume_role(AssumeRoleRequest {
+                    http_client: &http_client,
+                    role_arn: &role_arn,
+                    role_session_name: &role_session_name,
+                    region: &region,
+                    source_creds: &creds,
+                    session_policy_names: &[],
+                    session_policy: None,
+                    identity_context: None,
+                    duration_seconds: 900,
+                })
+                .await
+            };
+            (index, probe.await)
+        });
+    }
+
+    let mut results = BTreeMap::new();
+    while let Some(joined) = join_set.join_next().await {
+        // A panicked task leaves its slot empty and reports as inconclusive.
+        if let Ok((index, result)) = joined {
+            results.insert(index, result);
+        }
+    }
+    targets
+        .into_iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let result = results
+                .remove(&index)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("probe task failed")));
+            (target, result)
+        })
+        .collect()
+}
+
+/// Print the probe outcome for one profile.
+///
+/// Returns whether the profile should exist: `false` only on a confirmed
+/// AWS access denial. Inconclusive probes (throttling, network, region
+/// resolution) claim nothing and return `true` — a transient fault must
+/// not drop profiles.
+fn report_probe_outcome(
+    input: &DiscoveryContext<'_>,
+    target: &ProbeTarget,
+    probe: &Result<crate::integrations::aws::sts::StsCredentials>,
+) -> bool {
+    let profile_name = target.profile_name.as_str();
+    let role_arn = target.role_arn.as_str();
+    // Denial detection: signature/clock-skew 403s classify as network
+    // errors, not denials — see `CliError::is_aws_access_denied`.
+    match (target.disposition, probe) {
+        (Disposition::Added, Ok(_)) => {
+            tr_println!(
+                "setup-aws-entitlements-added-verified",
+                profile = profile_name,
+                role_arn = role_arn
+            );
+            true
+        }
+        (Disposition::Existing, Ok(_)) => {
+            tr_println!(
+                "setup-aws-entitlements-existing-verified",
+                profile = profile_name,
+                role_arn = role_arn
+            );
+            true
+        }
+        (Disposition::Added, Err(err)) if crate::exit_code::aws_access_denied(err) => {
+            tr_println!(
+                "setup-aws-entitlements-not-assumable-skipped",
+                profile = profile_name,
+                role_arn = role_arn
+            );
+            print_trust_remediation(input);
+            tr_println!("setup-aws-entitlements-rerun-hint");
+            false
+        }
+        (Disposition::Existing, Err(err)) if crate::exit_code::aws_access_denied(err) => {
+            tr_println!(
+                "setup-aws-entitlements-existing-trust-missing",
+                profile = profile_name,
+                role_arn = role_arn
+            );
+            print_trust_remediation(input);
+            false
+        }
+        // Throttling or network says nothing about trust — claim nothing.
+        (Disposition::Added, Err(err)) => {
+            tracing::debug!("entitlement probe inconclusive for {role_arn}: {err:#}");
+            tr_println!(
+                "setup-aws-discover-added",
+                profile = profile_name,
+                role_arn = role_arn
+            );
+            true
+        }
+        (Disposition::Existing, Err(err)) => {
+            tracing::debug!("entitlement probe inconclusive for {role_arn}: {err:#}");
+            tr_println!("setup-aws-discover-skipped", profile = profile_name);
+            true
+        }
+    }
+}
+
+/// Print the trust-statement remediation for a denied probe.
+fn print_trust_remediation(input: &DiscoveryContext<'_>) {
+    use crate::commands::credential::aws::{chained_role_trust_statement, source_identity_pattern};
+
+    let statement = chained_role_trust_statement(
+        input.management_role,
+        &source_identity_pattern(input.role_session_name),
+    );
+    tr_println!(
+        "setup-aws-entitlements-trust-remediation",
+        management_role = input.management_role,
+        statement = statement.as_str()
+    );
+}
+
+/// Health-check every Vouch-managed profile that discovery did not already
+/// touch this run: role-carrying profiles are probed through the management
+/// session (the same hop vending uses); Identity Center profiles are
+/// checked against the assignments the portal returned. Report-only —
+/// nothing is written or removed.
+async fn validate_existing_profiles(
+    ctx: &DiscoveryContext<'_>,
+    aws_config: &AwsConfig,
+    assignments: &BTreeSet<(String, String)>,
+    probed: &BTreeSet<String>,
+) {
+    use crate::integrations::aws::CredentialProcessLine;
+
+    let mut checked: u32 = 0;
+    let mut issues: u32 = 0;
+    let mut seen = probed.clone();
+    let mut targets = Vec::new();
+    for profile in aws_config.find_all_vouch_profiles() {
+        let Some(line) = profile
+            .credential_process
+            .as_deref()
+            .and_then(CredentialProcessLine::parse)
+        else {
+            continue;
+        };
+        match line {
+            CredentialProcessLine::Role { role_arn, via } => {
+                if !seen.insert(role_arn.clone()) {
+                    continue;
+                }
+                // A profile pinned to a different org's management role
+                // cannot be probed with this run's session.
+                if via.is_some_and(|via| via != ctx.management_role) {
+                    tracing::debug!(
+                        "sweep skipped {}: chained via a different management role",
+                        profile.name
+                    );
+                    continue;
+                }
+                checked = checked.saturating_add(1);
+                if role_arn == ctx.management_role {
+                    // The session in hand is this role — trivially assumable.
+                    tr_println!(
+                        "setup-aws-entitlements-existing-verified",
+                        profile = profile.name.as_str(),
+                        role_arn = role_arn.as_str()
+                    );
+                    continue;
+                }
+                targets.push(ProbeTarget {
+                    role_arn,
+                    profile_name: profile.name,
+                    disposition: Disposition::Existing,
+                });
+            }
+            CredentialProcessLine::IdentityCenter {
+                application_arn,
+                account,
+                permission_set,
+            } => {
+                // An absent `--idc-application` resolves to the configured
+                // org at vend time — treat it as this org's profile.
+                if application_arn.is_some_and(|app| app != ctx.idc.application_arn) {
+                    continue;
+                }
+                checked = checked.saturating_add(1);
+                if !assignments.contains(&(account.clone(), permission_set.clone())) {
+                    issues = issues.saturating_add(1);
+                    tr_println!(
+                        "setup-aws-sweep-assignment-stale",
+                        profile = profile.name.as_str(),
+                        account = account.as_str(),
+                        permission_set = permission_set.as_str()
+                    );
+                }
+            }
+        }
+    }
+    for (target, probe) in probe_targets(ctx, targets).await {
+        if !report_probe_outcome(ctx, &target, &probe) {
+            issues = issues.saturating_add(1);
+        }
+    }
+    if checked > 0 {
         tr_println!(
-            "setup-aws-discover-added",
-            profile = profile_name.as_str(),
-            role_arn = role.role_arn.as_str()
+            "setup-aws-sweep-summary",
+            checked = checked,
+            issues = issues
         );
-        *created = created.saturating_add(1);
     }
 }
 
@@ -832,12 +1126,24 @@ enum NameCollision {
 }
 
 fn classify_name_collision(existing: &AwsProfile, role_arn: &str) -> NameCollision {
-    let same_role = existing
+    use crate::integrations::aws::CredentialProcessLine;
+
+    let same_role = match existing
         .credential_process
         .as_deref()
-        .and_then(crate::integrations::aws::extract_role_from_credential_process)
-        .as_deref()
-        == Some(role_arn);
+        .and_then(CredentialProcessLine::parse)
+    {
+        Some(CredentialProcessLine::Role {
+            role_arn: existing_role,
+            via: _,
+        }) => existing_role == role_arn,
+        Some(CredentialProcessLine::IdentityCenter {
+            application_arn: _,
+            account: _,
+            permission_set: _,
+        })
+        | None => false,
+    };
     if same_role {
         NameCollision::SameRole
     } else {
@@ -963,33 +1269,21 @@ mod tests {
     #[test]
     fn test_discover_credential_process_embeds_idc_application() {
         let vouch_path = std::path::Path::new("/usr/local/bin/vouch");
-        let app_arn = "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz";
-        let account_id = "111111111111";
-        let role_name = "ReadOnly";
 
-        let credential_process = format!(
-            "\"{}\" credential aws --idc-application {} --account {} --permission-set \"{}\"",
-            vouch_path.display(),
-            app_arn,
-            account_id,
-            role_name,
-        );
+        let credential_process = crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+            application_arn: Some(
+                "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz".to_string(),
+            ),
+            account: "111111111111".to_string(),
+            permission_set: "ReadOnly".to_string(),
+        }
+        .render(vouch_path);
 
-        assert!(
-            credential_process.contains("--idc-application"),
-            "credential_process must include --idc-application: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(app_arn),
-            "credential_process must embed the application ARN: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(&format!("--account {account_id}")),
-            "credential_process must include --account: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(&format!("--permission-set \"{role_name}\"")),
-            "credential_process must include --permission-set: {credential_process}"
+        assert_eq!(
+            credential_process,
+            "\"/usr/local/bin/vouch\" credential aws \
+             --idc-application arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz \
+             --account 111111111111 --permission-set ReadOnly"
         );
     }
 
