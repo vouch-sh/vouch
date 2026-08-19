@@ -1268,33 +1268,21 @@ mod tests {
     #[test]
     fn test_discover_credential_process_embeds_idc_application() {
         let vouch_path = std::path::Path::new("/usr/local/bin/vouch");
-        let app_arn = "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz";
-        let account_id = "111111111111";
-        let role_name = "ReadOnly";
 
-        let credential_process = format!(
-            "\"{}\" credential aws --idc-application {} --account {} --permission-set \"{}\"",
-            vouch_path.display(),
-            app_arn,
-            account_id,
-            role_name,
-        );
+        let credential_process = crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+            application_arn: Some(
+                "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz".to_string(),
+            ),
+            account: "111111111111".to_string(),
+            permission_set: "ReadOnly".to_string(),
+        }
+        .render(vouch_path);
 
-        assert!(
-            credential_process.contains("--idc-application"),
-            "credential_process must include --idc-application: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(app_arn),
-            "credential_process must embed the application ARN: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(&format!("--account {account_id}")),
-            "credential_process must include --account: {credential_process}"
-        );
-        assert!(
-            credential_process.contains(&format!("--permission-set \"{role_name}\"")),
-            "credential_process must include --permission-set: {credential_process}"
+        assert_eq!(
+            credential_process,
+            "\"/usr/local/bin/vouch\" credential aws \
+             --idc-application arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz \
+             --account 111111111111 --permission-set ReadOnly"
         );
     }
 
