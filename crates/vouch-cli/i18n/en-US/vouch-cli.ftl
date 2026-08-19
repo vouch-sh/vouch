@@ -1150,12 +1150,10 @@ setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
 setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
-setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (verified — the management role can assume it)
-setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } already exists (verified — the management role can assume it)
-setup-aws-entitlements-not-assumable-skipped =
-    Entitled role { $role_arn } is NOT assumable — profile [{ $profile }] was not written: the management role was denied sts:AssumeRole on this role.
-setup-aws-entitlements-existing-trust-missing =
-    Profile [{ $profile }] → { $role_arn } already exists but is NOT currently assumable: the management role was denied sts:AssumeRole on this role. The profile was kept.
+setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (assumable)
+setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } exists and is assumable
+setup-aws-entitlements-not-assumable-skipped = Role { $role_arn } is not assumable — profile [{ $profile }] was not written
+setup-aws-entitlements-existing-trust-missing = Profile [{ $profile }] → { $role_arn } exists but is not assumable — the profile was kept
 setup-aws-entitlements-trust-remediation =
     Ask an administrator to add this statement to the role's trust-policy Statement array:
 
