@@ -10,6 +10,8 @@
 //! - Identity Center: `--management-role <arn> --identity-center-application <arn>
 //!   --region <region> [--discover]` — stores org + IdC, optionally enumerates.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result};
 use inquire::{Confirm, InquireError, Select, Text};
 use vouch_cli::{tr, tr_args, tr_println};
@@ -491,8 +493,7 @@ async fn run_discover(
     let mut aws_config = load_or_create_aws_config()?;
     let mut created_count: u32 = 0;
     let mut skipped_count: u32 = 0;
-    let mut assignments: std::collections::BTreeSet<(String, String)> =
-        std::collections::BTreeSet::new();
+    let mut assignments: BTreeSet<(String, String)> = BTreeSet::new();
 
     for account in &accounts {
         let roles = list_account_roles(&http_client, &idc.region, &idc_token, &account.account_id)
@@ -575,7 +576,7 @@ async fn run_discover(
         Ok(probed) => probed,
         Err(err) => {
             tracing::debug!("entitlement discovery skipped: {err:#}");
-            std::collections::BTreeSet::new()
+            BTreeSet::new()
         }
     };
     validate_existing_profiles(&ctx, &aws_config, &assignments, &probed).await;
@@ -623,7 +624,7 @@ async fn discover_entitlements(
     aws_config: &mut AwsConfig,
     created: &mut u32,
     skipped: &mut u32,
-) -> Result<std::collections::BTreeSet<String>> {
+) -> Result<BTreeSet<String>> {
     use crate::integrations::aws::account_access::{self, AamPrincipal};
     use crate::integrations::aws::{identitystore, sso_admin};
     use vouch_common::aws::Partition;
@@ -634,19 +635,19 @@ async fn discover_entitlements(
             "entitlement discovery skipped: account access manager is not available \
              in the {region} region's partition"
         );
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(BTreeSet::new());
     }
 
     let Some(email) = input.user_email else {
         tracing::debug!("entitlement discovery skipped: server token has no email claim");
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(BTreeSet::new());
     };
 
     let instances = sso_admin::list_instances(input.http_client, region, &input.creds).await?;
     let Some(identity_store_id) = resolve_identity_store(&instances, &input.idc.application_arn)
     else {
         tracing::debug!("entitlement discovery skipped: could not resolve the identity store");
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(BTreeSet::new());
     };
 
     let user_id = match identitystore::get_user_id(
@@ -661,7 +662,7 @@ async fn discover_entitlements(
         Ok(user_id) => user_id,
         Err(err) if crate::exit_code::aws_error_code_matches(&err, "ResourceNotFoundException") => {
             tracing::debug!("entitlement discovery skipped: no Identity Center user for {email}");
-            return Ok(std::collections::BTreeSet::new());
+            return Ok(BTreeSet::new());
         }
         Err(err) => return Err(err),
     };
@@ -679,7 +680,7 @@ async fn discover_entitlements(
         account_access::list_applications(input.http_client, region, &input.creds).await?;
     if applications.is_empty() {
         tracing::debug!("entitlement discovery: no account access manager application");
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(BTreeSet::new());
     }
 
     let mut principals = vec![AamPrincipal::User(user_id)];
@@ -718,7 +719,7 @@ async fn discover_entitlements(
         }
     }
 
-    let mut entitled = std::collections::BTreeMap::new();
+    let mut entitled = BTreeMap::new();
     let mut failed: u32 = 0;
     let mut first_error: Option<anyhow::Error> = None;
     while let Some(joined) = join_set.join_next().await {
@@ -762,7 +763,7 @@ async fn discover_entitlements(
         if failed == 0 {
             tracing::debug!("entitlement discovery: no entitlements for {email}");
         }
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(BTreeSet::new());
     }
 
     Ok(write_entitled_profiles(entitled.values(), input, aws_config, created, skipped).await)
@@ -786,7 +787,7 @@ async fn write_entitled_profiles<'a>(
     aws_config: &mut AwsConfig,
     created: &mut u32,
     skipped: &mut u32,
-) -> std::collections::BTreeSet<String> {
+) -> BTreeSet<String> {
     // Validate names and collisions first, collecting the roles to probe.
     let mut targets = Vec::new();
     for role in roles {
@@ -829,7 +830,7 @@ async fn write_entitled_profiles<'a>(
 
     // Probe concurrently, then report and write in input order. A confirmed
     // denial gates the write of a new profile.
-    let mut probed = std::collections::BTreeSet::new();
+    let mut probed = BTreeSet::new();
     for (target, probe) in probe_targets(input, targets).await {
         let usable = report_probe_outcome(input, &target, &probe);
         match target.disposition {
@@ -918,7 +919,7 @@ async fn probe_targets(
         });
     }
 
-    let mut results = std::collections::BTreeMap::new();
+    let mut results = BTreeMap::new();
     while let Some(joined) = join_set.join_next().await {
         // A panicked task leaves its slot empty and reports as inconclusive.
         if let Ok((index, result)) = joined {
@@ -1029,8 +1030,8 @@ fn print_trust_remediation(input: &DiscoveryContext<'_>) {
 async fn validate_existing_profiles(
     ctx: &DiscoveryContext<'_>,
     aws_config: &AwsConfig,
-    assignments: &std::collections::BTreeSet<(String, String)>,
-    probed: &std::collections::BTreeSet<String>,
+    assignments: &BTreeSet<(String, String)>,
+    probed: &BTreeSet<String>,
 ) {
     use crate::integrations::aws::CredentialProcessLine;
 
