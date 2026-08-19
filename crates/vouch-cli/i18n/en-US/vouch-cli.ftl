@@ -814,7 +814,10 @@ aws-err-target-role-trust-missing =
 
     Keep the aws:SourceIdentity condition and adjust its pattern to your organization's email domain — without it, anyone who can assume the management role could assume this role.
 
-    Also verify the management role { $management_role } has an IAM policy allowing sts:AssumeRole on this role.
+    Also verify the management role { $management_role } has an IAM policy allowing:
+
+    { $policy }
+
     If the trust statement is already present, the denial may instead come from a service control policy, a permissions boundary, an aws:SourceIdentity condition that does not match your identity, or a role that does not currently exist.
 
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
@@ -1147,6 +1150,7 @@ setup-aws-added-profile-block =
     To configure AWS role trust policy, see:
       https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
+setup-aws-idc-existing-verified = Profile [{ $profile }] → assumable through AWS IAM Identity Center ({ $account } / { $permission_set })
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
 setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
@@ -1160,7 +1164,10 @@ setup-aws-entitlements-trust-remediation =
     { $statement }
 
     Keep the aws:SourceIdentity condition and adjust its pattern to your organization's email domain.
-    Also verify the management role { $management_role } has an IAM policy allowing sts:AssumeRole on this role.
+    Also verify the management role { $management_role } has an IAM policy allowing:
+
+    { $policy }
+
     AWS returns the same denial when the role does not currently exist (for example, infrastructure that is provisioned on demand).
 setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
 setup-aws-sweep-assignment-stale = Profile [{ $profile }] — its Identity Center assignment ({ $account } / { $permission_set }) no longer exists. The profile was kept; remove it manually if unwanted.

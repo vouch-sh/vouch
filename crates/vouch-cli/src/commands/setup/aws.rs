@@ -520,9 +520,15 @@ async fn run_discover(
             };
 
             if aws_config.profile_exists(&profile_name) {
+                // This loop iterates the portal's assignment list, so an
+                // existing profile reached here is verified vendable — the
+                // portal authorizes GetRoleCredentials against the same
+                // assignments (no live probe needed, unlike role chaining).
                 tr_println!(
-                    "setup-aws-discover-skipped",
-                    profile = profile_name.as_str()
+                    "setup-aws-idc-existing-verified",
+                    profile = profile_name.as_str(),
+                    account = account.account_id.as_str(),
+                    permission_set = role.role_name.as_str()
                 );
                 skipped_count = skipped_count.saturating_add(1);
                 continue;
@@ -976,7 +982,7 @@ fn report_probe_outcome(
                 profile = profile_name,
                 role_arn = role_arn
             );
-            print_trust_remediation(input);
+            print_trust_remediation(input, role_arn);
             tr_println!("setup-aws-entitlements-rerun-hint");
             false
         }
@@ -986,7 +992,7 @@ fn report_probe_outcome(
                 profile = profile_name,
                 role_arn = role_arn
             );
-            print_trust_remediation(input);
+            print_trust_remediation(input, role_arn);
             false
         }
         // Throttling or network says nothing about trust — claim nothing.
@@ -1008,17 +1014,21 @@ fn report_probe_outcome(
 }
 
 /// Print the trust-statement remediation for a denied probe.
-fn print_trust_remediation(input: &DiscoveryContext<'_>) {
-    use crate::commands::credential::aws::{chained_role_trust_statement, source_identity_pattern};
+fn print_trust_remediation(input: &DiscoveryContext<'_>, target_role_arn: &str) {
+    use crate::commands::credential::aws::{
+        chained_role_trust_statement, management_role_policy_statement, source_identity_pattern,
+    };
 
     let statement = chained_role_trust_statement(
         input.management_role,
         &source_identity_pattern(input.role_session_name),
     );
+    let policy = management_role_policy_statement(target_role_arn);
     tr_println!(
         "setup-aws-entitlements-trust-remediation",
         management_role = input.management_role,
-        statement = statement.as_str()
+        statement = statement.as_str(),
+        policy = policy.as_str()
     );
 }
 
