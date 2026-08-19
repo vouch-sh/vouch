@@ -506,11 +506,13 @@ async fn assume_role_via_management_chain(
                 input.mgmt_role_arn,
                 &source_identity_pattern(input.session),
             );
+            let policy = management_role_policy_statement(input.role_arn);
             Err(err.context(tr_args!(
                 "aws-err-target-role-trust-missing",
                 role_arn = input.role_arn,
                 management_role = input.mgmt_role_arn,
-                statement = statement.as_str()
+                statement = statement.as_str(),
+                policy = policy.as_str()
             )))
         }
         Err(err) => Err(err.context(tr!("err-failed-assume-target-role-via-chaining"))),
@@ -557,6 +559,22 @@ pub(crate) fn chained_role_trust_statement(
         "Condition": {
             "StringLike": { "aws:SourceIdentity": source_identity }
         }
+    }))
+    .unwrap_or_default()
+}
+
+/// The identity-policy statement the management role needs so it can
+/// perform the chained hop into the target role.
+///
+/// The action triple matches the trust statement (and the agent-restricted
+/// session policy): the chained `AssumeRole` propagates the session's
+/// source identity, so `sts:SetSourceIdentity` and `sts:TagSession` are
+/// exercised alongside `sts:AssumeRole`.
+pub(crate) fn management_role_policy_statement(target_role_arn: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "Effect": "Allow",
+        "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
+        "Resource": target_role_arn
     }))
     .unwrap_or_default()
 }
@@ -1226,6 +1244,20 @@ mod tests {
         // This Bool condition key only exists for AssumeRoleWithWebIdentity
         // and would never match on the chained AssumeRole hop.
         assert!(!statement.contains("RoleAuthorizedByIdp"));
+    }
+
+    #[test]
+    fn test_management_role_policy_statement_exact_json() {
+        let statement = management_role_policy_statement("arn:aws:iam::999999999999:role/target");
+        let parsed: serde_json::Value = serde_json::from_str(&statement).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "Effect": "Allow",
+                "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
+                "Resource": "arn:aws:iam::999999999999:role/target"
+            })
+        );
     }
 
     #[test]
