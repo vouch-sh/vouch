@@ -48,7 +48,7 @@ struct RegistrationResponse {
     client_id: String,
     /// Token for managing the registration (RFC 7592).
     #[serde(default)]
-    registration_access_token: Option<String>,
+    registration_access_token: Option<secrecy::SecretString>,
     /// URI for reading/updating/deleting the registration (RFC 7592).
     #[serde(default)]
     registration_client_uri: Option<String>,
@@ -193,7 +193,7 @@ pub struct RegistrationResult {
     /// Server-assigned client identifier.
     pub client_id: String,
     /// Token for managing the registration (RFC 7592).
-    pub registration_access_token: Option<String>,
+    pub registration_access_token: Option<secrecy::SecretString>,
     /// URI for reading/updating/deleting the registration (RFC 7592).
     pub registration_client_uri: Option<String>,
     /// Key ID of the DPoP key used for registration.

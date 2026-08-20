@@ -31,7 +31,7 @@ const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 struct CreateTokenResponse {
     /// The Identity Center access token (presented to the SSO Portal via the
     /// `x-amz-sso_bearer_token` header).
-    access_token: String,
+    access_token: SecretString,
     /// Present when the application has trusted identity propagation enabled.
     aws_additional_details: Option<AwsAdditionalDetails>,
 }
@@ -106,7 +106,7 @@ pub(crate) async fn create_token_with_iam(
         .context(tr!("err-failed-parse-createtokenwithiam-response"))?;
 
     Ok(IdcTokenExchange {
-        access_token: SecretString::from(parsed.access_token),
+        access_token: parsed.access_token,
         identity_context: parsed
             .aws_additional_details
             .and_then(|d| d.identity_context)
@@ -121,6 +121,7 @@ pub(crate) async fn create_token_with_iam(
 )]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_create_token_response_deserialization() {
@@ -135,7 +136,7 @@ mod tests {
         }"#;
 
         let parsed: CreateTokenResponse = serde_json::from_str(json).expect("valid JSON");
-        assert_eq!(parsed.access_token, "ic-access-token-value");
+        assert_eq!(parsed.access_token.expose_secret(), "ic-access-token-value");
         assert!(
             parsed.aws_additional_details.is_none(),
             "identity context must be None when awsAdditionalDetails is absent"

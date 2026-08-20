@@ -30,8 +30,8 @@ struct RoleCredentialsResponse {
 #[serde(rename_all = "camelCase")]
 struct PortalRoleCredentials {
     access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
+    secret_access_key: SecretString,
+    session_token: SecretString,
     /// Expiry as Unix epoch milliseconds.
     expiration: i64,
 }
@@ -277,8 +277,8 @@ pub(crate) async fn get_role_credentials(
 
     Ok(StsCredentials {
         access_key_id: resp.role_credentials.access_key_id,
-        secret_access_key: SecretString::from(resp.role_credentials.secret_access_key),
-        session_token: SecretString::from(resp.role_credentials.session_token),
+        secret_access_key: resp.role_credentials.secret_access_key,
+        session_token: resp.role_credentials.session_token,
         expiration,
     })
 }

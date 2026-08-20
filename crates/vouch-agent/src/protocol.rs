@@ -1,23 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JSON-RPC 2.0 protocol types for agent IPC.
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// JSON-RPC protocol version.
 pub const JSONRPC_VERSION: &str = "2.0";
-
-/// Serialize a `SecretString` by exposing the secret value.
-///
-/// Required because `secrecy` intentionally does not implement `Serialize`
-/// for `SecretString` to prevent accidental leakage. This explicit serializer
-/// is only used for IPC over a Unix socket, not for logging or external APIs.
-fn serialize_secret_string<S: serde::Serializer>(
-    secret: &SecretString,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(secret.expose_secret())
-}
 
 /// Supported JSON-RPC methods for agent IPC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,7 +136,7 @@ pub const CACHE_MISS: i32 = -32002;
 #[derive(Serialize, Deserialize)]
 pub struct StoreSessionParams {
     /// JWT token (redacted in Debug output via `SecretString`).
-    #[serde(serialize_with = "serialize_secret_string")]
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
     pub token: SecretString,
     /// User's email.
     pub user_email: String,

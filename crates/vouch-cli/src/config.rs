@@ -6,7 +6,7 @@
 //! stale registrations causing `invalid_client` errors.
 
 use anyhow::{Context, Result};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -260,11 +260,11 @@ struct ConfigFile {
     #[serde(default, skip_serializing)]
     server_url: Option<String>,
     #[serde(default, skip_serializing)]
-    token: Option<String>,
+    token: Option<SecretString>,
     #[serde(default, skip_serializing)]
     client_id: Option<String>,
     #[serde(default, skip_serializing)]
-    registration_access_token: Option<String>,
+    registration_access_token: Option<SecretString>,
     #[serde(default, skip_serializing)]
     registration_client_uri: Option<String>,
     #[serde(default, skip_serializing)]
@@ -276,12 +276,22 @@ struct ConfigFile {
 struct ServerConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
+    /// Session token, persisted to `config.json` by design (0600 perms).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "vouch_common::serialize_opt_secret_string"
+    )]
+    token: Option<SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    registration_access_token: Option<String>,
+    /// RFC 7592 management token, persisted to `config.json` by design.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "vouch_common::serialize_opt_secret_string"
+    )]
+    registration_access_token: Option<SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registration_client_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,10 +791,9 @@ impl From<ConfigFile> for Config {
         {
             let sc = ServerConfig {
                 server_url: url.clone(),
-                token: std::mem::take(&mut file.token).map(SecretString::from),
+                token: std::mem::take(&mut file.token),
                 client_id: std::mem::take(&mut file.client_id),
-                registration_access_token: std::mem::take(&mut file.registration_access_token)
-                    .map(SecretString::from),
+                registration_access_token: std::mem::take(&mut file.registration_access_token),
                 registration_client_uri: std::mem::take(&mut file.registration_client_uri),
                 dpop_key_id: std::mem::take(&mut file.dpop_key_id),
                 registration_verified_at: None, // field did not exist in legacy format
@@ -835,9 +844,9 @@ impl From<ServerConfigFile> for ServerConfig {
     fn from(mut scf: ServerConfigFile) -> Self {
         Self {
             server_url: scf.server_url.take().unwrap_or_default(),
-            token: scf.token.take().map(SecretString::from),
+            token: scf.token.take(),
             client_id: scf.client_id.take(),
-            registration_access_token: scf.registration_access_token.take().map(SecretString::from),
+            registration_access_token: scf.registration_access_token.take(),
             registration_client_uri: scf.registration_client_uri.take(),
             dpop_key_id: scf.dpop_key_id.take(),
             registration_verified_at: scf.registration_verified_at.take(),
@@ -888,12 +897,9 @@ impl From<&ServerConfig> for ServerConfigFile {
     fn from(sc: &ServerConfig) -> Self {
         Self {
             server_url: Some(sc.server_url.clone()),
-            token: sc.token.as_ref().map(|s| s.expose_secret().to_string()),
+            token: sc.token.clone(),
             client_id: sc.client_id.clone(),
-            registration_access_token: sc
-                .registration_access_token
-                .as_ref()
-                .map(|s| s.expose_secret().to_string()),
+            registration_access_token: sc.registration_access_token.clone(),
             registration_client_uri: sc.registration_client_uri.clone(),
             dpop_key_id: sc.dpop_key_id.clone(),
             registration_verified_at: sc.registration_verified_at.clone(),

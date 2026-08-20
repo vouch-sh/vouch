@@ -58,7 +58,7 @@ struct ConsoleCreds {
 #[derive(Deserialize)]
 struct SigninTokenResponse {
     #[serde(rename = "SigninToken")]
-    signin_token: String,
+    signin_token: SecretString,
 }
 
 /// Obtain console credentials via the Identity Center path.
@@ -240,7 +240,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         .append_pair("Action", "login")
         .append_pair("Issuer", server)
         .append_pair("Destination", console_url)
-        .append_pair("SigninToken", &token_resp.signin_token);
+        .append_pair("SigninToken", token_resp.signin_token.expose_secret());
 
     // Open browser (print URL only as fallback)
     let login_str = login_url.as_str();
@@ -313,7 +313,7 @@ mod tests {
     fn test_signin_token_response_deserialize() {
         let json = r#"{"SigninToken": "abc123"}"#;
         let resp: SigninTokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.signin_token, "abc123");
+        assert_eq!(resp.signin_token.expose_secret(), "abc123");
     }
 
     #[test]

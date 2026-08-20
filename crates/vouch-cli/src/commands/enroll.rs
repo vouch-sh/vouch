@@ -243,7 +243,7 @@ async fn register_fapi_client_open(
         config.set_server_url(&url);
         config.set_client_id(&result.client_id);
         if let Some(ref rat) = result.registration_access_token {
-            config.set_registration_access_token(rat);
+            config.set_registration_access_token(secrecy::ExposeSecret::expose_secret(rat));
         }
         if let Some(ref uri) = result.registration_client_uri {
             config.set_registration_client_uri(uri);

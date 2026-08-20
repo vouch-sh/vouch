@@ -98,7 +98,7 @@ async fn revoke_on_server(config: &Config) {
     let form = serde_urlencoded::to_string([
         ("token", token.expose_secret()),
         ("client_id", client_id),
-        ("client_assertion", assertion.assertion.as_str()),
+        ("client_assertion", assertion.assertion.expose_secret()),
         ("client_assertion_type", assertion.assertion_type),
     ]);
 
