@@ -1801,3 +1801,260 @@ fn custom_policy(name: &str, policy_text: &str) -> db::CustomPosturePolicy {
         updated_at: jiff::Timestamp::now(),
     }
 }
+
+// ============================================================
+// Deny attribution: metrics label vs. audit policy name
+// ============================================================
+
+/// A custom policy deny must record the actual policy name for the audit
+/// record (not the generic "custom" label), while metrics keep "custom" to
+/// avoid cardinality explosion from unbounded admin-chosen names.
+#[test]
+fn test_deny_attribution_custom_uses_name_for_audit() {
+    let (metrics_label, audit_policy) = deny_attribution(&Some(engine::DenyingPolicy::Custom {
+        name: "Corporate Security Policy".to_string(),
+    }));
+    assert_eq!(
+        metrics_label, "custom",
+        "metrics label for custom policies is the generic 'custom' \
+         (cardinality control)"
+    );
+    assert_eq!(
+        audit_policy, "Corporate Security Policy",
+        "audit record must carry the actual custom policy name, not 'custom'"
+    );
+}
+
+/// A preconfigured policy deny uses the slug for both metrics and audit —
+/// the slug is a bounded, low-cardinality identifier that is also specific
+/// enough for admin identification.
+#[test]
+fn test_deny_attribution_preconfigured_uses_slug_for_both() {
+    let (metrics_label, audit_policy) = deny_attribution(&Some(
+        engine::DenyingPolicy::Preconfigured(PreconfiguredSlug::DiskEncryption),
+    ));
+    assert_eq!(metrics_label, "disk_encryption");
+    assert_eq!(audit_policy, "disk_encryption");
+}
+
+/// An unattributed deny (no determining rule found) uses "unattributed"
+/// for both metrics and audit.
+#[test]
+fn test_deny_attribution_unattributed_uses_label_for_both() {
+    let (metrics_label, audit_policy) = deny_attribution(&None);
+    assert_eq!(metrics_label, "unattributed");
+    assert_eq!(audit_policy, "unattributed");
+}
+
+/// Read back the single `policy_denied` audit event for a user and return
+/// its parsed JSON data. Panics if there is not exactly one event.
+async fn single_denial_audit_data(state: &crate::AppState, user_id: &str) -> serde_json::Value {
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["policy_denied".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("audit query");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one policy_denied audit event, got {}",
+        events.len()
+    );
+    serde_json::from_str(&events[0].data).expect("audit data is valid JSON")
+}
+
+/// When a custom posture policy denies during token issuance, the
+/// `policy_denied` audit event must carry the actual policy name — not the
+/// generic "custom" label. This is the end-to-end regression for the
+/// audit-log policy-name bug: `authorize_decision` writes the audit record
+/// through `record_denial`, and the record's `policy` field is what admins
+/// see in the audit log.
+#[tokio::test]
+async fn test_authorize_decision_records_custom_policy_name_in_audit() {
+    let state = crate::test_utils::test_app_state().await;
+
+    // A custom posture policy that requires disk encryption. Minimal
+    // posture does not have it, so this policy denies.
+    let custom = vec![custom_policy(
+        "Corporate Security Policy",
+        &requirement("context.device.disk_encryption_enabled"),
+    )];
+    let posture = minimal_posture();
+    let result = authorize_decision(
+        &state,
+        DecisionRequest {
+            org_id: "org-1",
+            user_id: "user-1",
+            user_email: "alice@example.com",
+            kind: DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "test-client",
+            },
+            os: None,
+        },
+        &[],
+        &custom,
+    )
+    .await;
+    assert!(result.is_err(), "minimal posture must be denied");
+
+    let data = single_denial_audit_data(&state, "user-1").await;
+    assert_eq!(
+        data["policy"].as_str(),
+        Some("Corporate Security Policy"),
+        "audit record must carry the actual custom policy name, not 'custom'"
+    );
+    assert_eq!(
+        data["action"].as_str(),
+        Some("issue_token"),
+        "audit record must carry the decision action"
+    );
+    assert_eq!(
+        data["org_id"].as_str(),
+        Some("org-1"),
+        "audit record must carry the org id"
+    );
+}
+
+/// A preconfigured policy deny records the slug in the audit record — the
+/// slug is already specific enough for admin identification, and is the
+/// same value used for metrics (no cardinality concern).
+#[tokio::test]
+async fn test_authorize_decision_records_preconfigured_slug_in_audit() {
+    let state = crate::test_utils::test_app_state().await;
+
+    let slugs = vec!["disk_encryption".to_string()];
+    let posture = minimal_posture();
+    let result = authorize_decision(
+        &state,
+        DecisionRequest {
+            org_id: "org-1",
+            user_id: "user-2",
+            user_email: "bob@example.com",
+            kind: DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "test-client",
+            },
+            os: None,
+        },
+        &slugs,
+        &[],
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "minimal posture must be denied by disk_encryption"
+    );
+
+    let data = single_denial_audit_data(&state, "user-2").await;
+    assert_eq!(
+        data["policy"].as_str(),
+        Some("disk_encryption"),
+        "audit record must carry the preconfigured slug"
+    );
+    assert_eq!(data["action"].as_str(), Some("issue_token"),);
+}
+
+/// When a custom temporal policy denies token exchange, the audit record
+/// must carry the actual policy name and the `exchange_token` action. This
+/// verifies the fix on the ExchangeToken path (no device posture), with a
+/// temporal policy that denies when there is no recent login in history.
+#[tokio::test]
+async fn test_authorize_decision_exchange_records_custom_policy_name_in_audit() {
+    let state = crate::test_utils::test_app_state().await;
+
+    let custom = vec![custom_policy(
+        "Exchange Step-Up",
+        r#"forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
+};"#,
+    )];
+    let result = authorize_decision(
+        &state,
+        DecisionRequest {
+            org_id: "org-1",
+            user_id: "user-3",
+            user_email: "carol@example.com",
+            kind: DecisionKind::ExchangeToken {
+                ip: None,
+                client_id: "test-client",
+                audience: None,
+            },
+            os: None,
+        },
+        &[],
+        &custom,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "exchange with no recent login must be denied by the step-up policy"
+    );
+
+    let data = single_denial_audit_data(&state, "user-3").await;
+    assert_eq!(
+        data["policy"].as_str(),
+        Some("Exchange Step-Up"),
+        "audit record must carry the actual custom policy name for exchange denials"
+    );
+    assert_eq!(
+        data["action"].as_str(),
+        Some("exchange_token"),
+        "audit record must carry the exchange_token action"
+    );
+}
+
+/// A multi-rule custom policy deny must record the actual policy name in
+/// the audit record — the attribution fix (one ref per rule) and the
+/// audit-name fix (actual name, not "custom") compose correctly.
+#[tokio::test]
+async fn test_authorize_decision_multi_rule_custom_policy_name_in_audit() {
+    let state = crate::test_utils::test_app_state().await;
+
+    let multi_rule = format!(
+        "{}\n{}",
+        requirement("context.device.disk_encryption_enabled"),
+        requirement("context.device.firewall_enabled"),
+    );
+    let custom = vec![custom_policy("Multi-Rule Policy", &multi_rule)];
+
+    // Posture where the first requirement is met but the second is not:
+    // the second forbid fires, and must be attributed to the custom policy.
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(true);
+    posture.firewall_enabled = Some(false);
+
+    let result = authorize_decision(
+        &state,
+        DecisionRequest {
+            org_id: "org-1",
+            user_id: "user-4",
+            user_email: "dave@example.com",
+            kind: DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "test-client",
+            },
+            os: None,
+        },
+        &[],
+        &custom,
+    )
+    .await;
+    assert!(result.is_err(), "firewall disabled must deny");
+
+    let data = single_denial_audit_data(&state, "user-4").await;
+    assert_eq!(
+        data["policy"].as_str(),
+        Some("Multi-Rule Policy"),
+        "audit record must carry the custom policy name even when the \
+         second rule of a multi-rule policy fires"
+    );
+}
