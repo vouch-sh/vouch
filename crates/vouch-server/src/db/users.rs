@@ -434,7 +434,10 @@ pub async fn get_user_github_refresh_token(
 /// Uses optimistic concurrency (`store.modify`) so concurrent field
 /// mutations do not silently overwrite each other. A missing user is
 /// silently ignored (idempotent clear semantics).
-pub async fn clear_user_github_refresh_token(store: &DocumentStore, user_id: &str) -> Result<()> {
+pub(in crate::db) async fn clear_user_github_refresh_token(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<()> {
     store
         .modify::<UserDoc, _>(user_id, |data| {
             data.github_refresh_token = None;

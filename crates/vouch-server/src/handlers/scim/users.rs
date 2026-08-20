@@ -486,25 +486,20 @@ pub(crate) async fn patch_user(
             "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
             id
         );
-        if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
-            tracing::error!("Failed to delete sessions for deactivated user: {e}");
-        } else {
-            state.session_cache.invalidate_for_user(&id);
-        }
-        // Revoke all SSH certificates for this user
-        if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-            &state.store,
+        if crate::services::auth::revoke_user_access(
+            &state,
             &id,
-            Some("User deactivated via SCIM"),
-            Some("scim"),
+            "User deactivated via SCIM",
+            "scim",
         )
         .await
+        .is_err()
         {
-            tracing::error!("Failed to revoke SSH certificates for deactivated user: {e}");
-        }
-        // Clear GitHub refresh token to prevent further API access
-        if let Err(e) = db::clear_user_github_refresh_token(&state.store, &id).await {
-            tracing::error!("Failed to clear GitHub refresh token for deactivated user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to revoke user access")),
+            )
+                .into_response();
         }
     }
 
@@ -591,27 +586,16 @@ pub(crate) async fn delete_user(
         id,
         redact_email(&user.email)
     );
-    if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
-        tracing::error!("Failed to delete sessions: {e}");
-    } else {
-        state.session_cache.invalidate_for_user(&id);
-    }
-
-    // Revoke SSH certificates before deleting. If revocation fails,
-    // abort — delete_user would destroy the issued cert records,
-    // making the certs permanently unrevocable.
-    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-        &state.store,
-        &id,
-        Some("User deleted via SCIM"),
-        Some("scim"),
-    )
-    .await
+    // Revoke access before deleting. If revocation fails, abort — delete_user
+    // would destroy the issued cert records, making the certs permanently
+    // unrevocable.
+    if crate::services::auth::revoke_user_access(&state, &id, "User deleted via SCIM", "scim")
+        .await
+        .is_err()
     {
-        tracing::error!("Failed to revoke SSH certificates for deleted user: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to revoke SSH certificates")),
+            Json(ScimError::new(500, "Failed to revoke user access")),
         )
             .into_response();
     }
