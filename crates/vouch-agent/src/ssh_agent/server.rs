@@ -18,6 +18,14 @@ const MAX_SSH_CONNECTIONS: usize = 64;
 /// before aborting them.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Grace window for a request already in flight when shutdown is signalled.
+///
+/// Bounds how long an otherwise-idle connection delays shutdown, so stopping
+/// the agent costs this rather than [`SHUTDOWN_DRAIN_TIMEOUT`] per connection.
+/// OpenSSH holds its agent connection open for the life of the ssh session, so
+/// this is the common path.
+const SHUTDOWN_READ_GRACE: Duration = Duration::from_millis(250);
+
 use super::provisioning::{handle_request_identities, handle_sign_request};
 use super::state::SshAgentState;
 use super::{
@@ -82,13 +90,20 @@ impl SshAgentServer {
                     };
                     let state = Arc::clone(&self.state);
                     let agent_state = self.agent_state.clone();
+                    let conn_shutdown = self.shutdown_rx.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        if let Err(e) = handle_ssh_connection(conn, state, agent_state).await {
+                        if let Err(e) =
+                            handle_ssh_connection(conn, state, agent_state, conn_shutdown).await
+                        {
                             debug!("SSH agent connection error: {e}");
                         }
                     });
                 }
+                // Reap finished tasks so the set does not grow for the life of
+                // the daemon. The guard keeps an empty set from busy-looping,
+                // since `join_next` on an empty JoinSet returns immediately.
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
                 _ = shutdown.changed() => {
                     info!("SSH agent received shutdown signal, stopping listener");
                     break;
@@ -132,14 +147,50 @@ async fn handle_ssh_connection(
     conn: AuthorizedStream,
     state: Arc<SshAgentState>,
     agent_state: Option<Arc<crate::state::AgentState>>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut stream = conn.into_stream();
     loop {
         // Read length-prefixed message, bounding how long an idle or
         // stalled client can hold this connection task open.
-        let buf = match wire::read_message_timeout(&mut stream, wire::IDLE_READ_TIMEOUT).await? {
+        //
+        // Shutdown is only honoured here, between requests. OpenSSH holds its
+        // agent connection open for the life of the ssh session, so waiting on
+        // an idle read is the common case; closing it immediately is what keeps
+        // agent shutdown from stalling for the full drain timeout.
+        let buf = tokio::select! {
+            // Biased: poll the read first so a request that has already
+            // arrived is served even if shutdown fires in the same tick.
+            // Unbiased selection picks randomly between ready branches and
+            // would drop such a request.
+            biased;
+            read = wire::read_message_timeout(&mut stream, wire::IDLE_READ_TIMEOUT) => {
+                match read? {
+                    Some(buf) => Some(buf),
+                    None => return Ok(()), // Clean disconnect
+                }
+            }
+            // `None` signals shutdown. The grace read must happen outside the
+            // select: `wait_for` yields a borrow guard that is not `Send`, and
+            // holding it across an await would make this task unspawnable.
+            _ = shutdown.wait_for(|&stop| stop) => None,
+        };
+
+        let buf = match buf {
             Some(buf) => buf,
-            None => return Ok(()), // Clean disconnect
+            None => {
+                // A request the client has already written may not have reached
+                // the reactor yet — signalling the watch channel wakes this task
+                // synchronously, ahead of the I/O readiness event — so poll once
+                // more with a short grace window instead of dropping it.
+                debug!("Shutdown signalled while SSH connection idle");
+                match wire::read_message_timeout(&mut stream, SHUTDOWN_READ_GRACE).await {
+                    Ok(Some(buf)) => buf,
+                    // Clean disconnect, grace expired, or a malformed final
+                    // message: the connection is closing regardless.
+                    Ok(None) | Err(_) => return Ok(()),
+                }
+            }
         };
 
         // Validate message size for SSH agent (more restrictive than general wire protocol)
@@ -170,15 +221,6 @@ async fn handle_ssh_connection(
             vec![SSH_AGENT_FAILURE]
         });
         wire::write_message(&mut stream, &response_data).await?;
-    }
-}
-
-impl Drop for SshAgentServer {
-    fn drop(&mut self) {
-        // Clean up socket on drop
-        if let Ok(path) = ssh_agent_socket_path() {
-            std::fs::remove_file(path).ok();
-        }
     }
 }
 
@@ -213,9 +255,10 @@ mod tests {
         let listener = bind_socket(&path).await.expect("bind socket");
         let state = SshAgentState::new();
 
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let server = tokio::spawn(async move {
             if let Some(conn) = accept_authorized(&listener, SocketKind::SshAgent).await {
-                let _connection = handle_ssh_connection(conn, state, None).await;
+                let _connection = handle_ssh_connection(conn, state, None, shutdown_rx).await;
             }
         });
 

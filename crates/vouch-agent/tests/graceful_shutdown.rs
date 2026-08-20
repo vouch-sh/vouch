@@ -38,6 +38,9 @@ struct Dirs {
     runtime: TempDir,
     cache: TempDir,
     config: TempDir,
+    state: TempDir,
+    data: TempDir,
+    home: TempDir,
 }
 
 impl AgentProcess {
@@ -53,24 +56,27 @@ fn spawn_agent() -> AgentProcess {
         runtime: TempDir::new().expect("runtime tempdir"),
         cache: TempDir::new().expect("cache tempdir"),
         config: TempDir::new().expect("config tempdir"),
+        state: TempDir::new().expect("state tempdir"),
+        data: TempDir::new().expect("data tempdir"),
+        home: TempDir::new().expect("home tempdir"),
     };
 
-    // CARGO_BIN_EXE_vouch_agent is set by Cargo at runtime for integration
-    // tests.  Fall back to the workspace target dir when it is unavailable.
-    let bin = std::env::var("CARGO_BIN_EXE_vouch_agent")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/../../target/debug/vouch-agent",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-    let mut cmd = Command::new(bin);
+    // Cargo substitutes the built binary's path at compile time. This must be
+    // `env!`, not `std::env::var`: `CARGO_BIN_EXE_*` is not set at runtime, so
+    // a lookup silently falls through to a hardcoded `target/debug` path that
+    // is wrong under `CARGO_TARGET_DIR` or `--release`.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vouch-agent"));
+    // Every path the agent resolves must land in a temp dir. HOME matters
+    // because `migrate_legacy_layout` *moves* a real `~/.vouch/` into the XDG
+    // locations, which would destroy the developer's config when the temp dirs
+    // are deleted.
     cmd.arg("--foreground")
         .env("XDG_RUNTIME_DIR", dirs.runtime.path())
         .env("XDG_CACHE_HOME", dirs.cache.path())
         .env("XDG_CONFIG_HOME", dirs.config.path())
+        .env("XDG_STATE_HOME", dirs.state.path())
+        .env("XDG_DATA_HOME", dirs.data.path())
+        .env("HOME", dirs.home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -237,5 +243,31 @@ async fn socket_removed_on_shutdown() {
     assert!(
         !socket.exists(),
         "socket should be removed after graceful shutdown"
+    );
+}
+
+/// The agent removes its PID file on graceful shutdown. A stale PID file makes
+/// the next `vouch-agent` start refuse with "already running", so this is as
+/// load-bearing as socket removal.
+#[tokio::test]
+async fn pid_file_removed_on_shutdown() {
+    let mut agent = spawn_agent();
+    wait_for_socket(&agent).await;
+
+    let pid_file = agent._dirs.cache.path().join("vouch").join("agent.pid");
+    assert!(
+        pid_file.exists(),
+        "PID file should exist at {} while the agent is running",
+        pid_file.display()
+    );
+
+    send_sigterm(&agent.child);
+    let status = wait_for_exit(&mut agent.child);
+    assert!(status.success(), "agent should exit with status 0");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !pid_file.exists(),
+        "PID file should be removed after graceful shutdown"
     );
 }

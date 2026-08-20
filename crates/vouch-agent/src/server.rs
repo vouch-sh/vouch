@@ -29,6 +29,12 @@ const MAX_CONNECTIONS: usize = 64;
 /// before aborting them.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Grace window for a request already in flight when shutdown is signalled.
+///
+/// Bounds how long an otherwise-idle connection delays shutdown, so stopping
+/// the agent costs this rather than [`SHUTDOWN_DRAIN_TIMEOUT`] per connection.
+const SHUTDOWN_READ_GRACE: Duration = Duration::from_millis(250);
+
 /// Agent server with graceful shutdown support.
 pub struct AgentServer {
     state: Arc<AgentState>,
@@ -99,14 +105,20 @@ impl AgentServer {
                     };
                     let state = Arc::clone(&self.state);
                     let ssh_state = Arc::clone(&self.ssh_state);
+                    let conn_shutdown = self.shutdown_rx.clone();
                     tasks.spawn(async move {
                         // Hold the permit for the full connection task; it auto-releases on drop.
                         let _permit = permit;
-                        if let Err(e) = handle_connection(conn, state, ssh_state).await {
+                        if let Err(e) = handle_connection(conn, state, ssh_state, conn_shutdown).await
+                        {
                             debug!("Connection error: {e}");
                         }
                     });
                 }
+                // Reap finished tasks so the set does not grow for the life of
+                // the daemon. The guard keeps an empty set from busy-looping,
+                // since `join_next` on an empty JoinSet returns immediately.
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
                 _ = shutdown.changed() => {
                     info!("Agent received shutdown signal, stopping listener");
                     break;
@@ -142,14 +154,50 @@ async fn handle_connection(
     conn: AuthorizedStream,
     state: Arc<AgentState>,
     ssh_state: Arc<SshAgentState>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut stream = conn.into_stream();
     loop {
         // Read length-prefixed message, bounding how long an idle or
         // stalled client can hold this connection task open.
-        let buf = match wire::read_message_timeout(&mut stream, wire::IDLE_READ_TIMEOUT).await? {
+        //
+        // Shutdown is only honoured here, between requests. A request already
+        // being served runs to completion; a connection merely parked waiting
+        // for the next one closes immediately, so stopping the agent does not
+        // wait out the drain timeout for every idle ssh session.
+        let buf = tokio::select! {
+            // Biased: poll the read first so a request that has already
+            // arrived is served even if shutdown fires in the same tick.
+            // Unbiased selection picks randomly between ready branches and
+            // would drop such a request.
+            biased;
+            read = wire::read_message_timeout(&mut stream, wire::IDLE_READ_TIMEOUT) => {
+                match read? {
+                    Some(buf) => Some(buf),
+                    None => return Ok(()), // Client disconnected
+                }
+            }
+            // `None` signals shutdown. The grace read must happen outside the
+            // select: `wait_for` yields a borrow guard that is not `Send`, and
+            // holding it across an await would make this task unspawnable.
+            _ = shutdown.wait_for(|&stop| stop) => None,
+        };
+
+        let buf = match buf {
             Some(buf) => buf,
-            None => return Ok(()), // Client disconnected
+            None => {
+                // A request the client has already written may not have reached
+                // the reactor yet — signalling the watch channel wakes this task
+                // synchronously, ahead of the I/O readiness event — so poll once
+                // more with a short grace window instead of dropping it.
+                debug!("Shutdown signalled while connection idle");
+                match wire::read_message_timeout(&mut stream, SHUTDOWN_READ_GRACE).await {
+                    Ok(Some(buf)) => buf,
+                    // Clean disconnect, grace expired, or a malformed final
+                    // message: the connection is closing regardless.
+                    Ok(None) | Err(_) => return Ok(()),
+                }
+            }
         };
 
         // Parse as RawRequest first to separate parse errors from unknown methods
@@ -470,13 +518,6 @@ async fn drain_connections(tasks: &mut JoinSet<()>) {
     }
 }
 
-impl Drop for AgentServer {
-    fn drop(&mut self) {
-        // Clean up socket on drop (best-effort; cannot return errors from Drop).
-        let _removed = crate::socket::remove_socket();
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -600,6 +641,49 @@ mod tests {
             .expect("run_listener should return within 10s")
             .expect("task should not panic");
         assert!(result.is_ok(), "run_listener should return Ok");
+    }
+
+    /// A connection parked waiting for its next request closes as soon as
+    /// shutdown is signalled, instead of being waited out for the full drain
+    /// timeout and then aborted. This is the common case: clients hold the
+    /// socket open between requests, so without it every agent stop would
+    /// stall for [`SHUTDOWN_DRAIN_TIMEOUT`].
+    #[tokio::test]
+    async fn idle_connection_closes_promptly_on_shutdown() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("test-idle.sock");
+        let listener = bind_socket(&path).await.expect("bind");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = make_server(shutdown_rx);
+        let server_clone = Arc::clone(&server);
+        let task = tokio::spawn(async move { server_clone.run_listener(listener).await });
+
+        // Establish the connection and complete one request, so the handler is
+        // parked on the read for the *next* request.
+        let mut client = UnixStream::connect(&path).await.expect("connect");
+        client.write_all(&encode_ping()).await.expect("write ping");
+        let resp = read_jsonrpc_response(&mut client).await;
+        assert_eq!(resp.get("result"), Some(&serde_json::json!("pong")));
+
+        // Hold the connection open and idle. The client never disconnects, so
+        // the only thing that can end the handler task is the shutdown signal.
+        let start = std::time::Instant::now();
+        shutdown_tx.send(true).expect("send shutdown");
+
+        let result = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, task)
+            .await
+            .expect("run_listener must return before the drain timeout")
+            .expect("task should not panic");
+        assert!(result.is_ok(), "run_listener should return Ok");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < SHUTDOWN_DRAIN_TIMEOUT / 2,
+            "idle connection should close promptly, took {elapsed:?}"
+        );
+
+        drop(client);
     }
 
     /// The drain helper finishes quickly when all tasks have already
