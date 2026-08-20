@@ -19,7 +19,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -83,7 +83,7 @@ pub(crate) struct ParRequest {
     client_secret: Option<SecretString>,
     /// RFC 7521 Section 4.2: Client assertion for JWT client authentication.
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<SecretString>,
     /// RFC 7521 Section 4.2: Client assertion type.
     #[serde(default)]
     client_assertion_type: Option<String>,
@@ -142,7 +142,7 @@ impl ClientAuthFields for ParRequest {
     }
 
     fn client_assertion(&self) -> Option<&str> {
-        self.client_assertion.as_deref()
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
     }
 
     fn client_assertion_type(&self) -> Option<&str> {

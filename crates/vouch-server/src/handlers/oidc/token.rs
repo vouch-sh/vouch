@@ -26,7 +26,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -34,13 +34,15 @@ use std::sync::Arc;
 #[derive(Serialize)]
 pub(super) struct TokenResponse {
     /// The access token issued by the authorization server.
-    pub access_token: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub access_token: SecretString,
     /// The type of the token issued ("Bearer" or "DPoP").
     pub token_type: String,
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
     /// OIDC Core Section 3.1.3.3: The ID Token.
-    pub id_token: Option<String>,
+    #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
+    pub id_token: Option<SecretString>,
     /// RFC 6749 Section 3.3: The scope of the access token.
     pub scope: Option<ScopeSet>,
     /// User email (included in FIDO2 assertion grant responses).
@@ -91,13 +93,13 @@ pub(crate) struct TokenRequest {
     pub device_code: Option<String>,
     /// RFC 8693 Section 2.1: The subject token to exchange.
     #[serde(default)]
-    pub subject_token: Option<String>,
+    pub subject_token: Option<SecretString>,
     /// RFC 8693 Section 2.1: Type identifier for the subject token.
     #[serde(default)]
     pub subject_token_type: Option<String>,
     /// RFC 8693 Section 2.1: Optional actor token (for delegation).
     #[serde(default)]
-    pub actor_token: Option<String>,
+    pub actor_token: Option<SecretString>,
     /// RFC 8693 Section 2.1: Type identifier for the actor token.
     #[serde(default)]
     pub actor_token_type: Option<String>,
@@ -115,13 +117,13 @@ pub(crate) struct TokenRequest {
     pub resource: Option<String>,
     /// RFC 7521 Section 4.2: Client assertion for JWT client authentication.
     #[serde(default)]
-    pub client_assertion: Option<String>,
+    pub client_assertion: Option<SecretString>,
     /// RFC 7521 Section 4.2: Client assertion type.
     #[serde(default)]
     pub client_assertion_type: Option<String>,
     /// RFC 7521 Section 4.1: The assertion for JWT bearer grants.
     #[serde(default)]
-    pub assertion: Option<String>,
+    pub assertion: Option<SecretString>,
     /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
     pub authorization_details: Option<String>,
@@ -175,7 +177,8 @@ impl TokenRequest {
 #[derive(Serialize)]
 pub(super) struct TokenExchangeResponse {
     /// The security token issued by the authorization server.
-    pub access_token: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub access_token: SecretString,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
     /// The type of the token issued (e.g., "Bearer").
@@ -267,7 +270,7 @@ pub(crate) async fn token(
         );
     }
     if let Some(ref v) = params.client_assertion
-        && v.len() > MAX_ASSERTION_LEN
+        && v.expose_secret().len() > MAX_ASSERTION_LEN
     {
         return token_error_response(
             "invalid_request",
@@ -275,7 +278,7 @@ pub(crate) async fn token(
         );
     }
     if let Some(ref v) = params.assertion
-        && v.len() > MAX_ASSERTION_LEN
+        && v.expose_secret().len() > MAX_ASSERTION_LEN
     {
         return token_error_response(
             "invalid_request",
@@ -966,9 +969,12 @@ async fn handle_token_exchange_grant(
     };
 
     let exchange_params = TokenExchangeParams {
-        subject_token: params.subject_token.as_deref().unwrap_or_default(),
+        subject_token: params
+            .subject_token
+            .as_ref()
+            .map_or("", |s| s.expose_secret()),
         subject_token_type: params.subject_token_type.as_deref().unwrap_or_default(),
-        actor_token: params.actor_token.as_deref(),
+        actor_token: params.actor_token.as_ref().map(|s| s.expose_secret()),
         actor_token_type: params.actor_token_type.as_deref(),
         audience: effective_audience,
         scope: params.scope.as_deref(),
@@ -1054,7 +1060,7 @@ impl ClientAuthFields for TokenRequest {
     }
 
     fn client_assertion(&self) -> Option<&str> {
-        self.client_assertion.as_deref()
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
     }
 
     fn client_assertion_type(&self) -> Option<&str> {
@@ -1145,7 +1151,7 @@ async fn handle_fido2_assertion_grant(
 
     // Exchange the FIDO2 assertion for an access token
     let exchange_params = crate::services::oidc::fido2_grant::Fido2AssertionParams {
-        assertion: &assertion,
+        assertion: assertion.expose_secret(),
         client: &crate::services::oidc::token::AuthenticatedClient {
             client: jwt_authenticated.client,
             is_public: false,

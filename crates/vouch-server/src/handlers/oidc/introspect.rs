@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_
 #[derive(Deserialize)]
 pub(crate) struct RevokeRequest {
     /// RFC 7009 Section 2.1: The token that the client wants to get revoked.
-    token: String,
+    token: SecretString,
     /// RFC 7009 Section 2.1: A hint about the type of the token.
     #[serde(default)]
     token_type_hint: Option<String>,
@@ -44,7 +44,7 @@ pub(crate) struct RevokeRequest {
     client_secret: Option<SecretString>,
     /// RFC 7521 Section 4.2: JWT assertion for `private_key_jwt` authentication.
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<SecretString>,
     /// RFC 7521 Section 4.2: Assertion type (must be
     /// `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`).
     #[serde(default)]
@@ -76,7 +76,7 @@ impl ClientAuthFields for RevokeRequest {
     }
 
     fn client_assertion(&self) -> Option<&str> {
-        self.client_assertion.as_deref()
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
     }
 
     fn client_assertion_type(&self) -> Option<&str> {
@@ -91,7 +91,7 @@ impl ClientAuthFields for RevokeRequest {
 #[derive(Deserialize)]
 pub(crate) struct IntrospectRequest {
     /// RFC 7662 Section 2.1: The string value of the token.
-    token: String,
+    token: SecretString,
     /// RFC 7662 Section 2.1: A hint about the type of the token.
     #[serde(default)]
     token_type_hint: Option<String>,
@@ -104,7 +104,7 @@ pub(crate) struct IntrospectRequest {
     client_secret: Option<SecretString>,
     /// RFC 7521 Section 4.2: JWT assertion for `private_key_jwt` authentication.
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<SecretString>,
     /// RFC 7521 Section 4.2: Assertion type (must be
     /// `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`).
     #[serde(default)]
@@ -136,7 +136,7 @@ impl ClientAuthFields for IntrospectRequest {
     }
 
     fn client_assertion(&self) -> Option<&str> {
-        self.client_assertion.as_deref()
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
     }
 
     fn client_assertion_type(&self) -> Option<&str> {
@@ -173,7 +173,7 @@ pub(crate) async fn revoke(
 
     let _result = svc_revoke(
         &state,
-        &params.token,
+        params.token.expose_secret(),
         params.token_type_hint.as_deref(),
         client_info,
         &caller_client_id,
@@ -236,7 +236,7 @@ pub(crate) async fn introspect(
 
     let result = match svc_introspect(
         &state,
-        &params.token,
+        params.token.expose_secret(),
         params.token_type_hint.as_deref(),
         Some(client_id.as_str()),
     )

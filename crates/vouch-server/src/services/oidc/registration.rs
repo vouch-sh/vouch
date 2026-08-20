@@ -27,6 +27,7 @@ use crate::error::{OAuthErrorCode, ServiceError};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -189,8 +190,11 @@ pub struct RegistrationResponse {
     /// RFC 7591 Section 3.2.1: REQUIRED. OAuth 2.0 client identifier.
     pub client_id: String,
     /// RFC 7591 Section 3.2.1: OAuth 2.0 client secret (for confidential clients).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_secret: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "vouch_common::serialize_opt_secret_string"
+    )]
+    pub client_secret: Option<SecretString>,
     /// RFC 7591 Section 3.2.1: 0 = does not expire. REQUIRED when client_secret issued.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret_expires_at: Option<i64>,
@@ -198,8 +202,11 @@ pub struct RegistrationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id_issued_at: Option<i64>,
     /// RFC 7592: Registration access token for future management.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registration_access_token: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "vouch_common::serialize_opt_secret_string"
+    )]
+    pub registration_access_token: Option<SecretString>,
     /// RFC 7592: Client configuration endpoint URI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_client_uri: Option<String>,
@@ -646,7 +653,7 @@ pub async fn register_client(
         )
         .await?;
 
-        Some(secret)
+        Some(SecretString::from(secret))
     } else {
         None
     };
@@ -687,7 +694,7 @@ pub async fn register_client(
             None
         },
         client_id_issued_at: Some(client_id_issued_at),
-        registration_access_token: Some(reg_token),
+        registration_access_token: Some(reg_token.into()),
         registration_client_uri: Some(format!("{base_url}/oauth/register/{}", client.client_id)),
         redirect_uris: if redirect_uris.is_empty() {
             None
@@ -1319,7 +1326,7 @@ pub async fn update_client_configuration(
 
     let base_url = &state.config().base_url;
     let mut response = build_client_response(updated, base_url);
-    response.registration_access_token = Some(new_reg_token);
+    response.registration_access_token = Some(new_reg_token.into());
 
     Ok(response)
 }

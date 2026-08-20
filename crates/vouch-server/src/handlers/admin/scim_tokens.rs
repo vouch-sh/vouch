@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -68,7 +68,8 @@ pub(crate) struct CreateScimTokenRequest {
 #[derive(serde::Serialize)]
 pub(crate) struct CreateScimTokenResponse {
     pub id: String,
-    pub token: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub token: SecretString,
     pub description: Option<String>,
     pub expires_at: Option<Timestamp>,
     pub audit_read: bool,
@@ -175,7 +176,7 @@ pub(crate) async fn create_scim_token(
 
     Ok(Json(CreateScimTokenResponse {
         id: token_id,
-        token: generated.plaintext.expose_secret().to_string(),
+        token: generated.plaintext.clone(),
         description: req.description,
         expires_at,
         audit_read: req.audit_read,
@@ -475,6 +476,8 @@ pub(crate) async fn admin_create_scim_token(
         auth,
         tokens,
         flash_message: None,
+        // Deliberate render-boundary exposure: this page shows the token
+        // once, at creation, which is its purpose (Askama needs Display).
         new_token: Some(generated.plaintext.expose_secret().to_string()),
     }
     .into_response())

@@ -71,7 +71,7 @@ pub struct TokenExchangeParams<'a> {
 /// Result of a token exchange (RFC 8693 Section 2.2).
 pub struct TokenExchangeResult {
     /// The security token issued by the authorization server.
-    pub access_token: String,
+    pub access_token: secrecy::SecretString,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
     /// RFC 6749 Section 7.1: The type of the token issued (e.g., "Bearer").
@@ -499,7 +499,7 @@ pub(crate) async fn exchange_token(
     };
 
     Ok(TokenExchangeResult {
-        access_token: session_result.token.expose_secret().to_string(),
+        access_token: session_result.token.clone(),
         issued_token_type: token_types::ACCESS_TOKEN.to_string(),
         token_type: token_type.to_string(),
         expires_in,
@@ -638,7 +638,7 @@ async fn issue_id_token(
     );
 
     Ok(TokenExchangeResult {
-        access_token: id_token,
+        access_token: id_token.into(),
         issued_token_type: token_types::ID_TOKEN.to_string(),
         token_type: "Bearer".to_string(),
         expires_in,
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn test_token_exchange_result_debug_redacts_access_token() {
         let result = TokenExchangeResult {
-            access_token: "eyJhbGciOiJFUzI1NiJ9.exchange-secret-token".to_string(),
+            access_token: "eyJhbGciOiJFUzI1NiJ9.exchange-secret-token".into(),
             issued_token_type: token_types::ACCESS_TOKEN.to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 3600,

@@ -20,7 +20,6 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use secrecy::ExposeSecret;
 use std::sync::Arc;
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
@@ -603,7 +602,10 @@ pub(crate) async fn device_token(
             let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
 
             Ok(Json(DeviceTokenResponse {
-                access_token: token.expose_secret().to_string(),
+                // Clone the SecretString rather than rebuilding it via
+                // expose_secret(): the intermediate String would never be
+                // zeroized.
+                access_token: token.clone(),
                 token_type: token_type.to_string(),
                 expires_in,
                 email: user_email,

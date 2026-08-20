@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use secrecy::ExposeSecret;
+
 use super::{
     GitHubError, GitHubInstallationId, GitHubResult, GitHubService,
     list_user_accessible_installations,
@@ -218,7 +220,7 @@ impl GitHubService<'_> {
 
         // Verify user actually has access to this installation
         let user_installations =
-            list_user_accessible_installations(app.http_client(), &access_token)
+            list_user_accessible_installations(app.http_client(), access_token.expose_secret())
                 .await
                 .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
@@ -326,14 +328,18 @@ impl GitHubService<'_> {
             .collect();
 
         // Fetch installations the user can access
-        let installations =
-            match list_user_accessible_installations(app.http_client(), &access_token).await {
-                Ok(installations) => installations,
-                Err(e) => {
-                    tracing::warn!("Failed to fetch user installations: {}", e);
-                    return Ok(vec![]);
-                }
-            };
+        let installations = match list_user_accessible_installations(
+            app.http_client(),
+            access_token.expose_secret(),
+        )
+        .await
+        {
+            Ok(installations) => installations,
+            Err(e) => {
+                tracing::warn!("Failed to fetch user installations: {}", e);
+                return Ok(vec![]);
+            }
+        };
 
         // Filter to unlinked installations only
         let unlinked = installations

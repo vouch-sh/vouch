@@ -544,3 +544,86 @@ async fn test_token_db_error_on_client_lookup_returns_internal_server_error() {
         "DB error must not be reported as invalid_client: {body}"
     );
 }
+
+#[test]
+fn test_token_response_wire_shape_with_and_without_id_token() {
+    // RFC 6749 Section 5.1 responses without an ID token (client
+    // credentials, refresh) serialize `id_token: null`, and the token
+    // values serialize as plain strings. Pins the wire shape across the
+    // SecretString field migration: the explicit serializers must produce
+    // exactly what the bare `String`/`Option<String>` fields did.
+    let with = crate::handlers::oidc::token::TokenResponse {
+        access_token: "at-secret".into(),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        id_token: Some("idt-secret".into()),
+        scope: None,
+        email: None,
+        authorization_details: None,
+    };
+    let json = serde_json::to_value(&with).expect("serialize TokenResponse");
+    assert_eq!(json["access_token"], "at-secret");
+    assert_eq!(json["id_token"], "idt-secret");
+
+    let without = crate::handlers::oidc::token::TokenResponse {
+        access_token: "at-secret".into(),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        id_token: None,
+        scope: None,
+        email: None,
+        authorization_details: None,
+    };
+    let json = serde_json::to_value(&without).expect("serialize TokenResponse");
+    assert!(
+        json["id_token"].is_null() && json.get("id_token").is_some(),
+        "id_token must serialize as an explicit null when absent: {json}"
+    );
+}
+
+#[test]
+fn test_token_request_debug_never_prints_credential_material() {
+    // Every credential-bearing field must be absent from `{:?}` output —
+    // the manual Debug impl prints [REDACTED] and the SecretString fields
+    // self-redact even if a future impl prints them directly.
+    let request = crate::handlers::oidc::token::TokenRequest {
+        grant_type: "authorization_code".to_string(),
+        code: Some("visible-code".to_string()),
+        redirect_uri: None,
+        client_id: Some("client-1".to_string()),
+        client_secret: Some("secret-cs".into()),
+        code_verifier: Some("secret-cv".to_string()),
+        device_code: None,
+        subject_token: Some("secret-st".into()),
+        subject_token_type: None,
+        actor_token: Some("secret-at".into()),
+        actor_token_type: None,
+        audience: None,
+        scope: None,
+        requested_token_type: None,
+        resource: None,
+        client_assertion: Some("secret-ca".into()),
+        client_assertion_type: None,
+        assertion: Some("secret-a".into()),
+        authorization_details: None,
+    };
+    let debug = format!("{request:?}");
+    for secret in [
+        "secret-cs",
+        "secret-cv",
+        "secret-st",
+        "secret-at",
+        "secret-ca",
+        "secret-a",
+    ] {
+        assert!(
+            !debug.contains(secret),
+            "{secret} leaked into Debug: {debug}"
+        );
+    }
+    assert!(debug.contains("[REDACTED]"), "{debug}");
+    assert!(
+        debug.contains("client-1"),
+        "non-secrets stay visible: {debug}"
+    );
+}

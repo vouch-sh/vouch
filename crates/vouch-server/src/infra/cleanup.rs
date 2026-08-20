@@ -15,6 +15,7 @@ use crate::db::store::DocumentStore;
 use crate::infra::dns;
 use aws_lc_rs::rand as aws_rand;
 use jiff::{Span, Timestamp};
+use secrecy::ExposeSecret;
 use tokio::task::JoinHandle;
 
 /// Minimum gap between consecutive DNS re-checks for the same domain.
@@ -393,19 +394,20 @@ async fn recheck_additional_domains(
 /// Re-verify a single domain and persist the result. Errors are logged and
 /// swallowed so one bad record never aborts the surrounding pass.
 async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::VerifiedDomainRecord) {
-    let outcome = match dns::verify_txt_record(&rec.domain, &rec.verification_token).await {
-        Ok(true) => db::RecheckOutcome::Success,
-        Ok(false) => db::RecheckOutcome::Failure,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                domain = %rec.domain,
-                org_id = %rec.org_id,
-                "DNS re-verification lookup failed; treating as failure"
-            );
-            db::RecheckOutcome::Failure
-        }
-    };
+    let outcome =
+        match dns::verify_txt_record(&rec.domain, rec.verification_token.expose_secret()).await {
+            Ok(true) => db::RecheckOutcome::Success,
+            Ok(false) => db::RecheckOutcome::Failure,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    domain = %rec.domain,
+                    org_id = %rec.org_id,
+                    "DNS re-verification lookup failed; treating as failure"
+                );
+                db::RecheckOutcome::Failure
+            }
+        };
 
     match db::record_recheck_result(store, &rec.org_id, &rec.domain, outcome).await {
         Ok(db::RecheckEffect::FlippedToUnverified { released_subdomain }) => {
@@ -521,7 +523,7 @@ mod tests {
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "squatted.example.com".to_string(),
-            verification_token: "tok".to_string(),
+            verification_token: "tok".into(),
             added_at: stale_added,
             added_by_user_id: "u1".to_string(),
             added_by_email: "u1@acme.com".to_string(),
@@ -591,7 +593,7 @@ mod tests {
         let rec = db::VerifiedDomainRecord {
             org_id: org.id.clone(),
             domain: "widgets.io".to_string(),
-            verification_token: "tok".to_string(),
+            verification_token: "tok".into(),
             last_checked_at: None,
             consecutive_failures: 0,
         };

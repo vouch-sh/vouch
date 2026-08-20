@@ -7,6 +7,8 @@
 //! - Store GitHub identity and refresh token
 //! - Refresh access tokens using stored refresh tokens
 
+use secrecy::{ExposeSecret, SecretString};
+
 use super::{
     GitHubError, GitHubResult, GitHubService, exchange_oauth_code, get_github_user,
     refresh_oauth_token,
@@ -55,9 +57,12 @@ impl GitHubService<'_> {
         .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Get GitHub user info
-        let github_user = get_github_user(app.http_client(), &token_response.access_token)
-            .await
-            .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
+        let github_user = get_github_user(
+            app.http_client(),
+            token_response.access_token.expose_secret(),
+        )
+        .await
+        .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Update user's GitHub identity
         db::update_user_github_identity(
@@ -65,7 +70,10 @@ impl GitHubService<'_> {
             params.user_id,
             github_user.id.cast_signed(),
             &github_user.login,
-            token_response.refresh_token.as_deref(),
+            token_response
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret()),
         )
         .await
         .map_err(GitHubError::Database)?;
@@ -86,7 +94,7 @@ impl GitHubService<'_> {
     pub(crate) async fn get_user_access_token(
         &self,
         user_id: &str,
-    ) -> GitHubResult<Option<String>> {
+    ) -> GitHubResult<Option<SecretString>> {
         // Get the user's refresh token
         let refresh_token = match db::get_user_github_refresh_token(self.store, user_id)
             .await
@@ -101,10 +109,14 @@ impl GitHubService<'_> {
         let client_secret = self.oauth_client_secret()?;
 
         // Refresh the token
-        let token_response =
-            refresh_oauth_token(app.http_client(), client_id, client_secret, &refresh_token)
-                .await
-                .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
+        let token_response = refresh_oauth_token(
+            app.http_client(),
+            client_id,
+            client_secret,
+            refresh_token.expose_secret(),
+        )
+        .await
+        .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Persist the rotated refresh token. GitHub rotates refresh tokens:
         // the old token is invalidated by the refresh above, so losing the
@@ -127,7 +139,7 @@ impl GitHubService<'_> {
                 user_id,
                 github_id,
                 github_login,
-                Some(new_refresh_token),
+                Some(new_refresh_token.expose_secret()),
             )
             .await
             .map_err(GitHubError::Database)?;

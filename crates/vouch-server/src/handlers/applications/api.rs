@@ -172,7 +172,7 @@ pub(crate) async fn create_application_api(
             return Err(e);
         }
 
-        Some(secret)
+        Some(secrecy::SecretString::from(secret))
     } else {
         None
     };
@@ -504,7 +504,7 @@ pub(crate) async fn add_secret_api(
         StatusCode::CREATED,
         Json(AddSecretResponse {
             secret_id: record.id,
-            client_secret: secret,
+            client_secret: secret.into(),
             created_at: record.created_at,
             expires_at: record.expires_at,
         }),

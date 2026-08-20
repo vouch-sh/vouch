@@ -21,7 +21,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
@@ -48,7 +48,7 @@ pub(crate) struct CompleteLoginQuery {
     /// Pending OAuth authorization ID (UUID).
     pub pending_auth: String,
     /// HMAC-SHA256 of `pending_auth`, base64url-encoded (no padding).
-    pub token: String,
+    pub token: SecretString,
 }
 
 // Custom Debug that redacts the token to prevent accidental log exposure:
@@ -79,17 +79,21 @@ pub(crate) async fn complete_login(
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
     // ── 1. Token validation ───────────────────────────────────────────────
-    let secret = match state.config().certification_test_token.as_ref() {
-        Some(s) => s.expose_secret().to_string(),
+    let config = state.config();
+    let secret = match config.certification_test_token.as_ref() {
+        Some(s) => s,
         None => {
             tracing::error!("Certification endpoint called but token not configured");
             return StatusCode::NOT_FOUND.into_response();
         }
     };
 
-    let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
+    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
 
-    let token_valid: bool = expected.as_bytes().ct_eq(query.token.as_bytes()).into();
+    let token_valid: bool = expected
+        .as_bytes()
+        .ct_eq(query.token.expose_secret().as_bytes())
+        .into();
     if !token_valid {
         tracing::warn!(
             pending_auth = %query.pending_auth,
@@ -234,12 +238,16 @@ pub(crate) async fn deny_login(
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
     // Validate HMAC token.
-    let secret = match state.config().certification_test_token.as_ref() {
-        Some(s) => s.expose_secret().to_string(),
+    let config = state.config();
+    let secret = match config.certification_test_token.as_ref() {
+        Some(s) => s,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
-    let token_valid: bool = expected.as_bytes().ct_eq(query.token.as_bytes()).into();
+    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
+    let token_valid: bool = expected
+        .as_bytes()
+        .ct_eq(query.token.expose_secret().as_bytes())
+        .into();
     if !token_valid {
         return StatusCode::FORBIDDEN.into_response();
     }

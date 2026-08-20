@@ -3,11 +3,16 @@
 //!
 //! A derived `Debug` prints every field verbatim, so any `{:?}` of such a
 //! struct — a `tracing` field, an `anyhow` context, a test failure message —
-//! writes the live credential into the log. The convention in this workspace
-//! is a hand-written `impl Debug` that prints `[REDACTED]` for the secret
-//! fields and leaves the rest visible (see `AuthCodeExchangeResult` in
-//! `services/oidc/token.rs`), rather than `SecretString`, so the response
-//! types keep their plain `String` fields for serde.
+//! writes the live credential into the log.
+//!
+//! In `vouch-server` and `vouch-common` the guarantee is now carried by the
+//! field type: credential fields are `secrecy::SecretString` (self-redacting
+//! `Debug`, no `Serialize` impl — serialization points opt in explicitly via
+//! `vouch_common::serialize_secret_string`), with the hand-written
+//! `[REDACTED]` Debug impls kept on top. This scan remains because
+//! `vouch-cli` and `vouch-agent` still hold bare-`String` secrets protected
+//! only by manual impls; once they migrate, this file is deleted with them
+//! (issue #989).
 //!
 //! Detection is by field name and type: a field whose name ends in `_token`,
 //! `_secret`, or `_token_hint` (or is exactly `token`/`secret`) and whose

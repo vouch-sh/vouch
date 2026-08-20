@@ -534,7 +534,7 @@ fn test_response_serialization_omits_none_fields() {
         client_secret: None,
         client_secret_expires_at: None,
         client_id_issued_at: Some(1_700_000_000),
-        registration_access_token: Some("vouch_reg_abc123".to_string()),
+        registration_access_token: Some("vouch_reg_abc123".into()),
         registration_client_uri: Some(
             "https://example.com/oauth/register/test-client-id".to_string(),
         ),
@@ -600,7 +600,7 @@ fn test_response_serialization_omits_none_fields() {
 fn test_response_serialization_includes_secret_fields_when_present() {
     let response = RegistrationResponse {
         client_id: "test-client".to_string(),
-        client_secret: Some("s3cr3t".to_string()),
+        client_secret: Some("s3cr3t".into()),
         client_secret_expires_at: Some(0),
         client_id_issued_at: Some(1_700_000_000),
         registration_access_token: None,
