@@ -172,9 +172,9 @@ pub(crate) struct OidcCallbackParams {
 /// OIDC token response.
 #[derive(Deserialize)]
 struct OidcTokenResponse {
-    id_token: String,
+    id_token: secrecy::SecretString,
     #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    access_token: String,
+    access_token: secrecy::SecretString,
 }
 
 // Custom Debug that redacts both tokens to prevent accidental log exposure of
@@ -598,7 +598,7 @@ pub(crate) async fn oidc_callback(
     let identity = match crate::services::idp::oidc::verify_id_token(
         &state.http_client,
         &oidc_provider.provider,
-        &tokens.id_token,
+        tokens.id_token.expose_secret(),
         client_id,
         &stored_state.nonce,
     )

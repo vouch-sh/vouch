@@ -580,3 +580,50 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
         "id_token must serialize as an explicit null when absent: {json}"
     );
 }
+
+#[test]
+fn test_token_request_debug_never_prints_credential_material() {
+    // Every credential-bearing field must be absent from `{:?}` output —
+    // the manual Debug impl prints [REDACTED] and the SecretString fields
+    // self-redact even if a future impl prints them directly.
+    let request = crate::handlers::oidc::token::TokenRequest {
+        grant_type: "authorization_code".to_string(),
+        code: Some("visible-code".to_string()),
+        redirect_uri: None,
+        client_id: Some("client-1".to_string()),
+        client_secret: Some("secret-cs".into()),
+        code_verifier: Some("secret-cv".to_string()),
+        device_code: None,
+        subject_token: Some("secret-st".into()),
+        subject_token_type: None,
+        actor_token: Some("secret-at".into()),
+        actor_token_type: None,
+        audience: None,
+        scope: None,
+        requested_token_type: None,
+        resource: None,
+        client_assertion: Some("secret-ca".into()),
+        client_assertion_type: None,
+        assertion: Some("secret-a".into()),
+        authorization_details: None,
+    };
+    let debug = format!("{request:?}");
+    for secret in [
+        "secret-cs",
+        "secret-cv",
+        "secret-st",
+        "secret-at",
+        "secret-ca",
+        "secret-a",
+    ] {
+        assert!(
+            !debug.contains(secret),
+            "{secret} leaked into Debug: {debug}"
+        );
+    }
+    assert!(debug.contains("[REDACTED]"), "{debug}");
+    assert!(
+        debug.contains("client-1"),
+        "non-secrets stay visible: {debug}"
+    );
+}

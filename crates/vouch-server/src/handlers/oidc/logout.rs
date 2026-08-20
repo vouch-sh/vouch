@@ -39,6 +39,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use jsonwebtoken::Validation;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -51,7 +52,7 @@ use std::sync::Arc;
 pub(crate) struct LogoutQuery {
     /// OPTIONAL. Previously issued ID Token passed as a hint. Used to identify
     /// the RP and optionally to look up the client's registered post-logout URIs.
-    pub id_token_hint: Option<String>,
+    pub id_token_hint: Option<SecretString>,
     /// OPTIONAL. Hint about the End-User's login identifier. Informational only;
     /// accepted per spec but not acted upon; the `Debug` impl is its only reader.
     pub logout_hint: Option<String>,
@@ -89,7 +90,7 @@ impl std::fmt::Debug for LogoutQuery {
 /// POST /oauth/logout form body — mirrors the hidden fields in the confirmation form.
 #[derive(Deserialize)]
 pub(crate) struct LogoutForm {
-    pub id_token_hint: Option<String>,
+    pub id_token_hint: Option<SecretString>,
     pub post_logout_redirect_uri: Option<String>,
     pub client_id: Option<String>,
     /// `state` is carried as a hidden form field through the confirmation page.
@@ -266,8 +267,8 @@ pub(crate) async fn logout(
     // (spec says the server SHOULD show the confirmation page regardless).
     let hint_claims = query
         .id_token_hint
-        .as_deref()
-        .and_then(|hint| verify_id_token_hint(&state, hint));
+        .as_ref()
+        .and_then(|hint| verify_id_token_hint(&state, hint.expose_secret()));
 
     // When both a verified hint and a bare client_id are present, they MUST agree.
     // Spec §3: "If client_id is given, it MUST match the aud of id_token_hint."
@@ -297,8 +298,14 @@ pub(crate) async fn logout(
     // The confirmation form propagates the hint, redirect URI, state, and
     // ui_locales as hidden fields so the POST handler can re-validate them.
     let template = LogoutConfirmTemplate {
+        // Deliberate render-boundary exposure: the hint rides through the
+        // confirmation page as a hidden form field, so the template needs
+        // the plaintext.
         id_token_hint: if hint_claims.is_some() {
-            query.id_token_hint.clone()
+            query
+                .id_token_hint
+                .as_ref()
+                .map(|s| s.expose_secret().to_string())
         } else {
             None
         },
@@ -324,8 +331,8 @@ pub(crate) async fn logout_post(
 ) -> Response {
     let hint_claims = form
         .id_token_hint
-        .as_deref()
-        .and_then(|hint| verify_id_token_hint(&state, hint));
+        .as_ref()
+        .and_then(|hint| verify_id_token_hint(&state, hint.expose_secret()));
 
     // Enforce client_id == hint.aud on the POST leg as well.
     let hint_claims = filter_hint_by_client_id(hint_claims, form.client_id.as_deref());
