@@ -1759,6 +1759,10 @@ async fn issue_code_and_redirect(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::db::{
@@ -1839,5 +1843,66 @@ mod tests {
         ]);
         let result = resolve_redirect_uri(None, &client);
         assert!(result.is_err());
+    }
+
+    /// JARM §2.1 requires the response be a JWT "even in case of an error
+    /// response", and clients "MUST NOT" accept `alg: none`. When signing
+    /// fails there is no conformant response to put on the redirect, so the
+    /// redirect must not be taken — returning plain parameters would send the
+    /// client exactly what it is obliged to discard while looking, to the
+    /// user, like the flow completed.
+    #[tokio::test]
+    async fn jarm_signing_failure_does_not_fall_back_to_unsigned_parameters() {
+        use crate::test_utils::{TestClientSpec, create_test_client, create_test_user};
+
+        // No RSA key is configured in the test state, so a client that asks
+        // for RS256 JARM makes signing fail for real rather than by mocking.
+        let state = crate::test_utils::test_app_state().await;
+        let user = create_test_user(&state.store, "jarm-fail@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                authorization_signed_response_alg: Some(JwsAlgorithm::Rs256),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        assert!(
+            state.oidc_rsa_key.is_none(),
+            "test state must have no RSA key for signing to fail"
+        );
+
+        let response = oauth_error_response(
+            &state,
+            &client,
+            "https://example.com/callback",
+            "access_denied",
+            "user denied",
+            Some("opaque-state"),
+            ResponseMode::Jwt,
+        )
+        .await;
+
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .is_none(),
+            "must not redirect: there is no conformant response to send"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            !body.contains("opaque-state") && !body.contains("access_denied"),
+            "must not leak the response parameters outside a signed JWT: {body}"
+        );
     }
 }

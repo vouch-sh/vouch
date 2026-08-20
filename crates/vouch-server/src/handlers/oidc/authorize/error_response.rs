@@ -7,6 +7,12 @@
 //! exit cannot render a bare 302 and ignore the mode the client asked for.
 //! Two exits previously did, and a `form_post` client that receives query
 //! parameters on its redirect_uri has no way to read them.
+//!
+//! The JWT modes are stricter still. JARM §2.1 requires a JWT "even in case
+//! of an error response", and clients "MUST NOT" accept `alg: none`, so
+//! there is no unsigned form to fall back to — a signing failure has to
+//! surface as a server error rather than as plain parameters the client is
+//! obliged to discard.
 
 use super::*;
 
@@ -75,7 +81,8 @@ pub(crate) async fn oauth_error_response(
 
 /// Create an OAuth error redirect response using JARM encoding.
 ///
-/// Falls back to plain query parameters if JARM JWT signing fails.
+/// Fails closed when signing fails: JARM permits no unsigned form, so there
+/// is nothing conformant to put on the redirect and it is not taken.
 pub(super) async fn oauth_error_redirect_jarm(
     state: &Arc<AppState>,
     client: &OAuthClient,
@@ -98,14 +105,32 @@ pub(super) async fn oauth_error_redirect_jarm(
             axum::response::Redirect::to(&url).into_response()
         }
         Err(e) => {
+            // Fail closed. JARM leaves no room for an unsigned fallback:
+            //
+            //   "The JWT MUST furthermore contain the authorization endpoint
+            //    response parameters as defined for the particular response
+            //    types, even in case of an error response."
+            //   — JARM §2.1
+            //
+            // and the client is required to reject one anyway:
+            //
+            //   "The client MUST check the signature of the JWT according to
+            //    [RFC7515] and the algorithm 'none' ('"alg":"none"') MUST NOT
+            //    be accepted."
+            //
+            // Returning plain query parameters therefore sends the client
+            // exactly what it is obliged to discard, while looking to the user
+            // like the flow completed. With no JWT there is nothing
+            // conformant to put on the redirect, so the redirect is not taken
+            // at all and the failure surfaces here.
             tracing::error!("Failed to build JARM error JWT: {e}");
-            let issuer = &state.config().base_url;
-            let mut params = vec![("error", error), ("error_description", description)];
-            if let Some(state_param) = oauth_state {
-                params.push(("state", state_param));
+            AuthorizeDeniedTemplate {
+                client_name: client.name.clone(),
+                error_message: "The authorization server could not produce a signed response. \
+                     Please try again, or contact the application owner if this persists."
+                    .to_string(),
             }
-            params.push(("iss", issuer));
-            build_authorization_redirect(redirect_uri, &params)
+            .into_response()
         }
     }
 }
