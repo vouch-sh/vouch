@@ -78,17 +78,38 @@ pub enum Prompt {
 }
 
 impl Prompt {
+    /// Every accepted `prompt` value, in the order shown to clients.
+    ///
+    /// [`parse`](Self::parse) and [`supported_values`](Self::supported_values)
+    /// both read this table, so an accepted value cannot be missing from the
+    /// error message that lists them and a listed value cannot be
+    /// unparseable. Keeping them as separate literals is how the message came
+    /// to advertise fewer values than the parser accepted.
+    const ACCEPTED: &'static [(&'static str, Self)] = &[
+        ("login", Self::Login),
+        ("none", Self::Silent),
+        ("consent", Self::Consent),
+    ];
+
     /// Parse a prompt value from a string.
     ///
     /// Returns `None` for unsupported values (e.g., `select_account`).
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "login" => Some(Self::Login),
-            "none" => Some(Self::Silent),
-            "consent" => Some(Self::Consent),
-            _ => None,
-        }
+        Self::ACCEPTED
+            .iter()
+            .find(|(value, _)| *value == s)
+            .map(|(_, prompt)| *prompt)
+    }
+
+    /// Comma-separated list of accepted values, for error messages.
+    #[must_use]
+    pub fn supported_values() -> String {
+        Self::ACCEPTED
+            .iter()
+            .map(|(value, _)| *value)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Return the string representation used in OAuth parameters.
@@ -1524,6 +1545,28 @@ mod tests {
         assert_eq!(Prompt::parse("consent"), Some(Prompt::Consent));
         assert_eq!(Prompt::parse("select_account"), None);
         assert_eq!(Prompt::parse(""), None);
+    }
+
+    /// Every value the error message advertises must actually parse. This is
+    /// the invariant that broke when the message and the parser were separate
+    /// literals: the message listed fewer values than the parser accepted.
+    #[test]
+    fn every_advertised_prompt_value_parses() {
+        let advertised = Prompt::supported_values();
+        assert!(!advertised.is_empty(), "message must list something");
+        for value in advertised.split(", ") {
+            assert!(
+                Prompt::parse(value).is_some(),
+                "advertised prompt {value:?} does not parse"
+            );
+        }
+        // And every accepted value is advertised.
+        for (value, _) in Prompt::ACCEPTED {
+            assert!(
+                advertised.contains(value),
+                "accepted prompt {value:?} is missing from the advertised list"
+            );
+        }
     }
 
     #[test]
