@@ -2,14 +2,223 @@
 //! Audit event data payloads for the `audit_events.data` JSON column.
 //!
 //! These are serialized to JSON and stored in the unencrypted audit table.
-//! They are NOT `DocumentType` implementations — they're the payload
-//! inside `AuditStore::insert_event(data_json)`.
+//! They are NOT `DocumentType` implementations — they're the typed payload
+//! behind [`AuditData`] that `AuditStore::insert_event` serializes.
+//!
+//! Every payload the audit write API accepts is a named struct in this
+//! file: [`AuditData`] is sealed by a module-private supertrait, so an ad
+//! hoc `serde_json::json!` literal cannot be passed, and this module is
+//! the whole review surface for what audit `data` may contain. The seal
+//! cannot inspect values — a free-text field on a vetted payload could
+//! still carry an address, so payload fields here are what review guards.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::db::audit::AuditEventKind;
+
+/// Seal for [`AuditData`]. Private to this module on purpose: a new payload
+/// type must be added here, not implemented ad hoc elsewhere in the crate.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A vetted, named audit `data` payload accepted by
+/// `AuditStore::insert_event` / `insert_event_with_domain`.
+///
+/// Raw email addresses must not appear in payload fields — audit rows
+/// carry only the derived `email_domain` / `email_hmac` columns; identify
+/// users via `*_user_id` fields.
+pub trait AuditData: Serialize + sealed::Sealed {}
+
+/// Implement [`AuditData`] (and its seal) for payload structs in this file.
+macro_rules! impl_audit_data {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl sealed::Sealed for $ty {}
+            impl AuditData for $ty {}
+        )+
+    };
+}
+
+/// Administrative member actions (promote/demote/activate/deactivate/
+/// revoke-credentials/remove), written under the corresponding `Admin*`
+/// kinds. `target_user_id` is what the admin UI resolves to a display
+/// email at render time.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminMemberActionData<'a> {
+    pub action: &'static str,
+    pub target_user_id: &'a str,
+    pub admin_user_id: &'a str,
+    /// Only the revoke-credentials site records how many keys were revoked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys_revoked: Option<usize>,
+}
+
+/// Admin-initiated additional-domain add/verify (`OrgDomainAdded`,
+/// `OrgDomainVerified`).
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgDomainAdminData<'a> {
+    pub action: &'static str,
+    pub domain: &'a str,
+    pub admin_user_id: &'a str,
+    /// Verification method; only the verify site records it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<&'static str>,
+}
+
+/// Admin-initiated additional-domain removal (`OrgDomainRemoved`), with the
+/// revocation fallout the removal triggered.
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgDomainRemovalData<'a> {
+    pub action: &'static str,
+    pub domain: &'a str,
+    pub admin_user_id: &'a str,
+    pub revoked_user_session_count: u64,
+    pub revocation_errored: bool,
+    /// Issuer subdomain released because this was its last verified backing
+    /// domain; serialized as an explicit `null` when none was.
+    pub released_subdomain: Option<String>,
+}
+
+/// Admin-initiated issuer-subdomain claim (`OrgSubdomainClaimed`).
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgSubdomainClaimData<'a> {
+    pub action: &'static str,
+    pub label: &'a str,
+    /// Full issuer URL; serialized as an explicit `null` when the config
+    /// cannot derive one.
+    pub issuer: Option<&'a str>,
+    pub admin_user_id: &'a str,
+}
+
+/// Admin-initiated issuer-subdomain release (`OrgSubdomainReleased`).
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgSubdomainReleaseData<'a> {
+    pub action: &'static str,
+    pub label: &'a str,
+    pub admin_user_id: &'a str,
+}
+
+/// SCIM API token lifecycle (`AdminCreateScimToken`, `AdminDeleteScimToken`,
+/// `AdminRevokeScimToken`).
+#[derive(Debug, Serialize)]
+pub(crate) struct ScimTokenAdminData<'a> {
+    pub action: &'static str,
+    pub token_id: &'a str,
+    pub admin_user_id: &'a str,
+}
+
+/// Preconfigured posture-policy enable/disable (`AdminPolicyToggle`).
+#[derive(Debug, Serialize)]
+pub(crate) struct PreconfiguredPolicyToggleData<'a> {
+    /// `preconfigured_policy_{enabled|disabled}` — built with `format!` at
+    /// the call site.
+    pub action: String,
+    pub slug: &'a str,
+    pub admin_user_id: &'a str,
+}
+
+/// Custom posture-policy lifecycle (`AdminPolicyCreate`/`Update`/`Delete`
+/// and the custom-policy arm of `AdminPolicyToggle`).
+#[derive(Debug, Serialize)]
+pub(crate) struct CustomPolicyAdminData<'a> {
+    /// `custom_policy_created` / `_updated` / `_deleted` /
+    /// `custom_policy_{enabled|disabled}`.
+    pub action: String,
+    pub policy_id: &'a str,
+    /// Absent on delete (the policy is gone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_name: Option<&'a str>,
+    pub admin_user_id: &'a str,
+    /// SHA-256 of the policy text; absent on delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_text_hash: Option<String>,
+}
+
+/// Cleanup-task removal of a stale additional domain (`OrgDomainExpired`)
+/// or automatic unverify after DNS re-check failures (`OrgDomainUnverified`).
+/// System actor: no `admin_user_id`.
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgDomainCleanupData<'a> {
+    pub action: &'static str,
+    pub domain: &'a str,
+    pub org_id: &'a str,
+    pub reason: &'static str,
+}
+
+/// Cleanup-task release of an issuer subdomain whose backing domain became
+/// unverified (`OrgSubdomainReleased`). System actor: no `admin_user_id`.
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgSubdomainCleanupData<'a> {
+    pub action: &'static str,
+    pub label: &'a str,
+    pub org_id: &'a str,
+    pub reason: &'static str,
+}
+
+/// Replayed key-registration link rejected (`KeyRegistrationReplay`).
+#[derive(Debug, Serialize)]
+pub(crate) struct RegistrationReplayData {
+    /// `cli_register` or `browser_register`.
+    pub flow: &'static str,
+    /// `false` — the event records a rejection.
+    pub success: bool,
+    pub error_code: &'static str,
+}
+
+/// Per-org issuer key rotation, scheduled or emergency
+/// (`OrgIssuerKeyRotated`, `OrgIssuerKeyEmergencyRotation`) — one event per
+/// algorithm.
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgIssuerKeyRotationData<'a> {
+    pub action: &'static str,
+    pub org_id: &'a str,
+    pub alg: &'static str,
+    pub old_kid: &'a str,
+    pub new_kid: &'a str,
+}
+
+/// Per-org previous-key revocation (`OrgIssuerKeyRevoked`) — one event per
+/// algorithm.
+#[derive(Debug, Serialize)]
+pub(crate) struct OrgIssuerKeyRevocationData<'a> {
+    pub action: &'static str,
+    pub org_id: &'a str,
+    pub alg: &'static str,
+    pub kid: &'a str,
+}
+
+/// A posture or temporal policy denying credential issuance
+/// (`PolicyDenied`). `policy` is the policy's registered name, not free
+/// text.
+#[derive(Debug, Serialize)]
+pub(crate) struct PolicyDenialData<'a> {
+    /// `issue_token` or `exchange_token`.
+    pub action: &'static str,
+    pub policy: &'a str,
+    pub org_id: &'a str,
+}
+
+impl_audit_data!(
+    AdminMemberActionData<'_>,
+    OrgDomainAdminData<'_>,
+    OrgDomainRemovalData<'_>,
+    OrgSubdomainClaimData<'_>,
+    OrgSubdomainReleaseData<'_>,
+    ScimTokenAdminData<'_>,
+    PreconfiguredPolicyToggleData<'_>,
+    CustomPolicyAdminData<'_>,
+    OrgDomainCleanupData<'_>,
+    OrgSubdomainCleanupData<'_>,
+    RegistrationReplayData,
+    OrgIssuerKeyRotationData<'_>,
+    OrgIssuerKeyRevocationData<'_>,
+    PolicyDenialData<'_>,
+    OAuthUsageData,
+    ScimAuditData,
+);
 
 /// Data payload for OAuth usage audit events.
 #[derive(Debug, Serialize, Deserialize)]
@@ -234,6 +443,346 @@ mod tests {
         assert_eq!(back.agent.as_deref(), Some("claude-code"));
         assert_eq!(back.asn, Some(3320));
         assert_eq!(back.org_name.as_deref(), Some("DTAG"));
+    }
+
+    /// Every typed payload must serialize to the exact JSON shape of the
+    /// rows already stored in `audit_events` (Value equality — key order
+    /// is irrelevant, every reader parses). Covers both branches of every
+    /// optional field.
+    #[test]
+    fn test_typed_payloads_match_stored_row_shapes() {
+        use serde_json::json;
+
+        let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
+            // members.rs promote (keys_revoked absent) and
+            // revoke_credentials (keys_revoked present)
+            (
+                serde_json::to_value(AdminMemberActionData {
+                    action: "promote",
+                    target_user_id: "u-target",
+                    admin_user_id: "u-admin",
+                    keys_revoked: None,
+                })
+                .unwrap(),
+                json!({
+                    "action": "promote",
+                    "target_user_id": "u-target",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            (
+                serde_json::to_value(AdminMemberActionData {
+                    action: "revoke_credentials",
+                    target_user_id: "u-target",
+                    admin_user_id: "u-admin",
+                    keys_revoked: Some(3),
+                })
+                .unwrap(),
+                json!({
+                    "action": "revoke_credentials",
+                    "target_user_id": "u-target",
+                    "admin_user_id": "u-admin",
+                    "keys_revoked": 3,
+                }),
+            ),
+            // domains.rs add (method absent) and verify (method present)
+            (
+                serde_json::to_value(OrgDomainAdminData {
+                    action: "add_org_domain",
+                    domain: "acme.co",
+                    admin_user_id: "u-admin",
+                    method: None,
+                })
+                .unwrap(),
+                json!({
+                    "action": "add_org_domain",
+                    "domain": "acme.co",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            (
+                serde_json::to_value(OrgDomainAdminData {
+                    action: "verify_org_domain",
+                    domain: "acme.co",
+                    admin_user_id: "u-admin",
+                    method: Some("dns_txt"),
+                })
+                .unwrap(),
+                json!({
+                    "action": "verify_org_domain",
+                    "domain": "acme.co",
+                    "admin_user_id": "u-admin",
+                    "method": "dns_txt",
+                }),
+            ),
+            // domains.rs remove: released_subdomain None serialized as an
+            // explicit null (the historical json! shape), Some as a string
+            (
+                serde_json::to_value(OrgDomainRemovalData {
+                    action: "remove_org_domain",
+                    domain: "acme.co",
+                    admin_user_id: "u-admin",
+                    revoked_user_session_count: 2,
+                    revocation_errored: false,
+                    released_subdomain: None,
+                })
+                .unwrap(),
+                json!({
+                    "action": "remove_org_domain",
+                    "domain": "acme.co",
+                    "admin_user_id": "u-admin",
+                    "revoked_user_session_count": 2,
+                    "revocation_errored": false,
+                    "released_subdomain": null,
+                }),
+            ),
+            (
+                serde_json::to_value(OrgDomainRemovalData {
+                    action: "remove_org_domain",
+                    domain: "acme.co",
+                    admin_user_id: "u-admin",
+                    revoked_user_session_count: 0,
+                    revocation_errored: true,
+                    released_subdomain: Some("acme-co".to_string()),
+                })
+                .unwrap(),
+                json!({
+                    "action": "remove_org_domain",
+                    "domain": "acme.co",
+                    "admin_user_id": "u-admin",
+                    "revoked_user_session_count": 0,
+                    "revocation_errored": true,
+                    "released_subdomain": "acme-co",
+                }),
+            ),
+        ];
+        for (typed, literal) in cases {
+            assert_eq!(typed, literal);
+        }
+    }
+
+    /// Same stored-row-shape contract for the subdomain, SCIM-token, and
+    /// policy payloads.
+    #[test]
+    fn test_subdomain_scim_and_policy_payloads_match_stored_row_shapes() {
+        use serde_json::json;
+
+        let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
+            // subdomain.rs claim (issuer present) and release (absent)
+            (
+                serde_json::to_value(OrgSubdomainClaimData {
+                    action: "claim_subdomain",
+                    label: "acme-co",
+                    issuer: Some("https://acme-co.us.vouch.sh"),
+                    admin_user_id: "u-admin",
+                })
+                .unwrap(),
+                json!({
+                    "action": "claim_subdomain",
+                    "label": "acme-co",
+                    "issuer": "https://acme-co.us.vouch.sh",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            (
+                serde_json::to_value(OrgSubdomainClaimData {
+                    action: "claim_subdomain",
+                    label: "acme-co",
+                    issuer: None,
+                    admin_user_id: "u-admin",
+                })
+                .unwrap(),
+                json!({
+                    "action": "claim_subdomain",
+                    "label": "acme-co",
+                    "issuer": null,
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            (
+                serde_json::to_value(OrgSubdomainReleaseData {
+                    action: "release_subdomain",
+                    label: "acme-co",
+                    admin_user_id: "u-admin",
+                })
+                .unwrap(),
+                json!({
+                    "action": "release_subdomain",
+                    "label": "acme-co",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            // scim_tokens.rs create
+            (
+                serde_json::to_value(ScimTokenAdminData {
+                    action: "create_scim_token",
+                    token_id: "tok-1",
+                    admin_user_id: "u-admin",
+                })
+                .unwrap(),
+                json!({
+                    "action": "create_scim_token",
+                    "token_id": "tok-1",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            // policies.rs preconfigured toggle
+            (
+                serde_json::to_value(PreconfiguredPolicyToggleData {
+                    action: "preconfigured_policy_enabled".to_string(),
+                    slug: "require-secure-boot",
+                    admin_user_id: "u-admin",
+                })
+                .unwrap(),
+                json!({
+                    "action": "preconfigured_policy_enabled",
+                    "slug": "require-secure-boot",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+            // policies.rs custom create (name + hash) and delete (neither)
+            (
+                serde_json::to_value(CustomPolicyAdminData {
+                    action: "custom_policy_created".to_string(),
+                    policy_id: "pol-1",
+                    policy_name: Some("Block exports"),
+                    admin_user_id: "u-admin",
+                    policy_text_hash: Some("abc123".to_string()),
+                })
+                .unwrap(),
+                json!({
+                    "action": "custom_policy_created",
+                    "policy_id": "pol-1",
+                    "policy_name": "Block exports",
+                    "admin_user_id": "u-admin",
+                    "policy_text_hash": "abc123",
+                }),
+            ),
+            (
+                serde_json::to_value(CustomPolicyAdminData {
+                    action: "custom_policy_deleted".to_string(),
+                    policy_id: "pol-1",
+                    policy_name: None,
+                    admin_user_id: "u-admin",
+                    policy_text_hash: None,
+                })
+                .unwrap(),
+                json!({
+                    "action": "custom_policy_deleted",
+                    "policy_id": "pol-1",
+                    "admin_user_id": "u-admin",
+                }),
+            ),
+        ];
+        for (typed, literal) in cases {
+            assert_eq!(typed, literal);
+        }
+    }
+
+    /// Same stored-row-shape contract for the cleanup, replay, key-rotation,
+    /// and policy-denial payloads.
+    #[test]
+    fn test_system_actor_payloads_match_stored_row_shapes() {
+        use serde_json::json;
+
+        let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
+            // infra/cleanup.rs expire + subdomain release
+            (
+                serde_json::to_value(OrgDomainCleanupData {
+                    action: "expire_org_domain",
+                    domain: "acme.co",
+                    org_id: "org-1",
+                    reason: "pending_ttl_expired",
+                })
+                .unwrap(),
+                json!({
+                    "action": "expire_org_domain",
+                    "domain": "acme.co",
+                    "org_id": "org-1",
+                    "reason": "pending_ttl_expired",
+                }),
+            ),
+            (
+                serde_json::to_value(OrgSubdomainCleanupData {
+                    action: "release_subdomain",
+                    label: "acme-co",
+                    org_id: "org-1",
+                    reason: "backing_domain_unverified",
+                })
+                .unwrap(),
+                json!({
+                    "action": "release_subdomain",
+                    "label": "acme-co",
+                    "org_id": "org-1",
+                    "reason": "backing_domain_unverified",
+                }),
+            ),
+            // keys.rs / enroll.rs replay rejection
+            (
+                serde_json::to_value(RegistrationReplayData {
+                    flow: "cli_register",
+                    success: false,
+                    error_code: "state_already_used",
+                })
+                .unwrap(),
+                json!({
+                    "flow": "cli_register",
+                    "success": false,
+                    "error_code": "state_already_used",
+                }),
+            ),
+            // org_keys/rotation.rs rotate and revoke
+            (
+                serde_json::to_value(OrgIssuerKeyRotationData {
+                    action: "rotate_org_issuer_key",
+                    org_id: "org-1",
+                    alg: "ES256",
+                    old_kid: "kid-old",
+                    new_kid: "kid-new",
+                })
+                .unwrap(),
+                json!({
+                    "action": "rotate_org_issuer_key",
+                    "org_id": "org-1",
+                    "alg": "ES256",
+                    "old_kid": "kid-old",
+                    "new_kid": "kid-new",
+                }),
+            ),
+            (
+                serde_json::to_value(OrgIssuerKeyRevocationData {
+                    action: "revoke_org_issuer_key",
+                    org_id: "org-1",
+                    alg: "RS256",
+                    kid: "kid-old",
+                })
+                .unwrap(),
+                json!({
+                    "action": "revoke_org_issuer_key",
+                    "org_id": "org-1",
+                    "alg": "RS256",
+                    "kid": "kid-old",
+                }),
+            ),
+            // services/policy/mod.rs denial
+            (
+                serde_json::to_value(PolicyDenialData {
+                    action: "issue_token",
+                    policy: "exchange-ip-consistency",
+                    org_id: "org-1",
+                })
+                .unwrap(),
+                json!({
+                    "action": "issue_token",
+                    "policy": "exchange-ip-consistency",
+                    "org_id": "org-1",
+                }),
+            ),
+        ];
+
+        for (typed, literal) in cases {
+            assert_eq!(typed, literal);
+        }
     }
 
     #[test]

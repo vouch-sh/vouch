@@ -799,7 +799,7 @@ mod tests {
 
         state
             .audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 None,
                 Some("a@example.com"),

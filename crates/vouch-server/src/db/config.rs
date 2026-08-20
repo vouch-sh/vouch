@@ -76,7 +76,7 @@ pub struct AuthEventParams {
     /// Upstream IdP issuer for identity-binding events. The upstream
     /// subject is deliberately NOT recorded: a SAML NameID is frequently
     /// an email address, and audit payloads must not carry raw emails
-    /// (see `tests/no_raw_email_in_audit_data.rs`).
+    /// (see the [`crate::db::AuditData`] payload contract).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub idp_issuer: Option<String>,
 }
@@ -132,7 +132,7 @@ pub(super) async fn insert_auth_event(
     }
     let data_json = value.to_string();
     audit
-        .insert_event(
+        .insert_event_json(
             params.event_type.kind(),
             Some(&params.user_id),
             email,

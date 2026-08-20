@@ -131,7 +131,7 @@ async fn run_cleanup_tolerates_zero_retention_for_audit_events() {
     harness
         .state
         .audit
-        .insert_event(
+        .insert_json_event_for_test(
             db::AuditEventKind::LoginSuccess,
             Some("user-1"),
             Some("user-1@example.com"),

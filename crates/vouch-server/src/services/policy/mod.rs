@@ -456,11 +456,11 @@ async fn record_denial(
         DecisionKind::IssueToken { .. } => "issue_token",
         DecisionKind::ExchangeToken { .. } => "exchange_token",
     };
-    let data = serde_json::json!({
-        "action": action,
-        "policy": policy,
-        "org_id": org_id,
-    });
+    let data = crate::db::documents::audit::PolicyDenialData {
+        action,
+        policy,
+        org_id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
@@ -470,7 +470,7 @@ async fn record_denial(
             // view scopes rows — without it a denial is invisible to the
             // admin it is evidence for.
             Some(user_email),
-            &data.to_string(),
+            &data,
         )
         .await
     {

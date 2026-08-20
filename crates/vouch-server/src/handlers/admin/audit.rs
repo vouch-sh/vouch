@@ -344,6 +344,21 @@ mod tests {
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
+    /// Member-event target resolution must parse the typed payload the
+    /// admin handlers write.
+    #[test]
+    fn test_target_fields_parse_the_typed_member_payload() {
+        let typed = serde_json::to_string(&crate::db::documents::audit::AdminMemberActionData {
+            action: "promote",
+            target_user_id: "u-target",
+            admin_user_id: "u-admin",
+            keys_revoked: None,
+        })
+        .unwrap();
+        let fields = TargetFields::from_json(&typed);
+        assert_eq!(fields.target_user_id.as_deref(), Some("u-target"));
+    }
+
     #[test]
     fn test_geo_fields_from_json_full_record() {
         let json = r#"{"country_code":"US","client_ip":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
@@ -590,7 +605,7 @@ mod tests {
         // the page's email_domain filter must match via case normalization.
         state
             .audit
-            .insert_event(
+            .insert_json_event_for_test(
                 crate::db::audit::AuditEventKind::LoginSuccess,
                 Some(&admin.id),
                 Some("Alice@CORP.Example.COM"),
@@ -623,7 +638,7 @@ mod tests {
         let data = serde_json::json!({ "target_user_id": target.id }).to_string();
         state
             .audit
-            .insert_event(
+            .insert_json_event_for_test(
                 crate::db::audit::AuditEventKind::AdminPromote,
                 Some(&admin.id),
                 Some(&admin.email),
@@ -633,7 +648,7 @@ mod tests {
             .unwrap();
         state
             .audit
-            .insert_event(
+            .insert_json_event_for_test(
                 crate::db::audit::AuditEventKind::AdminDemote,
                 Some(&admin.id),
                 Some(&admin.email),

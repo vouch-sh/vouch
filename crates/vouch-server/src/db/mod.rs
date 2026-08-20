@@ -122,10 +122,11 @@ pub use scim::{
     update_scim_token_last_used, update_scim_user,
 };
 
-// Re-export credential audit payload types (envelope + per-kind details)
+// Re-export audit payload types: the sealed AuditData marker plus the
+// credential envelope + per-kind details
 pub use documents::audit::{
-    AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope, GitHubCredentialDetails,
-    SshCredentialDetails, TokenExchangeDetails,
+    AuditData, AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope,
+    GitHubCredentialDetails, SshCredentialDetails, TokenExchangeDetails,
 };
 pub use documents::oauth::{
     AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource, ResponseMode,

@@ -924,19 +924,14 @@ pub async fn record_oauth_event(
         org_name,
     };
     let org_domain = resolve_oauth_event_org_domain(store, params).await;
-    let result = match serde_json::to_string(&data) {
-        Ok(data_json) => {
-            audit
-                .insert_event_with_domain(
-                    params.event_type.kind(),
-                    params.user_id,
-                    org_domain.as_deref(),
-                    &data_json,
-                )
-                .await
-        }
-        Err(e) => Err(e.into()),
-    };
+    let result = audit
+        .insert_event_with_domain(
+            params.event_type.kind(),
+            params.user_id,
+            org_domain.as_deref(),
+            &data,
+        )
+        .await;
     if let Err(e) = result {
         tracing::warn!(
             error = %e,
