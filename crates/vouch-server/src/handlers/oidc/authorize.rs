@@ -1453,14 +1453,28 @@ async fn authorize_authenticated_user(
         ReauthPolicy::OnDemand => {
             validated.prompt() == Some(Prompt::Login)
                 || validated.max_age().is_some_and(|max_age| {
-                    let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_session.created_at)
-                        .as_secs()
-                        .max(0);
-                    let Ok(age) = u64::try_from(age_secs) else {
-                        return true;
-                    };
-                    age >= max_age
+                    // OIDC Core 3.1.2.1: "If the elapsed time is greater than
+                    // this value, the OP MUST attempt to actively
+                    // re-authenticate the End-User." The same paragraph adds:
+                    // "Note that max_age=0 is equivalent to prompt=login."
+                    //
+                    // Both hold only when elapsed time is compared at full
+                    // precision. Truncating to whole seconds first rounds a
+                    // fresh session's age down to zero, so `>` would let it
+                    // satisfy max_age=0 and break the prompt=login
+                    // equivalence, while `>=` re-authenticates at exactly
+                    // max_age, which the spec requires only beyond it.
+                    // Comparing durations directly is exact at every value:
+                    // elapsed is never precisely zero, so max_age=0 always
+                    // re-authenticates.
+                    //
+                    // A max_age too large for `i64` seconds is ~292 billion
+                    // years, far beyond any session, so saturating means "no
+                    // age limit" rather than an arbitrary rejection.
+                    let elapsed = jiff::Timestamp::now().duration_since(auth_session.created_at);
+                    let limit =
+                        jiff::SignedDuration::from_secs(i64::try_from(max_age).unwrap_or(i64::MAX));
+                    elapsed > limit
                 })
         }
     };
