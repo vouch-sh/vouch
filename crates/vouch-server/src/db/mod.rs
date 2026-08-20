@@ -74,7 +74,7 @@ pub use authenticators::{
 
 // Re-export organization types and functions
 pub use documents::organization::{
-    AdditionalDomain, OrgSigningKeyDoc, SigningKeyState, SubdomainClaimDoc,
+    AdditionalDomain, DomainClaimDoc, OrgSigningKeyDoc, SigningKeyState, SubdomainClaimDoc,
     UNVERIFY_FAILURE_THRESHOLD,
 };
 pub use organizations::{

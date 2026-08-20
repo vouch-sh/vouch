@@ -4,7 +4,7 @@
 //! This module provides enrollment operations that ensure consistency
 //! when creating organizations and users during the OIDC enrollment flow.
 
-use super::documents::organization::OrganizationDoc;
+use super::documents::organization::{DomainClaimDoc, OrganizationDoc};
 use super::documents::user::{IdpIdentity, UpstreamLogin, UserDoc, idp_identity_index_value};
 use super::store::DocumentStore;
 use crate::error::ServiceError;
@@ -124,8 +124,41 @@ async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String
         additional_domains: Vec::new(),
         subdomain: None,
     };
-    match store.insert_with_id(&id, &doc).await {
-        Ok(result) => Ok(result.id),
+
+    // Take the domain's claim slot alongside the org row. Two orgs cannot
+    // share a *primary* domain — the org ID is a hash of it, so they collide
+    // on the primary key — but a primary domain and another org's additional
+    // domain can still race: the index read above sees nothing while that
+    // other org is mid-verification, and the two writes touch different rows.
+    // The shared slot is what makes them conflict.
+    let claim_id = crate::db::organizations::deterministic_domain_claim_id(domain);
+    let mut tx = store.begin().await?;
+    let slot_taken = match tx.get::<DomainClaimDoc>(&claim_id).await? {
+        None => {
+            let slot = DomainClaimDoc {
+                domain: domain.to_string(),
+                org_id: id.clone(),
+            };
+            tx.insert_with_id(&claim_id, &slot).await.is_ok()
+        }
+        // Held by another org that verified this domain first; fall through
+        // to the existing-org lookup below rather than creating a duplicate.
+        Some(existing) => existing.data.org_id == id,
+    };
+    if !slot_taken {
+        // Dropping the transaction rolls it back.
+        drop(tx);
+        return store
+            .find_one::<OrganizationDoc>("domain", domain)
+            .await?
+            .map(|org| org.id)
+            .context("domain claimed by an organization that could not be found");
+    }
+    match tx.insert_with_id(&id, &doc).await {
+        Ok(result) => {
+            tx.commit().await?;
+            Ok(result.id)
+        }
         Err(e) if super::pool::is_unique_violation(&e) => {
             // Concurrent enrollee inserted first — re-fetch.
             let org = match store.get::<OrganizationDoc>(&id).await? {

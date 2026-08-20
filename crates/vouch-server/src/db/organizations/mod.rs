@@ -9,6 +9,7 @@ use anyhow::Result;
 mod validation;
 use jiff::Timestamp;
 mod domains;
+pub(crate) use domains::deterministic_domain_claim_id;
 pub use domains::{
     AddDomainError, AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, MarkVerifiedError,
     RecheckEffect, RecheckOutcome, StaleDomainRemoval, VerifiedDomainRecord, add_additional_domain,
