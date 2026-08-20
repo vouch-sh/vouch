@@ -16,7 +16,7 @@ use vouch_agent::daemon;
 use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
 use vouch_agent::socket::{prepare_vouch_dir, remove_socket};
-use vouch_agent::ssh_agent::{SshAgentServer, SshAgentState, ssh_agent_socket_path};
+use vouch_agent::ssh_agent::{SshAgentServer, ssh_agent_socket_path};
 use vouch_agent::state::AgentState;
 #[expect(
     unused_imports,
@@ -180,14 +180,12 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Create agent state
+    // Create agent state, shared by both servers so a credential and the
+    // session authorizing it are always read and cleared together.
     let state = AgentState::new();
 
-    // Create SSH agent state
-    let ssh_state = SshAgentState::new();
-
     // Try to recover session from disk (best-effort)
-    if recovery::try_recover_session(&state, &ssh_state).await {
+    if recovery::try_recover_session(&state).await {
         info!("Session recovered from disk");
     }
 
@@ -196,14 +194,8 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 
     // Create servers — each gets its own receiver from the shutdown channel
     let agent_shutdown_rx = shutdown_rx.clone();
-    let server = AgentServer::new(
-        Arc::clone(&state),
-        Arc::clone(&ssh_state),
-        agent_shutdown_rx,
-    );
-    // Create SSH agent server with access to main agent state for certificate refresh
-    let ssh_server =
-        SshAgentServer::with_agent_state(Arc::clone(&ssh_state), Arc::clone(&state), shutdown_rx);
+    let server = AgentServer::new(Arc::clone(&state), agent_shutdown_rx);
+    let ssh_server = SshAgentServer::new(Arc::clone(&state), shutdown_rx);
 
     info!("Agent starting");
 

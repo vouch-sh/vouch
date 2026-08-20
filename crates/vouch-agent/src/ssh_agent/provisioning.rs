@@ -16,15 +16,12 @@ use super::credentials::SshCredentials;
 use super::protocol::{
     build_identities_response, build_sign_response, parse_sign_request, sign_data,
 };
-use super::state::SshAgentState;
+use crate::state::AgentState;
 
 /// Handle SSH_AGENTC_REQUEST_IDENTITIES.
-pub(super) async fn handle_request_identities(
-    state: &Arc<SshAgentState>,
-    agent_state: Option<&Arc<crate::state::AgentState>>,
-) -> Result<Vec<u8>> {
+pub(super) async fn handle_request_identities(state: &Arc<AgentState>) -> Result<Vec<u8>> {
     // First check in-memory credentials
-    let creds = state.get_valid_credentials().await;
+    let creds = state.get_valid_ssh_credentials().await;
 
     if let Some(c) = creds {
         return build_identities_response(Some(&c));
@@ -32,7 +29,7 @@ pub(super) async fn handle_request_identities(
 
     // No valid credentials in memory — try reloading a still-valid cert from
     // disk (written by the CLI's `vouch credential ssh`).
-    if let Some(loaded) = try_load_from_disk(state, agent_state).await {
+    if let Some(loaded) = try_load_from_disk(state).await {
         return build_identities_response(Some(&loaded));
     }
 
@@ -42,9 +39,9 @@ pub(super) async fn handle_request_identities(
 }
 
 /// Handle SSH_AGENTC_SIGN_REQUEST.
-pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<SshAgentState>) -> Result<Vec<u8>> {
+pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<AgentState>) -> Result<Vec<u8>> {
     let creds = state
-        .get_valid_credentials()
+        .get_valid_ssh_credentials()
         .await
         .ok_or_else(|| AgentError::Protocol("no valid credentials available".to_string()))?;
 
@@ -62,14 +59,13 @@ pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<SshAgentState>) 
 
 /// Try to load SSH credentials from disk (lazy loading after agent restart).
 ///
-/// Only loads if the agent has a valid session (prevents stale certs after logout).
-async fn try_load_from_disk(
-    state: &Arc<SshAgentState>,
-    agent_state: Option<&Arc<crate::state::AgentState>>,
-) -> Option<SshCredentials> {
+/// Only loads if the agent has a valid session (prevents stale certs after
+/// logout). `vouch logout` leaves the on-disk key and certificate in place, so
+/// without this gate a cleared session could be undone by the next signature
+/// request.
+async fn try_load_from_disk(state: &Arc<AgentState>) -> Option<SshCredentials> {
     // Require a valid agent session to prevent serving stale certs
-    let agent = agent_state?;
-    let session = agent.get_session().await?;
+    state.get_session().await?;
 
     // Check for default key and cert files on disk
     let home = std::env::home_dir()?;
@@ -99,11 +95,13 @@ async fn try_load_from_disk(
 
     info!("Lazy-loaded SSH credentials from disk");
 
-    // Store in agent state with session linkage
-    let server_url = state.get_server_url().await;
-    state
-        .store_credentials(creds.clone(), Some(session.expires_at), server_url)
-        .await;
+    // Re-check the session under the same call that stores: the filesystem work
+    // above is slow enough for a concurrent logout to land in between, and
+    // storing afterwards would resurrect credentials that logout just cleared.
+    let server_url = state.get_ssh_server_url().await;
+    if !state.store_ssh_credentials(creds.clone(), server_url).await {
+        return None;
+    }
 
     Some(creds)
 }

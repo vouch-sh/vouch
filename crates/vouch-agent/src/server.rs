@@ -8,7 +8,7 @@ use crate::protocol::{
     StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
-use crate::ssh_agent::{SshAgentState, SshCredentials};
+use crate::ssh_agent::SshCredentials;
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
 use serde::de::DeserializeOwned;
@@ -38,22 +38,13 @@ const SHUTDOWN_READ_GRACE: Duration = Duration::from_millis(250);
 /// Agent server with graceful shutdown support.
 pub struct AgentServer {
     state: Arc<AgentState>,
-    ssh_state: Arc<SshAgentState>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl AgentServer {
     /// Create a new agent server with a shutdown signal.
-    pub fn new(
-        state: Arc<AgentState>,
-        ssh_state: Arc<SshAgentState>,
-        shutdown_rx: watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            state,
-            ssh_state,
-            shutdown_rx,
-        }
+    pub fn new(state: Arc<AgentState>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { state, shutdown_rx }
     }
 
     /// Run the server, listening on the Unix socket.
@@ -104,12 +95,11 @@ impl AgentServer {
                         }
                     };
                     let state = Arc::clone(&self.state);
-                    let ssh_state = Arc::clone(&self.ssh_state);
                     let conn_shutdown = self.shutdown_rx.clone();
                     tasks.spawn(async move {
                         // Hold the permit for the full connection task; it auto-releases on drop.
                         let _permit = permit;
-                        if let Err(e) = handle_connection(conn, state, ssh_state, conn_shutdown).await
+                        if let Err(e) = handle_connection(conn, state, conn_shutdown).await
                         {
                             debug!("Connection error: {e}");
                         }
@@ -153,7 +143,6 @@ struct RawRequest {
 async fn handle_connection(
     conn: AuthorizedStream,
     state: Arc<AgentState>,
-    ssh_state: Arc<SshAgentState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut stream = conn.into_stream();
@@ -233,7 +222,7 @@ async fn handle_connection(
         debug!("Request: method={:?}", request.method);
 
         // Handle request
-        let response = handle_request(&request, &state, &ssh_state).await;
+        let response = handle_request(&request, &state).await;
         send_response(&mut stream, &response).await?;
     }
 }
@@ -251,20 +240,16 @@ fn success_or_internal_error(
 }
 
 /// Handle a JSON-RPC request.
-async fn handle_request(
-    request: &Request,
-    state: &Arc<AgentState>,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
+async fn handle_request(request: &Request, state: &Arc<AgentState>) -> Response {
     match request.method {
         Method::Ping => handle_ping(request),
-        Method::GetSession => handle_get_session(request, state, ssh_state).await,
-        Method::StoreSession => handle_store_session(request, state, ssh_state).await,
-        Method::ClearSession => handle_clear_session(request, state, ssh_state).await,
+        Method::GetSession => handle_get_session(request, state).await,
+        Method::StoreSession => handle_store_session(request, state).await,
+        Method::ClearSession => handle_clear_session(request, state).await,
         Method::GetToken => handle_get_token(request, state).await,
-        Method::StoreSshCredentials => handle_store_ssh_credentials(request, ssh_state).await,
-        Method::ClearSshCredentials => handle_clear_ssh_credentials(request, ssh_state).await,
-        Method::HasSshCredentials => handle_has_ssh_credentials(request, ssh_state).await,
+        Method::StoreSshCredentials => handle_store_ssh_credentials(request, state).await,
+        Method::ClearSshCredentials => handle_clear_ssh_credentials(request, state).await,
+        Method::HasSshCredentials => handle_has_ssh_credentials(request, state).await,
         Method::CacheCredential => handle_cache_credential(request, state).await,
         Method::GetCachedCredential => handle_get_cached_credential(request, state).await,
         Method::ClearCredentialCache => handle_clear_credential_cache(request, state).await,
@@ -285,16 +270,12 @@ fn handle_ping(request: &Request) -> Response {
 }
 
 /// Handle `get_session` request.
-async fn handle_get_session(
-    request: &Request,
-    state: &Arc<AgentState>,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
+async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Response {
     // `get_session()` already filters out expired sessions (returns None).
     match state.get_session().await {
         Some(session) => {
             let mut info = SessionInfo::from(&session);
-            info.server_url = ssh_state.get_server_url().await;
+            info.server_url = state.get_ssh_server_url().await;
             success_or_internal_error(request.id, Response::success(request.id, info))
         }
         None => Response::not_authenticated(request.id),
@@ -302,11 +283,7 @@ async fn handle_get_session(
 }
 
 /// Handle `store_session` request.
-async fn handle_store_session(
-    request: &Request,
-    state: &Arc<AgentState>,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
+async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Response {
     let Some(params): Option<StoreSessionParams> = extract_params(request) else {
         return Response::invalid_params(request.id, "missing or invalid params");
     };
@@ -329,14 +306,14 @@ async fn handle_store_session(
             if parsed.scheme() == "https" || parsed.scheme() == "http" {
                 match vouch_common::check_url_security(&url) {
                     vouch_common::UrlSecurity::Secure => {
-                        ssh_state.set_server_url(url).await;
+                        state.set_ssh_server_url(url).await;
                     }
                     vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
                         if std::env::var("VOUCH_ALLOW_INSECURE").is_ok() {
                             warn!(
                                 "Using insecure HTTP server URL: {insecure_url}. VOUCH_ALLOW_INSECURE is set."
                             );
-                            ssh_state.set_server_url(url).await;
+                            state.set_ssh_server_url(url).await;
                         } else {
                             warn!(
                                 "Rejecting insecure HTTP server URL: {insecure_url}. Set VOUCH_ALLOW_INSECURE=1 to override."
@@ -362,13 +339,8 @@ async fn handle_store_session(
 }
 
 /// Handle `clear_session` request.
-async fn handle_clear_session(
-    request: &Request,
-    state: &Arc<AgentState>,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
+async fn handle_clear_session(request: &Request, state: &Arc<AgentState>) -> Response {
     state.clear_session().await;
-    ssh_state.clear_credentials().await;
     info!("Session and SSH credentials cleared");
     audit::log_event(AuditEvent::SessionCleared);
     success_or_internal_error(request.id, Response::success(request.id, true))
@@ -386,10 +358,7 @@ async fn handle_get_token(request: &Request, state: &Arc<AgentState>) -> Respons
 }
 
 /// Handle `store_ssh_credentials` request.
-async fn handle_store_ssh_credentials(
-    request: &Request,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
+async fn handle_store_ssh_credentials(request: &Request, state: &Arc<AgentState>) -> Response {
     let Some(params): Option<StoreSshCredentialsParams> = extract_params(request) else {
         return Response::invalid_params(request.id, "missing or invalid params");
     };
@@ -400,18 +369,17 @@ async fn handle_store_ssh_credentials(
 
     match SshCredentials::load(key_path, cert_path) {
         Ok(creds) => {
-            // Parse session expiration if provided
-            let session_expires_at = params
-                .session_expires_at
-                .as_ref()
-                .and_then(|s| s.parse::<Timestamp>().ok());
+            // Validity is gated on the live session, so the caller-supplied
+            // expiry is no longer recorded.
+            if !state.store_ssh_credentials(creds, params.server_url).await {
+                return Response::error(
+                    request.id,
+                    crate::protocol::INTERNAL_ERROR,
+                    "no active session",
+                );
+            }
 
-            // Store credentials with session linkage
-            ssh_state
-                .store_credentials(creds, session_expires_at, params.server_url)
-                .await;
-
-            info!("SSH credentials stored with session linkage");
+            info!("SSH credentials stored");
             audit::log_event(AuditEvent::SshCertProvisioned {
                 key_path: params.key_path,
                 cert_path: params.cert_path,
@@ -426,18 +394,15 @@ async fn handle_store_ssh_credentials(
 }
 
 /// Handle `clear_ssh_credentials` request.
-async fn handle_clear_ssh_credentials(
-    request: &Request,
-    ssh_state: &Arc<SshAgentState>,
-) -> Response {
-    ssh_state.clear_credentials().await;
+async fn handle_clear_ssh_credentials(request: &Request, state: &Arc<AgentState>) -> Response {
+    state.clear_ssh_credentials().await;
     info!("SSH credentials cleared");
     success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Handle `has_ssh_credentials` request.
-async fn handle_has_ssh_credentials(request: &Request, ssh_state: &Arc<SshAgentState>) -> Response {
-    let has_creds = ssh_state.has_credentials().await;
+async fn handle_has_ssh_credentials(request: &Request, state: &Arc<AgentState>) -> Response {
+    let has_creds = state.has_ssh_credentials().await;
     success_or_internal_error(request.id, Response::success(request.id, has_creds))
 }
 
@@ -526,7 +491,6 @@ async fn drain_connections(tasks: &mut JoinSet<()>) {
 )]
 mod tests {
     use super::*;
-    use crate::ssh_agent::SshAgentState;
     use crate::state::AgentState;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -536,11 +500,7 @@ mod tests {
 
     /// Build an `AgentServer` backed by a temp-dir listener.
     fn make_server(shutdown_rx: watch::Receiver<bool>) -> Arc<AgentServer> {
-        Arc::new(AgentServer::new(
-            AgentState::new(),
-            SshAgentState::new(),
-            shutdown_rx,
-        ))
+        Arc::new(AgentServer::new(AgentState::new(), shutdown_rx))
     }
 
     /// Helper: encode a JSON-RPC ping as a length-prefixed wire message.

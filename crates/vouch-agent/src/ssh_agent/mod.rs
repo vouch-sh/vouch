@@ -13,7 +13,6 @@ mod credentials;
 mod protocol;
 mod provisioning;
 mod server;
-mod state;
 
 use crate::error::Result;
 use crate::socket::vouch_dir;
@@ -22,7 +21,6 @@ use std::path::PathBuf;
 // Re-export public types
 pub use credentials::{CertificateMetadata, SshCredentials};
 pub use server::SshAgentServer;
-pub use state::SshAgentState;
 
 // SSH Agent Protocol Constants
 // https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent
