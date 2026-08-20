@@ -27,32 +27,25 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_READ_GRACE: Duration = Duration::from_millis(250);
 
 use super::provisioning::{handle_request_identities, handle_sign_request};
-use super::state::SshAgentState;
 use super::{
     SSH_AGENT_FAILURE, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENTC_SIGN_REQUEST,
     ssh_agent_socket_path,
 };
+use crate::state::AgentState;
 
 /// SSH Agent server with graceful shutdown support.
 pub struct SshAgentServer {
-    state: Arc<SshAgentState>,
-    agent_state: Option<Arc<crate::state::AgentState>>,
+    state: Arc<AgentState>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl SshAgentServer {
-    /// Create a new SSH agent server with access to the main agent state, used
-    /// to session-gate lazy disk loading of certificates.
-    pub fn with_agent_state(
-        state: Arc<SshAgentState>,
-        agent_state: Arc<crate::state::AgentState>,
-        shutdown_rx: watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            state,
-            agent_state: Some(agent_state),
-            shutdown_rx,
-        }
+    /// Create a new SSH agent server.
+    ///
+    /// Shares [`AgentState`] with the IPC server so a certificate and the
+    /// session authorizing it are always read and cleared together.
+    pub fn new(state: Arc<AgentState>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { state, shutdown_rx }
     }
 
     /// Run the SSH agent server.
@@ -89,12 +82,11 @@ impl SshAgentServer {
                         }
                     };
                     let state = Arc::clone(&self.state);
-                    let agent_state = self.agent_state.clone();
                     let conn_shutdown = self.shutdown_rx.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
                         if let Err(e) =
-                            handle_ssh_connection(conn, state, agent_state, conn_shutdown).await
+                            handle_ssh_connection(conn, state, conn_shutdown).await
                         {
                             debug!("SSH agent connection error: {e}");
                         }
@@ -145,8 +137,7 @@ async fn drain_connections(tasks: &mut JoinSet<()>) {
 /// Handle a single SSH agent connection whose peer has been verified.
 async fn handle_ssh_connection(
     conn: AuthorizedStream,
-    state: Arc<SshAgentState>,
-    agent_state: Option<Arc<crate::state::AgentState>>,
+    state: Arc<AgentState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut stream = conn.into_stream();
@@ -205,9 +196,7 @@ async fn handle_ssh_connection(
 
         // Handle message
         let response = match msg_type {
-            SSH_AGENTC_REQUEST_IDENTITIES => {
-                handle_request_identities(&state, agent_state.as_ref()).await
-            }
+            SSH_AGENTC_REQUEST_IDENTITIES => handle_request_identities(&state).await,
             SSH_AGENTC_SIGN_REQUEST => handle_sign_request(&buf, &state).await,
             _ => {
                 debug!("Unknown SSH agent message type: {msg_type}");
@@ -238,11 +227,7 @@ mod tests {
 
     /// Build an `SshAgentServer` backed by a temp-dir listener.
     fn make_server(shutdown_rx: watch::Receiver<bool>) -> Arc<SshAgentServer> {
-        Arc::new(SshAgentServer::with_agent_state(
-            SshAgentState::new(),
-            AgentState::new(),
-            shutdown_rx,
-        ))
+        Arc::new(SshAgentServer::new(AgentState::new(), shutdown_rx))
     }
 
     /// End-to-end over a real socket: a same-UID client passes
@@ -253,12 +238,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ssh-agent-test.sock");
         let listener = bind_socket(&path).await.expect("bind socket");
-        let state = SshAgentState::new();
+        let state = AgentState::new();
 
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let server = tokio::spawn(async move {
             if let Some(conn) = accept_authorized(&listener, SocketKind::SshAgent).await {
-                let _connection = handle_ssh_connection(conn, state, None, shutdown_rx).await;
+                let _connection = handle_ssh_connection(conn, state, shutdown_rx).await;
             }
         });
 
