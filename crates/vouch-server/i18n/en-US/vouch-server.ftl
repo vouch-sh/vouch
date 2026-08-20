@@ -986,3 +986,65 @@ redirect-title = Redirecting...
 redirect-continue = Continue
 redirect-form-post-noscript = Submitting authorization response. If you are not redirected, click the button below.
 redirect-saml-noscript = Redirecting to identity provider. If you are not redirected, click the button below.
+
+## Audit event catalogue — group headings and per-kind descriptions.
+##
+## One `audit-group-*` message per `AuditEventGroup` and one `audit-event-*`
+## message per `AuditEventKind` (crates/vouch-server/src/db/audit.rs). The
+## "Audit Events" section of docs/src/admin/audit.md is generated from these
+## via `make docs-gen` (tests/audit_docs_gen.rs); the parity test in
+## infra/i18n.rs enforces exact registry ↔ catalog correspondence both ways.
+## Text may use markdown backticks (rendered as code in mdBook); a literal
+## `{` or `}` would need Fluent escaping as {"{"} / {"}"}.
+
+audit-group-authentication = Authentication and key lifecycle
+audit-group-credentials = Credential issuance
+audit-group-oauth-clients = OAuth clients
+audit-group-administration = Administration and organization
+
+audit-event-login-success = User authenticated — FIDO2 passkey login, or a returning user signing in on the website via the upstream IdP (the latter has no `authenticator_id`)
+audit-event-login-failed = Failed authentication attempt
+audit-event-enrollment = User enrolled their first hardware key
+audit-event-logout = User logged out (including RFC 7009 token revocation)
+audit-event-key-registered = Additional hardware key registered (`vouch register`)
+audit-event-key-removed = Hardware key removed
+audit-event-device-auth-approved = Browser approved a CLI device-authorization request
+audit-event-key-registration-replay = Replayed key-registration link rejected (possible attack)
+audit-event-identity-bound = Upstream IdP identity (issuer + subject) bound to an account on its first IdP login; `data.idp_issuer` names the issuer
+audit-event-identity-bind-refused = IdP sign-in refused: the asserted email matched an account already bound to a different subject at the same issuer (possible upstream email reassignment); `data.idp_issuer` names the issuer
+audit-event-ssh-credential = SSH certificate issued; `data` includes the serial, principals, requesting agent, and expiry
+audit-event-aws-credential = AWS OIDC token issued; `data` includes the pinned IAM `role_arn` (the `https://aws.amazon.com/roles` claim), the requesting agent, and token expiry
+audit-event-github-credential = GitHub installation token issued or installation connected; `data` includes repositories and permissions
+audit-event-token-exchange = RFC 8693 token exchange (workload identity federation); `data` includes the client, audience, scope, and issued token type
+audit-event-oauth-token-issued = Token issued at `/oauth/token` (`data.details` carries the grant type)
+audit-event-oauth-token-revoked = All tokens for an application revoked
+audit-event-oauth-client-registered = OAuth client registered (RFC 7591 or applications UI)
+audit-event-oauth-client-updated = OAuth client configuration updated
+audit-event-oauth-client-deleted = OAuth client deleted
+audit-event-oauth-secret-added = Client secret added
+audit-event-oauth-secret-revoked = Client secret revoked
+audit-event-scim-operation = SCIM provisioning operation (`data` carries operation and resource type)
+audit-event-admin-promote = Org-admin role granted
+audit-event-admin-demote = Org-admin role removed
+audit-event-admin-deactivate = User account deactivated
+audit-event-admin-activate = User account reactivated
+audit-event-admin-revoke-credentials = Admin revoked a member's keys, sessions, and certificates
+audit-event-admin-remove-user = Admin removed a member from the organization
+audit-event-policy-denied = A posture or temporal policy denied credential issuance
+audit-event-admin-policy-toggle = Posture policy enabled or disabled
+audit-event-admin-policy-create = Custom posture policy created
+audit-event-admin-policy-update = Custom posture policy updated
+audit-event-admin-policy-delete = Custom posture policy deleted
+audit-event-admin-create-scim-token = SCIM API token created
+audit-event-admin-delete-scim-token = SCIM API token deleted
+audit-event-admin-revoke-scim-token = SCIM API token revoked
+audit-event-org-domain-added = Additional email domain added to the organization
+audit-event-org-domain-verified = Additional email domain ownership verified
+audit-event-org-domain-removed = Additional email domain removed by an admin
+audit-event-org-domain-expired = Stale additional domain removed by the cleanup task (never verified, or unverified past its TTL)
+audit-event-org-domain-unverified = Verified additional domain flipped to unverified after repeated DNS re-check failures
+audit-event-org-subdomain-claimed = Issuer subdomain claimed for the organization
+audit-event-org-subdomain-released = Issuer subdomain released (by an admin, or automatically when its backing domain became unverified)
+audit-event-org-issuer-key-rotated = Per-org issuer signing keys rotated (one event per algorithm)
+audit-event-org-issuer-key-revoked = Per-org previous signing keys revoked (one event per algorithm)
+audit-event-org-issuer-key-emergency-rotation = Emergency rotation of per-org issuer keys (one event per algorithm)
