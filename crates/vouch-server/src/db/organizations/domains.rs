@@ -11,7 +11,7 @@ use super::ORG_SCAN_PAGE_SIZE;
 use super::issuer::{release_ineligible_subdomain, subdomain_to_release};
 use super::validation::{DomainValidationError, normalize_domain};
 use crate::db::documents::organization::{
-    AdditionalDomain, AdditionalDomainState, OrganizationDoc,
+    AdditionalDomain, AdditionalDomainState, DomainClaimDoc, OrganizationDoc,
 };
 use crate::db::store::DocumentStore;
 use anyhow::Result;
@@ -19,6 +19,21 @@ use jiff::Timestamp;
 
 /// Maximum additional (non-primary) email domains per organization.
 pub const MAX_ADDITIONAL_DOMAINS: usize = 10;
+
+/// Deterministic document ID for a domain's cross-org claim slot.
+///
+/// Same construction as `deterministic_org_id` and
+/// `deterministic_subdomain_claim_id`: the shared primary key is what makes
+/// concurrent claims from different organizations collide, since each would
+/// otherwise version-bump only its own org document and never conflict.
+pub(crate) fn deterministic_domain_claim_id(domain: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"domain_claim\0");
+    ctx.update(domain.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
 
 /// List additional domains for an organization.
 pub async fn list_additional_domains(
@@ -359,6 +374,32 @@ pub async fn mark_additional_domain_verified(
             return Err(MarkVerifiedError::ClaimedByOtherOrg);
         }
 
+        // Take the claim slot. The read above settles conflicts against
+        // already-committed domains, but two organizations verifying the same
+        // domain concurrently both see nothing and then version-bump their own
+        // org document, which never conflicts. A shared primary key is what
+        // makes them collide.
+        let claim_id = deterministic_domain_claim_id(&normalized);
+        match tx.get::<DomainClaimDoc>(&claim_id).await? {
+            None => {
+                let slot = DomainClaimDoc {
+                    domain: normalized.clone(),
+                    org_id: org_id.to_string(),
+                };
+                if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
+                    if crate::db::pool::is_unique_violation(&e) {
+                        return Err(MarkVerifiedError::ClaimedByOtherOrg);
+                    }
+                    return Err(MarkVerifiedError::Other(e));
+                }
+            }
+            Some(existing) if existing.data.org_id != org_id => {
+                return Err(MarkVerifiedError::ClaimedByOtherOrg);
+            }
+            // Already ours: re-verification of a domain this org still holds.
+            Some(_) => {}
+        }
+
         // Reset re-verification state so a freshly re-verified entry is treated
         // identically to a brand-new verification by the background task.
         entry.state = AdditionalDomainState::Verified {
@@ -427,6 +468,11 @@ pub async fn remove_additional_domain(
         let version = org_doc.version;
         let mut data = org_doc.data;
 
+        // A verified entry holds a claim slot; a pending one never took one.
+        let held_claim = data.additional_domains.iter().any(|ad| {
+            ad.domain == normalized && matches!(ad.state, AdditionalDomainState::Verified { .. })
+        });
+
         let original_len = data.additional_domains.len();
         data.additional_domains.retain(|ad| ad.domain != normalized);
         if data.additional_domains.len() == original_len {
@@ -439,14 +485,27 @@ pub async fn remove_additional_domain(
         // the claim slot and the mirror must move together, but the common
         // no-subdomain path stays a plain CAS (a read-then-write transaction
         // can deadlock concurrent writers on SQLite's deferred locking).
-        let released = if let Some(label) = subdomain_to_release(&data) {
+        // A transaction is opened only when something besides the org
+        // document must move with it: a released subdomain, or a claim slot.
+        // Releasing the slot has to be atomic with the removal — dropping it
+        // while the removal fails would let another org claim a domain this
+        // one still holds, and the reverse strands the domain permanently,
+        // since a second removal attempt returns early with nothing to remove.
+        let subdomain = subdomain_to_release(&data);
+        let released = if subdomain.is_some() || held_claim {
             let mut tx = store.begin().await?;
-            release_ineligible_subdomain(&mut tx, org_id, &mut data, &label).await?;
+            if let Some(label) = subdomain.as_deref() {
+                release_ineligible_subdomain(&mut tx, org_id, &mut data, label).await?;
+            }
+            if held_claim {
+                tx.delete(&deterministic_domain_claim_id(&normalized))
+                    .await?;
+            }
             if !tx.compare_and_update(org_id, version, &data).await? {
                 return Err(OrgCasError::OccConflict);
             }
             tx.commit().await?;
-            Some(label)
+            subdomain
         } else {
             if !store.compare_and_update(org_id, version, &data).await? {
                 return Err(OrgCasError::OccConflict);
@@ -875,15 +934,24 @@ pub async fn record_recheck_result(
             None
         };
 
-        if let Some(label) = to_release {
+        // Losing verification also releases the domain's claim slot, or the
+        // domain stays unclaimable by anyone — including this org, which can
+        // no longer re-verify it.
+        if to_release.is_some() || flipped {
             let mut tx = store.begin().await?;
-            release_ineligible_subdomain(&mut tx, org_id, &mut data, &label).await?;
+            if let Some(label) = to_release.as_deref() {
+                release_ineligible_subdomain(&mut tx, org_id, &mut data, label).await?;
+            }
+            if flipped {
+                tx.delete(&deterministic_domain_claim_id(&normalized))
+                    .await?;
+            }
             if !tx.compare_and_update(org_id, version, &data).await? {
                 return Err(OrgCasError::OccConflict);
             }
             tx.commit().await?;
             if let RecheckEffect::FlippedToUnverified { released_subdomain } = &mut effect {
-                *released_subdomain = Some(label);
+                *released_subdomain = to_release;
             }
         } else if !store.compare_and_update(org_id, version, &data).await? {
             return Err(OrgCasError::OccConflict);
@@ -1157,6 +1225,115 @@ mod tests {
             err.to_string().contains("pending verification"),
             "expected cross-page pending conflict to be detected, got: {err}"
         );
+    }
+
+    /// The slot, not the conflict read, is what settles a concurrent claim.
+    ///
+    /// The slot is seeded for org A *without* updating org A's document, which
+    /// is the state a real interleaving produces: org A's write has landed but
+    /// the index the conflict read consults has not caught up. The read
+    /// therefore finds nothing and only the slot can reject org B — so this
+    /// fails when the slot is removed. A sequential two-call test does not:
+    /// by the second call org A's domain is already indexed, and the
+    /// pre-existing read rejects it without the slot doing any work.
+    #[tokio::test]
+    async fn claim_slot_rejects_a_second_org_when_the_index_read_cannot() {
+        let store = fresh_store().await;
+        let org_a = create_organization(&store, "a-corp.com", None, None)
+            .await
+            .unwrap();
+        let org_b = create_organization(&store, "b-corp.com", None, None)
+            .await
+            .unwrap();
+
+        add_additional_domain(
+            &store,
+            &org_b.id,
+            "contested.com",
+            "user-b",
+            "u@example.com",
+        )
+        .await
+        .unwrap();
+
+        // Org A holds the slot; nothing in any org document says so yet.
+        store
+            .insert_with_id(
+                &deterministic_domain_claim_id("contested.com"),
+                &DomainClaimDoc {
+                    domain: "contested.com".to_string(),
+                    org_id: org_a.id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .find_one::<OrganizationDoc>("domain", "contested.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "precondition: the conflict read must not see the claim"
+        );
+
+        let result = mark_additional_domain_verified(&store, &org_b.id, "contested.com").await;
+        assert!(
+            matches!(result, Err(MarkVerifiedError::ClaimedByOtherOrg)),
+            "the slot must reject the second org, got: {result:?}"
+        );
+    }
+
+    /// Releasing a domain frees its slot, or the domain becomes permanently
+    /// unclaimable — including by the organization that released it.
+    #[tokio::test]
+    async fn removing_a_verified_domain_frees_it_for_another_org() {
+        let store = fresh_store().await;
+        let org_a = create_organization(&store, "a-corp.com", None, None)
+            .await
+            .unwrap();
+        let org_b = create_organization(&store, "b-corp.com", None, None)
+            .await
+            .unwrap();
+
+        add_additional_domain(&store, &org_a.id, "shared.com", "user-a", "u@example.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org_a.id, "shared.com")
+            .await
+            .unwrap();
+
+        remove_additional_domain(&store, &org_a.id, "shared.com")
+            .await
+            .unwrap()
+            .expect("domain was attached");
+
+        add_additional_domain(&store, &org_b.id, "shared.com", "user-b", "u@example.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org_b.id, "shared.com")
+            .await
+            .expect("released domain must be claimable again");
+    }
+
+    /// Re-verifying a domain this org already holds is not a conflict with
+    /// itself: the recheck path calls straight back into verification.
+    #[tokio::test]
+    async fn reverifying_own_domain_is_not_a_conflict() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "user-1", "u@example.com")
+            .await
+            .unwrap();
+
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .expect("re-verifying our own domain must succeed");
     }
 
     #[tokio::test]

@@ -64,6 +64,38 @@ pub struct SubdomainClaimDoc {
     pub released_at: Option<Timestamp>,
 }
 
+/// Cross-org uniqueness slot for a verified email domain.
+///
+/// Two organizations must never both claim the same email domain: domain →
+/// org lookup resolves `ORDER BY created_at DESC LIMIT 1`, so a duplicate
+/// silently routes enrollment to whichever org document was created later,
+/// and the SCIM domain gate passes for both.
+///
+/// The `document_indexes` UNIQUE constraint is per-document, so it cannot
+/// express that. Two orgs verifying the same domain write to two different
+/// primary keys and never conflict. Hashing the domain into a shared
+/// document ID is what forces them to collide — the same construction as
+/// `deterministic_org_id` and [`SubdomainClaimDoc`].
+///
+/// Unlike a subdomain label, a released domain carries no reuse cooldown, so
+/// the row is deleted on release rather than tombstoned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainClaimDoc {
+    /// The claimed domain (normalized lowercase).
+    pub domain: String,
+    /// The organization holding the claim.
+    pub org_id: String,
+}
+
+impl DocumentType for DomainClaimDoc {
+    const DOC_TYPE: &'static str = "domain_claim";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        // Looked up exclusively by deterministic document ID.
+        Vec::new()
+    }
+}
+
 impl DocumentType for SubdomainClaimDoc {
     const DOC_TYPE: &'static str = "subdomain_claim";
 
