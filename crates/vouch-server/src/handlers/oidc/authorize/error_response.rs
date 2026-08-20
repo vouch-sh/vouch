@@ -50,7 +50,7 @@ pub(crate) async fn oauth_error_response(
             let mut params = vec![
                 ("error".to_string(), error.to_string()),
                 ("error_description".to_string(), description.to_string()),
-                ("iss".to_string(), app_state.config().base_url.clone()),
+                ("iss".to_string(), app_state.config().base_url.to_string()),
             ];
             if let Some(s) = oauth_state {
                 params.push(("state".to_string(), s.to_string()));

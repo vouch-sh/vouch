@@ -1758,7 +1758,6 @@ async fn issue_code_and_redirect(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
