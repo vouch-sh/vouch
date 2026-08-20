@@ -106,7 +106,7 @@ pub use device_auth::{
 pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim, get_device_auth_by_id};
 
 // Re-export audit event types (used by integration tests and the handlers)
-pub use audit::{AuditEvent, AuditEventFilter, AuditEventKind, Retention};
+pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, Retention};
 
 // Re-export config and auth event types and functions
 pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};

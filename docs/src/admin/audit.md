@@ -12,6 +12,8 @@ code, ASN, and network organization resolved from the client IP.
 
 ## Audit Events
 
+<!-- generated:audit-events:begin — do not edit by hand; generated from the AuditEventKind registry (crates/vouch-server/src/db/audit.rs) and i18n/en-US/vouch-server.ftl. Regenerate with `make docs-gen`. -->
+
 ### Authentication and key lifecycle
 
 | Event Type | Description |
@@ -52,19 +54,32 @@ code, ASN, and network organization resolved from the client IP.
 
 | Event Type | Description |
 |------------|-------------|
-| `admin_promote` / `admin_demote` | Org-admin role granted / removed |
-| `admin_activate` / `admin_deactivate` | User account reactivated / deactivated |
+| `scim_operation` | SCIM provisioning operation (`data` carries operation and resource type) |
+| `admin_promote` | Org-admin role granted |
+| `admin_demote` | Org-admin role removed |
+| `admin_deactivate` | User account deactivated |
+| `admin_activate` | User account reactivated |
 | `admin_revoke_credentials` | Admin revoked a member's keys, sessions, and certificates |
 | `admin_remove_user` | Admin removed a member from the organization |
 | `policy_denied` | A posture or temporal policy denied credential issuance |
-| `admin_policy_create` / `admin_policy_update` / `admin_policy_delete` / `admin_policy_toggle` | Posture policy changes |
-| `admin_create_scim_token` / `admin_delete_scim_token` / `admin_revoke_scim_token` | SCIM token lifecycle |
-| `scim_operation` | SCIM provisioning operation (`data` carries operation and resource type) |
-| `org_domain_added` / `org_domain_verified` / `org_domain_removed` / `org_domain_expired` / `org_domain_unverified` | Additional-domain lifecycle |
-| `org_subdomain_claimed` / `org_subdomain_released` | Issuer subdomain lifecycle |
+| `admin_policy_toggle` | Posture policy enabled or disabled |
+| `admin_policy_create` | Custom posture policy created |
+| `admin_policy_update` | Custom posture policy updated |
+| `admin_policy_delete` | Custom posture policy deleted |
+| `admin_create_scim_token` | SCIM API token created |
+| `admin_delete_scim_token` | SCIM API token deleted |
+| `admin_revoke_scim_token` | SCIM API token revoked |
+| `org_domain_added` | Additional email domain added to the organization |
+| `org_domain_verified` | Additional email domain ownership verified |
+| `org_domain_removed` | Additional email domain removed by an admin |
+| `org_domain_expired` | Stale additional domain removed by the cleanup task (never verified, or unverified past its TTL) |
+| `org_domain_unverified` | Verified additional domain flipped to unverified after repeated DNS re-check failures |
+| `org_subdomain_claimed` | Issuer subdomain claimed for the organization |
+| `org_subdomain_released` | Issuer subdomain released (by an admin, or automatically when its backing domain became unverified) |
 | `org_issuer_key_rotated` | Per-org issuer signing keys rotated (one event per algorithm) |
 | `org_issuer_key_revoked` | Per-org previous signing keys revoked (one event per algorithm) |
 | `org_issuer_key_emergency_rotation` | Emergency rotation of per-org issuer keys (one event per algorithm) |
+<!-- generated:audit-events:end -->
 
 ## Retention
 

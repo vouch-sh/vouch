@@ -13,7 +13,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration test-fuzz test-coverage test-mutants run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve bake-cli bake-server bake-all
+.PHONY: all build test test-integration test-fuzz test-coverage test-mutants run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-gen docs-serve bake-cli bake-server bake-all
 
 all: build
 
@@ -101,6 +101,9 @@ deploy-logs: ## View production logs
 
 docs-build: ## Build documentation
 	cd docs && mdbook build
+
+docs-gen: ## Regenerate generated doc sections from code (audit events)
+	VOUCH_REGEN=1 $(CARGO) test --package vouch-server --test audit_docs_gen
 
 docs-serve: ## Serve documentation locally
 	cd docs && mdbook serve --open

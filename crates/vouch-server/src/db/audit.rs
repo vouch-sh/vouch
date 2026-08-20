@@ -49,17 +49,57 @@ pub enum Retention {
     Keep,
 }
 
-/// Defines [`AuditEventKind`] with its wire string and retention class in one
-/// place, so a variant cannot exist without both.
+/// Operator-docs grouping for an audit event type.
+///
+/// Drives the generated "Audit Events" section of `docs/src/admin/audit.md`
+/// (`tests/audit_docs_gen.rs`) and the `audit-group-*` Fluent headings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventGroup {
+    /// Logins, enrollment, and hardware-key lifecycle.
+    Authentication,
+    /// SSH, AWS, GitHub, and token-exchange credential issuance.
+    Credentials,
+    /// OAuth client usage and lifecycle.
+    OauthClients,
+    /// Administrative member actions and organization lifecycle.
+    Administration,
+}
+
+impl AuditEventGroup {
+    /// Every group, in the display order of the generated docs sections.
+    pub const ALL: &'static [Self] = &[
+        Self::Authentication,
+        Self::Credentials,
+        Self::OauthClients,
+        Self::Administration,
+    ];
+
+    /// Fluent id of the group's docs heading.
+    #[must_use]
+    pub fn i18n_id(self) -> &'static str {
+        match self {
+            Self::Authentication => "audit-group-authentication",
+            Self::Credentials => "audit-group-credentials",
+            Self::OauthClients => "audit-group-oauth-clients",
+            Self::Administration => "audit-group-administration",
+        }
+    }
+}
+
+/// Defines [`AuditEventKind`] with its wire string, retention class, and
+/// operator-docs group in one place, so a variant cannot exist without all
+/// three.
 macro_rules! audit_event_kinds {
-    ($($(#[$attr:meta])* $variant:ident => $name:literal, $retention:ident;)+) => {
+    ($($(#[$attr:meta])* $variant:ident => $name:literal, $retention:ident, $group:ident;)+) => {
         /// Every audit event type the server writes.
         ///
         /// This is the single registry: [`AuditStore::insert_event`] only
         /// accepts these kinds, the cleanup task derives retention from
-        /// [`Self::retention`], and `tests/audit_event_docs.rs` fails when a
-        /// variant is missing from the operator documentation
-        /// (`docs/src/admin/audit.md`).
+        /// [`Self::retention`], and the operator documentation
+        /// (`docs/src/admin/audit.md`) is generated from [`Self::group`] plus
+        /// the `audit-event-*` Fluent messages — `tests/audit_docs_gen.rs`
+        /// fails when the generated section is stale, and the i18n parity
+        /// test in `infra::i18n` fails when a variant has no catalog entry.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum AuditEventKind {
             $($(#[$attr])* $variant,)+
@@ -90,69 +130,86 @@ macro_rules! audit_event_kinds {
             pub fn retention(self) -> Retention {
                 match self { $(Self::$variant => Retention::$retention,)+ }
             }
+
+            /// Which operator-docs group this event is documented under.
+            #[must_use]
+            pub fn group(self) -> AuditEventGroup {
+                match self { $(Self::$variant => AuditEventGroup::$group,)+ }
+            }
         }
     };
 }
 
 audit_event_kinds! {
     // Authentication and key lifecycle
-    LoginSuccess => "login_success", AuthEvents;
-    LoginFailed => "login_failed", AuthEvents;
-    Enrollment => "enrollment", AuthEvents;
-    Logout => "logout", AuthEvents;
-    KeyRegistered => "key_registered", AuthEvents;
-    KeyRemoved => "key_removed", AuthEvents;
-    DeviceAuthApproved => "device_auth_approved", AuthEvents;
-    KeyRegistrationReplay => "key_registration_replay", AuthEvents;
+    LoginSuccess => "login_success", AuthEvents, Authentication;
+    LoginFailed => "login_failed", AuthEvents, Authentication;
+    Enrollment => "enrollment", AuthEvents, Authentication;
+    Logout => "logout", AuthEvents, Authentication;
+    KeyRegistered => "key_registered", AuthEvents, Authentication;
+    KeyRemoved => "key_removed", AuthEvents, Authentication;
+    DeviceAuthApproved => "device_auth_approved", AuthEvents, Authentication;
+    KeyRegistrationReplay => "key_registration_replay", AuthEvents, Authentication;
     // Upstream identity binding (issuer/subject account linking)
-    IdentityBound => "identity_bound", AuthEvents;
-    IdentityBindRefused => "identity_bind_refused", AuthEvents;
+    IdentityBound => "identity_bound", AuthEvents, Authentication;
+    IdentityBindRefused => "identity_bind_refused", AuthEvents, Authentication;
     // SCIM provisioning operations
-    ScimOperation => "scim_operation", AuthEvents;
+    ScimOperation => "scim_operation", AuthEvents, Administration;
     // Credential issuance
-    SshCredential => "ssh_credential", OAuthEvents;
-    AwsCredential => "aws_credential", OAuthEvents;
-    GitHubCredential => "github_credential", OAuthEvents;
-    TokenExchange => "token_exchange", OAuthEvents;
+    SshCredential => "ssh_credential", OAuthEvents, Credentials;
+    AwsCredential => "aws_credential", OAuthEvents, Credentials;
+    GitHubCredential => "github_credential", OAuthEvents, Credentials;
+    TokenExchange => "token_exchange", OAuthEvents, Credentials;
     // OAuth client usage (high volume) and lifecycle (kept)
-    OauthTokenIssued => "oauth_token_issued", OAuthEvents;
-    OauthTokenRevoked => "oauth_token_revoked", OAuthEvents;
-    OauthClientRegistered => "oauth_client_registered", OAuthEvents;
-    OauthClientUpdated => "oauth_client_updated", Keep;
-    OauthClientDeleted => "oauth_client_deleted", Keep;
-    OauthSecretAdded => "oauth_secret_added", Keep;
-    OauthSecretRevoked => "oauth_secret_revoked", Keep;
+    OauthTokenIssued => "oauth_token_issued", OAuthEvents, OauthClients;
+    OauthTokenRevoked => "oauth_token_revoked", OAuthEvents, OauthClients;
+    OauthClientRegistered => "oauth_client_registered", OAuthEvents, OauthClients;
+    OauthClientUpdated => "oauth_client_updated", Keep, OauthClients;
+    OauthClientDeleted => "oauth_client_deleted", Keep, OauthClients;
+    OauthSecretAdded => "oauth_secret_added", Keep, OauthClients;
+    OauthSecretRevoked => "oauth_secret_revoked", Keep, OauthClients;
     // Administrative member actions
-    AdminPromote => "admin_promote", Keep;
-    AdminDemote => "admin_demote", Keep;
-    AdminDeactivate => "admin_deactivate", Keep;
-    AdminActivate => "admin_activate", Keep;
-    AdminRevokeCredentials => "admin_revoke_credentials", Keep;
-    AdminRemoveUser => "admin_remove_user", Keep;
+    AdminPromote => "admin_promote", Keep, Administration;
+    AdminDemote => "admin_demote", Keep, Administration;
+    AdminDeactivate => "admin_deactivate", Keep, Administration;
+    AdminActivate => "admin_activate", Keep, Administration;
+    AdminRevokeCredentials => "admin_revoke_credentials", Keep, Administration;
+    AdminRemoveUser => "admin_remove_user", Keep, Administration;
     // Posture policies
     // A denied decision is the evidence trail for the policy gate; it is
     // deliberately NOT ingested as temporal history (a denial feeding a
     // count policy would amplify denials).
-    PolicyDenied => "policy_denied", AuthEvents;
-    AdminPolicyToggle => "admin_policy_toggle", Keep;
-    AdminPolicyCreate => "admin_policy_create", Keep;
-    AdminPolicyUpdate => "admin_policy_update", Keep;
-    AdminPolicyDelete => "admin_policy_delete", Keep;
+    PolicyDenied => "policy_denied", AuthEvents, Administration;
+    AdminPolicyToggle => "admin_policy_toggle", Keep, Administration;
+    AdminPolicyCreate => "admin_policy_create", Keep, Administration;
+    AdminPolicyUpdate => "admin_policy_update", Keep, Administration;
+    AdminPolicyDelete => "admin_policy_delete", Keep, Administration;
     // SCIM token lifecycle
-    AdminCreateScimToken => "admin_create_scim_token", Keep;
-    AdminDeleteScimToken => "admin_delete_scim_token", Keep;
-    AdminRevokeScimToken => "admin_revoke_scim_token", Keep;
+    AdminCreateScimToken => "admin_create_scim_token", Keep, Administration;
+    AdminDeleteScimToken => "admin_delete_scim_token", Keep, Administration;
+    AdminRevokeScimToken => "admin_revoke_scim_token", Keep, Administration;
     // Organization domains, subdomains, and issuer keys
-    OrgDomainAdded => "org_domain_added", Keep;
-    OrgDomainVerified => "org_domain_verified", Keep;
-    OrgDomainRemoved => "org_domain_removed", Keep;
-    OrgDomainExpired => "org_domain_expired", Keep;
-    OrgDomainUnverified => "org_domain_unverified", Keep;
-    OrgSubdomainClaimed => "org_subdomain_claimed", Keep;
-    OrgSubdomainReleased => "org_subdomain_released", Keep;
-    OrgIssuerKeyRotated => "org_issuer_key_rotated", Keep;
-    OrgIssuerKeyRevoked => "org_issuer_key_revoked", Keep;
-    OrgIssuerKeyEmergencyRotation => "org_issuer_key_emergency_rotation", Keep;
+    OrgDomainAdded => "org_domain_added", Keep, Administration;
+    OrgDomainVerified => "org_domain_verified", Keep, Administration;
+    OrgDomainRemoved => "org_domain_removed", Keep, Administration;
+    OrgDomainExpired => "org_domain_expired", Keep, Administration;
+    OrgDomainUnverified => "org_domain_unverified", Keep, Administration;
+    OrgSubdomainClaimed => "org_subdomain_claimed", Keep, Administration;
+    OrgSubdomainReleased => "org_subdomain_released", Keep, Administration;
+    OrgIssuerKeyRotated => "org_issuer_key_rotated", Keep, Administration;
+    OrgIssuerKeyRevoked => "org_issuer_key_revoked", Keep, Administration;
+    OrgIssuerKeyEmergencyRotation => "org_issuer_key_emergency_rotation", Keep, Administration;
+}
+
+impl AuditEventKind {
+    /// Fluent id of this kind's operator-docs description
+    /// (`audit-event-<wire-string-with-hyphens>`). Wire strings never contain
+    /// `-`, so the mapping is bijective; ids are kebab-case because Fluent
+    /// ids (and the catalog parity test) require it.
+    #[must_use]
+    pub fn i18n_id(self) -> String {
+        format!("audit-event-{}", self.as_str().replace('_', "-"))
+    }
 }
 
 // ============================================================================

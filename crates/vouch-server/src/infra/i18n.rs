@@ -1016,6 +1016,11 @@ mod tests {
         // Everything referenced (template keys plus the shipped JS bundle) must
         // exist in the catalog.
         used.extend(declared);
+        // The audit-event catalogue is rendered via dynamic ids (the docs
+        // generator in tests/audit_docs_gen.rs), so no literal call site
+        // exists; exact correspondence with the registry is enforced by
+        // `audit_catalog_matches_registry`.
+        used.extend(expected_audit_ids());
         let mut missing: Vec<&String> = used.difference(&defined).collect();
         missing.sort();
         assert!(
@@ -1052,6 +1057,49 @@ mod tests {
         assert!(
             dead.is_empty(),
             "i18n catalog ids defined but never referenced by any call site: {dead:?}"
+        );
+    }
+
+    /// Every id the audit-event registry expects in the catalog: one
+    /// `audit-event-*` per [`AuditEventKind`] and one `audit-group-*` per
+    /// [`AuditEventGroup`].
+    fn expected_audit_ids() -> std::collections::HashSet<String> {
+        use crate::db::{AuditEventGroup, AuditEventKind};
+        let mut ids: std::collections::HashSet<String> =
+            AuditEventKind::ALL.iter().map(|k| k.i18n_id()).collect();
+        ids.extend(AuditEventGroup::ALL.iter().map(|g| g.i18n_id().to_owned()));
+        ids
+    }
+
+    /// The `audit-event-*` / `audit-group-*` messages in the catalog must
+    /// correspond exactly to the audit-event registry, both ways: a kind
+    /// without a description can't be documented (the docs generator would
+    /// echo the raw id), and an orphan message documents an event no code
+    /// writes — the phantom-docs failure mode this catalogue replaced.
+    #[test]
+    fn audit_catalog_matches_registry() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let ftl = std::fs::read_to_string(format!("{root}/i18n/en-US/vouch-server.ftl")).unwrap();
+        let expected = expected_audit_ids();
+        let defined: std::collections::HashSet<String> = collect_ftl_ids(&ftl)
+            .into_iter()
+            .filter(|id| id.starts_with("audit-event-") || id.starts_with("audit-group-"))
+            .collect();
+
+        let mut missing: Vec<&String> = expected.difference(&defined).collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "audit event kinds/groups missing a Fluent description in \
+             i18n/en-US/vouch-server.ftl: {missing:?}"
+        );
+
+        let mut orphans: Vec<&String> = defined.difference(&expected).collect();
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "orphan audit-event-/audit-group- messages with no registered \
+             kind (remove them or register the kind in db/audit.rs): {orphans:?}"
         );
     }
 }
