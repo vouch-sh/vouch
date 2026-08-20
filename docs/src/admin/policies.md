@@ -345,8 +345,12 @@ To roll back an over-strict policy, toggle it off — no restart required.
 | `admin_policy_delete` | Custom policy deleted |
 | `admin_policy_toggle` | Any policy enabled or disabled |
 
-These are in the never-purged retention class, so the record of when a policy was relaxed is
-permanent. See [Audit Events](audit.md).
+The four `admin_policy_*` events are in the never-purged retention class, so the record of when a
+policy was created, relaxed, or disabled is permanent.
+
+`policy_denied` is not. It is an authentication event, retained for
+`VOUCH_AUTH_EVENTS_RETENTION_DAYS` (90 by default) and then purged, so export it before that window
+closes if you need denial evidence for longer. See [Audit Events](audit.md).
 
 ## Troubleshooting
 

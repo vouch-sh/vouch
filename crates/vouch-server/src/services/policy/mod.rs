@@ -570,8 +570,16 @@ async fn authorize_decision(
             reads_device: _,
         } => uses_temporal,
         engine::Precheck::BrokenCustom(name) => {
-            crate::infra::metrics::record_policy_decision("deny", &name);
-            return Err(deny_error(Some(engine::DenyingPolicy::Custom { name }), os));
+            // A policy that fails precheck denies every request in the org
+            // until it is re-authored, so it needs the same evidence trail as
+            // any other denial — and the same bounded metrics label. Passing
+            // the admin-chosen name straight to Prometheus would make
+            // cardinality a function of how many policies have been written.
+            let denying = engine::DenyingPolicy::Custom { name };
+            let (metrics_label, audit_policy) = deny_attribution(&Some(denying.clone()));
+            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
+            return Err(deny_error(Some(denying), os));
         }
         engine::Precheck::EngineError(msg) => {
             tracing::error!(org_id, "policy precheck failed: {msg}");
