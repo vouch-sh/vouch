@@ -497,6 +497,65 @@ async fn test_rfc9126_par_rejects_missing_response_type() {
 }
 
 #[tokio::test]
+async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
+    // OIDC Core Section 3.1.2.1: Unsupported prompt values must be rejected.
+    // Vouch supports "login", "none", and "consent"; the error description
+    // returned at the PAR endpoint must list all three supported values so
+    // developers are not misled into believing "consent" is unsupported.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-badprompt@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256\
+         &scope=openid\
+         &prompt=select_account",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Unsupported prompt value should be rejected: {response_body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+
+    let description = json["error_description"]
+        .as_str()
+        .expect("error_description must be a string");
+    assert!(
+        description.contains("login"),
+        "error_description should mention 'login': {description}"
+    );
+    assert!(
+        description.contains("none"),
+        "error_description should mention 'none': {description}"
+    );
+    assert!(
+        description.contains("consent"),
+        "error_description should mention 'consent': {description}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc9126_par_allows_missing_pkce_for_confidential_client() {
     // Confidential clients (client_secret_basic) do not require PKCE at PAR.
     let (app, state) = test_app().await;

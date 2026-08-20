@@ -405,7 +405,7 @@ pub(crate) async fn par(
                     return par_error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request",
-                        "Unsupported prompt value. Only 'login' and 'none' are supported",
+                        "Unsupported prompt value. Supported values: login, none, consent",
                     );
                 }
             },
