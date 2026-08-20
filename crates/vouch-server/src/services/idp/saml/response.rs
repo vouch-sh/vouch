@@ -86,6 +86,15 @@ pub(crate) enum ResponseError {
     /// per SAML Profiles Section 4.1.4.3).
     #[error("missing InResponseTo attribute (required for SP-initiated SSO)")]
     MissingInResponseTo,
+    /// `SubjectConfirmationData.InResponseTo` is missing. Required when the
+    /// Response itself is not signed (assertion-only signature), because the
+    /// unsigned `Response.InResponseTo` attribute can be modified without
+    /// invalidating the signature and must not be the sole binding to the
+    /// expected request ID.
+    #[error(
+        "missing InResponseTo in SubjectConfirmationData (required when Response is not signed)"
+    )]
+    MissingSubjectConfirmationInResponseTo,
     /// The SAML Status is not `urn:oasis:names:tc:SAML:2.0:status:Success`.
     #[error("SAML status is not Success: {0}")]
     StatusNotSuccess(String),
@@ -137,7 +146,10 @@ pub(crate) enum ResponseError {
 /// 9. Validate `<saml:AudienceRestriction>` includes SP entity ID (Core 2.5.1.4)
 /// 10. Validate `NotBefore` / `NotOnOrAfter` with clock skew tolerance (Core 2.5.1)
 /// 11. Validate `SubjectConfirmation` Method is bearer (Core 2.4.1.2)
-/// 12. Validate `SubjectConfirmationData` Recipient and time (Profiles 4.1.4.3)
+/// 12. Validate `SubjectConfirmationData` Recipient, InResponseTo, and time
+///     (Profiles 4.1.4.3). When the Response is not signed (assertion-only
+///     signature), `SubjectConfirmationData.InResponseTo` is required because
+///     the unsigned `Response.InResponseTo` cannot be trusted.
 /// 13. Extract email from NameID or configured attribute
 /// 14. Extract domain from email or configured attribute
 ///
@@ -286,7 +298,22 @@ pub(crate) fn validate_saml_response(
 
     // Step 11: Validate SubjectConfirmation Method is bearer (Core 2.4.1.2)
     // Step 12: Validate SubjectConfirmationData (Profiles 4.1.4.3)
-    validate_subject_confirmation(assertion, expected_request_id, &provider.acs_url, now)?;
+    //
+    // When only the Assertion is signed (Response is unsigned), the
+    // `Response.InResponseTo` attribute is not covered by any signature and
+    // can be modified without invalidating the assertion signature. In that
+    // case, require `SubjectConfirmationData.InResponseTo` — which lives
+    // inside the signed Assertion — as the signed binding to the expected
+    // request ID. This prevents an attacker with MITM capability from
+    // modifying the unsigned `Response.InResponseTo` to impersonate a victim.
+    let response_signed = signed_element.has_tag_name((NS_SAMLP, "Response"));
+    validate_subject_confirmation(
+        assertion,
+        expected_request_id,
+        &provider.acs_url,
+        now,
+        !response_signed,
+    )?;
 
     // Step 10: Extract email
     let email = extract_email(assertion, provider.email_attribute.as_deref())?;
@@ -460,6 +487,7 @@ fn validate_subject_confirmation(
     expected_request_id: &str,
     acs_url: &str,
     now: Timestamp,
+    require_irt: bool,
 ) -> Result<(), ResponseError> {
     // SAML Profiles 4.1.4.3: Subject MUST be present for Web Browser SSO.
     let subject = assertion
@@ -492,8 +520,13 @@ fn validate_subject_confirmation(
     // single-confirmation failures still report a specific cause.
     let mut first_error: Option<ResponseError> = None;
     for confirmation in confirmations {
-        match validate_single_subject_confirmation(confirmation, expected_request_id, acs_url, now)
-        {
+        match validate_single_subject_confirmation(
+            confirmation,
+            expected_request_id,
+            acs_url,
+            now,
+            require_irt,
+        ) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 first_error.get_or_insert(e);
@@ -512,11 +545,18 @@ fn validate_subject_confirmation(
 /// SAML Core Section 2.4.1.2: The Method MUST be bearer.
 /// SAML Profiles Section 4.1.4.3: SubjectConfirmationData Recipient,
 /// InResponseTo, and NotOnOrAfter MUST be validated.
+///
+/// When `require_irt` is true (Response is not signed, assertion-only
+/// signature), `SubjectConfirmationData.InResponseTo` MUST be present and
+/// match the expected request ID. The unsigned `Response.InResponseTo`
+/// attribute can be modified without invalidating the assertion signature,
+/// so it must not be the sole binding to the expected request ID.
 fn validate_single_subject_confirmation(
     confirmation: roxmltree::Node<'_, '_>,
     expected_request_id: &str,
     acs_url: &str,
     now: Timestamp,
+    require_irt: bool,
 ) -> Result<(), ResponseError> {
     // SAML Core 2.4.1.2: Verify Method is bearer
     let method = confirmation.attribute("Method").unwrap_or("");
@@ -546,13 +586,25 @@ fn validate_single_subject_confirmation(
         });
     }
 
-    // Check InResponseTo matches request ID
-    if let Some(in_response_to) = conf_data.attribute("InResponseTo")
-        && in_response_to != expected_request_id
+    // Check InResponseTo matches request ID.
+    //
+    // When the Response is not signed (assertion-only signature), the
+    // unsigned Response.InResponseTo cannot be trusted as the binding to
+    // the expected request ID. Require SubjectConfirmationData.InResponseTo,
+    // which is inside the signed Assertion and therefore covered by the
+    // signature.
+    let in_response_to = conf_data.attribute("InResponseTo");
+
+    if require_irt && in_response_to.is_none() {
+        return Err(ResponseError::MissingSubjectConfirmationInResponseTo);
+    }
+
+    if let Some(irt) = in_response_to
+        && irt != expected_request_id
     {
         return Err(ResponseError::InResponseToMismatch {
             expected: expected_request_id.to_string(),
-            actual: in_response_to.to_string(),
+            actual: irt.to_string(),
         });
     }
 
