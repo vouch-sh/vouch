@@ -27,7 +27,6 @@ use crate::services::oidc::token::AuthenticatedClient;
 use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -82,7 +81,7 @@ pub struct Fido2AssertionParams<'a> {
 /// Result of a successful FIDO2 assertion grant exchange.
 pub struct Fido2AssertionResult {
     /// The OAuth access token.
-    pub access_token: String,
+    pub access_token: secrecy::SecretString,
     /// Token type ("DPoP" or "Bearer").
     pub token_type: String,
     /// Expires in seconds.
@@ -410,7 +409,7 @@ pub(crate) async fn exchange_fido2_assertion(
     };
 
     Ok(Fido2AssertionResult {
-        access_token: session_result.token.expose_secret().to_string(),
+        access_token: session_result.token.clone(),
         token_type: token_type.to_string(),
         expires_in: session_result.expires_in,
         scope: Some(scope),

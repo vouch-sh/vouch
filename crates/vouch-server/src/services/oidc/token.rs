@@ -85,13 +85,13 @@ pub struct ClientCredentials {
 /// Result of exchanging an authorization code.
 pub struct AuthCodeExchangeResult {
     /// The access token.
-    pub access_token: String,
+    pub access_token: SecretString,
     /// Token type ("Bearer" or "DPoP").
     pub token_type: String,
     /// Expiration in seconds.
     pub expires_in: u64,
     /// The ID token (JWT).
-    pub id_token: String,
+    pub id_token: SecretString,
     /// Granted scope.
     pub scope: ScopeSet,
     /// RFC 9396: Rich authorization details.
@@ -428,10 +428,10 @@ pub(crate) async fn exchange_authorization_code(
     }
 
     Ok(AuthCodeExchangeResult {
-        access_token: access_token.expose_secret().to_string(),
+        access_token,
         token_type: token_type.to_string(),
         expires_in,
-        id_token,
+        id_token: id_token.into(),
         scope: auth_code.scope,
         authorization_details: grants.authorization_details,
     })
@@ -1932,10 +1932,10 @@ mod tests {
     #[test]
     fn test_auth_code_exchange_result_debug_redacts_tokens() {
         let result = AuthCodeExchangeResult {
-            access_token: "eyJhbGciOiJFUzI1NiJ9.access-secret-token".to_string(),
+            access_token: "eyJhbGciOiJFUzI1NiJ9.access-secret-token".into(),
             token_type: "Bearer".to_string(),
             expires_in: 3600,
-            id_token: "eyJhbGciOiJFUzI1NiJ9.id-secret-token".to_string(),
+            id_token: "eyJhbGciOiJFUzI1NiJ9.id-secret-token".into(),
             scope: ScopeSet::parse("openid"),
             authorization_details: None,
         };

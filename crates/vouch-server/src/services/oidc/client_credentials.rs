@@ -15,13 +15,12 @@ use crate::services::auth::{
     CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use secrecy::ExposeSecret;
 use std::sync::Arc;
 
 /// Result of a client credentials grant exchange.
 pub struct ClientCredentialsResult {
     /// The issued access token.
-    pub access_token: String,
+    pub access_token: secrecy::SecretString,
     /// Token type ("Bearer").
     pub token_type: String,
     /// Expiration in seconds.
@@ -115,7 +114,7 @@ pub(crate) async fn exchange_client_credentials(
     };
 
     Ok(ClientCredentialsResult {
-        access_token: session_result.token.expose_secret().to_string(),
+        access_token: session_result.token.clone(),
         token_type: token_type.to_string(),
         expires_in: session_result.expires_in,
         scope,
@@ -131,6 +130,7 @@ mod tests {
     use super::*;
     use crate::services::auth::{ClientAuthProof, GrantProof, SenderConstraintProof};
     use crate::services::oidc::OAuthScope;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_scope_filters_openid_and_email() {
@@ -225,7 +225,7 @@ mod tests {
         // Decode the access token JWT and verify the cnf claim
         let config = state.config();
         let decoded = crate::services::auth::decode_token(
-            &result.access_token,
+            result.access_token.expose_secret(),
             &state.oidc_key,
             &config.base_url,
         )

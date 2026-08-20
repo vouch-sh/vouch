@@ -34,13 +34,15 @@ use std::sync::Arc;
 #[derive(Serialize)]
 pub(super) struct TokenResponse {
     /// The access token issued by the authorization server.
-    pub access_token: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub access_token: SecretString,
     /// The type of the token issued ("Bearer" or "DPoP").
     pub token_type: String,
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
     /// OIDC Core Section 3.1.3.3: The ID Token.
-    pub id_token: Option<String>,
+    #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
+    pub id_token: Option<SecretString>,
     /// RFC 6749 Section 3.3: The scope of the access token.
     pub scope: Option<ScopeSet>,
     /// User email (included in FIDO2 assertion grant responses).
@@ -175,7 +177,8 @@ impl TokenRequest {
 #[derive(Serialize)]
 pub(super) struct TokenExchangeResponse {
     /// The security token issued by the authorization server.
-    pub access_token: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub access_token: SecretString,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
     /// The type of the token issued (e.g., "Bearer").
