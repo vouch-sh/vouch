@@ -303,16 +303,24 @@ async fn resolve_client_decoding_key(
     client: &OAuthClient,
     header: &JwtAssertionHeader,
 ) -> Result<jsonwebtoken::DecodingKey, ClientAuthError> {
-    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
-    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
-        .await
-        .map_err(|e| {
-            tracing::debug!(
-                "JWKS cache lookup failed for client {}: {e}",
-                client.client_id
-            );
-            ClientAuthError::InvalidCredentials
-        })?;
+    // Only `jwks_uri` clients (no inline JWKS) need the cached fetch — skip
+    // the extra DB round trip for the common inline case, and degrade
+    // gracefully on DB errors so a transient outage cannot fail closed for
+    // inline-JWKS clients (matching `infra::httpsig`).
+    let jwks_cache = if client.jwks.is_some() {
+        None
+    } else {
+        crate::db::get_jwks_cache(&state.store, &client.id)
+            .await
+            .map_err(|e| {
+                tracing::debug!(
+                    "JWKS cache lookup failed for client {}: {e}",
+                    client.client_id
+                );
+            })
+            .ok()
+            .flatten()
+    };
 
     // Loopback JWKS destinations are permitted only in local development
     // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
@@ -706,5 +714,55 @@ mod tests {
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;
         assert!(matches!(result, Err(ClientAuthError::InvalidCredentials)));
+    }
+
+    /// Regression: an inline-JWKS client must resolve its decoding key even
+    /// when the JWKS cache DB read fails. Before the fix,
+    /// `resolve_client_decoding_key` loaded the cache unconditionally and
+    /// mapped any DB error to `InvalidCredentials`, failing closed for
+    /// inline-JWKS clients during a transient DB outage — even though their
+    /// signing keys are embedded and need no cache. The cache lookup is now
+    /// skipped when `client.jwks` is present, matching `infra::httpsig`.
+    #[tokio::test]
+    async fn test_resolve_client_decoding_key_inline_jwks_ignores_cache_db_error() {
+        let state = make_state().await;
+        let (client, kid) = make_client_with_jwks(&state).await;
+
+        // Simulate a transient DB failure: drop the documents table so the
+        // `get_jwks_cache` read errors out. The client is already loaded, and
+        // an inline-JWKS client never consults the cache, so key resolution
+        // must still succeed.
+        match &state.db {
+            db::Pool::Sqlite(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+            db::Pool::Postgres(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+        }
+
+        // Sanity: the cache read now errors.
+        assert!(
+            crate::db::get_jwks_cache(&state.store, &client.id)
+                .await
+                .is_err(),
+            "sanity: get_jwks_cache must error after dropping the documents table"
+        );
+
+        let header = JwtAssertionHeader {
+            alg: "ES256".to_string(),
+            kid: Some(kid),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+        assert!(
+            result.is_ok(),
+            "inline-JWKS client must resolve key despite cache DB error: {result:?}"
+        );
     }
 }

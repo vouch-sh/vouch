@@ -354,16 +354,21 @@ pub async fn validate_request_object(
     }
 
     // 3. Resolve client JWKS and find matching key
-    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
-    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
-        .await
-        .map_err(|e| {
-            tracing::debug!("JWKS cache lookup failed for Request Object: {e}");
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                "Failed to load JWKS cache for Request Object verification",
-            )
-        })?;
+    // Only `jwks_uri` clients (no inline JWKS) need the cached fetch — skip
+    // the extra DB round trip for the common inline case, and degrade
+    // gracefully on DB errors so a transient outage cannot fail closed for
+    // inline-JWKS clients (matching `infra::httpsig`).
+    let jwks_cache = if client.jwks.is_some() {
+        None
+    } else {
+        crate::db::get_jwks_cache(&state.store, &client.id)
+            .await
+            .map_err(|e| {
+                tracing::debug!("JWKS cache lookup failed for Request Object: {e}");
+            })
+            .ok()
+            .flatten()
+    };
 
     // Loopback JWKS destinations are permitted only in local development
     // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
@@ -860,6 +865,38 @@ mod tests {
         jsonwebtoken::encode(&header, claims, encoding_key).expect("JWT signing must succeed")
     }
 
+    /// Generate a fresh ES256 key pair plus the inline JWKS document and `kid`
+    /// that register its public half, so a test can sign a Request Object and
+    /// register the matching inline JWKS on the client.
+    fn test_es256_key_with_jwks() -> (jsonwebtoken::EncodingKey, serde_json::Value, String) {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .expect("key generation must succeed");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+            .expect("key parsing must succeed");
+        let encoding_key = jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref());
+        let pub_bytes = key_pair.public_key().as_ref();
+        let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+        let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+        let kid = "test-jar-inline-key".to_string();
+        let jwks = serde_json::json!({
+            "keys": [{ "kty": "EC", "crv": "P-256", "x": x, "y": y, "kid": kid }]
+        });
+        (encoding_key, jwks, kid)
+    }
+
+    /// Sign a Request Object with ES256, setting `typ` and `kid` in the header.
+    fn sign_request_object_with_kid(
+        claims: &serde_json::Value,
+        encoding_key: &jsonwebtoken::EncodingKey,
+        kid: &str,
+    ) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("oauth-authz-req+jwt".to_string());
+        header.kid = Some(kid.to_string());
+        jsonwebtoken::encode(&header, claims, encoding_key).expect("JWT signing must succeed")
+    }
+
     fn valid_request_object_claims(client_id: &str, issuer: &str, now: i64) -> serde_json::Value {
         serde_json::json!({
             "iss": client_id,
@@ -1223,6 +1260,77 @@ mod tests {
         assert!(
             validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_err(),
             "iat == now + skew + 1 must be rejected"
+        );
+    }
+
+    /// Regression: an inline-JWKS client's Request Object must validate even
+    /// when the JWKS cache DB read fails. Before the fix,
+    /// `validate_request_object` loaded the cache unconditionally and mapped
+    /// any DB error to `invalid_request_object`, failing closed for
+    /// inline-JWKS clients during a transient DB outage — even though their
+    /// signing keys are embedded and need no cache. The cache lookup is now
+    /// skipped when `client.jwks` is present, matching `infra::httpsig`.
+    #[tokio::test]
+    async fn test_validate_request_object_inline_jwks_ignores_cache_db_error() {
+        use crate::db::{self, get_oauth_client_by_id};
+        use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
+
+        let state = crate::test_utils::test_app_state().await;
+
+        let (encoding_key, jwks, kid) = test_es256_key_with_jwks();
+
+        let user = create_test_user(&state.store, "jar-cache@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                jwks: TestJwks::Custom(jwks),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        // Sign a valid Request Object with the client's inline key.
+        let now = Timestamp::now().as_second();
+        let issuer = state.config().base_url.clone();
+        let claims = valid_request_object_claims(&client.client_id, &issuer, now);
+        let request_jwt = sign_request_object_with_kid(&claims, &encoding_key, &kid);
+
+        // Simulate a transient DB failure: drop the documents table so the
+        // `get_jwks_cache` read errors out. The client is already loaded, and
+        // an inline-JWKS client never consults the cache, so Request Object
+        // validation must still succeed.
+        match &state.db {
+            db::Pool::Sqlite(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+            db::Pool::Postgres(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+        }
+
+        // Sanity: the cache read now errors.
+        assert!(
+            crate::db::get_jwks_cache(&state.store, &client.id)
+                .await
+                .is_err(),
+            "sanity: get_jwks_cache must error after dropping the documents table"
+        );
+
+        let result = validate_request_object(&state, &request_jwt, &client, None).await;
+        assert!(
+            result.is_ok(),
+            "inline-JWKS client must validate Request Object despite cache DB error: {result:?}"
         );
     }
 }
