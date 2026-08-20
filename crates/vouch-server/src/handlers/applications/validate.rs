@@ -476,18 +476,18 @@ pub(super) fn compute_fapi_update_fields<'a>(
 
     let jwks = if validated.jwks.is_some() {
         validated.jwks.as_ref()
-    } else if fapi_profile == FapiProfile::Fapi2Security {
-        client.jwks.as_ref()
-    } else {
+    } else if !is_fapi && validated.fapi_profile_provided {
         None
+    } else {
+        client.jwks.as_ref()
     };
 
     let jwks_uri = if validated.jwks_uri.is_some() {
         validated.jwks_uri
-    } else if fapi_profile == FapiProfile::Fapi2Security {
-        client.jwks_uri.as_deref()
-    } else {
+    } else if !is_fapi && validated.fapi_profile_provided {
         None
+    } else {
+        client.jwks_uri.as_deref()
     };
 
     let dpop_bound_access_tokens = if is_fapi {
@@ -725,6 +725,30 @@ mod tests {
             .expect("client exists")
     }
 
+    // A non-FAPI client that authenticates with `private_key_jwt` and carries
+    // JWKS — the shape produced by authenticated dynamic registration (RFC
+    // 7591) when the caller supplies `token_endpoint_auth_method=private_key_jwt`
+    // + `jwks` without requesting a FAPI profile.
+    async fn non_fapi_pkjwt_client(state: &crate::AppState, email: &str) -> crate::db::OAuthClient {
+        let user = create_test_user(&state.store, email).await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC"}]})),
+                fapi_profile: None,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists")
+    }
+
     fn update_input(fapi_profile: Option<&str>) -> ValidatedUpdateApp<'_> {
         validate_update_format(UpdateAppInput {
             redirect_uris: None,
@@ -825,6 +849,129 @@ mod tests {
         assert!(fields.jwks.is_some(), "request JWKS used");
         assert_eq!(fields.jwks_uri, Some("https://client.example/jwks.json"));
         assert!(fields.dpop_bound_access_tokens);
+    }
+
+    // ========================================================================
+    // JWKS / jwks_uri preservation on update — the merge logic must follow
+    // the same "absent vs provided" distinction as `dpop_bound_access_tokens`
+    // so that a non-FAPI `private_key_jwt` client (e.g. one created via
+    // authenticated dynamic registration) does not silently lose its JWKS
+    // when an unrelated PATCH omits `fapi_profile`.
+    // ========================================================================
+
+    // Regression: an absent `fapi_profile` must preserve the existing JWKS of
+    // a non-FAPI `private_key_jwt` client. The docstring promises this but the
+    // old implementation cleared JWKS for any non-FAPI profile.
+    #[tokio::test]
+    async fn non_fapi_client_preserves_jwks_when_fapi_profile_absent() {
+        let state = test_app_state().await;
+        let client = non_fapi_pkjwt_client(&state, "pkjwt-keep@example.com").await;
+        assert!(client.jwks.is_some(), "client must start with JWKS");
+
+        let validated = update_input(None);
+        validate_update_fapi(&validated, &client).expect("absent profile is valid");
+        let fields = compute_fapi_update_fields(&validated, &client);
+
+        assert_eq!(fields.fapi_profile, FapiProfile::None);
+        assert_eq!(
+            fields.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt,
+            "auth method preserved for non-FAPI client"
+        );
+        assert!(
+            fields.jwks.is_some(),
+            "existing JWKS must be preserved when fapi_profile is absent"
+        );
+        assert_eq!(fields.jwks, client.jwks.as_ref(), "same JWKS value");
+        assert!(
+            !fields.dpop_bound_access_tokens,
+            "dpop preserved from client (false)"
+        );
+    }
+
+    // A non-FAPI client with `jwks_uri` (instead of inline `jwks`) must also
+    // preserve it when `fapi_profile` is absent.
+    #[tokio::test]
+    async fn non_fapi_client_preserves_jwks_uri_when_fapi_profile_absent() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "pkjwt-uri@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks_uri: Some("https://client.example/jwks.json".to_string()),
+                fapi_profile: None,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        assert_eq!(
+            client.jwks_uri.as_deref(),
+            Some("https://client.example/jwks.json"),
+            "client must start with jwks_uri"
+        );
+
+        let validated = update_input(None);
+        let fields = compute_fapi_update_fields(&validated, &client);
+
+        assert_eq!(
+            fields.jwks_uri,
+            Some("https://client.example/jwks.json"),
+            "existing jwks_uri must be preserved when fapi_profile is absent"
+        );
+    }
+
+    // Explicitly setting `fapi_profile: "none"` on a non-FAPI client must still
+    // clear JWKS and jwks_uri — the documented "provided non-FAPI value clears
+    // ... JWKS" behaviour must not be broken by the fix.
+    #[tokio::test]
+    async fn non_fapi_client_clears_jwks_when_fapi_profile_explicitly_none() {
+        let state = test_app_state().await;
+        let client = non_fapi_pkjwt_client(&state, "pkjwt-clear@example.com").await;
+        assert!(client.jwks.is_some(), "client must start with JWKS");
+
+        let validated = update_input(Some("none"));
+        validate_update_fapi(&validated, &client).expect("non-FAPI -> non-FAPI is allowed");
+        let fields = compute_fapi_update_fields(&validated, &client);
+
+        assert_eq!(fields.fapi_profile, FapiProfile::None);
+        assert!(
+            fields.jwks.is_none(),
+            "JWKS must be cleared when fapi_profile is explicitly set to none"
+        );
+        assert!(
+            fields.jwks_uri.is_none(),
+            "jwks_uri must be cleared when fapi_profile is explicitly set to none"
+        );
+        assert!(!fields.dpop_bound_access_tokens);
+    }
+
+    // Guard against a naive fix that clears JWKS whenever
+    // `fapi_profile_provided` is true: re-confirming an existing FAPI client
+    // with `fapi_profile: "fapi2_security"` (no `jwks` in the request) must
+    // preserve the client's existing JWKS.
+    #[tokio::test]
+    async fn fapi_client_reconfirmed_preserves_existing_jwks() {
+        let state = test_app_state().await;
+        let client = fapi_test_client(&state, "fapi-reconfirm@example.com").await;
+        assert!(client.jwks.is_some(), "client must start with JWKS");
+
+        let validated = update_input(Some("fapi2_security"));
+        validate_update_fapi(&validated, &client).expect("FAPI -> FAPI is allowed");
+        let fields = compute_fapi_update_fields(&validated, &client);
+
+        assert_eq!(fields.fapi_profile, FapiProfile::Fapi2Security);
+        assert!(
+            fields.jwks.is_some(),
+            "existing JWKS must be preserved when re-confirming FAPI without JWKS"
+        );
+        assert_eq!(fields.jwks, client.jwks.as_ref(), "same JWKS value");
     }
 
     // ========================================================================
