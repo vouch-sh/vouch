@@ -47,7 +47,7 @@ pub async fn list_additional_domains(
 /// Result of adding an additional domain.
 pub struct AddedDomain {
     pub domain: String,
-    pub verification_token: String,
+    pub verification_token: secrecy::SecretString,
 }
 
 // Custom Debug that redacts verification_token to keep the DNS challenge
@@ -278,7 +278,7 @@ pub async fn add_additional_domain(
 
         data.additional_domains.push(AdditionalDomain {
             domain: normalized.clone(),
-            verification_token: token.clone(),
+            verification_token: token.clone().into(),
             added_at: now,
             added_by_user_id: added_by_user_id.to_string(),
             added_by_email: added_by_email.to_string(),
@@ -293,7 +293,7 @@ pub async fn add_additional_domain(
 
         Ok(AddedDomain {
             domain: normalized.clone(),
-            verification_token: token,
+            verification_token: token.into(),
         })
     })
 }
@@ -307,7 +307,7 @@ pub async fn get_verification_token(
     store: &DocumentStore,
     org_id: &str,
     domain: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<secrecy::SecretString>> {
     let normalized = normalize_domain(domain)?;
     let Some(doc) = store.get::<OrganizationDoc>(org_id).await? else {
         return Ok(None);
@@ -758,7 +758,7 @@ pub async fn cleanup_stale_additional_domains(
 pub struct VerifiedDomainRecord {
     pub org_id: String,
     pub domain: String,
-    pub verification_token: String,
+    pub verification_token: secrecy::SecretString,
     pub last_checked_at: Option<Timestamp>,
     pub consecutive_failures: u32,
 }
@@ -1020,6 +1020,8 @@ async fn find_conflicting_claim_in_other_org(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::super::{create_organization, fresh_store};
     use super::*;
 
@@ -1039,7 +1041,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(added.domain, "acme.co.uk");
-        assert!(!added.verification_token.is_empty());
+        assert!(!added.verification_token.expose_secret().is_empty());
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
         assert_eq!(list.len(), 1);
@@ -1593,7 +1595,7 @@ mod tests {
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "squatted.example.com".to_string(),
-            verification_token: "tok".to_string(),
+            verification_token: "tok".into(),
             added_at: stale_added,
             added_by_user_id: "u1".to_string(),
             added_by_email: "u1@example.com".to_string(),
@@ -1676,7 +1678,7 @@ mod tests {
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "drifted.example.com".to_string(),
-            verification_token: "tok".to_string(),
+            verification_token: "tok".into(),
             added_at: old_verified_at,
             added_by_user_id: "u1".to_string(),
             added_by_email: "u1@example.com".to_string(),
@@ -1758,7 +1760,7 @@ mod tests {
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "flips-late.example.com".to_string(),
-            verification_token: "tok".to_string(),
+            verification_token: "tok".into(),
             added_at: stale_added,
             added_by_user_id: "u1".to_string(),
             added_by_email: "u1@example.com".to_string(),
@@ -1834,7 +1836,7 @@ mod tests {
                     // now Verified" — i.e., the admin verified it during
                     // the race window.
                     domain: "racy.example.com".to_string(),
-                    verification_token: "tok".to_string(),
+                    verification_token: "tok".into(),
                     added_at,
                     added_by_user_id: "u1".to_string(),
                     added_by_email: "u1@example.com".to_string(),
@@ -1848,7 +1850,7 @@ mod tests {
                     // A genuinely stale Pending entry that should still be
                     // removed even when other candidates are spared.
                     domain: "squat.example.com".to_string(),
-                    verification_token: "tok2".to_string(),
+                    verification_token: "tok2".into(),
                     added_at,
                     added_by_user_id: "u1".to_string(),
                     added_by_email: "u1@example.com".to_string(),

@@ -2,7 +2,7 @@
 //! Organization document type.
 
 use jiff::Timestamp;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::db::document_type::{DocumentType, IndexEntry};
@@ -105,15 +105,6 @@ impl DocumentType for SubdomainClaimDoc {
     }
 }
 
-/// Serialize a [`SecretString`] field by exposing it. Only for fields whose
-/// document is sealed at rest by the store.
-fn serialize_secret_string<S: serde::Serializer>(
-    value: &SecretString,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(value.expose_secret())
-}
-
 /// State of a per-org issuer signing key (Auth0-style rotation).
 ///
 /// A key set always holds a `Current` signer and a `Next` successor: the
@@ -171,7 +162,7 @@ pub struct OrgSigningKeyDoc {
     /// it out of `Debug` output and zeroizes the buffer on drop; at rest the
     /// document store seals the whole document (keys are only ever created
     /// when `DocumentStore::is_encrypted`).
-    #[serde(serialize_with = "serialize_secret_string")]
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
     pub private_pkcs8_der_b64: SecretString,
     /// Rotation state; also selects the document's deterministic ID. Defaults
     /// to `Current` so existing rows without this field deserialize correctly.
@@ -234,7 +225,9 @@ pub struct AdditionalDomain {
     /// Normalized lowercase ASCII domain.
     pub domain: String,
     /// Random hex token the admin must publish as `_vouch-verification.<domain>` TXT.
-    pub verification_token: String,
+    /// Serialized by exposure: the org document is sealed at rest by the store.
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub verification_token: SecretString,
     pub added_at: Timestamp,
     pub added_by_user_id: String,
     /// Email of the admin who added this entry, denormalized at write time

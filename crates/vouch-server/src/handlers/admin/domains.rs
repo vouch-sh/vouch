@@ -21,6 +21,7 @@ use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -107,15 +108,17 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
     });
     for ad in &org.additional_domains {
         use crate::db::documents::organization::AdditionalDomainState;
+        // Deliberate render-boundary exposure: showing the TXT challenge
+        // value so the admin can publish it is this page's purpose.
         let (status, verification_token) = match &ad.state {
             AdditionalDomainState::Verified { .. } => (DomainRowStatus::Verified, None),
             AdditionalDomainState::Unverified { .. } => (
                 DomainRowStatus::Unverified,
-                Some(ad.verification_token.clone()),
+                Some(ad.verification_token.expose_secret().to_string()),
             ),
             AdditionalDomainState::Pending => (
                 DomainRowStatus::Pending,
-                Some(ad.verification_token.clone()),
+                Some(ad.verification_token.expose_secret().to_string()),
             ),
         };
         rows.push(DomainRow {
@@ -341,7 +344,7 @@ pub(crate) async fn admin_verify_domain(
         }
     };
 
-    let txt_ok = match dns::verify_txt_record(&normalized, &token).await {
+    let txt_ok = match dns::verify_txt_record(&normalized, token.expose_secret()).await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
