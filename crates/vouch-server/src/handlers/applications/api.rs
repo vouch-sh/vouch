@@ -324,7 +324,7 @@ pub(crate) async fn update_application_api(
 
     // FAPI rules that depend on the existing client record
     validate_update_fapi(&validated, &client)?;
-    let fapi = compute_fapi_update_fields(&validated, &client);
+    let fapi = compute_fapi_update_fields(&validated, &client)?;
 
     db::update_oauth_client(
         &state.store,

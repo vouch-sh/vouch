@@ -399,6 +399,12 @@ pub async fn update_user_active_status(
 ///
 /// Uses optimistic concurrency (`store.modify`) so a concurrent admin-status
 /// change landing between the read and write is not silently lost.
+///
+/// A `None` refresh token means the response carried none, not that the stored
+/// one should be discarded — GitHub omits `refresh_token` when the app has
+/// expiring tokens disabled, so a re-link would otherwise erase a working
+/// token and silently break background refresh. Clearing is done explicitly,
+/// through [`super::credentials::revoke_user_credentials`].
 pub async fn update_user_github_identity(
     store: &DocumentStore,
     user_id: &str,
@@ -410,7 +416,9 @@ pub async fn update_user_github_identity(
         .modify::<UserDoc, _>(user_id, |data| {
             data.github_id = Some(github_id);
             data.github_login = Some(github_login.to_string());
-            data.github_refresh_token = github_refresh_token.map(String::from);
+            if let Some(token) = github_refresh_token {
+                data.github_refresh_token = Some(token.to_string());
+            }
         })
         .await?;
     if found {
@@ -434,7 +442,10 @@ pub async fn get_user_github_refresh_token(
 /// Uses optimistic concurrency (`store.modify`) so concurrent field
 /// mutations do not silently overwrite each other. A missing user is
 /// silently ignored (idempotent clear semantics).
-pub async fn clear_user_github_refresh_token(store: &DocumentStore, user_id: &str) -> Result<()> {
+pub(in crate::db) async fn clear_user_github_refresh_token(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<()> {
     store
         .modify::<UserDoc, _>(user_id, |data| {
             data.github_refresh_token = None;

@@ -792,7 +792,7 @@ pub(crate) async fn create_oauth_access_token(
     };
 
     let claims = AccessTokenClaims {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud,
         exp: expires.as_second(),
@@ -977,6 +977,48 @@ pub(crate) fn decode_token(
     let ctx = crate::crypto::jwt::TokenValidationContext::new(oidc_key, expected_issuer);
     let claims: AccessTokenClaims = crate::crypto::jwt::decode_es256_token(token, &ctx)?;
     Some(DecodedToken::AccessToken(claims))
+}
+
+/// Revoke every credential that lets a user keep acting after their access is
+/// withdrawn: active sessions, issued SSH certificates, and the stored GitHub
+/// refresh token.
+///
+/// Every write propagates. A caller that reports the withdrawal as successful
+/// while one of these failed tells the operator (or the IdP) that access is
+/// gone when it is not: an unrevoked certificate appears on no KRL, and
+/// `revoke_all_ssh_certificates_for_user` is the only server-side lever there
+/// is. Returning an error lets the caller surface a 5xx so the request is
+/// retried.
+///
+/// `reason` and `revoked_by` are recorded on the revocation records.
+///
+/// # Errors
+///
+/// Returns [`ServiceError`] if any of the three writes fails. Earlier writes
+/// are not rolled back; each is individually idempotent, so retrying the whole
+/// operation converges.
+pub(crate) async fn revoke_user_access(
+    state: &AppState,
+    user_id: &str,
+    reason: &str,
+    revoked_by: &str,
+) -> Result<(), ServiceError> {
+    db::delete_sessions_for_user(&state.store, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete sessions for {user_id}: {e}");
+            ServiceError::Internal("failed to delete sessions".to_string())
+        })?;
+    state.session_cache.invalidate_for_user(user_id);
+
+    db::revoke_user_credentials(&state.store, user_id, Some(reason), Some(revoked_by))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to revoke credentials for {user_id}: {e}");
+            ServiceError::Internal("failed to revoke user credentials".to_string())
+        })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

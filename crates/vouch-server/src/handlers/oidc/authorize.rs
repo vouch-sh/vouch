@@ -519,7 +519,10 @@ async fn handle_direct_request(
                     .error_redirect(
                         state,
                         "invalid_request",
-                        "Unsupported prompt value. Supported values: login, none, consent",
+                        &format!(
+                            "Unsupported prompt value. Supported values: {}",
+                            crate::services::oidc::authorization::Prompt::supported_values()
+                        ),
                         params.state.as_deref(),
                     )
                     .await;
@@ -1670,7 +1673,7 @@ async fn issue_code_and_redirect(
                 }
             }
             ResponseMode::FormPost => {
-                let base_url = state.config().base_url.clone();
+                let base_url = state.config().base_url.to_string();
                 let mut params = vec![
                     ("code".to_string(), code.to_string()),
                     ("iss".to_string(), base_url),
@@ -1685,7 +1688,7 @@ async fn issue_code_and_redirect(
                 .into_response()
             }
             ResponseMode::Query => {
-                let base_url = state.config().base_url.clone();
+                let base_url = state.config().base_url.to_string();
                 match build_authorization_success_redirect_url(
                     redirect_uri,
                     code.as_str(),
@@ -1752,7 +1755,7 @@ async fn oauth_error_response(
             let mut params = vec![
                 ("error".to_string(), error.to_string()),
                 ("error_description".to_string(), description.to_string()),
-                ("iss".to_string(), app_state.config().base_url.clone()),
+                ("iss".to_string(), app_state.config().base_url.to_string()),
             ];
             if let Some(s) = oauth_state {
                 params.push(("state".to_string(), s.to_string()));

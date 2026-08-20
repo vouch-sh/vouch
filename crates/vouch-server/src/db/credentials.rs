@@ -235,7 +235,7 @@ pub async fn get_revoked_ssh_certificates(
 
 /// Revoke all SSH certificates for a user by looking up issued certs
 /// and inserting a revocation record for each real serial.
-pub async fn revoke_all_ssh_certificates_for_user(
+pub(in crate::db) async fn revoke_all_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,
     reason: Option<&str>,
@@ -270,6 +270,37 @@ pub async fn revoke_all_ssh_certificates_for_user(
 /// Delete expired SSH certificate revocations.
 pub async fn delete_expired_ssh_revocations(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(SshRevokedCertDoc::DOC_TYPE).await
+}
+
+/// Revoke every long-lived credential belonging to a user: their issued SSH
+/// certificates and their stored GitHub refresh token.
+///
+/// This is the only way to reach either write. They are deliberately not
+/// individually callable, because "revoke the certificates but not the token"
+/// is never the intent, and revoking one while silently failing the other
+/// reports a withdrawal of access that did not happen. Per
+/// `references/ssh-certs-not-revocable.md` the KRL is the only server-side
+/// lever for a certificate, so a dropped error leaves a working credential on
+/// no revocation list.
+///
+/// Callers should prefer `services::auth::revoke_user_access`, which also
+/// deletes sessions and invalidates the session cache.
+///
+/// `reason` and `revoked_by` are recorded on the revocation records.
+///
+/// # Errors
+///
+/// Returns an error if either write fails. Both are idempotent, so retrying
+/// the whole operation converges.
+pub async fn revoke_user_credentials(
+    store: &DocumentStore,
+    user_id: &str,
+    reason: Option<&str>,
+    revoked_by: Option<&str>,
+) -> Result<()> {
+    revoke_all_ssh_certificates_for_user(store, user_id, reason, revoked_by).await?;
+    super::users::clear_user_github_refresh_token(store, user_id).await?;
+    Ok(())
 }
 
 // ============================================================

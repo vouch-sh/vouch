@@ -335,7 +335,7 @@ async fn build_signed_userinfo_response(
     };
     let now = Timestamp::now().as_second();
     let signed_claims = SignedUserInfoClaims {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         sub: response_body.sub.clone(),
         aud,
         iat: now,

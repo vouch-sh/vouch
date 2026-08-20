@@ -366,6 +366,33 @@ fn node_qualified_name(node: roxmltree::Node<'_, '_>) -> String {
     }
 }
 
+/// Concatenate every text child of an element, skipping comments.
+///
+/// This is the only correct way to read a signed element's value. Signature
+/// digests cover the canonical form produced by [`exclusive_c14n`], which
+/// concatenates all text children and drops comments. `roxmltree`'s
+/// `Node::text()` returns only the *first* text child, so a comment placed
+/// mid-value (`<NameID>a@b.com<!---->.evil.tld</NameID>`) leaves the signed
+/// bytes byte-identical while `text()` yields only `a@b.com` — the signature
+/// verifies over one value and the application acts on another
+/// (CVE-2017-11427 class).
+///
+/// Returns `None` when the element has no text children.
+#[must_use]
+pub(crate) fn element_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let mut out = String::new();
+    let mut found = false;
+    for child in node.children() {
+        if child.is_text()
+            && let Some(text) = child.text()
+        {
+            out.push_str(text);
+            found = true;
+        }
+    }
+    found.then_some(out)
+}
+
 /// Escape text content per c14n spec.
 ///
 /// Replacements: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `\r` → `&#xD;`

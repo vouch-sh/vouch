@@ -33,7 +33,7 @@ pub(crate) async fn security_txt(State(state): State<Arc<AppState>>) -> impl Int
         .checked_add(jiff::Span::new().hours(720))
         .and_then(|ts| ts.round(jiff::Unit::Second))
         .unwrap_or(now);
-    let base_url = config.base_url.trim_end_matches('/');
+    let base_url = &config.base_url;
     let body = format!(
         "Contact: mailto:{}\r\nExpires: {expires}\r\nCanonical: {base_url}/.well-known/security.txt\r\n",
         config.security_contact

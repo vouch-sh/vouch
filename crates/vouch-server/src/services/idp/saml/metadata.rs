@@ -152,9 +152,8 @@ pub(crate) fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError
                             if !x509_cert_node.has_tag_name((NS_DS, "X509Certificate")) {
                                 continue;
                             }
-                            let cert_text = x509_cert_node
-                                .text()
-                                .unwrap_or("")
+                            let cert_text = super::c14n::element_text(x509_cert_node)
+                                .unwrap_or_default()
                                 // Strip whitespace (certs often have line breaks in metadata).
                                 .split_whitespace()
                                 .collect::<String>();

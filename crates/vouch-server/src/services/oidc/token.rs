@@ -186,6 +186,21 @@ pub enum ClientAuthError {
     MtlsVerificationFailed(String),
 }
 
+/// A failed database call is a server fault, never a statement about the
+/// client's credentials.
+///
+/// This exists so `?` on a database call yields [`ClientAuthError::DatabaseError`]
+/// — which maps to `server_error` / HTTP 500, letting the client retry — rather
+/// than requiring every call site to remember. Reporting a transient outage as
+/// `invalid_client` tells a client its credentials are wrong, so it stops
+/// retrying and may discard them; that is how the JWKS cache read came to fail
+/// authentication for clients that never needed the cache.
+impl From<anyhow::Error> for ClientAuthError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::DatabaseError(err.to_string())
+    }
+}
+
 impl ClientAuthError {
     /// Convert to `ServiceError`.
     #[must_use]
@@ -753,8 +768,7 @@ pub async fn authenticate_client(
 ) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
-        .await
-        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?
+        .await?
         .ok_or(ClientAuthError::InvalidClient)?;
 
     // Check if client is active
@@ -805,8 +819,7 @@ pub async fn authenticate_client(
             &credentials.client_id,
             &secret_hash,
         )
-        .await
-        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
+        .await?;
 
         if validated.is_none() {
             return Err(ClientAuthError::InvalidCredentials);
@@ -888,7 +901,7 @@ async fn generate_id_token(
     let has_email = params.scope.contains(OAuthScope::Email);
 
     let claims = IdTokenClaims {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud: params.client_id.to_string(),
         exp,

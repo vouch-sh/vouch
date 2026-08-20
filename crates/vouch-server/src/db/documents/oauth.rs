@@ -295,16 +295,41 @@ pub enum ResponseMode {
 }
 
 impl ResponseMode {
+    /// Every accepted `response_mode` string, in the order shown to clients.
+    ///
+    /// [`parse`](Self::parse) and [`supported_values`](Self::supported_values)
+    /// both read this table, so an accepted value cannot be missing from the
+    /// error message that lists them and a listed value cannot be
+    /// unparseable. Keeping them as separate literals is how the message came
+    /// to omit `form_post` while the parser accepted it.
+    ///
+    /// `jwt` and `query.jwt` are aliases for the same mode (JARM), so this is
+    /// a table of accepted strings rather than of variants.
+    const ACCEPTED: &'static [(&'static str, Self)] = &[
+        ("query", Self::Query),
+        ("form_post", Self::FormPost),
+        ("jwt", Self::Jwt),
+        ("query.jwt", Self::Jwt),
+    ];
+
     /// Parse a raw `response_mode` string, returning `None` for
     /// unrecognized values so the caller can produce an error.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "query" => Some(Self::Query),
-            "jwt" | "query.jwt" => Some(Self::Jwt),
-            "form_post" => Some(Self::FormPost),
-            _ => Option::None,
-        }
+        Self::ACCEPTED
+            .iter()
+            .find(|(value, _)| *value == s)
+            .map(|(_, mode)| *mode)
+    }
+
+    /// Comma-separated list of accepted values, for error messages.
+    #[must_use]
+    pub fn supported_values() -> String {
+        Self::ACCEPTED
+            .iter()
+            .map(|(value, _)| *value)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -663,6 +688,33 @@ mod tests {
             doc.id_token_signed_response_alg,
             JwsAlgorithm::Es256,
             "Missing field should default to ES256 for backward compatibility"
+        );
+    }
+
+    /// Every value the error message advertises must actually parse, and every
+    /// accepted value must be advertised. This is the invariant that broke
+    /// when the message and the parser were separate literals: the message
+    /// omitted `form_post` while the parser accepted it.
+    #[test]
+    fn every_advertised_response_mode_parses() {
+        use super::ResponseMode;
+        let advertised = ResponseMode::supported_values();
+        assert!(!advertised.is_empty(), "message must list something");
+        for value in advertised.split(", ") {
+            assert!(
+                ResponseMode::parse(value).is_some(),
+                "advertised response_mode {value:?} does not parse"
+            );
+        }
+        for (value, _) in ResponseMode::ACCEPTED {
+            assert!(
+                advertised.contains(value),
+                "accepted response_mode {value:?} is missing from the advertised list"
+            );
+        }
+        assert!(
+            ResponseMode::parse("fragment").is_none(),
+            "unsupported values must still be rejected"
         );
     }
 }

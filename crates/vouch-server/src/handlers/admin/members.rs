@@ -276,25 +276,16 @@ pub(crate) async fn deactivate_member(
         return Err(member_gone());
     }
 
-    // Invalidate all sessions for the deactivated user
-    db::delete_sessions_for_user(&state.store, &target_id).await?;
-    state.session_cache.invalidate_for_user(&target_id);
-
-    // Revoke all SSH certificates for this user
-    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-        &state.store,
+    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
+    // request fails — reporting a deactivation that left credentials live
+    // would tell the admin access is gone when it is not.
+    crate::services::auth::revoke_user_access(
+        &state,
         &target_id,
-        Some("User deactivated by admin"),
-        Some(&admin.id),
+        "User deactivated by admin",
+        &admin.id,
     )
-    .await
-    {
-        tracing::error!("Failed to revoke SSH certificates for deactivated user: {e}");
-    }
-    // Clear GitHub refresh token to prevent further API access
-    if let Err(e) = db::clear_user_github_refresh_token(&state.store, &target_id).await {
-        tracing::error!("Failed to clear GitHub refresh token for deactivated user: {e}");
-    }
+    .await?;
 
     let data = serde_json::json!({
         "action": "deactivate",
@@ -406,25 +397,15 @@ pub(crate) async fn revoke_member_credentials(
         db::delete_authenticator(&state.store, &auth.id).await?;
     }
 
-    // Also kill any remaining sessions
-    db::delete_sessions_for_user(&state.store, &target_id).await?;
-    state.session_cache.invalidate_for_user(&target_id);
-
-    // Revoke all SSH certificates for this user
-    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-        &state.store,
+    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
+    // request fails.
+    crate::services::auth::revoke_user_access(
+        &state,
         &target_id,
-        Some("Credentials revoked by admin"),
-        Some(&admin.id),
+        "Credentials revoked by admin",
+        &admin.id,
     )
-    .await
-    {
-        tracing::error!("Failed to revoke SSH certificates for user: {e}");
-    }
-    // Clear GitHub refresh token to prevent further API access
-    if let Err(e) = db::clear_user_github_refresh_token(&state.store, &target_id).await {
-        tracing::error!("Failed to clear GitHub refresh token for user: {e}");
-    }
+    .await?;
 
     let data = serde_json::json!({
         "action": "revoke_credentials",
@@ -487,24 +468,16 @@ pub(crate) async fn remove_member(
 
     let target_email = target.email.clone();
 
-    // Revoke SSH certificates before deleting. If revocation fails,
-    // abort — delete_user would destroy the issued cert records,
-    // making the certs permanently unrevocable.
-    db::revoke_all_ssh_certificates_for_user(
-        &state.store,
+    // Withdraw access before deleting. Certificate revocation in particular
+    // must happen first: delete_user destroys the issued cert records, which
+    // would make those certificates permanently unrevocable.
+    crate::services::auth::revoke_user_access(
+        &state,
         &target_id,
-        Some("User removed by admin"),
-        Some(&admin.id),
+        "User removed by admin",
+        &admin.id,
     )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to revoke SSH certificates for removed user: {e}");
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "revocation_failed",
-            "Failed to revoke SSH certificates",
-        )
-    })?;
+    .await?;
 
     let deleted = db::delete_user(&state.store, &target_id)
         .await

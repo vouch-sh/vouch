@@ -18,6 +18,7 @@ use super::types::{
 use crate::AppState;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
+use crate::error::ServiceError;
 
 /// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
 ///
@@ -89,7 +90,10 @@ pub(crate) async fn list_groups(
     let base_url = &state.config().base_url;
     let mut resources = Vec::new();
     for g in groups {
-        let members = get_group_members_scim(&state.store, base_url, &g.id, &auth.org_id).await;
+        let Ok(members) = get_group_members_scim(&state.store, base_url, &g.id, &auth.org_id).await
+        else {
+            return members_read_error_response();
+        };
         resources.push(db_group_to_scim(base_url, g, members));
     }
 
@@ -143,6 +147,51 @@ pub(super) fn create_scim_group_error_response(err: anyhow::Error) -> Response {
         .into_response()
 }
 
+/// Map a group member operation error onto its SCIM wire response.
+///
+/// Member writes (`add_scim_group_member`,
+/// `replace_scim_group_members`, `remove_scim_group_member`) can fail two
+/// ways. A NUL byte in the `user_id` index is a client error and returns
+/// `400 invalidValue` via [`super::invalid_index_value_response`]. Every
+/// other failure — HPKE decryption, JSON or timestamp parsing, DB
+/// connection or timeout, exhausted OCC retries — is an infrastructure
+/// fault and returns `500 INTERNAL SERVER ERROR`, matching
+/// [`create_scim_group_error_response`] and the attribute-update arms of
+/// [`patch_group`].
+///
+/// Without this, a non-`InvalidIndexValue` member failure was logged and
+/// swallowed, so a PATCH/POST returned `200`/`201` with stale membership.
+///
+/// A 500 does not mean nothing changed. Add and remove commit one member
+/// per transaction, so a failure part-way leaves the earlier members
+/// written, and attribute updates run after member operations. Every member
+/// write is idempotent, so a client that retries the whole request
+/// converges; the guarantee is retry-convergence, not atomicity. The
+/// documented "leaves the record untouched" guarantee covers the `400`
+/// validation path, which runs before any write.
+pub(super) fn member_op_error_response(err: anyhow::Error) -> Response {
+    if let Some(resp) = super::invalid_index_value_response(&err) {
+        return resp.into_response();
+    }
+    tracing::error!("Failed to update group members: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ScimError::new(500, "Failed to update group members")),
+    )
+        .into_response()
+}
+
+/// Response for a failed group-membership read.
+///
+/// The read itself logs the cause; this only shapes the SCIM error body.
+fn members_read_error_response() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ScimError::new(500, "Failed to read group members")),
+    )
+        .into_response()
+}
+
 /// POST /scim/v2/Groups (RFC 7644 Section 3.3).
 ///
 /// Creates a new Group resource. Returns 201 Created on success.
@@ -192,10 +241,7 @@ pub(crate) async fn create_group(
                 db::add_scim_group_member(&state.store, &db_group.id, &auth.org_id, &member.value)
                     .await
             {
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return resp.into_response();
-                }
-                tracing::warn!("Failed to add member {} to group: {e}", member.value);
+                return member_op_error_response(e);
             }
         }
     }
@@ -216,7 +262,11 @@ pub(crate) async fn create_group(
     }
 
     let base_url = &state.config().base_url;
-    let members = get_group_members_scim(&state.store, base_url, &db_group.id, &auth.org_id).await;
+    let Ok(members) =
+        get_group_members_scim(&state.store, base_url, &db_group.id, &auth.org_id).await
+    else {
+        return members_read_error_response();
+    };
     let scim_group = db_group_to_scim(base_url, db_group, members);
 
     (StatusCode::CREATED, Json(scim_group)).into_response()
@@ -264,7 +314,10 @@ pub(crate) async fn get_group(
     };
 
     let base_url = &state.config().base_url;
-    let members = get_group_members_scim(&state.store, base_url, &group.id, &auth.org_id).await;
+    let Ok(members) = get_group_members_scim(&state.store, base_url, &group.id, &auth.org_id).await
+    else {
+        return members_read_error_response();
+    };
     Json(db_group_to_scim(base_url, group, members)).into_response()
 }
 
@@ -339,10 +392,7 @@ async fn apply_member_op(
                     continue;
                 };
                 if let Err(e) = db::add_scim_group_member(db, group_id, org_id, user_id).await {
-                    if let Some(resp) = super::invalid_index_value_response(&e) {
-                        return Err(resp.into_response());
-                    }
-                    tracing::warn!("Failed to add member: {e}");
+                    return Err(member_op_error_response(e));
                 }
             }
             Ok(())
@@ -359,10 +409,7 @@ async fn apply_member_op(
                 .filter_map(|m| m.get("value").and_then(|v| v.as_str()).map(String::from))
                 .collect();
             if let Err(e) = db::replace_scim_group_members(db, group_id, org_id, &user_ids).await {
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return Err(resp.into_response());
-                }
-                tracing::error!("Failed to replace group members: {e}");
+                return Err(member_op_error_response(e));
             }
             Ok(())
         }
@@ -393,7 +440,7 @@ async fn apply_member_op(
             };
             for user_id in user_ids {
                 if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
-                    tracing::warn!("Failed to remove member: {e}");
+                    return Err(member_op_error_response(e));
                 }
             }
             Ok(())
@@ -543,7 +590,11 @@ pub(crate) async fn patch_group(
     };
 
     let base_url = &state.config().base_url;
-    let members = get_group_members_scim(&state.store, base_url, &updated.id, &auth.org_id).await;
+    let Ok(members) =
+        get_group_members_scim(&state.store, base_url, &updated.id, &auth.org_id).await
+    else {
+        return members_read_error_response();
+    };
     Json(db_group_to_scim(base_url, updated, members)).into_response()
 }
 
@@ -621,22 +672,38 @@ pub(crate) async fn delete_group(
 /// Helper to get group members in SCIM format, scoped to the
 /// caller's org. Cross-org user_ids in the membership table are
 /// silently filtered out at read time by `db::get_scim_group_members`.
+///
+/// A read failure is an error rather than an empty list: the response body is
+/// the resource as stored, so returning `members: []` for a group that has
+/// members reports a membership change that never happened.
+///
+/// `Ok(None)` means the group is not in this org and stays an empty list.
+///
+/// # Errors
+///
+/// Returns [`ServiceError`] if the membership read fails.
 pub(crate) async fn get_group_members_scim(
     db: &crate::db::store::DocumentStore,
     base_url: &str,
     group_id: &str,
     org_id: &str,
-) -> Vec<ScimGroupMember> {
+) -> Result<Vec<ScimGroupMember>, ServiceError> {
     match db::get_scim_group_members(db, group_id, org_id).await {
-        Ok(Some(users)) => users
+        Ok(Some(users)) => Ok(users
             .into_iter()
             .map(|u| ScimGroupMember {
                 value: u.id.clone(),
                 ref_url: Some(format!("{base_url}/scim/v2/Users/{}", u.id)),
                 display: Some(u.email),
             })
-            .collect(),
-        Ok(None) | Err(_) => Vec::new(),
+            .collect()),
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => {
+            tracing::error!("Failed to read members for group {group_id}: {e}");
+            Err(ServiceError::Internal(
+                "failed to read group members".to_string(),
+            ))
+        }
     }
 }
 

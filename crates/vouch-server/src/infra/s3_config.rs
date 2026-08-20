@@ -808,7 +808,7 @@ impl ServerConfig {
             self.rp_name = v.clone();
         }
         if let Some(v) = &s3.base_url {
-            self.base_url = v.clone();
+            self.base_url = crate::config::BaseUrl::new(v);
         }
         if let Some(v) = &s3.jwt_secret {
             self.jwt_secret = SecretString::from(v.clone());
@@ -1005,6 +1005,56 @@ mod tests {
 
         assert_eq!(config.rp_id, "new.example.com");
         assert_eq!(config.session_hours, 12);
+    }
+
+    #[test]
+    fn test_merge_s3_config_trims_trailing_slash_from_base_url() {
+        // Regression: a trailing slash on an S3-sourced base_url used to
+        // produce a spec-violating issuer and double-slash endpoint URLs.
+        let mut config = crate::test_utils::test_config();
+        let s3 = S3Config {
+            base_url: Some("https://auth.example.com/".to_string()),
+            ..Default::default()
+        };
+
+        config.merge_s3_config(&s3, false).unwrap();
+
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "trailing slash must be stripped from S3-sourced base_url"
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_trims_multiple_trailing_slashes_from_base_url() {
+        let mut config = crate::test_utils::test_config();
+        let s3 = S3Config {
+            base_url: Some("https://auth.example.com///".to_string()),
+            ..Default::default()
+        };
+
+        config.merge_s3_config(&s3, false).unwrap();
+
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "all trailing slashes must be stripped from S3-sourced base_url"
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_preserves_base_url_without_trailing_slash() {
+        let mut config = crate::test_utils::test_config();
+        let s3 = S3Config {
+            base_url: Some("https://auth.example.com".to_string()),
+            ..Default::default()
+        };
+
+        config.merge_s3_config(&s3, false).unwrap();
+
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "base_url without trailing slash must be unchanged"
+        );
     }
 
     #[test]

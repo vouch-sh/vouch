@@ -147,7 +147,12 @@ pub(crate) async fn complete_login(
     // session leakage between conformance test modules (which share a
     // browser context). Each module should start with a clean session.
     if let Err(e) = db::delete_sessions_for_user(&state.store, &user.id).await {
-        tracing::warn!("Failed to delete previous cert sessions: {e}");
+        tracing::error!("Failed to delete previous cert sessions: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to clear previous sessions",
+        )
+            .into_response();
     }
 
     let session_client_id = state.config().base_url.clone();
