@@ -274,3 +274,84 @@ async fn scim_list_filter_user_name_eq_is_case_insensitive() {
         "a different address must not match; got {list}"
     );
 }
+
+/// `GET /scim/v2/Groups?filter=displayName eq "..."` finds a group when the
+/// filter value uses different casing than the stored display name.
+///
+/// The group counterpart of the `userName` test above. RFC 7643 Section 8.7.2
+/// defines Group `displayName` with `caseExact: false`, so a provisioner
+/// sending `displayName eq "ENGINEERING"` must find a group stored as
+/// "Engineering". The indexed lookup lowercases both sides to match.
+///
+/// This runs through the real router because the db-level test passes against
+/// a correct parser while the endpoint is wrong — the same shape of gap that
+/// let the `userName` bug ship.
+#[tokio::test]
+async fn scim_list_filter_group_display_name_eq_is_case_insensitive() {
+    let harness = TestHarness::new().await;
+
+    let org = harness
+        .create_org("e2e-groupfilter.example.com")
+        .await
+        .expect("create org");
+    let scim_token = harness
+        .create_scim_token("E2E SCIM group token", &org.id)
+        .await
+        .expect("create scim token");
+
+    let resp = harness
+        .post_json_authenticated(
+            "/scim/v2/Groups",
+            &json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "displayName": "Engineering",
+            }),
+            &scim_token,
+        )
+        .await
+        .expect("SCIM group creation HTTP call");
+    assert_eq!(resp.status, 201, "SCIM group creation should succeed");
+    let created: serde_json::Value = resp.json().expect("parse SCIM response");
+    let group_id = created["id"]
+        .as_str()
+        .expect("SCIM response must include group id")
+        .to_string();
+
+    // Uppercase filter must find the mixed-case group.
+    let path = "/scim/v2/Groups?filter=displayName%20eq%20%22ENGINEERING%22";
+    let list_resp = harness
+        .get_authenticated(path, &scim_token)
+        .await
+        .expect("SCIM list groups HTTP call");
+    assert_eq!(list_resp.status, 200);
+    let list: serde_json::Value = list_resp.json().expect("parse SCIM list response");
+    assert_eq!(
+        list["totalResults"].as_u64(),
+        Some(1),
+        "uppercase displayName eq filter should find 1 group; got {list}"
+    );
+    let resources = list["Resources"]
+        .as_array()
+        .expect("Resources must be an array");
+    assert_eq!(resources[0]["id"].as_str(), Some(group_id.as_str()));
+    assert_eq!(
+        resources[0]["displayName"].as_str(),
+        Some("Engineering"),
+        "the response body keeps the original casing"
+    );
+
+    // A different name must still not match, and must return an empty list
+    // rather than an error — provisioners query this to decide whether to
+    // create a group.
+    let path = "/scim/v2/Groups?filter=displayName%20eq%20%22Marketing%22";
+    let list_resp = harness
+        .get_authenticated(path, &scim_token)
+        .await
+        .expect("SCIM list groups HTTP call");
+    assert_eq!(
+        list_resp.status, 200,
+        "a miss is an empty list, not an error"
+    );
+    let list: serde_json::Value = list_resp.json().expect("parse SCIM list response");
+    assert_eq!(list["totalResults"].as_u64(), Some(0));
+}

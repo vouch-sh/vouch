@@ -3,6 +3,7 @@
 #![expect(
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable; cast bounds are obvious in test fixtures"
 )]
 
@@ -331,6 +332,185 @@ async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
 }
 
 // ========================================================================
+// SCIM group displayName eq — case-insensitive (RFC 7643 caseExact: false)
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
+    // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, so
+    // `displayName eq` must be case-insensitive: a filter with different
+    // casing than the stored value must still match.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to create group");
+
+    // Lowercase filter against a title-case group.
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "engineering""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(
+        total, 1,
+        "displayName eq must be case-insensitive per RFC 7643 caseExact: false"
+    );
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].display_name, "Engineering");
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to create group");
+
+    // Exact-case match (no regression of the previously-working path).
+    let (_groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "Engineering""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "exact-case eq must still match");
+
+    // All-caps filter must also match.
+    let (_groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "ENGINEERING""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "uppercase eq must match");
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
+    // An index row written before displayName normalization still carries its
+    // original mixed-case value, so a lowercased indexed lookup misses it.
+    // That is accepted rather than papered over: the row is re-stored
+    // lowercased the next time the group is written through normal SCIM
+    // create/update, matching the decision taken for the user path when the
+    // same normalization landed there.
+    //
+    // The alternative — falling through to the unindexed scan on any miss —
+    // is worse than the gap it closes. A miss is the normal case, since Okta
+    // and Entra both query `displayName eq` to check whether a group exists
+    // before creating it, so above the 10k `FilterTooBroad` threshold the
+    // common provisioning path would return 400 instead of an empty list.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to create group");
+
+    // Simulate a pre-normalization index row.
+    let crate::db::pool::Pool::Sqlite(pool) = store.pool() else {
+        panic!("in-memory test DB must be SQLite");
+    };
+    sqlx::query(
+        "UPDATE document_indexes SET index_value = ? \
+         WHERE document_id = ? AND index_field = 'display_name'",
+    )
+    .bind("Engineering")
+    .bind(&group.id)
+    .execute(pool)
+    .await
+    .expect("rewrite display_name index to legacy mixed-case");
+
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "engineering""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+
+    // An empty answer, not a rescan and not an error.
+    assert_eq!(
+        total, 0,
+        "stale index row is not found by the indexed lookup"
+    );
+    assert!(groups.is_empty());
+
+    // Re-writing the group re-stores the index lowercased, and it is findable
+    // again — which is what makes the gap self-healing rather than permanent.
+    update_scim_group(&store, &group.id, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to update group");
+
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "engineering""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "re-saved group is findable case-insensitively");
+    assert_eq!(groups.len(), 1);
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
+    // `externalId` is `caseExact: true` per RFC 7643 Section 3.1, so the
+    // indexed `eq` lookup must stay case-sensitive — contrasting with
+    // displayName, and matching the case-sensitive `co` coverage above.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("Ext-Case-1"))
+        .await
+        .expect("Failed to create group");
+
+    // Exact-case match.
+    let (_groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId eq "Ext-Case-1""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "exact-case externalId eq must match");
+
+    // Wrong-case match must NOT match (case-sensitive).
+    let (_groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId eq "ext-case-1""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(
+        total, 0,
+        "externalId is caseExact: true; lowercase eq must not match"
+    );
+}
+
+// ========================================================================
 // Concurrent membership addition — duplicate-prevention regression
 // ========================================================================
 
@@ -576,4 +756,48 @@ async fn test_add_scim_group_member_concurrent_different_users() {
         "all {num_users} members must appear, got {}",
         members.len()
     );
+}
+
+// ========================================================================
+// displayName index normalization (case-insensitive storage)
+// ========================================================================
+
+/// Read the raw `display_name` index value for a group directly from
+/// `document_indexes` (SQLite in-memory, plaintext crypto).
+async fn read_display_name_index(store: &DocumentStore, group_id: &str) -> String {
+    let crate::db::pool::Pool::Sqlite(p) = store.pool() else {
+        panic!("expected SQLite pool");
+    };
+    let row: (String,) =
+        sqlx::query_as("SELECT index_value FROM document_indexes WHERE document_id = $1 AND index_field = 'display_name'")
+            .bind(group_id)
+            .fetch_one(p)
+            .await
+            .expect("fetch display_name index row");
+    row.0
+}
+
+#[tokio::test]
+async fn test_scim_group_display_name_index_is_lowercased() {
+    // `displayName` is `caseExact: false` per RFC 7643, so the blind-index
+    // value is stored ASCII-lowercased — mirroring how `UserDoc` stores the
+    // `email` index through the canonicalizing `Email` type. The document
+    // body preserves the original casing for display.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("create group");
+
+    let idx = read_display_name_index(&store, &group.id).await;
+    assert_eq!(
+        idx, "engineering",
+        "display_name index must be ASCII-lowercased"
+    );
+    let fetched = get_scim_group(&store, &group.id, TEST_ORG_ID)
+        .await
+        .expect("get group")
+        .expect("group exists");
+    assert_eq!(fetched.display_name, "Engineering", "body preserves casing");
 }

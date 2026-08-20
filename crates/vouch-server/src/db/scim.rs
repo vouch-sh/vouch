@@ -1124,11 +1124,33 @@ async fn try_indexed_group_lookup(
     org_id: &str,
     filter: &str,
 ) -> Result<Option<Vec<ScimGroupRecord>>> {
+    // displayName eq → find_by_indexes combining display_name + org_id at DB
+    // level.
+    //
+    // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, and
+    // `ScimGroupDoc::index_entries` stores the value ASCII-lowercased. Normalize
+    // the filter value to match the lowercased index; otherwise a mixed-case
+    // filter like `displayName eq "engineering"` misses a group stored as
+    // "Engineering". The `co`/`sw` operators are already case-insensitive via
+    // the in-memory fallback in `list_scim_groups`.
+    //
+    // An empty result is returned as `Some(vec![])`, matching the `externalId`
+    // branch below and the user lookup: the indexed path is authoritative, so
+    // "no such group" is an answer rather than a reason to rescan. Falling
+    // through to the unindexed scan instead would hand every miss to the
+    // 10k `FilterTooBroad` guard in `list_scim_groups`, and a miss is the
+    // normal case — Okta and Entra both query `displayName eq` to check
+    // whether a group exists before creating it, so above 10k groups the
+    // common provisioning path would start returning 400.
     if let Some(f) = parse_scim_filter(filter, "displayName")?
         && f.op == ScimFilterOp::Eq
     {
+        let display_name_lower = f.value.to_ascii_lowercase();
         let docs = store
-            .find_by_indexes::<ScimGroupDoc>(&[("display_name", &f.value), ("org_id", org_id)])
+            .find_by_indexes::<ScimGroupDoc>(&[
+                ("display_name", &display_name_lower),
+                ("org_id", org_id),
+            ])
             .await?;
         return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
     }
