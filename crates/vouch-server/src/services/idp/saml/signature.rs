@@ -201,11 +201,12 @@ pub(crate) fn verify_xml_signature(
     }
 
     // Step 5: Canonicalize the signed element (enveloped-signature: exclude Signature subtree)
-    let canonical_element = c14n_excluding_signature(signed_element, sig_node, &inclusive_prefixes);
+    let canonical_element =
+        c14n_excluding_signature(signed_element, sig_node, &inclusive_prefixes)?;
 
     // Step 6: Compute SHA-256 digest and compare with <ds:DigestValue>
     let digest_value_b64 = find_child_element(reference_node, NS_DS, "DigestValue")
-        .and_then(|n| n.text())
+        .and_then(c14n::element_text)
         .ok_or_else(|| SignatureError::Other("missing DigestValue".to_string()))?;
 
     let expected_digest = BASE64_STANDARD
@@ -230,7 +231,7 @@ pub(crate) fn verify_xml_signature(
 
     // Step 8: Extract <ds:SignatureValue>
     let sig_value_b64 = find_child_element(sig_node, NS_DS, "SignatureValue")
-        .and_then(|n| n.text())
+        .and_then(c14n::element_text)
         .ok_or_else(|| SignatureError::Other("missing SignatureValue".to_string()))?;
 
     let sig_bytes = BASE64_STANDARD
@@ -371,7 +372,7 @@ fn c14n_excluding_signature(
     signed_element: roxmltree::Node<'_, '_>,
     sig_node: roxmltree::Node<'_, '_>,
     inclusive_prefixes: &[&str],
-) -> String {
+) -> Result<String, SignatureError> {
     // Build canonical form by iterating children and excluding the Signature.
     // We need to produce the canonical opening tag of signed_element, then
     // recurse into children (skipping sig_node), then close.
@@ -383,20 +384,27 @@ fn c14n_excluding_signature(
     let mut xml_without_sig = String::with_capacity(4096);
     serialize_node_excl(&mut xml_without_sig, signed_element, sig_node.id());
 
-    let doc = match roxmltree::Document::parse(&xml_without_sig) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("Failed to reparse element for c14n (enveloped-sig): {e}");
-            // Fall back to full c14n (less secure but prevents crash)
-            return c14n::exclusive_c14n(signed_element, inclusive_prefixes);
-        }
-    };
+    // Both failure paths below must be hard errors. Returning some *other*
+    // canonical form (the element with its Signature still inside, or an empty
+    // string) would hash bytes the signer never saw, which is the shape every
+    // signature-bypass in this family takes. The digest comparison would reject
+    // it today, but only by luck of ordering — fail closed here instead.
+    let doc = roxmltree::Document::parse(&xml_without_sig).map_err(|e| {
+        SignatureError::Other(format!(
+            "failed to reparse element for enveloped-signature c14n: {e}"
+        ))
+    })?;
 
-    if let Some(root_elem) = doc.root().children().find(|n| n.is_element()) {
-        c14n::exclusive_c14n(root_elem, inclusive_prefixes)
-    } else {
-        String::new()
-    }
+    let root_elem = doc
+        .root()
+        .children()
+        .find(|n| n.is_element())
+        .ok_or_else(|| {
+            SignatureError::Other(
+                "reparsed element for enveloped-signature c14n has no root element".to_string(),
+            )
+        })?;
+    Ok(c14n::exclusive_c14n(root_elem, inclusive_prefixes))
 }
 
 /// Recursively serialize a node, skipping the node with the given ID.

@@ -15,7 +15,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use jiff::Timestamp;
 
-use super::{SamlProvider, signature::SignatureError};
+use super::{SamlProvider, c14n, signature::SignatureError};
 
 // ============================================================================
 // SAML namespace constants
@@ -372,9 +372,9 @@ fn validate_issuer(
     let issuer = assertion
         .children()
         .find(|n| n.has_tag_name((NS_SAML, "Issuer")))
-        .and_then(|n| n.text())
-        .map(str::trim)
+        .and_then(c14n::element_text)
         .ok_or_else(|| ResponseError::Other("missing Issuer element in assertion".to_string()))?;
+    let issuer = issuer.trim();
 
     if issuer != expected_entity_id {
         return Err(ResponseError::IssuerMismatch {
@@ -415,7 +415,7 @@ fn validate_audience_restriction(
     let has_match = audience_restriction
         .children()
         .filter(|n| n.has_tag_name((NS_SAML, "Audience")))
-        .filter_map(|n| n.text())
+        .filter_map(c14n::element_text)
         .any(|text| text.trim() == sp_entity_id);
 
     if !has_match {
@@ -657,7 +657,11 @@ fn extract_name_id(assertion: roxmltree::Node<'_, '_>) -> Option<(String, Option
         .children()
         .find(|n| n.has_tag_name((NS_SAML, "Subject")))
         .and_then(|s| s.children().find(|n| n.has_tag_name((NS_SAML, "NameID"))))?;
-    let text = node.text().map(str::trim).filter(|s| !s.is_empty())?;
+    let text = c14n::element_text(node)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
     let format = node.attribute("Format").map(str::to_string);
     Some((text.to_string(), format))
 }
@@ -700,7 +704,7 @@ fn find_saml_attribute(assertion: roxmltree::Node<'_, '_>, attr_name: &str) -> O
             && let Some(value_node) = attribute
                 .children()
                 .find(|n| n.has_tag_name((NS_SAML, "AttributeValue")))
-            && let Some(text) = value_node.text()
+            && let Some(text) = c14n::element_text(value_node)
         {
             let trimmed = text.trim();
             if !trimmed.is_empty() {

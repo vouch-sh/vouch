@@ -1228,6 +1228,122 @@ fn extract_name_id_reads_text_and_format() {
     assert_eq!(format, None);
 }
 
+/// An XML comment splits an element's text into multiple text nodes, but
+/// canonicalization concatenates them all and drops the comment — so the
+/// signature stays valid over the whole value. Every extractor must read the
+/// whole value too; reading only the first text node would let a holder of a
+/// legitimately signed assertion truncate it to another user's identity
+/// (CVE-2017-11427 class).
+#[test]
+fn comment_split_text_is_read_whole_not_truncated() {
+    let assertion_xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+        <saml:Issuer>https://idp.example.com<!---->.evil.tld</saml:Issuer>
+        <saml:Subject>
+            <saml:NameID>alice@example.com<!---->.evil.tld</saml:NameID>
+        </saml:Subject>
+        <saml:Conditions>
+            <saml:AudienceRestriction>
+                <saml:Audience>https://vouch.example.com<!---->.evil.tld</saml:Audience>
+            </saml:AudienceRestriction>
+        </saml:Conditions>
+        <saml:AttributeStatement>
+            <saml:Attribute Name="email">
+                <saml:AttributeValue>alice@example.com<!---->.evil.tld</saml:AttributeValue>
+            </saml:Attribute>
+        </saml:AttributeStatement>
+    </saml:Assertion>"#;
+    let doc = roxmltree::Document::parse(assertion_xml).expect("parse");
+    let assertion = doc.root_element();
+
+    let (name_id, _format) = super::extract_name_id(assertion).expect("name id present");
+    assert_eq!(
+        name_id, "alice@example.com.evil.tld",
+        "NameID must be the whole signed value, not the prefix before the comment"
+    );
+
+    let attr = super::find_saml_attribute(assertion, "email").expect("attribute present");
+    assert_eq!(
+        attr, "alice@example.com.evil.tld",
+        "AttributeValue must be the whole signed value"
+    );
+
+    // The audience is not the SP entity ID, so the restriction must not match.
+    assert!(
+        super::validate_audience_restriction(assertion, "https://vouch.example.com").is_err(),
+        "An Audience of https://vouch.example.com.evil.tld must not satisfy \
+         https://vouch.example.com"
+    );
+
+    // The issuer is not the configured entity ID, so it must not match.
+    assert!(
+        super::validate_issuer(assertion, "https://idp.example.com").is_err(),
+        "An Issuer of https://idp.example.com.evil.tld must not satisfy \
+         https://idp.example.com"
+    );
+
+    // A leading comment puts the text after a comment node rather than
+    // splitting it. The value is still fully signed, so it must still be read.
+    let leading = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+        <saml:Subject>
+            <saml:NameID><!---->alice@example.com</saml:NameID>
+        </saml:Subject>
+    </saml:Assertion>"#;
+    let doc = roxmltree::Document::parse(leading).expect("parse");
+    let (id, _) = super::extract_name_id(doc.root_element()).expect("name id present");
+    assert_eq!(id, "alice@example.com");
+}
+
+/// End-to-end: injecting a comment into the NameID of a *validly signed*
+/// assertion keeps the signature valid (canonicalization drops comments), so
+/// the attack has to be stopped by reading the whole value. The resulting
+/// identity must be the full attacker-controlled string, never the victim
+/// prefix.
+#[test]
+fn validate_saml_response_comment_injection_does_not_truncate_identity() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "attacker@example.com.evil.tld",
+        "_response003",
+        "_assertion003",
+        "_request003",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request003"),
+    );
+
+    // Split the signed NameID with a comment, aiming to truncate the identity
+    // down to the victim's address. The signature is untouched.
+    let injected_xml = xml.replace(
+        "attacker@example.com.evil.tld",
+        "attacker@example.com<!---->.evil.tld",
+    );
+    assert_ne!(xml, injected_xml, "Injection must actually change the XML");
+
+    let base64_response = B64.encode(injected_xml.as_bytes());
+    let assertion = validate_saml_response(&base64_response, "_request003", &provider)
+        .expect("comment injection leaves the signature valid, so validation succeeds");
+
+    assert_eq!(
+        assertion.email, "attacker@example.com.evil.tld",
+        "Identity must be the whole signed value; truncating to \
+         attacker@example.com would authenticate as a different user"
+    );
+    assert_eq!(
+        assertion.name_id.as_deref(),
+        Some("attacker@example.com.evil.tld")
+    );
+}
+
 /// Tamper-detection: modifying the email in the assertion after signing must
 /// cause digest mismatch during validation.
 #[test]
