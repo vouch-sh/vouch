@@ -1730,7 +1730,7 @@ fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> 
 /// - `Query`: delivers via query-string redirect (RFC 6749).
 ///
 /// Includes the `iss` parameter per RFC 9207 in all modes.
-async fn oauth_error_response(
+pub(crate) async fn oauth_error_response(
     app_state: &Arc<AppState>,
     client: &OAuthClient,
     redirect_uri: &str,

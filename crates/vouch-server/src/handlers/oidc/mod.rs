@@ -85,7 +85,7 @@ pub(crate) fn build_redirect_url_with_params(
 }
 
 // Re-export handler functions
-pub(crate) use authorize::{authorize, authorize_post};
+pub(crate) use authorize::{authorize, authorize_post, oauth_error_response};
 pub(crate) use discovery::{discovery, jwks};
 pub(crate) use fido2_challenge::fido2_challenge;
 pub(crate) use introspect::{introspect, revoke};
