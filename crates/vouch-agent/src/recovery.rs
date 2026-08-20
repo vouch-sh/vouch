@@ -7,7 +7,6 @@
 //!
 //! This is best-effort: all errors are logged and never block startup.
 
-use crate::ssh_agent::SshAgentState;
 use crate::state::{AgentState, Session};
 
 use jiff::Timestamp;
@@ -21,8 +20,8 @@ use tracing::{debug, info};
 /// Returns `false` if no token was found, validation failed, or any error occurred.
 ///
 /// This function is best-effort: it logs errors at `debug` level and never panics.
-pub async fn try_recover_session(state: &Arc<AgentState>, ssh_state: &Arc<SshAgentState>) -> bool {
-    match try_recover_inner(state, ssh_state).await {
+pub async fn try_recover_session(state: &Arc<AgentState>) -> bool {
+    match try_recover_inner(state).await {
         Ok(true) => true,
         Ok(false) => false,
         Err(e) => {
@@ -33,10 +32,7 @@ pub async fn try_recover_session(state: &Arc<AgentState>, ssh_state: &Arc<SshAge
 }
 
 /// Inner recovery logic that returns errors for logging.
-async fn try_recover_inner(
-    state: &Arc<AgentState>,
-    ssh_state: &Arc<SshAgentState>,
-) -> Result<bool, Box<dyn std::error::Error>> {
+async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std::error::Error>> {
     let (token, server_url) = match read_credentials_from_config()? {
         Some((t, url)) => (SecretString::from(t), url),
         None => {
@@ -106,7 +102,7 @@ async fn try_recover_inner(
     state.store_session(session).await;
 
     // Store server URL in SSH agent state (enables lazy loading)
-    ssh_state.set_server_url(server_url).await;
+    state.set_ssh_server_url(server_url).await;
 
     // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
     let hours = expires_in.checked_div(3600).unwrap_or(0);

@@ -85,6 +85,65 @@ async fn test_oidc_discovery_endpoints_are_absolute_urls() {
 }
 
 #[tokio::test]
+async fn test_oidc_discovery_has_no_double_slash_paths_or_trailing_slash_issuer() {
+    // Regression: a trailing slash on VOUCH_BASE_URL used to produce an issuer
+    // with a trailing slash (violating OIDC Discovery 1.0 §4.3 exact-match)
+    // and double-slash endpoint URLs (`https://host//oauth/token`). Base URL
+    // normalization happens at config time, so the discovery document must
+    // always be well-formed.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // Issuer must not end with a trailing slash (OIDC Discovery 1.0 §4.3).
+    let issuer = discovery["issuer"].as_str().expect("issuer is a string");
+    assert!(
+        !issuer.ends_with('/'),
+        "issuer must not have a trailing slash, got: {issuer}"
+    );
+
+    // No endpoint URL may contain a double-slash path component.
+    let endpoints = [
+        "authorization_endpoint",
+        "token_endpoint",
+        "userinfo_endpoint",
+        "jwks_uri",
+        "revocation_endpoint",
+        "introspection_endpoint",
+        "device_authorization_endpoint",
+        "end_session_endpoint",
+    ];
+    for endpoint in endpoints {
+        let url = discovery[endpoint]
+            .as_str()
+            .expect("endpoint should be a string");
+        // Strip the scheme's `//` then check no `//` remains in the path.
+        let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+        assert!(
+            !after_scheme.contains("//"),
+            "{endpoint} must not contain a double-slash path component, got: {url}"
+        );
+    }
+
+    // Optional endpoints (registration, PAR) must also be clean when present.
+    for endpoint in [
+        "registration_endpoint",
+        "pushed_authorization_request_endpoint",
+    ] {
+        if let Some(url) = discovery.get(endpoint).and_then(|v| v.as_str()) {
+            let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+            assert!(
+                !after_scheme.contains("//"),
+                "{endpoint} must not contain a double-slash path component, got: {url}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_oidc_discovery_supported_grant_types() {
     // Verify supported grant types are advertised
     let (app, _state) = test_app().await;

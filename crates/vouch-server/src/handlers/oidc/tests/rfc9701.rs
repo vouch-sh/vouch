@@ -137,7 +137,7 @@ async fn test_introspect_jwt_response_is_valid_jwt() {
     let config = state.config();
     assert_eq!(
         payload["iss"],
-        serde_json::Value::String(config.base_url.clone()),
+        serde_json::Value::String(config.base_url.to_string()),
         "RFC 9701: iss must be the server issuer"
     );
 }

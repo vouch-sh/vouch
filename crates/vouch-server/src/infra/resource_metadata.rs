@@ -53,7 +53,7 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
 
     // Snapshot configuration exactly once for this response.
     let base_url = state.config().base_url.clone();
-    let metadata_url = format!("{}{}", base_url.trim_end_matches('/'), WELL_KNOWN_SUFFIX,);
+    let metadata_url = format!("{base_url}{WELL_KNOWN_SUFFIX}");
 
     append_resource_metadata(resp.headers_mut(), &metadata_url);
     resp

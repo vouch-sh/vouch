@@ -70,7 +70,7 @@ pub async fn build_jarm_success_jwt(
 ) -> Result<String> {
     let now = Timestamp::now().as_second();
     let exp = now.saturating_add(JARM_JWT_LIFETIME_SECONDS);
-    let issuer = state.config().base_url.clone();
+    let issuer = state.config().base_url.to_string();
 
     let claims = JarmSuccessClaims {
         iss: issuer,
@@ -105,7 +105,7 @@ pub async fn build_jarm_error_jwt(
 ) -> Result<String> {
     let now = Timestamp::now().as_second();
     let exp = now.saturating_add(JARM_JWT_LIFETIME_SECONDS);
-    let issuer = state.config().base_url.clone();
+    let issuer = state.config().base_url.to_string();
 
     let claims = JarmErrorClaims {
         iss: issuer,

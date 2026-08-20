@@ -67,7 +67,7 @@ pub fn test_config() -> ServerConfig {
             client_id: "test-client-id".to_string(),
             client_secret: SecretString::from("test-client-secret"),
         })],
-        base_url: "https://test.example.com".to_string(),
+        base_url: crate::config::BaseUrl::new("https://test.example.com"),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
         allowed_domains: Some(vec!["example.com".to_string()]),

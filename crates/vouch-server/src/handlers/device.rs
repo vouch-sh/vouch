@@ -462,7 +462,7 @@ pub(crate) async fn device_token(
             // Use the registered client_id from the device auth request.
             let client_id = request
                 .client_id
-                .unwrap_or_else(|| state.config().base_url.clone());
+                .unwrap_or_else(|| state.config().base_url.to_string());
             let now_secs = now.as_second();
 
             // The device auth request doesn't carry aaguid/org_domain, so look

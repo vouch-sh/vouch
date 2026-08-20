@@ -349,3 +349,81 @@ async fn create_group_error_unique_string_still_maps_to_500() {
         "no uniqueness scimType for infrastructure errors: {body}"
     );
 }
+
+// ============================================================================
+// member_op_error_response — every arm has a test that triggers it
+// ============================================================================
+//
+// Group member operations (add/replace/remove in PATCH, add in POST create)
+// route their errors through `member_op_error_response`. A NUL byte in the
+// `user_id` index is a 400 `invalidValue` client error; every other failure
+// (HPKE decryption, JSON/timestamp parse, DB connection/timeout, exhausted
+// OCC retries) is a 500 infrastructure error — matching
+// `create_scim_group_error_response` so a failed member write never leaves
+// a PATCH/POST returning 200/201 with stale membership.
+
+#[tokio::test]
+async fn member_op_error_infrastructure_maps_to_500() {
+    // A generic infrastructure error (e.g. DB connection refused, HPKE
+    // decrypt failure, JSON parse error) must surface as 500, not 200 OK.
+    let resp = crate::handlers::scim::groups::member_op_error_response(anyhow::anyhow!(
+        "sqlx::Error::PoolTimedOut: queue limit reached"
+    ));
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "infrastructure errors must return 500, not 200"
+    );
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "500", "SCIM status field must be 500");
+    assert!(
+        body.get("scimType").is_none_or(|v| v.is_null()),
+        "infrastructure errors must not carry a scimType: {body}"
+    );
+    assert_eq!(
+        body["detail"], "Failed to update group members",
+        "detail must not leak internal error strings"
+    );
+}
+
+#[tokio::test]
+async fn member_op_error_invalid_index_value_maps_to_400() {
+    // A NUL-byte index value is a client error (400 invalidValue), not a 500.
+    let err = anyhow::Error::from(crate::db::InvalidIndexValue { field: "user_id" });
+    let resp = crate::handlers::scim::groups::member_op_error_response(err);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "400");
+    assert_eq!(body["scimType"], "invalidValue");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("user_id"),
+        "detail must name the offending field: {body}"
+    );
+}
+
+/// An infrastructure error whose message happens to contain "UNIQUE" must
+/// still map to 500, not be misread as a duplicate-member conflict. Member
+/// documents use deterministic IDs, so a unique violation on the primary
+/// key is the concurrent-add idempotency guard — caught inside
+/// `add_scim_group_member` and returned as `Ok(true)`. An error that
+/// escapes to `member_op_error_response` is by definition not that case.
+#[tokio::test]
+async fn member_op_error_unique_string_still_maps_to_500() {
+    let resp = crate::handlers::scim::groups::member_op_error_response(anyhow::anyhow!(
+        "UNIQUE constraint failed: documents.id"
+    ));
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a 'UNIQUE' string must not be misread as a duplicate-member 409"
+    );
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "500");
+    assert!(
+        body.get("scimType").is_none_or(|v| v.is_null()),
+        "no uniqueness scimType for infrastructure errors: {body}"
+    );
+}

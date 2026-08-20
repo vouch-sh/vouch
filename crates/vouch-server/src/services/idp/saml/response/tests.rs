@@ -545,7 +545,8 @@ fn subject_confirmation_bearer_method_passes() {
             assertion,
             "_req123",
             "https://vouch.example.com/saml/acs",
-            now
+            now,
+            false
         )
         .is_ok()
     );
@@ -568,6 +569,7 @@ fn subject_confirmation_non_bearer_method_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
+        false,
     )
     .unwrap_err();
     assert!(
@@ -593,6 +595,7 @@ fn subject_confirmation_missing_method_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
+        false,
     )
     .unwrap_err();
     assert!(
@@ -642,7 +645,7 @@ fn subject_confirmation_multiple_one_valid_bearer_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
     assert!(
         result.is_ok(),
         "Expected Ok when at least one SubjectConfirmation is valid, got: {result:?}"
@@ -673,7 +676,7 @@ fn subject_confirmation_multiple_all_invalid_recipient_returns_error() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let err = validate_subject_confirmation(assertion, "_req123", acs, now).unwrap_err();
+    let err = validate_subject_confirmation(assertion, "_req123", acs, now, false).unwrap_err();
     assert!(
         matches!(err, ResponseError::DestinationMismatch { .. }),
         "Expected DestinationMismatch when all Recipients are wrong, got: {err}"
@@ -703,7 +706,7 @@ fn subject_confirmation_mixed_methods_one_valid_bearer_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
     assert!(
         result.is_ok(),
         "Expected Ok when a bearer SubjectConfirmation is present alongside a non-bearer one, got: {result:?}"
@@ -738,7 +741,7 @@ fn subject_confirmation_multiple_first_expired_second_valid_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
     assert!(
         result.is_ok(),
         "Expected Ok when a later SubjectConfirmation is valid despite an expired first one, got: {result:?}"
@@ -893,10 +896,19 @@ fn build_signed_saml_response(
     sp_entity_id: &str,
     not_before: &str,
     not_on_or_after: &str,
+    subject_confirmation_in_response_to: Option<&str>,
 ) -> String {
     use aws_lc_rs::digest;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
+
+    // Build the optional InResponseTo attribute for SubjectConfirmationData.
+    // When None, the attribute is omitted entirely (tests the case where an
+    // IdP legitimately excludes it).
+    let scd_irt_attr = match subject_confirmation_in_response_to {
+        Some(irt) => format!(r#" InResponseTo="{irt}""#),
+        None => String::new(),
+    };
 
     // Step 1: Build the assertion XML *without* the Signature element.
     // The Signature will be inserted immediately after </saml:Issuer> without
@@ -907,7 +919,7 @@ fn build_signed_saml_response(
   <saml:Subject>
 <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">{email}</saml:NameID>
 <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
-  <saml:SubjectConfirmationData Recipient="{destination}" InResponseTo="{in_response_to}" NotOnOrAfter="{not_on_or_after}"/>
+  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr} NotOnOrAfter="{not_on_or_after}"/>
 </saml:SubjectConfirmation>
   </saml:Subject>
   <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
@@ -991,6 +1003,129 @@ fn build_signed_saml_response(
     )
 }
 
+/// Construct a SAML Response where the **Response** element itself is signed
+/// (not just the Assertion). The Signature is a direct child of the Response,
+/// and the Reference URI points to the Response ID.
+///
+/// Used to test the complement case: when the Response is signed,
+/// `Response.InResponseTo` is covered by the signature, so
+/// `SubjectConfirmationData.InResponseTo` is NOT required.
+///
+/// Follows the same whitespace design as `build_signed_saml_response`: the
+/// Signature is inserted immediately after the Response-level `</saml:Issuer>`
+/// with no extra whitespace text nodes, so the canonical form after
+/// enveloped-signature exclusion matches the canonical form computed before
+/// the Signature was inserted.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper builds SAML response with all signed-element parameters"
+)]
+fn build_response_signed_saml_response(
+    key_pair: &aws_lc_rs::rsa::KeyPair,
+    email: &str,
+    response_id: &str,
+    assertion_id: &str,
+    in_response_to: &str,
+    destination: &str,
+    issuer: &str,
+    sp_entity_id: &str,
+    not_before: &str,
+    not_on_or_after: &str,
+    subject_confirmation_in_response_to: Option<&str>,
+) -> String {
+    use aws_lc_rs::digest;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let scd_irt_attr = match subject_confirmation_in_response_to {
+        Some(irt) => format!(r#" InResponseTo="{irt}""#),
+        None => String::new(),
+    };
+
+    // Step 1: Build the Assertion WITHOUT a Signature (the Response will be signed).
+    let assertion_xml = format!(
+        r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{assertion_id}" Version="2.0" IssueInstant="{not_before}">
+  <saml:Issuer>{issuer}</saml:Issuer>
+  <saml:Subject>
+<saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">{email}</saml:NameID>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr} NotOnOrAfter="{not_on_or_after}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+  <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
+<saml:AudienceRestriction>
+  <saml:Audience>{sp_entity_id}</saml:Audience>
+</saml:AudienceRestriction>
+  </saml:Conditions>
+  <saml:AuthnStatement AuthnInstant="{not_before}" SessionNotOnOrAfter="{not_on_or_after}">
+<saml:AuthnContext>
+  <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef>
+</saml:AuthnContext>
+  </saml:AuthnStatement>
+</saml:Assertion>"#
+    );
+
+    // Step 2: Build the Response WITHOUT the Signature element.
+    let response_without_sig = format!(
+        r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{response_id}" Version="2.0" IssueInstant="{not_before}" Destination="{destination}" InResponseTo="{in_response_to}">
+  <saml:Issuer>{issuer}</saml:Issuer>
+  <samlp:Status>
+<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+  </samlp:Status>
+  {assertion_xml}
+</samlp:Response>"#
+    );
+
+    // Step 3: Canonicalize the Response (exc-c14n, no inclusive prefixes).
+    let doc_no_sig = roxmltree::Document::parse(&response_without_sig).unwrap();
+    let response_node = doc_no_sig
+        .root()
+        .children()
+        .find(|n| n.is_element())
+        .unwrap();
+    let canonical_response = super::super::c14n::exclusive_c14n(response_node, &[]);
+
+    // Step 4: Compute SHA-256 digest over canonicalized Response.
+    let digest_bytes = digest::digest(&digest::SHA256, canonical_response.as_bytes());
+    let digest_b64 = B64.encode(digest_bytes.as_ref());
+
+    // Step 5: Build SignedInfo with the computed digest. Reference URI = #response_id.
+    let ref_uri = format!("#{response_id}");
+    let signed_info_xml = format!(
+        r#"<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></ds:SignatureMethod><ds:Reference URI="{ref_uri}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod><ds:DigestValue>{digest_b64}</ds:DigestValue></ds:Reference></ds:SignedInfo>"#
+    );
+
+    // Step 6: Canonicalize SignedInfo.
+    let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
+    let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
+    let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+
+    // Step 7: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let mut sig_buf = vec![0u8; key_pair.public_modulus_len()];
+    key_pair
+        .sign(
+            &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+            &rng,
+            canonical_signed_info.as_bytes(),
+            &mut sig_buf,
+        )
+        .unwrap();
+    let sig_b64 = B64.encode(&sig_buf);
+
+    // Step 8: Build the Signature element.
+    let signature_xml = format!(
+        r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">{signed_info_xml}<ds:SignatureValue>{sig_b64}</ds:SignatureValue></ds:Signature>"#
+    );
+
+    // Step 9: Insert the Signature immediately after the Response-level
+    // </saml:Issuer> with no extra whitespace (same whitespace design as
+    // build_signed_saml_response). replacen with count 1 targets the
+    // Response-level Issuer (which precedes the Assertion-level Issuer).
+    let issuer_close = format!("<saml:Issuer>{issuer}</saml:Issuer>");
+    response_without_sig.replacen(&issuer_close, &format!("{issuer_close}{signature_xml}"), 1)
+}
+
 /// Build a `SamlProvider` for the test IdP/SP configuration.
 fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
     use crate::services::idp::saml::IdpMetadata;
@@ -1047,6 +1182,7 @@ fn validate_saml_response_rsa_signed_happy_path() {
         "https://vouch.example.com",
         &not_before,
         &not_on_or_after,
+        Some("_request001"),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
@@ -1092,6 +1228,122 @@ fn extract_name_id_reads_text_and_format() {
     assert_eq!(format, None);
 }
 
+/// An XML comment splits an element's text into multiple text nodes, but
+/// canonicalization concatenates them all and drops the comment — so the
+/// signature stays valid over the whole value. Every extractor must read the
+/// whole value too; reading only the first text node would let a holder of a
+/// legitimately signed assertion truncate it to another user's identity
+/// (CVE-2017-11427 class).
+#[test]
+fn comment_split_text_is_read_whole_not_truncated() {
+    let assertion_xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+        <saml:Issuer>https://idp.example.com<!---->.evil.tld</saml:Issuer>
+        <saml:Subject>
+            <saml:NameID>alice@example.com<!---->.evil.tld</saml:NameID>
+        </saml:Subject>
+        <saml:Conditions>
+            <saml:AudienceRestriction>
+                <saml:Audience>https://vouch.example.com<!---->.evil.tld</saml:Audience>
+            </saml:AudienceRestriction>
+        </saml:Conditions>
+        <saml:AttributeStatement>
+            <saml:Attribute Name="email">
+                <saml:AttributeValue>alice@example.com<!---->.evil.tld</saml:AttributeValue>
+            </saml:Attribute>
+        </saml:AttributeStatement>
+    </saml:Assertion>"#;
+    let doc = roxmltree::Document::parse(assertion_xml).expect("parse");
+    let assertion = doc.root_element();
+
+    let (name_id, _format) = super::extract_name_id(assertion).expect("name id present");
+    assert_eq!(
+        name_id, "alice@example.com.evil.tld",
+        "NameID must be the whole signed value, not the prefix before the comment"
+    );
+
+    let attr = super::find_saml_attribute(assertion, "email").expect("attribute present");
+    assert_eq!(
+        attr, "alice@example.com.evil.tld",
+        "AttributeValue must be the whole signed value"
+    );
+
+    // The audience is not the SP entity ID, so the restriction must not match.
+    assert!(
+        super::validate_audience_restriction(assertion, "https://vouch.example.com").is_err(),
+        "An Audience of https://vouch.example.com.evil.tld must not satisfy \
+         https://vouch.example.com"
+    );
+
+    // The issuer is not the configured entity ID, so it must not match.
+    assert!(
+        super::validate_issuer(assertion, "https://idp.example.com").is_err(),
+        "An Issuer of https://idp.example.com.evil.tld must not satisfy \
+         https://idp.example.com"
+    );
+
+    // A leading comment puts the text after a comment node rather than
+    // splitting it. The value is still fully signed, so it must still be read.
+    let leading = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+        <saml:Subject>
+            <saml:NameID><!---->alice@example.com</saml:NameID>
+        </saml:Subject>
+    </saml:Assertion>"#;
+    let doc = roxmltree::Document::parse(leading).expect("parse");
+    let (id, _) = super::extract_name_id(doc.root_element()).expect("name id present");
+    assert_eq!(id, "alice@example.com");
+}
+
+/// End-to-end: injecting a comment into the NameID of a *validly signed*
+/// assertion keeps the signature valid (canonicalization drops comments), so
+/// the attack has to be stopped by reading the whole value. The resulting
+/// identity must be the full attacker-controlled string, never the victim
+/// prefix.
+#[test]
+fn validate_saml_response_comment_injection_does_not_truncate_identity() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "attacker@example.com.evil.tld",
+        "_response003",
+        "_assertion003",
+        "_request003",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request003"),
+    );
+
+    // Split the signed NameID with a comment, aiming to truncate the identity
+    // down to the victim's address. The signature is untouched.
+    let injected_xml = xml.replace(
+        "attacker@example.com.evil.tld",
+        "attacker@example.com<!---->.evil.tld",
+    );
+    assert_ne!(xml, injected_xml, "Injection must actually change the XML");
+
+    let base64_response = B64.encode(injected_xml.as_bytes());
+    let assertion = validate_saml_response(&base64_response, "_request003", &provider)
+        .expect("comment injection leaves the signature valid, so validation succeeds");
+
+    assert_eq!(
+        assertion.email, "attacker@example.com.evil.tld",
+        "Identity must be the whole signed value; truncating to \
+         attacker@example.com would authenticate as a different user"
+    );
+    assert_eq!(
+        assertion.name_id.as_deref(),
+        Some("attacker@example.com.evil.tld")
+    );
+}
+
 /// Tamper-detection: modifying the email in the assertion after signing must
 /// cause digest mismatch during validation.
 #[test]
@@ -1114,6 +1366,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
         "https://vouch.example.com",
         &not_before,
         &not_on_or_after,
+        Some("_request002"),
     );
 
     // Tamper: replace the NameID email after signing.
@@ -1171,6 +1424,7 @@ fn subject_confirmation_missing_subject_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
+        false,
     )
     .unwrap_err();
     assert!(
@@ -1195,6 +1449,7 @@ fn subject_confirmation_empty_children_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
+        false,
     )
     .unwrap_err();
     assert!(
@@ -1232,6 +1487,7 @@ fn xsw_nested_assertion_rejected() {
         "https://vouch.example.com",
         &not_before,
         &not_on_or_after,
+        Some("_request_xsw"),
     );
 
     // Extract the Assertion (which contains an enveloped Signature
@@ -1305,5 +1561,486 @@ fn oversized_response_returns_decode_error() {
     assert!(
         matches!(err, ResponseError::DecodeFailed(ref msg) if msg.contains("maximum size")),
         "Expected DecodeFailed for oversized response, got: {err}"
+    );
+}
+
+// =========================================================================
+// InResponseTo XSW vulnerability tests
+//
+// When only the Assertion is signed (Response is unsigned), the
+// Response.InResponseTo attribute is not covered by any signature and can be
+// modified without invalidating the assertion signature. In that case,
+// SubjectConfirmationData.InResponseTo (inside the signed Assertion) is
+// REQUIRED as the signed binding to the expected request ID.
+// =========================================================================
+
+/// The new error variant must produce a helpful, searchable message.
+#[test]
+fn missing_subject_confirmation_in_response_to_error_displays_correctly() {
+    let err = ResponseError::MissingSubjectConfirmationInResponseTo;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("InResponseTo"),
+        "Should mention InResponseTo: {msg}"
+    );
+    assert!(
+        msg.contains("SubjectConfirmationData"),
+        "Should mention SubjectConfirmationData: {msg}"
+    );
+    assert!(
+        msg.contains("not signed"),
+        "Should mention the unsigned-Response condition: {msg}"
+    );
+}
+
+// --- Unit tests for the require_irt parameter ---
+
+/// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
+/// absent, validation MUST fail with MissingSubjectConfirmationInResponseTo.
+#[test]
+fn subject_confirmation_require_irt_missing_irt_returns_error() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    // SCD has Recipient and NotOnOrAfter but NO InResponseTo.
+    let xml = format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(
+        assertion,
+        "_req123",
+        "https://vouch.example.com/saml/acs",
+        now,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
+        "Expected MissingSubjectConfirmationInResponseTo, got: {err}"
+    );
+}
+
+/// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
+/// present and matches, validation MUST pass.
+#[test]
+fn subject_confirmation_require_irt_present_matching_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let xml = format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    assert!(
+        validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+            true,
+        )
+        .is_ok()
+    );
+}
+
+/// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
+/// present but wrong, validation MUST fail with InResponseToMismatch.
+#[test]
+fn subject_confirmation_require_irt_mismatch_fails() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let xml = format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" InResponseTo="_wrong" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(
+        assertion,
+        "_req123",
+        "https://vouch.example.com/saml/acs",
+        now,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResponseError::InResponseToMismatch { .. }),
+        "Expected InResponseToMismatch, got: {err}"
+    );
+}
+
+/// When `require_irt` is false and SubjectConfirmationData.InResponseTo is
+/// absent, validation MUST pass (existing behavior for Response-signed case).
+#[test]
+fn subject_confirmation_no_require_irt_missing_irt_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let xml = format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    assert!(
+        validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+            false,
+        )
+        .is_ok()
+    );
+}
+
+// --- End-to-end tests via validate_saml_response ---
+
+/// CORE VULNERABILITY TEST: When only the Assertion is signed and
+/// SubjectConfirmationData.InResponseTo is absent, the unsigned
+/// Response.InResponseTo must NOT be trusted. Validation MUST reject.
+///
+/// Before the fix, this test would pass (is_ok) because the unsigned
+/// Response.InResponseTo was the sole binding to the request ID. After the
+/// fix, it fails with MissingSubjectConfirmationInResponseTo.
+#[test]
+fn xsw_inresponseto_unsigned_response_missing_scd_irt_rejected() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Assertion-only signature, SCD.InResponseTo absent.
+    // Response.InResponseTo = "_attacker_req" (matches expected below).
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "victim@example.com",
+        "_response_irt_1",
+        "_assertion_irt_1",
+        "_attacker_req",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        None, // SubjectConfirmationData.InResponseTo is ABSENT
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
+        "Expected MissingSubjectConfirmationInResponseTo (unsigned Response.InResponseTo must not be trusted), got: {err}"
+    );
+}
+
+/// NO REGRESSION: When only the Assertion is signed and
+/// SubjectConfirmationData.InResponseTo is present and matches, validation
+/// MUST pass. This is the common IdP configuration (Azure AD, Okta, etc.).
+#[test]
+fn xsw_inresponseto_unsigned_response_with_matching_scd_irt_passes() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_irt_2",
+        "_assertion_irt_2",
+        "_request_irt_2",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request_irt_2"),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_request_irt_2", &provider);
+    let assertion = result
+        .expect("Expected Ok for assertion-only signed response with matching SCD.InResponseTo");
+    assert_eq!(assertion.email, "alice@example.com");
+}
+
+/// When only the Assertion is signed and SubjectConfirmationData.InResponseTo
+/// is present but differs from the expected request ID, validation MUST fail
+/// with InResponseToMismatch. The signed SCD.InResponseTo is the authoritative
+/// binding.
+#[test]
+fn xsw_inresponseto_scd_irt_mismatch_fails() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Response.InResponseTo = "_attacker_req" (matches expected).
+    // SCD.InResponseTo = "_victim_req" (signed, differs from expected).
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "victim@example.com",
+        "_response_irt_3",
+        "_assertion_irt_3",
+        "_attacker_req",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_victim_req"),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResponseError::InResponseToMismatch { .. }),
+        "Expected InResponseToMismatch (signed SCD.InResponseTo differs from expected), got: {err}"
+    );
+}
+
+/// FULL ATTACK SCENARIO: An attacker with MITM capability intercepts a
+/// victim's SAML response and modifies the unsigned Response.InResponseTo to
+/// match the attacker's own request ID. The signed SubjectConfirmationData.
+/// InResponseTo (inside the signed Assertion) still carries the victim's
+/// request ID and cannot be modified without invalidating the signature.
+///
+/// Validation MUST reject because the signed SCD.InResponseTo does not match
+/// the attacker's expected request ID.
+#[test]
+fn xsw_inresponseto_attack_scenario_rejected() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Build a legitimate response for the victim.
+    // Both Response.InResponseTo and SCD.InResponseTo = "_victim_req".
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "victim@example.com",
+        "_response_irt_4",
+        "_assertion_irt_4",
+        "_victim_req",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_victim_req"),
+    );
+
+    // Attacker modifies the UNSIGNED Response.InResponseTo to their own
+    // request ID. Only the first occurrence (Response-level) is changed;
+    // the SCD-level InResponseTo is inside the signed Assertion and cannot
+    // be modified without invalidating the signature.
+    let attacked_xml = xml.replacen(
+        r#"InResponseTo="_victim_req""#,
+        r#"InResponseTo="_attacker_req""#,
+        1,
+    );
+    assert_ne!(xml, attacked_xml, "Attack must actually change the XML");
+
+    let base64_response = B64.encode(attacked_xml.as_bytes());
+    // Attacker submits with their own request ID as expected.
+    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResponseError::InResponseToMismatch { .. }),
+        "Expected InResponseToMismatch: signed SCD.InResponseTo (_victim_req) must not match \
+         attacker's expected (_attacker_req). Got: {err}"
+    );
+}
+
+/// Response.InResponseTo is still validated (defense-in-depth). When it
+/// differs from the expected request ID (even if SCD.InResponseTo matches),
+/// validation MUST fail at the Response-level check. This is existing
+/// behavior that must not regress.
+#[test]
+fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Response.InResponseTo = "_wrong_req" (differs from expected).
+    // SCD.InResponseTo = "_req_irt_5" (matches expected).
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_irt_5",
+        "_assertion_irt_5",
+        "_wrong_req",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_req_irt_5"),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_req_irt_5", &provider);
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResponseError::InResponseToMismatch { .. }),
+        "Expected InResponseToMismatch (Response.InResponseTo differs from expected), got: {err}"
+    );
+}
+
+// --- Response-signed complement tests ---
+
+/// COMPLEMENT CASE: When the Response itself is signed,
+/// Response.InResponseTo is covered by the signature and can be trusted.
+/// SubjectConfirmationData.InResponseTo is NOT required in this case.
+#[test]
+fn response_signed_missing_scd_irt_passes() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Response-signed, SCD.InResponseTo absent.
+    let xml = build_response_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_irt_6",
+        "_assertion_irt_6",
+        "_request_irt_6",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        None,
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_request_irt_6", &provider);
+    let assertion = result.expect("Expected Ok for Response-signed with SCD.InResponseTo absent");
+    assert_eq!(assertion.email, "alice@example.com");
+}
+
+/// When the Response is signed and SCD.InResponseTo is present and matches,
+/// validation MUST pass (happy path for Response-signed configuration).
+#[test]
+fn response_signed_with_scd_irt_passes() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_response_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_irt_7",
+        "_assertion_irt_7",
+        "_request_irt_7",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request_irt_7"),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_request_irt_7", &provider);
+    let assertion = result.expect("Expected Ok for Response-signed with matching SCD.InResponseTo");
+    assert_eq!(assertion.email, "alice@example.com");
+}
+
+/// When the Response is signed and SCD.InResponseTo is present but wrong,
+/// validation MUST still fail (the signed SCD.InResponseTo is checked when
+/// present, regardless of whether the Response is signed).
+#[test]
+fn response_signed_scd_irt_mismatch_fails() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_response_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_irt_8",
+        "_assertion_irt_8",
+        "_request_irt_8",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_wrong_req"),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let result = validate_saml_response(&base64_response, "_request_irt_8", &provider);
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResponseError::InResponseToMismatch { .. }),
+        "Expected InResponseToMismatch (SCD.InResponseTo differs from expected), got: {err}"
     );
 }

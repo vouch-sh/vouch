@@ -721,7 +721,7 @@ async fn build_configured_idp(
             let sp_entity_id = saml_cfg
                 .sp_entity_id
                 .clone()
-                .unwrap_or_else(|| config.base_url.clone());
+                .unwrap_or_else(|| config.base_url.to_string());
             let acs_url = format!("{}/saml/acs", config.base_url);
             let sso_url = idp_metadata
                 .sso_post_url

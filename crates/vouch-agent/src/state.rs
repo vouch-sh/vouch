@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent state and session management.
 
+use crate::ssh_agent::SshCredentials;
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Maximum number of entries in the credential cache.
 const MAX_CACHE_ENTRIES: usize = 128;
@@ -220,14 +221,36 @@ impl CachedCredential {
 
 /// Inner state protected by a single lock to prevent race conditions.
 ///
-/// All related fields (session + credential cache) are grouped so that
-/// operations like `clear_session()` can atomically clear both.
-#[derive(Debug, Default)]
+/// Every credential the agent holds lives here alongside the session that
+/// authorizes it, so `clear_session()` can drop all of them in one critical
+/// section. Splitting these across locks previously let a credential outlive
+/// the logout that should have killed it.
+#[derive(Default)]
 struct AgentStateInner {
     /// Current session (if authenticated).
     session: Option<Session>,
     /// Credential cache keyed by type (e.g., "aws", "github").
     credential_cache: HashMap<String, CachedCredential>,
+    /// Current SSH credentials (if loaded).
+    ///
+    /// Validity is derived from `session` rather than a copied expiry
+    /// timestamp; a duplicate could drift from the session it mirrors.
+    ssh_credentials: Option<SshCredentials>,
+    /// Server URL the SSH session is connected to.
+    ssh_server_url: Option<String>,
+}
+
+/// Hand-written so SSH credentials are reported as present or absent only.
+/// `SshCredentials` wraps a `PrivateKey` and deliberately has no `Debug`.
+impl std::fmt::Debug for AgentStateInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentStateInner")
+            .field("session", &self.session)
+            .field("credential_cache", &self.credential_cache)
+            .field("ssh_credentials", &self.ssh_credentials.is_some())
+            .field("ssh_server_url", &self.ssh_server_url)
+            .finish()
+    }
 }
 
 /// Agent state (shared across connections).
@@ -259,11 +282,90 @@ impl AgentState {
         guard.session = Some(session);
     }
 
-    /// Clear the current session and credential cache atomically.
+    /// Clear the current session and every credential it authorized.
+    ///
+    /// Session, cached credentials, and SSH credentials are dropped in one
+    /// critical section, so no concurrent request can observe a credential
+    /// that outlived the logout.
     pub async fn clear_session(&self) {
         let mut guard = self.inner.write().await;
         guard.session = None;
         guard.credential_cache.clear();
+        guard.ssh_credentials = None;
+        guard.ssh_server_url = None;
+    }
+
+    /// Store SSH credentials, but only while a session is live.
+    ///
+    /// Returns `false` without storing when there is no live session. The check
+    /// and the write share one critical section because callers do slow work
+    /// (loading a key and certificate off disk) before storing, and a logout
+    /// landing in that gap would otherwise be undone by the store.
+    pub async fn store_ssh_credentials(
+        &self,
+        creds: SshCredentials,
+        server_url: Option<String>,
+    ) -> bool {
+        let mut guard = self.inner.write().await;
+        match guard.session.as_ref() {
+            Some(session) if !session.is_expired() => {}
+            _ => {
+                debug!("No live session; refusing to store SSH credentials");
+                return false;
+            }
+        }
+        guard.ssh_credentials = Some(creds);
+        if let Some(url) = server_url {
+            guard.ssh_server_url = Some(url);
+        }
+        true
+    }
+
+    /// Clear SSH credentials and their server URL.
+    pub async fn clear_ssh_credentials(&self) {
+        let mut guard = self.inner.write().await;
+        guard.ssh_credentials = None;
+        guard.ssh_server_url = None;
+    }
+
+    /// Get SSH credentials, if both the certificate and the session are live.
+    ///
+    /// Both checks happen under one lock against the authoritative session, so
+    /// a certificate cannot be served after the session backing it is gone.
+    pub async fn get_valid_ssh_credentials(&self) -> Option<SshCredentials> {
+        let guard = self.inner.read().await;
+        let creds = guard.ssh_credentials.as_ref()?;
+
+        if creds.is_expired() {
+            debug!("SSH certificate has expired");
+            return None;
+        }
+
+        match guard.session.as_ref() {
+            Some(session) if !session.is_expired() => Some(creds.clone()),
+            _ => {
+                debug!("No live session; refusing to serve SSH credentials");
+                None
+            }
+        }
+    }
+
+    /// Check whether SSH credentials are loaded, regardless of validity.
+    pub async fn has_ssh_credentials(&self) -> bool {
+        let guard = self.inner.read().await;
+        guard.ssh_credentials.is_some()
+    }
+
+    /// Set the server URL the SSH session is connected to.
+    pub async fn set_ssh_server_url(&self, url: String) {
+        let mut guard = self.inner.write().await;
+        guard.ssh_server_url = Some(url);
+    }
+
+    /// Get the server URL the SSH session is connected to.
+    pub async fn get_ssh_server_url(&self) -> Option<String> {
+        let guard = self.inner.read().await;
+        guard.ssh_server_url.clone()
     }
 
     /// Store a credential in the cache.
@@ -382,6 +484,128 @@ mod tests {
     fn past_timestamp(seconds: i64) -> Timestamp {
         let now = Timestamp::now();
         Timestamp::from_second(now.as_second() - seconds).unwrap()
+    }
+
+    /// A real Ed25519 key and self-signed certificate, valid for an hour.
+    fn test_ssh_credentials() -> SshCredentials {
+        use ssh_key::rand_core::OsRng;
+        use ssh_key::{Algorithm, PrivateKey, certificate};
+
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let now = u64::try_from(Timestamp::now().as_second()).unwrap();
+        let mut builder = certificate::Builder::new_with_random_nonce(
+            &mut OsRng,
+            key.public_key(),
+            now - 60,
+            now + 3600,
+        )
+        .unwrap();
+        builder.valid_principal("tester").unwrap();
+        let cert = builder.sign(&key).unwrap();
+
+        SshCredentials::new(
+            key,
+            &cert,
+            "tester".to_string(),
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        )
+        .unwrap()
+    }
+
+    /// A live session, so credential stores are accepted.
+    async fn with_live_session(state: &Arc<AgentState>) {
+        state
+            .store_session(Session::new(
+                SecretString::from("token"),
+                "user@example.com".to_string(),
+                future_timestamp(3600),
+            ))
+            .await;
+    }
+
+    /// Logout must drop SSH credentials in the same critical section as the
+    /// session. When these lived behind separate locks, a signing request
+    /// landing between the two clears was served after logout.
+    #[tokio::test]
+    async fn clear_session_also_clears_ssh_credentials() {
+        let state = AgentState::new();
+        with_live_session(&state).await;
+        assert!(
+            state
+                .store_ssh_credentials(test_ssh_credentials(), Some("https://x".to_string()))
+                .await
+        );
+        assert!(state.get_valid_ssh_credentials().await.is_some());
+
+        state.clear_session().await;
+
+        assert!(!state.has_ssh_credentials().await);
+        assert!(state.get_valid_ssh_credentials().await.is_none());
+        assert!(state.get_ssh_server_url().await.is_none());
+    }
+
+    /// A certificate is only served while a session backs it, so an expired
+    /// session revokes it without any separate bookkeeping.
+    #[tokio::test]
+    async fn ssh_credentials_require_a_live_session() {
+        let state = AgentState::new();
+        with_live_session(&state).await;
+        assert!(
+            state
+                .store_ssh_credentials(test_ssh_credentials(), None)
+                .await
+        );
+        assert!(state.get_valid_ssh_credentials().await.is_some());
+
+        // Replace the session with an expired one; the certificate is
+        // untouched and still within its own validity window.
+        state
+            .store_session(Session::new(
+                SecretString::from("token"),
+                "user@example.com".to_string(),
+                past_timestamp(1),
+            ))
+            .await;
+
+        assert!(
+            state.has_ssh_credentials().await,
+            "credentials are still held"
+        );
+        assert!(
+            state.get_valid_ssh_credentials().await.is_none(),
+            "but must not be served without a live session"
+        );
+    }
+
+    /// Storing is refused outright with no session, so slow callers (lazy disk
+    /// load) cannot resurrect credentials a concurrent logout just cleared.
+    #[tokio::test]
+    async fn storing_ssh_credentials_without_a_session_is_refused() {
+        let state = AgentState::new();
+        assert!(
+            !state
+                .store_ssh_credentials(test_ssh_credentials(), None)
+                .await
+        );
+        assert!(!state.has_ssh_credentials().await);
+    }
+
+    #[tokio::test]
+    async fn ssh_server_url_round_trips_and_clears() {
+        let state = AgentState::new();
+        assert!(state.get_ssh_server_url().await.is_none());
+
+        state
+            .set_ssh_server_url("https://example.com".to_string())
+            .await;
+        assert_eq!(
+            state.get_ssh_server_url().await,
+            Some("https://example.com".to_string())
+        );
+
+        state.clear_ssh_credentials().await;
+        assert!(state.get_ssh_server_url().await.is_none());
     }
 
     #[test]

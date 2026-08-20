@@ -16,7 +16,7 @@ use vouch_agent::daemon;
 use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
 use vouch_agent::socket::{prepare_vouch_dir, remove_socket};
-use vouch_agent::ssh_agent::{SshAgentServer, SshAgentState, ssh_agent_socket_path};
+use vouch_agent::ssh_agent::{SshAgentServer, ssh_agent_socket_path};
 use vouch_agent::state::AgentState;
 #[expect(
     unused_imports,
@@ -180,14 +180,12 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Create agent state
+    // Create agent state, shared by both servers so a credential and the
+    // session authorizing it are always read and cleared together.
     let state = AgentState::new();
 
-    // Create SSH agent state
-    let ssh_state = SshAgentState::new();
-
     // Try to recover session from disk (best-effort)
-    if recovery::try_recover_session(&state, &ssh_state).await {
+    if recovery::try_recover_session(&state).await {
         info!("Session recovered from disk");
     }
 
@@ -196,72 +194,82 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 
     // Create servers — each gets its own receiver from the shutdown channel
     let agent_shutdown_rx = shutdown_rx.clone();
-    let server = AgentServer::new(
-        Arc::clone(&state),
-        Arc::clone(&ssh_state),
-        agent_shutdown_rx,
-    );
-    // Create SSH agent server with access to main agent state for certificate refresh
-    let ssh_server =
-        SshAgentServer::with_agent_state(Arc::clone(&ssh_state), Arc::clone(&state), shutdown_rx);
+    let server = AgentServer::new(Arc::clone(&state), agent_shutdown_rx);
+    let ssh_server = SshAgentServer::new(Arc::clone(&state), shutdown_rx);
 
     info!("Agent starting");
 
     // Spawn session expiry monitor (background task)
     tokio::spawn(vouch_agent::expiry_monitor::run(Arc::clone(&state)));
 
-    // Set up SIGTERM handler before select!
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    // Spawn the signal handler as a separate task so the server futures are
+    // not dropped before they can observe the shutdown signal.  When SIGTERM
+    // or Ctrl+C arrives the handler sends `true` on the watch channel; both
+    // servers poll `shutdown.changed()` in their accept loops and exit
+    // cleanly instead of being cancelled mid-request.
+    let shutdown_tx_for_signal = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => info!("Received Ctrl+C, initiating graceful shutdown"),
+                    Err(e) => warn!("Failed to listen for Ctrl+C: {e}"),
+                }
+            }
+            Some(()) = async {
+                match sigterm {
+                    Ok(mut s) => s.recv().await,
+                    Err(_) => std::future::pending().await,
+                }
+            } => {
+                info!("Received SIGTERM, initiating graceful shutdown");
+            }
+        }
+        let _signaled = shutdown_tx_for_signal.send(true);
+    });
 
-    // Run both servers
-    let result = tokio::select! {
-        result = server.run() => {
-            match result {
-                Ok(()) => {
-                    info!("Agent stopped");
-                    ExitCode::SUCCESS
+    // Run both servers concurrently.  The signal-handler task runs
+    // independently and signals shutdown via the watch channel — the servers
+    // observe it in their accept loops and stop accepting new connections,
+    // then drain in-flight requests before returning.  When either server
+    // finishes (shutdown or error) it also sends the shutdown signal so the
+    // other exits as well.
+    let result = if enable_ssh_agent {
+        let (ipc_result, ssh_result) = tokio::join!(
+            async {
+                let result = server.run().await;
+                let _signaled = shutdown_tx.send(true);
+                match &result {
+                    Ok(()) => info!("Agent stopped"),
+                    Err(e) => error!("Agent error: {e}"),
                 }
-                Err(e) => {
-                    error!("Agent error: {e}");
-                    ExitCode::FAILURE
+                result
+            },
+            async {
+                let result = ssh_server.run().await;
+                let _signaled = shutdown_tx.send(true);
+                match &result {
+                    Ok(()) => info!("SSH agent stopped"),
+                    Err(e) => error!("SSH agent error: {e}"),
                 }
-            }
+                result
+            },
+        );
+        match (ipc_result, ssh_result) {
+            (Ok(()), Ok(())) => ExitCode::SUCCESS,
+            _ => ExitCode::FAILURE,
         }
-        result = ssh_server.run(), if enable_ssh_agent => {
-            match result {
-                Ok(()) => {
-                    info!("SSH agent stopped");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    error!("SSH agent error: {e}");
-                    ExitCode::FAILURE
-                }
+    } else {
+        match server.run().await {
+            Ok(()) => {
+                info!("Agent stopped");
+                ExitCode::SUCCESS
             }
-        }
-        result = tokio::signal::ctrl_c() => {
-            match result {
-                Ok(()) => {
-                    info!("Received shutdown signal, shutting down...");
-                }
-                Err(e) => {
-                    warn!("Failed to listen for Ctrl+C: {e}");
-                }
+            Err(e) => {
+                error!("Agent error: {e}");
+                ExitCode::FAILURE
             }
-            // Signal SSH agent to stop accepting new connections; receiver may already be gone.
-            let _signaled = shutdown_tx.send(true);
-            ExitCode::SUCCESS
-        }
-        Some(()) = async {
-            match &mut sigterm {
-                Ok(s) => s.recv().await,
-                Err(_) => std::future::pending().await,
-            }
-        } => {
-            info!("Received SIGTERM, shutting down...");
-            // Signal SSH agent to stop accepting new connections; receiver may already be gone.
-            let _signaled = shutdown_tx.send(true);
-            ExitCode::SUCCESS
         }
     };
 

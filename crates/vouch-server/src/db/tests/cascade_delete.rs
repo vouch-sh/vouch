@@ -161,7 +161,7 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to record issued SSH certificate");
 
-    revoke_all_ssh_certificates_for_user(
+    crate::db::credentials::revoke_all_ssh_certificates_for_user(
         &store,
         &user_id,
         Some("User deleted by admin"),

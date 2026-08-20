@@ -244,12 +244,12 @@ impl GitHubService<'_> {
                     installation_id,
                     installation.account.login
                 );
-                if let Err(e) =
-                    db::delete_github_installation_by_installation_id(self.store, installation_id)
-                        .await
-                {
-                    tracing::error!("Failed to delete installation {}: {}", installation_id, e);
-                }
+                db::delete_github_installation_by_installation_id(self.store, installation_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to delete installation {}: {}", installation_id, e);
+                        GitHubError::Internal(format!("Failed to delete installation: {e}"))
+                    })?;
             }
             InstallationEvent::Suspend { installation } => {
                 let installation_id = installation.id.cast_signed();
@@ -258,9 +258,16 @@ impl GitHubService<'_> {
                     installation_id,
                     installation.account.login
                 );
-                if let Err(e) = db::suspend_github_installation(self.store, installation_id).await {
-                    tracing::error!("Failed to suspend installation {}: {}", installation_id, e);
-                }
+                db::suspend_github_installation(self.store, installation_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to suspend installation {}: {}",
+                            installation_id,
+                            e
+                        );
+                        GitHubError::Internal(format!("Failed to suspend installation: {e}"))
+                    })?;
             }
             InstallationEvent::Unsuspend { installation } => {
                 let installation_id = installation.id.cast_signed();
@@ -269,14 +276,16 @@ impl GitHubService<'_> {
                     installation_id,
                     installation.account.login
                 );
-                if let Err(e) = db::unsuspend_github_installation(self.store, installation_id).await
-                {
-                    tracing::error!(
-                        "Failed to unsuspend installation {}: {}",
-                        installation_id,
-                        e
-                    );
-                }
+                db::unsuspend_github_installation(self.store, installation_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to unsuspend installation {}: {}",
+                            installation_id,
+                            e
+                        );
+                        GitHubError::Internal(format!("Failed to unsuspend installation: {e}"))
+                    })?;
             }
             InstallationEvent::Unknown => {
                 tracing::debug!("Ignoring unknown installation action");
