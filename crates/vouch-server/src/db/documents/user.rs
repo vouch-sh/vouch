@@ -254,7 +254,10 @@ mod tests {
             idp_identities: Vec::new(),
         };
         let json = serde_json::to_value(&doc).expect("serialize UserDoc");
-        assert_eq!(json["github_refresh_token"], "ghr_secret-value");
+        assert_eq!(
+            json.get("github_refresh_token"),
+            Some(&serde_json::Value::from("ghr_secret-value"))
+        );
 
         let read: UserDoc = serde_json::from_value(json).expect("deserialize UserDoc");
         assert_eq!(
@@ -267,7 +270,7 @@ mod tests {
         doc.github_refresh_token = None;
         let json = serde_json::to_value(&doc).expect("serialize UserDoc");
         assert!(
-            json["github_refresh_token"].is_null() && json.get("github_refresh_token").is_some(),
+            json.get("github_refresh_token") == Some(&serde_json::Value::Null),
             "None must serialize as an explicit null: {json}"
         );
     }

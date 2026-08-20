@@ -491,14 +491,12 @@ async fn build_app_state(
         );
         Some(key)
     } else {
-        // Clone the PEM content (or None) before crossing the spawn_blocking boundary.
-        // RSA-3072 generation takes ~200ms; offload to avoid blocking the tokio runtime.
-        let pem_owned = config
-            .oidc_rsa_signing_key
-            .as_ref()
-            .map(|s| s.expose_secret().to_string());
+        // Clone the SecretString (not a bare String) before crossing the
+        // spawn_blocking boundary so the PEM stays zeroizing. RSA-3072
+        // generation takes ~200ms; offload to avoid blocking the runtime.
+        let pem_owned = config.oidc_rsa_signing_key.clone();
         let key = tokio::task::spawn_blocking(move || {
-            OidcRsaSigningKey::load_or_generate(pem_owned.as_deref())
+            OidcRsaSigningKey::load_or_generate(pem_owned.as_ref().map(|s| s.expose_secret()))
         })
         .await
         .map_err(|e| anyhow::anyhow!("RSA key generation task panicked: {e}"))??;

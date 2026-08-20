@@ -79,15 +79,16 @@ pub(crate) async fn complete_login(
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
     // ── 1. Token validation ───────────────────────────────────────────────
-    let secret = match state.config().certification_test_token.as_ref() {
-        Some(s) => s.expose_secret().to_string(),
+    let config = state.config();
+    let secret = match config.certification_test_token.as_ref() {
+        Some(s) => s,
         None => {
             tracing::error!("Certification endpoint called but token not configured");
             return StatusCode::NOT_FOUND.into_response();
         }
     };
 
-    let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
+    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
 
     let token_valid: bool = expected
         .as_bytes()
@@ -237,11 +238,12 @@ pub(crate) async fn deny_login(
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
     // Validate HMAC token.
-    let secret = match state.config().certification_test_token.as_ref() {
-        Some(s) => s.expose_secret().to_string(),
+    let config = state.config();
+    let secret = match config.certification_test_token.as_ref() {
+        Some(s) => s,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
+    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
     let token_valid: bool = expected
         .as_bytes()
         .ct_eq(query.token.expose_secret().as_bytes())
