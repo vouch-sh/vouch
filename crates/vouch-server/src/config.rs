@@ -869,7 +869,16 @@ impl ServerConfig {
         let aws_use_fips_endpoint = vouch_common::env::non_empty(args.aws_use_fips_endpoint)
             .map(|v| v.eq_ignore_ascii_case("true"));
 
-        let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
+        // Normalize: strip any trailing slashes so the issuer and every
+        // endpoint derived from `base_url` (OIDC discovery, JWT `iss`, DPoP
+        // `htu`, authorization code validation) are spec-compliant. OIDC
+        // Discovery 1.0 §4.3 requires exact string equality between the
+        // issuer used to fetch the discovery document and the `issuer` value
+        // returned; a trailing slash breaks that comparison and produces
+        // double-slash endpoint URLs (e.g. `https://host//oauth/token`).
+        let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr)
+            .trim_end_matches('/')
+            .to_string();
 
         // Parse allowed domains
         let allowed_domains = args
@@ -1785,6 +1794,86 @@ mod tests {
             config.aws_use_fips_endpoint.is_none(),
             "empty CLI aws_use_fips_endpoint must be None, got {:?}",
             config.aws_use_fips_endpoint
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — base_url trailing-slash normalization
+    //
+    // OIDC Discovery 1.0 §4.3 requires exact string equality between the
+    // issuer used to fetch the discovery document and the `issuer` value
+    // returned. A trailing slash on `VOUCH_BASE_URL` would otherwise produce
+    // an issuer with a trailing slash and double-slash endpoint URLs
+    // (`https://host//oauth/token`), breaking spec-compliant clients and
+    // DPoP `htu` validation.
+    // ========================================================================
+
+    #[test]
+    fn from_args_trims_single_trailing_slash_from_base_url() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com/"])
+            .expect("parse with trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "single trailing slash must be stripped from base_url"
+        );
+    }
+
+    #[test]
+    fn from_args_trims_multiple_trailing_slashes_from_base_url() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com//"])
+            .expect("parse with double trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "all trailing slashes must be stripped from base_url"
+        );
+    }
+
+    #[test]
+    fn from_args_preserves_base_url_without_trailing_slash() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com"])
+            .expect("parse with clean base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "base_url without trailing slash must be unchanged"
+        );
+    }
+
+    #[test]
+    fn from_args_derived_base_url_has_no_trailing_slash() {
+        // When VOUCH_BASE_URL is unset, base_url is derived from rp_id and
+        // must never carry a trailing slash.
+        let args = Args::try_parse_from(["vouch-server", "--rp-id=auth.example.com"])
+            .expect("parse with rp_id only");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "derived base_url must not have a trailing slash"
+        );
+        assert!(
+            !config.base_url.ends_with('/'),
+            "derived base_url must never end with '/'"
+        );
+    }
+
+    #[test]
+    fn from_args_trailing_slash_does_not_produce_double_slash_endpoints() {
+        // Regression: a trailing slash on base_url used to produce
+        // `https://host//oauth/token` for discovery endpoints. Verify the
+        // normalized base_url concatenates cleanly with a path segment.
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com/"])
+            .expect("parse with trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        let token_endpoint = format!("{}/oauth/token", config.base_url);
+        assert_eq!(
+            token_endpoint, "https://auth.example.com/oauth/token",
+            "endpoint URLs must not contain double slashes"
+        );
+        assert!(
+            !token_endpoint.contains("//oauth"),
+            "no double-slash path component allowed in endpoints"
         );
     }
 
