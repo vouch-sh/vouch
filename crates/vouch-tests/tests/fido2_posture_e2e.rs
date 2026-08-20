@@ -577,3 +577,219 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
         "denied attempt must not record login_success"
     );
 }
+
+/// it should be visible immediately, but we poll briefly for safety.
+async fn poll_policy_denied_audit(harness: &TestHarness, user_id: &str) -> db::AuditEvent {
+    for _ in 0..40 {
+        let rows = harness
+            .state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["policy_denied".to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        if !rows.is_empty() {
+            return rows.into_iter().next().unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no policy_denied audit event found for user {user_id}");
+}
+
+/// A custom posture policy deny through the full HTTP router must record the
+/// actual policy name in the `policy_denied` audit event — not the generic
+/// "custom" label. The user-facing error must also name the policy.
+#[tokio::test]
+async fn custom_policy_denial_records_name_in_audit_and_error() {
+    let harness = TestHarness::new().await;
+
+    let org = harness
+        .create_org("custom-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = harness
+        .create_user_in_org("custom-audit@example.com", &org.id, false)
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+
+    // Create and activate a custom posture policy with a distinctive name.
+    let policy = db::create_custom_policy(
+        &harness.state.store,
+        db::CreateCustomPolicyParams {
+            name: "Test Audit Policy",
+            description: None,
+            policy_text: "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.disk_encryption_enabled };",
+            org_id: &org.id,
+            builder_spec: None,
+        },
+    )
+    .await
+    .expect("Failed to create custom policy");
+    db::update_custom_policy(
+        &harness.state.store,
+        &policy.id,
+        &org.id,
+        db::UpdateCustomPolicyParams {
+            name: None,
+            description: db::FieldUpdate::Keep,
+            policy_text: None,
+            active: Some(true),
+            builder_spec: db::FieldUpdate::Keep,
+        },
+    )
+    .await
+    .expect("Failed to activate custom policy");
+
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    // Posture without disk encryption → denied by the custom policy.
+    let posture_json = serde_json::json!([{
+        "type": "device_posture",
+        "posture_version": 1,
+        "os": "macos",
+        "os_version": "15.3.1",
+        "disk_encryption_enabled": false,
+    }])
+    .to_string();
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
+    .await;
+
+    assert_eq!(
+        status, 400,
+        "FIDO2 grant must be denied by custom policy. Response: {json}"
+    );
+    assert!(
+        json["error"].as_str() == Some("access_denied"),
+        "Expected access_denied error, got: {json}"
+    );
+
+    // Step 4: Verify the audit record carries the actual policy name.
+    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_data: serde_json::Value =
+        serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
+    assert_eq!(
+        audit_data["policy"].as_str(),
+        Some("Test Audit Policy"),
+        "audit record must carry the actual custom policy name, not 'custom': {}",
+        audit_data
+    );
+    assert_eq!(
+        audit_data["action"].as_str(),
+        Some("issue_token"),
+        "audit record must carry the issue_token action: {}",
+        audit_data
+    );
+
+    // Step 5: Verify the user-facing error message also names the policy.
+    let error_description = json["error_description"].as_str().unwrap_or("");
+    assert!(
+        error_description.contains("Test Audit Policy"),
+        "user-facing error must name the custom policy 'Test Audit Policy', got: {error_description}"
+    );
+
+    // Step 6: Verify Prometheus metrics used the generic "custom" label.
+    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let metrics_text = handle.render();
+    assert!(
+        metrics_text.contains("vouch_policy_decisions_total"),
+        "metrics must include vouch_policy_decisions_total, got:\n{metrics_text}"
+    );
+    assert!(
+        metrics_text.contains(r#"outcome="deny""#) && metrics_text.contains(r#"policy="custom""#),
+        "metrics must record the deny with the generic 'custom' label (cardinality control), got:\n{metrics_text}"
+    );
+}
+
+/// A preconfigured policy deny through the full HTTP router must record the
+/// slug in the audit record, and metrics must use the same slug.
+#[tokio::test]
+async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
+    let harness = TestHarness::new().await;
+
+    let org = harness
+        .create_org("preconfigured-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = harness
+        .create_user_in_org("preconfigured-audit@example.com", &org.id, false)
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org.id,
+        vec!["disk_encryption".to_string()],
+    )
+    .await
+    .expect("Failed to activate disk_encryption");
+
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    // Posture without disk encryption → denied by the preconfigured policy.
+    let posture_json = serde_json::json!([{
+        "type": "device_posture",
+        "posture_version": 1,
+        "os": "macos",
+        "os_version": "15.3.1",
+        "disk_encryption_enabled": false,
+    }])
+    .to_string();
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
+    .await;
+
+    assert_eq!(
+        status, 400,
+        "FIDO2 grant must be denied by disk_encryption. Response: {json}"
+    );
+
+    // Verify the audit record carries the slug.
+    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_data: serde_json::Value =
+        serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
+    assert_eq!(
+        audit_data["policy"].as_str(),
+        Some("disk_encryption"),
+        "audit record must carry the preconfigured slug, not a generic label: {}",
+        audit_data
+    );
+
+    // Verify metrics use the slug too.
+    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let metrics_text = handle.render();
+    assert!(
+        metrics_text.contains(r#"outcome="deny""#)
+            && metrics_text.contains(r#"policy="disk_encryption""#),
+        "metrics must record the deny with the preconfigured slug label, got:\n{metrics_text}"
+    );
+}

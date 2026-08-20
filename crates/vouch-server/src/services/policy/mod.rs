@@ -478,6 +478,28 @@ async fn record_denial(
     }
 }
 
+/// The metrics label and audit policy identifier for a deny decision.
+///
+/// These differ only for custom policies: metrics use the generic `"custom"`
+/// label (to avoid cardinality explosion from unbounded admin-chosen names),
+/// while the audit record carries the actual policy name so admins can
+/// identify which custom policy denied a request. Preconfigured policies and
+/// unattributed denies use the same value for both.
+///
+/// Returns `(metrics_label, audit_policy)`:
+/// - `metrics_label` is a static string suitable for a Prometheus label.
+/// - `audit_policy` is the identifier stored in the `policy_denied` audit
+///   record's `policy` field.
+fn deny_attribution(denying: &Option<engine::DenyingPolicy>) -> (&'static str, String) {
+    match denying {
+        Some(engine::DenyingPolicy::Preconfigured(slug)) => {
+            (slug.as_str(), slug.as_str().to_string())
+        }
+        Some(engine::DenyingPolicy::Custom { name }) => ("custom", name.clone()),
+        None => ("unattributed", "unattributed".to_string()),
+    }
+}
+
 /// Deny message for a determining rule.
 fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> ServiceError {
     let (name, remediation) = match denying {
@@ -548,8 +570,16 @@ async fn authorize_decision(
             reads_device: _,
         } => uses_temporal,
         engine::Precheck::BrokenCustom(name) => {
-            crate::infra::metrics::record_policy_decision("deny", &name);
-            return Err(deny_error(Some(engine::DenyingPolicy::Custom { name }), os));
+            // A policy that fails precheck denies every request in the org
+            // until it is re-authored, so it needs the same evidence trail as
+            // any other denial — and the same bounded metrics label. Passing
+            // the admin-chosen name straight to Prometheus would make
+            // cardinality a function of how many policies have been written.
+            let denying = engine::DenyingPolicy::Custom { name };
+            let (metrics_label, audit_policy) = deny_attribution(&Some(denying.clone()));
+            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
+            return Err(deny_error(Some(denying), os));
         }
         engine::Precheck::EngineError(msg) => {
             tracing::error!(org_id, "policy precheck failed: {msg}");
@@ -603,13 +633,9 @@ async fn authorize_decision(
             Ok(())
         }
         engine::OrgDecision::Deny(denying) => {
-            let label = match &denying {
-                Some(engine::DenyingPolicy::Preconfigured(slug)) => slug.as_str(),
-                Some(engine::DenyingPolicy::Custom { .. }) => "custom",
-                None => "unattributed",
-            };
-            crate::infra::metrics::record_policy_decision("deny", label);
-            record_denial(state, org_id, user_id, user_email, &kind, label).await;
+            let (metrics_label, audit_policy) = deny_attribution(&denying);
+            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
             Err(deny_error(denying, os))
         }
     }
