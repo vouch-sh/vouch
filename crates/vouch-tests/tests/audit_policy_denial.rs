@@ -120,6 +120,7 @@ async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
 }
 
 /// Exchange a FIDO2 assertion for an access token. Returns (status, json).
+#[allow(clippy::too_many_arguments)]
 async fn exchange_assertion(
     harness: &TestHarness,
     device: &IntegrationMockDevice,
