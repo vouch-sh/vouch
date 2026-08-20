@@ -63,8 +63,10 @@ pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
 struct Fido2AssertionTokenRequest {
     grant_type: &'static str,
     client_assertion_type: &'static str,
-    client_assertion: String,
-    assertion: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    client_assertion: secrecy::SecretString,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    assertion: secrecy::SecretString,
     scope: &'static str,
     /// RFC 9396: Device posture as authorization_details JSON array.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,7 +258,7 @@ async fn run_fapi_login(
         grant_type: "urn:ietf:params:oauth:grant-type:fido2-assertion",
         client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         client_assertion: client_assertion.assertion,
-        assertion: assertion_b64,
+        assertion: assertion_b64.into(),
         scope: "openid email",
         authorization_details,
     };
@@ -542,7 +544,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
         config.clear_fapi();
         config.set_client_id(&result.client_id);
         if let Some(ref rat) = result.registration_access_token {
-            config.set_registration_access_token(rat);
+            config.set_registration_access_token(secrecy::ExposeSecret::expose_secret(rat));
         }
         if let Some(ref uri) = result.registration_client_uri {
             config.set_registration_client_uri(uri);

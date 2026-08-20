@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use secrecy::ExposeSecret;
 
 // -----------------------------------------------------------------
 // Hostname extraction

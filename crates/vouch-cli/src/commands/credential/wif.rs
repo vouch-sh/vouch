@@ -160,7 +160,7 @@ fn build_exchange_form(req: &ExchangeRequest<'_>) -> Result<String> {
         ("requested_token_type", TOKEN_TYPE_ID_TOKEN),
         ("client_id", req.client_id),
         ("client_assertion_type", assertion.assertion_type),
-        ("client_assertion", &assertion.assertion),
+        ("client_assertion", assertion.assertion.expose_secret()),
     ];
     if let Some(aud) = req.audience.filter(|s| !s.is_empty()) {
         form.push(("audience", aud));

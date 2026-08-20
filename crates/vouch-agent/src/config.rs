@@ -28,7 +28,7 @@ pub(crate) struct VouchConfig {
     /// Legacy flat server URL.
     server_url: Option<String>,
     /// Legacy flat session token.
-    token: Option<String>,
+    token: Option<secrecy::SecretString>,
     /// Global network configuration (DoH, …).
     #[serde(default)]
     network: Option<NetworkConfig>,
@@ -53,7 +53,7 @@ impl std::fmt::Debug for VouchConfig {
 #[derive(Default, Deserialize)]
 struct ServerEntry {
     server_url: Option<String>,
-    token: Option<String>,
+    token: Option<secrecy::SecretString>,
 }
 
 // Custom Debug that redacts the session token to prevent accidental log
@@ -89,13 +89,14 @@ impl VouchConfig {
     /// `current_server`), then falls back to the legacy flat
     /// `token` field.
     pub(crate) fn token(&self) -> Option<&str> {
+        use secrecy::ExposeSecret;
         if let Some(host) = &self.current_server
             && let Some(entry) = self.servers.get(host)
             && let Some(tok) = &entry.token
         {
-            return Some(tok.as_str());
+            return Some(tok.expose_secret());
         }
-        self.token.as_deref()
+        self.token.as_ref().map(|t| t.expose_secret())
     }
 
     /// Configured DoH provider, if any.

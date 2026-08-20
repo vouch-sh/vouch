@@ -31,7 +31,7 @@ struct ClientAssertionClaims {
 /// A signed client assertion ready to be included in a token request.
 pub struct ClientAssertion {
     /// The signed JWT assertion string.
-    pub assertion: String,
+    pub assertion: secrecy::SecretString,
     /// The assertion type URI per RFC 7523.
     pub assertion_type: &'static str,
 }
@@ -107,7 +107,7 @@ impl ClientAssertionBuilder {
             .map_err(|e| FapiError::JwtSigning(e.to_string()))?;
 
         Ok(ClientAssertion {
-            assertion: token,
+            assertion: token.into(),
             assertion_type: ClientAssertion::TYPE,
         })
     }
@@ -125,6 +125,7 @@ mod tests {
     use crate::fapi::key::ClientKey;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use secrecy::ExposeSecret;
 
     fn decode_jwt_payload(token: &str) -> serde_json::Value {
         let parts: Vec<&str> = token.split('.').collect();
@@ -150,10 +151,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(assertion.assertion_type, ClientAssertion::TYPE);
-        assert!(!assertion.assertion.is_empty());
+        assert!(!assertion.assertion.expose_secret().is_empty());
 
         // JWT must have 3 parts
-        let parts: Vec<&str> = assertion.assertion.split('.').collect();
+        let parts: Vec<&str> = assertion.assertion.expose_secret().split('.').collect();
         assert_eq!(parts.len(), 3);
     }
 
@@ -164,7 +165,7 @@ mod tests {
             .build(&key)
             .unwrap();
 
-        let header = decode_jwt_header(&assertion.assertion);
+        let header = decode_jwt_header(assertion.assertion.expose_secret());
         assert_eq!(header["alg"], "ES256");
         assert_eq!(header["kid"], key.kid());
     }
@@ -176,7 +177,7 @@ mod tests {
             .build(&key)
             .unwrap();
 
-        let claims = decode_jwt_payload(&assertion.assertion);
+        let claims = decode_jwt_payload(assertion.assertion.expose_secret());
         assert_eq!(claims["iss"], "my-client-id");
         assert_eq!(claims["sub"], "my-client-id");
         assert_eq!(claims["aud"], "https://server.example.com");
@@ -209,8 +210,8 @@ mod tests {
             .build(&key)
             .unwrap();
 
-        let claims1 = decode_jwt_payload(&a1.assertion);
-        let claims2 = decode_jwt_payload(&a2.assertion);
+        let claims1 = decode_jwt_payload(a1.assertion.expose_secret());
+        let claims2 = decode_jwt_payload(a2.assertion.expose_secret());
 
         assert_ne!(
             claims1["jti"], claims2["jti"],
@@ -229,7 +230,7 @@ mod tests {
             .build(&key)
             .unwrap();
 
-        let claims = decode_jwt_payload(&assertion.assertion);
+        let claims = decode_jwt_payload(assertion.assertion.expose_secret());
         assert_eq!(
             claims["aud"].as_str().unwrap(),
             issuer,
