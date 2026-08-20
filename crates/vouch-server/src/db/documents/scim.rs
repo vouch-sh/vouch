@@ -55,10 +55,16 @@ impl DocumentType for ScimGroupDoc {
     const DOC_TYPE: &'static str = "scim_group";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
+        // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, so
+        // the blind-index value is stored ASCII-lowercased to make equality
+        // lookups case-insensitive — mirroring how `UserDoc` stores the
+        // `email` index through the canonicalizing `Email` type. The
+        // document body (`display_name` field below) keeps its original
+        // casing for display; only the index row is normalized.
         let mut entries = vec![
             IndexEntry {
                 field: "display_name",
-                value: self.display_name.clone(),
+                value: self.display_name.to_ascii_lowercase(),
             },
             IndexEntry {
                 field: "org_id",

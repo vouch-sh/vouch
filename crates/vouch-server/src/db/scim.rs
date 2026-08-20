@@ -1124,12 +1124,39 @@ async fn try_indexed_group_lookup(
     org_id: &str,
     filter: &str,
 ) -> Result<Option<Vec<ScimGroupRecord>>> {
+    // displayName eq → find_by_indexes combining display_name + org_id at DB
+    // level.
+    //
+    // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, and
+    // `ScimGroupDoc::index_entries` stores the value ASCII-lowercased. Normalize
+    // the filter value to match the lowercased index; otherwise a mixed-case
+    // filter like `displayName eq "engineering"` misses a group stored as
+    // "Engineering". The `co`/`sw` operators are already case-insensitive via
+    // the in-memory fallback in `list_scim_groups`.
+    //
+    // When the indexed lookup returns empty, fall through (`None`) instead of
+    // short-circuiting on an empty vector. This lets `list_scim_groups` reach
+    // the in-memory case-insensitive filter (`apply_scim_group_filter`), which
+    // catches groups whose `display_name` index was written before this
+    // normalization — legacy rows still carry their original mixed-case
+    // casing. That fallback is bounded by the 10k `FilterTooBroad` guard in
+    // `list_scim_groups`, consistent with the `co`/`sw`/`ew` operators, which
+    // already route through it. As legacy groups are re-written through normal
+    // SCIM create/update calls, their index rows are re-stored lowercased and
+    // the indexed path becomes authoritative again.
     if let Some(f) = parse_scim_filter(filter, "displayName")?
         && f.op == ScimFilterOp::Eq
     {
+        let display_name_lower = f.value.to_ascii_lowercase();
         let docs = store
-            .find_by_indexes::<ScimGroupDoc>(&[("display_name", &f.value), ("org_id", org_id)])
+            .find_by_indexes::<ScimGroupDoc>(&[
+                ("display_name", &display_name_lower),
+                ("org_id", org_id),
+            ])
             .await?;
+        if docs.is_empty() {
+            return Ok(None);
+        }
         return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
     }
 
