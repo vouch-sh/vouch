@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::documents::audit::{OrgDomainAdminData, OrgDomainRemovalData};
 use crate::error::ServiceError;
 use crate::filters;
 use crate::handlers::admin::flash;
@@ -201,18 +202,19 @@ pub(crate) async fn admin_add_domain(
             .await;
     match result {
         Ok(added) => {
-            let data = serde_json::json!({
-                "action": "add_org_domain",
-                "domain": added.domain,
-                "admin_user_id": admin.id,
-            });
+            let data = OrgDomainAdminData {
+                action: "add_org_domain",
+                domain: &added.domain,
+                admin_user_id: &admin.id,
+                method: None,
+            };
             if let Err(e) = state
                 .audit
                 .insert_event(
                     db::AuditEventKind::OrgDomainAdded,
                     Some(&admin.id),
                     Some(&admin.email),
-                    &data.to_string(),
+                    &data,
                 )
                 .await
             {
@@ -365,19 +367,19 @@ pub(crate) async fn admin_verify_domain(
 
     match db::mark_additional_domain_verified(&state.store, &org_id, &normalized).await {
         Ok(()) => {
-            let data = serde_json::json!({
-                "action": "verify_org_domain",
-                "domain": normalized,
-                "admin_user_id": admin.id,
-                "method": "dns_txt",
-            });
+            let data = OrgDomainAdminData {
+                action: "verify_org_domain",
+                domain: &normalized,
+                admin_user_id: &admin.id,
+                method: Some("dns_txt"),
+            };
             if let Err(e) = state
                 .audit
                 .insert_event(
                     db::AuditEventKind::OrgDomainVerified,
                     Some(&admin.id),
                     Some(&admin.email),
-                    &data.to_string(),
+                    &data,
                 )
                 .await
             {
@@ -443,21 +445,21 @@ pub(crate) async fn admin_remove_domain(
         Ok(Some(summary)) => {
             let revoked = summary.revoked_user_count;
             let errored = summary.revocation_errored;
-            let data = serde_json::json!({
-                "action": "remove_org_domain",
-                "domain": normalized,
-                "admin_user_id": admin.id,
-                "revoked_user_session_count": revoked,
-                "revocation_errored": errored,
-                "released_subdomain": summary.released_subdomain,
-            });
+            let data = OrgDomainRemovalData {
+                action: "remove_org_domain",
+                domain: &normalized,
+                admin_user_id: &admin.id,
+                revoked_user_session_count: revoked,
+                revocation_errored: errored,
+                released_subdomain: summary.released_subdomain.clone(),
+            };
             if let Err(e) = state
                 .audit
                 .insert_event(
                     db::AuditEventKind::OrgDomainRemoved,
                     Some(&admin.id),
                     Some(&admin.email),
-                    &data.to_string(),
+                    &data,
                 )
                 .await
             {

@@ -12,6 +12,7 @@
 use crate::AppState;
 use crate::db;
 use crate::db::SigningKeyState;
+use crate::db::documents::audit::{OrgSubdomainClaimData, OrgSubdomainReleaseData};
 use crate::db::{SubdomainClaimError, SubdomainLabelError};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
@@ -333,19 +334,19 @@ pub(crate) async fn admin_claim_subdomain(
 
     let issuer = state.config().org_issuer(&label);
 
-    let data = serde_json::json!({
-        "action": "claim_subdomain",
-        "label": label,
-        "issuer": issuer,
-        "admin_user_id": admin.id,
-    });
+    let data = OrgSubdomainClaimData {
+        action: "claim_subdomain",
+        label: &label,
+        issuer: issuer.as_deref(),
+        admin_user_id: &admin.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::OrgSubdomainClaimed,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -407,18 +408,18 @@ pub(crate) async fn admin_release_subdomain(
         }
     };
 
-    let data = serde_json::json!({
-        "action": "release_subdomain",
-        "label": released,
-        "admin_user_id": admin.id,
-    });
+    let data = OrgSubdomainReleaseData {
+        action: "release_subdomain",
+        label: &released,
+        admin_user_id: &admin.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::OrgSubdomainReleased,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {

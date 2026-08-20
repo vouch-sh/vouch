@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::documents::audit::{CustomPolicyAdminData, PreconfiguredPolicyToggleData};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
@@ -238,18 +239,18 @@ pub(crate) async fn toggle_preconfigured_policy(
     } else {
         "enabled"
     };
-    let data = serde_json::json!({
-        "action": format!("preconfigured_policy_{action}"),
-        "slug": &slug,
-        "admin_user_id": admin.id,
-    });
+    let data = PreconfiguredPolicyToggleData {
+        action: format!("preconfigured_policy_{action}"),
+        slug: &slug,
+        admin_user_id: &admin.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -391,20 +392,20 @@ pub(crate) async fn create_custom_policy(
     .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
 
     let policy_hash = policy_text_hash(&form.policy_text);
-    let data = serde_json::json!({
-        "action": "custom_policy_created",
-        "policy_id": policy.id,
-        "policy_name": policy.name,
-        "admin_user_id": admin.id,
-        "policy_text_hash": policy_hash,
-    });
+    let data = CustomPolicyAdminData {
+        action: "custom_policy_created".to_string(),
+        policy_id: &policy.id,
+        policy_name: Some(&policy.name),
+        admin_user_id: &admin.id,
+        policy_text_hash: Some(policy_hash),
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPolicyCreate,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -488,20 +489,20 @@ pub(crate) async fn update_custom_policy(
     }
 
     let policy_hash = policy_text_hash(&form.policy_text);
-    let data = serde_json::json!({
-        "action": "custom_policy_updated",
-        "policy_id": &*id,
-        "policy_name": form.name,
-        "admin_user_id": admin.id,
-        "policy_text_hash": policy_hash,
-    });
+    let data = CustomPolicyAdminData {
+        action: "custom_policy_updated".to_string(),
+        policy_id: &id,
+        policy_name: Some(&form.name),
+        admin_user_id: &admin.id,
+        policy_text_hash: Some(policy_hash),
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPolicyUpdate,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -539,18 +540,20 @@ pub(crate) async fn delete_custom_policy(
         ));
     }
 
-    let data = serde_json::json!({
-        "action": "custom_policy_deleted",
-        "policy_id": &*id,
-        "admin_user_id": admin.id,
-    });
+    let data = CustomPolicyAdminData {
+        action: "custom_policy_deleted".to_string(),
+        policy_id: &id,
+        policy_name: None,
+        admin_user_id: &admin.id,
+        policy_text_hash: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPolicyDelete,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -649,20 +652,20 @@ pub(crate) async fn toggle_custom_policy(
         "deactivated"
     };
     let policy_hash = policy_text_hash(&policy.policy_text);
-    let data = serde_json::json!({
-        "action": format!("custom_policy_{action}"),
-        "policy_id": &*id,
-        "policy_name": policy.name,
-        "admin_user_id": admin.id,
-        "policy_text_hash": policy_hash,
-    });
+    let data = CustomPolicyAdminData {
+        action: format!("custom_policy_{action}"),
+        policy_id: &id,
+        policy_name: Some(&policy.name),
+        admin_user_id: &admin.id,
+        policy_text_hash: Some(policy_hash),
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {

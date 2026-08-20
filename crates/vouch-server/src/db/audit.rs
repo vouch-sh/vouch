@@ -13,7 +13,7 @@ use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
 use serde::Serialize;
 
-use super::documents::audit::{CredentialAuditDetails, CredentialAuditEnvelope};
+use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
 use crate::crypto::document_crypto::DocumentCrypto;
 
@@ -323,15 +323,40 @@ impl AuditStore {
         Some(self.crypto.hmac_index(canonical.as_str()))
     }
 
-    /// Insert a new audit event.
+    /// Insert a new audit event with a typed `data` payload.
     ///
     /// `email` is masked to domain-only and HMAC-hashed for correlation.
-    /// `data_json` is the serialized event-specific payload.
+    /// `data` must be one of the vetted payload structs in
+    /// [`crate::db::documents::audit`] — [`AuditData`] is sealed there, so
+    /// an ad hoc `serde_json::json!` literal cannot be passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or the database write fails.
+    pub async fn insert_event<D: AuditData>(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        email: Option<&str>,
+        data: &D,
+    ) -> Result<String> {
+        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
+        self.insert_event_json(kind, user_id, email, &data_json)
+            .await
+    }
+
+    /// Crate-internal raw-JSON insert path behind [`Self::insert_event`].
+    ///
+    /// `pub(super)` because only two write sites assemble their payload as
+    /// a `serde_json::Value`: `insert_auth_event`'s geo-field merge in
+    /// `db/config.rs` and the flattened envelope in
+    /// [`Self::log_credential_event`]. Everything outside `db` must go
+    /// through a typed [`AuditData`] payload.
     ///
     /// # Errors
     ///
     /// Returns an error if the database write fails.
-    pub async fn insert_event(
+    pub(super) async fn insert_event_json(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
@@ -363,21 +388,22 @@ impl AuditStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database write fails.
-    pub async fn insert_event_with_domain(
+    /// Returns an error if serialization or the database write fails.
+    pub async fn insert_event_with_domain<D: AuditData>(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
         email_domain: Option<&str>,
-        data_json: &str,
+        data: &D,
     ) -> Result<String> {
+        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
         self.insert_event_raw(
             kind,
             user_id,
             email_domain,
             None,
             jiff::Timestamp::now(),
-            data_json,
+            &data_json,
         )
         .await
     }
@@ -418,6 +444,26 @@ impl AuditStore {
         data_json: &str,
     ) -> Result<String> {
         self.insert_event_raw(kind, Some(user_id), None, None, created_at, data_json)
+            .await
+    }
+
+    /// Test-only raw-JSON insert with the email→domain/HMAC derivation of
+    /// [`Self::insert_event`]. Tests legitimately seed arbitrary, legacy,
+    /// and malformed payloads that no vetted [`AuditData`] struct should
+    /// ever describe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn insert_json_event_for_test(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        email: Option<&str>,
+        data_json: &str,
+    ) -> Result<String> {
+        self.insert_event_json(kind, user_id, email, data_json)
             .await
     }
 
@@ -491,7 +537,7 @@ impl AuditStore {
             details,
         }) {
             Ok(data_json) => {
-                self.insert_event(D::KIND, Some(user_id), Some(user_email), &data_json)
+                self.insert_event_json(D::KIND, Some(user_id), Some(user_email), &data_json)
                     .await
             }
             Err(e) => Err(e.into()),
@@ -773,7 +819,7 @@ mod tests {
         let audit = test_audit().await;
 
         let id = audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-123"),
                 Some("alice@example.com"),
@@ -801,7 +847,7 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-1"),
                 Some("bob@test.com"),
@@ -810,7 +856,7 @@ mod tests {
             .await
             .unwrap();
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-2"),
                 Some("carol@test.com"),
@@ -835,7 +881,7 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, None, "{}")
             .await
             .unwrap();
 
@@ -858,11 +904,11 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(AuditEventKind::LoginSuccess, Some("user-a"), None, "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, Some("user-a"), None, "{}")
             .await
             .unwrap();
         audit
-            .insert_event(AuditEventKind::LoginSuccess, Some("user-b"), None, "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, Some("user-b"), None, "{}")
             .await
             .unwrap();
 
@@ -882,7 +928,7 @@ mod tests {
 
         for _ in 0..5 {
             audit
-                .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+                .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, None, "{}")
                 .await
                 .unwrap();
         }
@@ -905,7 +951,7 @@ mod tests {
         // return. The admin audit page queries by the org's stored domain,
         // which is always lowercase (see OIDC/SAML normalization).
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-1"),
                 Some("Alice@CORP.Example.COM"),
@@ -934,7 +980,7 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-1"),
                 Some("Alice@CORP.Example.COM"),
@@ -968,7 +1014,7 @@ mod tests {
         // the same email (e.g. an IdP config change over time). Both must be
         // correlated by the email HMAC filter.
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-1"),
                 Some("Alice@CORP.Example.COM"),
@@ -977,7 +1023,7 @@ mod tests {
             .await
             .unwrap();
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginFailed,
                 Some("user-1"),
                 Some("alice@corp.example.com"),
@@ -1007,7 +1053,7 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-1"),
                 Some("alice@corp.example.com"),
@@ -1016,7 +1062,7 @@ mod tests {
             .await
             .unwrap();
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 Some("user-2"),
                 Some("alice@other.example.com"),
@@ -1049,7 +1095,13 @@ mod tests {
                 AuditEventKind::ScimOperation,
                 None,
                 Some("example.com"),
-                "{}",
+                &super::super::documents::audit::ScimAuditData {
+                    operation: "create".to_string(),
+                    resource_type: "User".to_string(),
+                    resource_id: "u-1".to_string(),
+                    actor_token_id: None,
+                    details: None,
+                },
             )
             .await
             .unwrap();
@@ -1072,15 +1124,15 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(AuditEventKind::LoginSuccess, None, Some("a@one.com"), "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, Some("a@one.com"), "{}")
             .await
             .unwrap();
         audit
-            .insert_event(AuditEventKind::LoginSuccess, None, Some("b@two.com"), "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, Some("b@two.com"), "{}")
             .await
             .unwrap();
         audit
-            .insert_event(
+            .insert_json_event_for_test(
                 AuditEventKind::LoginSuccess,
                 None,
                 Some("c@three.com"),
@@ -1110,7 +1162,7 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..5 {
             let id = audit
-                .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+                .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, None, "{}")
                 .await
                 .unwrap();
             ids.push(id);
@@ -1160,7 +1212,7 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+            .insert_json_event_for_test(AuditEventKind::LoginSuccess, None, None, "{}")
             .await
             .unwrap();
 

@@ -387,9 +387,8 @@ pub async fn insert_scim_audit(
         actor_token_id: actor_token_id.map(String::from),
         details: details.map(String::from),
     };
-    let data_json = serde_json::to_string(&data)?;
     audit
-        .insert_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data_json)
+        .insert_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data)
         .await
 }
 

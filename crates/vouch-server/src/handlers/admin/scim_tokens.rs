@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::documents::audit::ScimTokenAdminData;
 use crate::db::{CreateScimTokenParams, ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
@@ -153,18 +154,18 @@ pub(crate) async fn create_scim_token(
     )
     .await?;
 
-    let data = serde_json::json!({
-        "action": "create_scim_token",
-        "token_id": token_id,
-        "admin_user_id": user.id,
-    });
+    let data = ScimTokenAdminData {
+        action: "create_scim_token",
+        token_id: &token_id,
+        admin_user_id: &user.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminCreateScimToken,
             Some(&user.id),
             Some(&user.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -234,18 +235,18 @@ pub(crate) async fn delete_scim_token(
         ));
     }
 
-    let data = serde_json::json!({
-        "action": "delete_scim_token",
-        "token_id": &*token_id,
-        "admin_user_id": user.id,
-    });
+    let data = ScimTokenAdminData {
+        action: "delete_scim_token",
+        token_id: &token_id,
+        admin_user_id: &user.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminDeleteScimToken,
             Some(&user.id),
             Some(&user.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -429,18 +430,18 @@ pub(crate) async fn admin_create_scim_token(
         Err(e) => return Err(e),
     };
 
-    let data = serde_json::json!({
-        "action": "create_scim_token",
-        "token_id": token_id,
-        "admin_user_id": admin.id,
-    });
+    let data = ScimTokenAdminData {
+        action: "create_scim_token",
+        token_id: &token_id,
+        admin_user_id: &admin.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminCreateScimToken,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -500,18 +501,18 @@ pub(crate) async fn admin_revoke_scim_token(
         return Ok(redirect_error(jar, "SCIM token not found"));
     }
 
-    let data = serde_json::json!({
-        "action": "revoke_scim_token",
-        "token_id": &*token_id,
-        "admin_user_id": admin.id,
-    });
+    let data = ScimTokenAdminData {
+        action: "revoke_scim_token",
+        token_id: &token_id,
+        admin_user_id: &admin.id,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminRevokeScimToken,
             Some(&admin.id),
             Some(&admin.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {

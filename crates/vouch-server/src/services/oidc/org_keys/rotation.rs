@@ -139,14 +139,14 @@ pub struct Operator<'a> {
 
 /// Insert an audit event, logging (never propagating) failures — audit writes
 /// must not abort a key operation that already committed.
-async fn audit_best_effort(
+async fn audit_best_effort<D: db::AuditData>(
     audit: &AuditStore,
     kind: db::AuditEventKind,
     operator: Operator<'_>,
-    data: &serde_json::Value,
+    data: &D,
 ) {
     if let Err(e) = audit
-        .insert_event(kind, operator.user_id, operator.email, &data.to_string())
+        .insert_event(kind, operator.user_id, operator.email, data)
         .await
     {
         tracing::warn!(error = %e, event_type = kind.as_str(), "failed to write audit event");
@@ -429,13 +429,13 @@ pub async fn rotate_org_keys(
                 &state.audit,
                 db::AuditEventKind::OrgIssuerKeyRotated,
                 operator,
-                &serde_json::json!({
-                    "action": "rotate_org_issuer_key",
-                    "org_id": org_id,
-                    "alg": alg.as_str(),
-                    "old_kid": kids.old_kid,
-                    "new_kid": kids.new_kid,
-                }),
+                &db::documents::audit::OrgIssuerKeyRotationData {
+                    action: "rotate_org_issuer_key",
+                    org_id,
+                    alg: alg.as_str(),
+                    old_kid: &kids.old_kid,
+                    new_kid: &kids.new_kid,
+                },
             )
             .await;
         }
@@ -541,12 +541,12 @@ pub async fn revoke_org_previous_keys(
                 &state.audit,
                 db::AuditEventKind::OrgIssuerKeyRevoked,
                 operator,
-                &serde_json::json!({
-                    "action": "revoke_org_issuer_key",
-                    "org_id": org_id,
-                    "alg": alg.as_str(),
-                    "kid": kid,
-                }),
+                &db::documents::audit::OrgIssuerKeyRevocationData {
+                    action: "revoke_org_issuer_key",
+                    org_id,
+                    alg: alg.as_str(),
+                    kid,
+                },
             )
             .await;
         }
@@ -690,13 +690,13 @@ pub async fn emergency_rotate_org_keys(
             &state.audit,
             db::AuditEventKind::OrgIssuerKeyEmergencyRotation,
             operator,
-            &serde_json::json!({
-                "action": "emergency_rotate_org_issuer_key",
-                "org_id": org_id,
-                "alg": alg.as_str(),
-                "old_kid": old_kid,
-                "new_kid": new_kid,
-            }),
+            &db::documents::audit::OrgIssuerKeyRotationData {
+                action: "emergency_rotate_org_issuer_key",
+                org_id,
+                alg: alg.as_str(),
+                old_kid,
+                new_kid,
+            },
         )
         .await;
     }

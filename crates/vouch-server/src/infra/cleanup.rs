@@ -11,6 +11,7 @@
 
 use crate::db;
 use crate::db::audit::AuditStore;
+use crate::db::documents::audit::{OrgDomainCleanupData, OrgSubdomainCleanupData};
 use crate::db::store::DocumentStore;
 use crate::infra::dns;
 use aws_lc_rs::rand as aws_rand;
@@ -290,12 +291,12 @@ async fn gc_stale_additional_domains(
             reason,
             "Removed stale additional-domain entry"
         );
-        let data = serde_json::json!({
-            "action": "expire_org_domain",
-            "domain": r.domain,
-            "org_id": r.org_id,
-            "reason": reason,
-        });
+        let data = OrgDomainCleanupData {
+            action: "expire_org_domain",
+            domain: &r.domain,
+            org_id: &r.org_id,
+            reason,
+        };
         // Stamp the org's primary domain into `email_domain` — this event
         // has no user/email of its own, and without a domain it would be
         // invisible to org-scoped audit reads.
@@ -311,7 +312,7 @@ async fn gc_stale_additional_domains(
                 db::AuditEventKind::OrgDomainExpired,
                 None,
                 org_domain.as_deref(),
-                &data.to_string(),
+                &data,
             )
             .await
         {
@@ -425,36 +426,36 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                     None
                 }
             };
-            let data = serde_json::json!({
-                "action": "auto_unverify_org_domain",
-                "domain": rec.domain,
-                "org_id": rec.org_id,
-                "reason": "consecutive_dns_recheck_failures",
-            });
+            let data = OrgDomainCleanupData {
+                action: "auto_unverify_org_domain",
+                domain: &rec.domain,
+                org_id: &rec.org_id,
+                reason: "consecutive_dns_recheck_failures",
+            };
             if let Err(e) = audit
                 .insert_event_with_domain(
                     db::AuditEventKind::OrgDomainUnverified,
                     None,
                     org_domain.as_deref(),
-                    &data.to_string(),
+                    &data,
                 )
                 .await
             {
                 tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
             }
             if let Some(label) = released_subdomain {
-                let data = serde_json::json!({
-                    "action": "release_subdomain",
-                    "label": label,
-                    "org_id": rec.org_id,
-                    "reason": "backing_domain_unverified",
-                });
+                let data = OrgSubdomainCleanupData {
+                    action: "release_subdomain",
+                    label: &label,
+                    org_id: &rec.org_id,
+                    reason: "backing_domain_unverified",
+                };
                 if let Err(e) = audit
                     .insert_event_with_domain(
                         db::AuditEventKind::OrgSubdomainReleased,
                         None,
                         org_domain.as_deref(),
-                        &data.to_string(),
+                        &data,
                     )
                     .await
                 {

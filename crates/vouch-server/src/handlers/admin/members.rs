@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::documents::audit::AdminMemberActionData;
 use crate::error::ServiceError;
 use crate::impl_template_response;
 use askama::Template;
@@ -152,18 +153,19 @@ pub(crate) async fn promote_member(
         return Err(member_gone());
     }
 
-    let data = serde_json::json!({
-        "action": "promote",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-    });
+    let data = AdminMemberActionData {
+        action: "promote",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminPromote,
             Some(&admin.id),
             Some(&target.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -214,18 +216,19 @@ pub(crate) async fn demote_member(
         return Err(member_gone());
     }
 
-    let data = serde_json::json!({
-        "action": "demote",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-    });
+    let data = AdminMemberActionData {
+        action: "demote",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminDemote,
             Some(&admin.id),
             Some(&target.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -287,18 +290,19 @@ pub(crate) async fn deactivate_member(
     )
     .await?;
 
-    let data = serde_json::json!({
-        "action": "deactivate",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-    });
+    let data = AdminMemberActionData {
+        action: "deactivate",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminDeactivate,
             Some(&admin.id),
             Some(&target.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -336,18 +340,19 @@ pub(crate) async fn activate_member(
         return Err(member_gone());
     }
 
-    let data = serde_json::json!({
-        "action": "activate",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-    });
+    let data = AdminMemberActionData {
+        action: "activate",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminActivate,
             Some(&admin.id),
             Some(&target.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -407,19 +412,19 @@ pub(crate) async fn revoke_member_credentials(
     )
     .await?;
 
-    let data = serde_json::json!({
-        "action": "revoke_credentials",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-        "keys_revoked": key_count,
-    });
+    let data = AdminMemberActionData {
+        action: "revoke_credentials",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: Some(key_count),
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminRevokeCredentials,
             Some(&admin.id),
             Some(&target.email),
-            &data.to_string(),
+            &data,
         )
         .await
     {
@@ -489,18 +494,19 @@ pub(crate) async fn remove_member(
         return Err(member_gone());
     }
 
-    let data = serde_json::json!({
-        "action": "remove_user",
-        "target_user_id": &*target_id,
-        "admin_user_id": admin.id,
-    });
+    let data = AdminMemberActionData {
+        action: "remove_user",
+        target_user_id: &target_id,
+        admin_user_id: &admin.id,
+        keys_revoked: None,
+    };
     if let Err(e) = state
         .audit
         .insert_event(
             db::AuditEventKind::AdminRemoveUser,
             Some(&admin.id),
             Some(&target_email),
-            &data.to_string(),
+            &data,
         )
         .await
     {

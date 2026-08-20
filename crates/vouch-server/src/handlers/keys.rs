@@ -203,18 +203,18 @@ pub(crate) async fn register_complete(
                 user_id = %reg_state.user_id,
                 "CLI registration state replay rejected"
             );
-            let audit_data = serde_json::json!({
-                "flow": "cli_register",
-                "success": false,
-                "error_code": "state_already_used",
-            });
+            let audit_data = crate::db::documents::audit::RegistrationReplayData {
+                flow: "cli_register",
+                success: false,
+                error_code: "state_already_used",
+            };
             if let Err(e) = state
                 .audit
                 .insert_event(
                     db::AuditEventKind::KeyRegistrationReplay,
                     Some(&reg_state.user_id.to_string()),
                     Some(&reg_state.user_name),
-                    &audit_data.to_string(),
+                    &audit_data,
                 )
                 .await
             {
