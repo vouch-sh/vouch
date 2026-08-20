@@ -8,7 +8,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 use crate::email::Email;
 
 /// A Vouch user.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserDoc {
     /// Canonical (trimmed, ASCII-lowercased) address. The [`Email`] type
     /// canonicalizes on construction and deserialization, so the `email`
@@ -23,7 +23,8 @@ pub struct UserDoc {
     pub external_id: Option<String>,
     pub github_id: Option<i64>,
     pub github_login: Option<String>,
-    pub github_refresh_token: Option<String>,
+    #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
+    pub github_refresh_token: Option<secrecy::SecretString>,
     /// Upstream IdP identities bound to this account, at most one per
     /// issuer (enforced by `enroll_user_with_org`, not the schema).
     /// Empty for accounts that predate identity binding and for
@@ -231,6 +232,44 @@ mod tests {
         let doc: Result<UserDoc, _> = serde_json::from_str(json);
         let doc = doc.expect("legacy user JSON must deserialize");
         assert!(doc.idp_identities.is_empty());
+    }
+
+    #[test]
+    fn github_refresh_token_round_trips_as_plain_json_string() {
+        // The SecretString field must serialize exactly like the
+        // Option<String> it replaced (explicit serializer, None -> null),
+        // and stored documents must read back with the value intact.
+        use secrecy::ExposeSecret;
+
+        let mut doc = UserDoc {
+            email: Email::new("rt@example.com"),
+            name: None,
+            org_id: None,
+            is_org_admin: false,
+            active: true,
+            external_id: None,
+            github_id: None,
+            github_login: None,
+            github_refresh_token: Some("ghr_secret-value".into()),
+            idp_identities: Vec::new(),
+        };
+        let json = serde_json::to_value(&doc).expect("serialize UserDoc");
+        assert_eq!(json["github_refresh_token"], "ghr_secret-value");
+
+        let read: UserDoc = serde_json::from_value(json).expect("deserialize UserDoc");
+        assert_eq!(
+            read.github_refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret()),
+            Some("ghr_secret-value")
+        );
+
+        doc.github_refresh_token = None;
+        let json = serde_json::to_value(&doc).expect("serialize UserDoc");
+        assert!(
+            json["github_refresh_token"].is_null() && json.get("github_refresh_token").is_some(),
+            "None must serialize as an explicit null: {json}"
+        );
     }
 
     #[test]

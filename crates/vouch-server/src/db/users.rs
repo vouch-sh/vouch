@@ -19,7 +19,7 @@ pub struct User {
     pub external_id: Option<String>,
     pub github_id: Option<i64>,
     pub github_login: Option<String>,
-    pub github_refresh_token: Option<String>,
+    pub github_refresh_token: Option<secrecy::SecretString>,
 }
 
 // Custom Debug that redacts github_refresh_token to prevent accidental log
@@ -417,7 +417,7 @@ pub async fn update_user_github_identity(
             data.github_id = Some(github_id);
             data.github_login = Some(github_login.to_string());
             if let Some(token) = github_refresh_token {
-                data.github_refresh_token = Some(token.to_string());
+                data.github_refresh_token = Some(secrecy::SecretString::from(token));
             }
         })
         .await?;
@@ -432,7 +432,7 @@ pub async fn update_user_github_identity(
 pub async fn get_user_github_refresh_token(
     store: &DocumentStore,
     user_id: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<secrecy::SecretString>> {
     let doc = store.get::<UserDoc>(user_id).await?;
     Ok(doc.and_then(|d| d.data.github_refresh_token))
 }

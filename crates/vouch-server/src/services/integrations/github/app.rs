@@ -131,7 +131,7 @@ pub struct GitHubRepository {
 /// Response from GitHub's installation token endpoint.
 #[derive(Deserialize)]
 struct InstallationTokenResponse {
-    token: String,
+    token: SecretString,
     expires_at: String,
     permissions: HashMap<String, String>,
     repositories: Option<Vec<GitHubRepository>>,
@@ -367,7 +367,7 @@ impl GitHubApp {
             .context("Failed to parse installation token response")?;
 
         Ok(GitHubInstallationToken {
-            token: SecretString::from(token_response.token),
+            token: token_response.token,
             expires_at: token_response.expires_at,
             permissions: token_response.permissions,
             repositories: token_response.repositories,
@@ -590,13 +590,13 @@ pub(crate) async fn get_github_user(
 #[derive(Deserialize)]
 pub(crate) struct GitHubOAuthTokenResponse {
     /// Access token for API calls.
-    pub access_token: String,
+    pub access_token: SecretString,
     /// Token type (usually "bearer").
     pub token_type: String,
     /// Granted scopes (space-separated).
     pub scope: Option<String>,
     /// Refresh token for getting new access tokens.
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<SecretString>,
     /// Access token expiration in seconds (8 hours for GitHub Apps).
     pub expires_in: Option<u64>,
     /// Refresh token expiration in seconds (6 months for GitHub Apps).
