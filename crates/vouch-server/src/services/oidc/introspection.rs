@@ -463,7 +463,7 @@ mod tests {
         // session lookup. The token is never stored, so the SessionCache misses
         // and the lookup must hit the pool.
         let claims = AccessTokenClaims {
-            iss: state.config().base_url.clone(),
+            iss: state.config().base_url.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
             exp: now + 3600,

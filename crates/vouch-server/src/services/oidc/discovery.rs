@@ -198,7 +198,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
     };
 
     OidcDiscoveryDocument {
-        issuer: base_url.clone(),
+        issuer: base_url.to_string(),
         authorization_endpoint: format!("{base_url}/oauth/authorize"),
         token_endpoint: format!("{base_url}/oauth/token"),
         userinfo_endpoint: format!("{base_url}/oauth/userinfo"),

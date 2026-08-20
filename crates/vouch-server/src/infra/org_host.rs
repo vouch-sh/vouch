@@ -96,7 +96,7 @@ mod tests {
 
     fn config_with_base_url(base_url: &str) -> ServerConfig {
         let mut config = crate::test_utils::test_config();
-        config.base_url = base_url.to_string();
+        config.base_url = crate::config::BaseUrl::new(base_url);
         config
     }
 

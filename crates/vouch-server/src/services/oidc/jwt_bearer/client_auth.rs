@@ -403,7 +403,7 @@ mod tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: "https://test.example.com".to_string(),
+            base_url: crate::config::BaseUrl::new("https://test.example.com"),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,

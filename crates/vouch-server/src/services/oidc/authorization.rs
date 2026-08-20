@@ -688,7 +688,7 @@ pub async fn issue_authorization_code(
         );
 
     let auth_code = AuthorizationCode {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         aud: params.client_id.to_string(),
         client_id: params.client_id.to_string(),
         redirect_uri: params.redirect_uri.to_string(),

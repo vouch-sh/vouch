@@ -282,12 +282,12 @@ pub async fn build_protected_resource_metadata(
     };
 
     let resource = match classification {
-        SubPathClassification::Root => config.base_url.clone(),
+        SubPathClassification::Root => config.base_url.to_string(),
         SubPathClassification::Known(canonical) => {
             // Concatenate base_url + "/" + tail literally (no URL
             // normalization) so the echoed value is byte-identical
             // to what the client asked for, per RFC 9728 §4.
-            let trimmed_base = config.base_url.trim_end_matches('/');
+            let trimmed_base = &config.base_url;
             let full = format!("{trimmed_base}/{canonical}");
             full
         }
@@ -321,8 +321,8 @@ pub async fn build_protected_resource_metadata(
     // JWS see an identical view.
     let mut metadata = ProtectedResourceMetadata {
         resource: resource.clone(),
-        authorization_servers: vec![config.base_url.clone()],
-        jwks_uri: format!("{}/oauth/jwks", config.base_url.trim_end_matches('/')),
+        authorization_servers: vec![config.base_url.to_string()],
+        jwks_uri: format!("{}/oauth/jwks", config.base_url),
         scopes_supported,
         bearer_methods_supported: vec!["header".to_string(), "body".to_string()],
         resource_signing_alg_values_supported,

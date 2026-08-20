@@ -56,7 +56,7 @@ pub(crate) async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoRes
             crate::services::idp::ConfiguredIdp::Saml(p) => Some(p.sp_entity_id.clone()),
             crate::services::idp::ConfiguredIdp::Oidc(_) => None,
         })
-        .unwrap_or_else(|| config.base_url.clone());
+        .unwrap_or_else(|| config.base_url.to_string());
     let acs_url = format!("{}/saml/acs", config.base_url);
     let xml = crate::services::idp::saml::metadata::generate_sp_metadata(&sp_entity_id, &acs_url);
     (

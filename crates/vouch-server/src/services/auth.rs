@@ -792,7 +792,7 @@ pub(crate) async fn create_oauth_access_token(
     };
 
     let claims = AccessTokenClaims {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud,
         exp: expires.as_second(),

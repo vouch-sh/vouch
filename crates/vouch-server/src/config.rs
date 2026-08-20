@@ -632,6 +632,83 @@ pub fn bootstrap_overlay_args(
 // Server Configuration
 // ============================================================================
 
+/// A server base URL with no trailing slash.
+///
+/// Normalization happens in [`BaseUrl::new`], which is the only way to build
+/// one, so every value is already normalized and no call site needs to trim.
+/// A trailing slash here produces `https://host//oauth/token` in every
+/// derived endpoint and an issuer that fails the exact-match comparison
+/// clients perform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseUrl(String);
+
+impl BaseUrl {
+    /// Build a base URL, stripping any trailing slashes.
+    #[must_use]
+    pub fn new(raw: impl AsRef<str>) -> Self {
+        Self(raw.as_ref().trim_end_matches('/').to_string())
+    }
+
+    /// The normalized URL.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for BaseUrl {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// Comparisons against plain strings keep call sites readable — notably the
+// WebAuthn origin check, which compares a browser-supplied origin to this.
+impl PartialEq<str> for BaseUrl {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<String> for BaseUrl {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialEq<BaseUrl> for String {
+    fn eq(&self, other: &BaseUrl) -> bool {
+        self == &other.0
+    }
+}
+
+impl PartialEq<&str> for BaseUrl {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<BaseUrl> for &str {
+    fn eq(&self, other: &BaseUrl) -> bool {
+        *self == other.0
+    }
+}
+
+// Serialized in config snapshots and template contexts; the wire form is the
+// normalized string, so this is transparent.
+impl serde::Serialize for BaseUrl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 /// Server configuration loaded from command-line arguments and environment variables.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -650,7 +727,7 @@ pub struct ServerConfig {
     /// Configured identity providers (OIDC + SAML), in operator-specified order.
     pub idps: Vec<IdpConfig>,
     /// Base URL for this server (defaults to `https://{rp_id}`, or `http://localhost:port` for local dev).
-    pub base_url: String,
+    pub base_url: BaseUrl,
     /// Device code expiration in seconds (default: 600).
     pub device_code_expires_seconds: u64,
     /// Device code polling interval in seconds (default: 5).
@@ -869,7 +946,16 @@ impl ServerConfig {
         let aws_use_fips_endpoint = vouch_common::env::non_empty(args.aws_use_fips_endpoint)
             .map(|v| v.eq_ignore_ascii_case("true"));
 
-        let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
+        // Normalize: strip any trailing slashes so the issuer and every
+        // endpoint derived from `base_url` (OIDC discovery, JWT `iss`, DPoP
+        // `htu`, authorization code validation) are spec-compliant. OIDC
+        // Discovery 1.0 §4.3 requires exact string equality between the
+        // issuer used to fetch the discovery document and the `issuer` value
+        // returned; a trailing slash breaks that comparison and produces
+        // double-slash endpoint URLs (e.g. `https://host//oauth/token`).
+        let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr)
+            .trim_end_matches('/')
+            .to_string();
 
         // Parse allowed domains
         let allowed_domains = args
@@ -910,7 +996,7 @@ impl ServerConfig {
             jwt_secret: SecretString::from(args.jwt_secret),
             session_hours: args.session_hours,
             idps,
-            base_url,
+            base_url: BaseUrl::new(base_url),
             device_code_expires_seconds: args.device_code_expires,
             device_poll_interval_seconds: args.device_poll_interval,
             allowed_domains,
@@ -1147,6 +1233,23 @@ impl ServerConfig {
                          List explicit origins instead, e.g. https://app.example.com"
                     );
                 }
+                // An origin is scheme + host + optional port (RFC 6454 §6.1) —
+                // no path, not even a bare "/". A value carrying one parses
+                // into a `HeaderValue` happily and is then compared verbatim
+                // against the browser's `Origin` header, so it silently never
+                // matches and every cross-origin UI request fails with nothing
+                // logged. Reject it here rather than rewrite it: the operator
+                // meant something specific and should be told it is wrong.
+                let after_scheme = origin.split_once("://").map_or(origin.as_str(), |(_, r)| r);
+                if after_scheme.contains('/') {
+                    anyhow::bail!(
+                        "VOUCH_CORS_ORIGINS entry '{origin}' must not contain a path or \
+                         trailing slash. An origin is scheme://host[:port] only — a browser \
+                         never sends a path in the Origin header, so this entry would never \
+                         match. Use '{}' instead.",
+                        origin.trim_end_matches('/')
+                    );
+                }
             }
         }
 
@@ -1263,7 +1366,7 @@ mod tests {
     #[test]
     fn test_org_issuer_preserves_scheme_and_port() {
         let mut config = test_config();
-        config.base_url = "http://localhost:3000".to_string();
+        config.base_url = crate::config::BaseUrl::new("http://localhost:3000");
         assert_eq!(config.primary_host().as_deref(), Some("localhost"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1274,7 +1377,7 @@ mod tests {
     #[test]
     fn test_org_issuer_production_shape() {
         let mut config = test_config();
-        config.base_url = "https://us.vouch.sh".to_string();
+        config.base_url = crate::config::BaseUrl::new("https://us.vouch.sh");
         assert_eq!(config.primary_host().as_deref(), Some("us.vouch.sh"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1285,7 +1388,7 @@ mod tests {
     #[test]
     fn test_org_issuer_unparseable_base_url() {
         let mut config = test_config();
-        config.base_url = "not a url".to_string();
+        config.base_url = crate::config::BaseUrl::new("not a url");
         assert!(config.primary_host().is_none());
         assert!(config.org_issuer("acme").is_none());
     }
@@ -1553,6 +1656,58 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    /// A trailing slash parses into a `HeaderValue` but never matches the
+    /// browser's `Origin`, so the misconfiguration is invisible at runtime —
+    /// every cross-origin UI request just fails. Reject it at startup.
+    #[test]
+    fn test_validate_rejects_cors_origin_with_trailing_slash() {
+        let mut config = test_config();
+        config.cors_origins = Some(vec!["https://app.example.com/".to_string()]);
+        let err = config
+            .validate()
+            .expect_err("an origin with a trailing slash must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("must not contain a path"), "message: {msg}");
+        assert!(
+            msg.contains("https://app.example.com'"),
+            "message should suggest the corrected value: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_cors_origin_with_path() {
+        let mut config = test_config();
+        config.cors_origins = Some(vec!["https://app.example.com/callback".to_string()]);
+        assert!(
+            config.validate().is_err(),
+            "an origin carrying a path must be rejected"
+        );
+    }
+
+    /// The whole point of the newtype: there is no way to hold an
+    /// unnormalized base URL, so no call site needs to trim.
+    #[test]
+    fn base_url_normalizes_on_construction() {
+        use super::BaseUrl;
+        assert_eq!(
+            BaseUrl::new("https://vouch.example.com/"),
+            "https://vouch.example.com"
+        );
+        assert_eq!(
+            BaseUrl::new("https://vouch.example.com///"),
+            "https://vouch.example.com"
+        );
+        assert_eq!(
+            BaseUrl::new("https://vouch.example.com"),
+            "https://vouch.example.com"
+        );
+        // A path-bearing base URL keeps its path, losing only the trailing slash.
+        assert_eq!(
+            BaseUrl::new("https://example.com/vouch/"),
+            "https://example.com/vouch"
+        );
+    }
+
     // ========================================================================
     // Bootstrap overlay precedence
     //
@@ -1785,6 +1940,86 @@ mod tests {
             config.aws_use_fips_endpoint.is_none(),
             "empty CLI aws_use_fips_endpoint must be None, got {:?}",
             config.aws_use_fips_endpoint
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — base_url trailing-slash normalization
+    //
+    // OIDC Discovery 1.0 §4.3 requires exact string equality between the
+    // issuer used to fetch the discovery document and the `issuer` value
+    // returned. A trailing slash on `VOUCH_BASE_URL` would otherwise produce
+    // an issuer with a trailing slash and double-slash endpoint URLs
+    // (`https://host//oauth/token`), breaking spec-compliant clients and
+    // DPoP `htu` validation.
+    // ========================================================================
+
+    #[test]
+    fn from_args_trims_single_trailing_slash_from_base_url() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com/"])
+            .expect("parse with trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "single trailing slash must be stripped from base_url"
+        );
+    }
+
+    #[test]
+    fn from_args_trims_multiple_trailing_slashes_from_base_url() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com//"])
+            .expect("parse with double trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "all trailing slashes must be stripped from base_url"
+        );
+    }
+
+    #[test]
+    fn from_args_preserves_base_url_without_trailing_slash() {
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com"])
+            .expect("parse with clean base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "base_url without trailing slash must be unchanged"
+        );
+    }
+
+    #[test]
+    fn from_args_derived_base_url_has_no_trailing_slash() {
+        // When VOUCH_BASE_URL is unset, base_url is derived from rp_id and
+        // must never carry a trailing slash.
+        let args = Args::try_parse_from(["vouch-server", "--rp-id=auth.example.com"])
+            .expect("parse with rp_id only");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.base_url, "https://auth.example.com",
+            "derived base_url must not have a trailing slash"
+        );
+        assert!(
+            !config.base_url.ends_with('/'),
+            "derived base_url must never end with '/'"
+        );
+    }
+
+    #[test]
+    fn from_args_trailing_slash_does_not_produce_double_slash_endpoints() {
+        // Regression: a trailing slash on base_url used to produce
+        // `https://host//oauth/token` for discovery endpoints. Verify the
+        // normalized base_url concatenates cleanly with a path segment.
+        let args = Args::try_parse_from(["vouch-server", "--base-url=https://auth.example.com/"])
+            .expect("parse with trailing-slash base_url");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        let token_endpoint = format!("{}/oauth/token", config.base_url);
+        assert_eq!(
+            token_endpoint, "https://auth.example.com/oauth/token",
+            "endpoint URLs must not contain double slashes"
+        );
+        assert!(
+            !token_endpoint.contains("//oauth"),
+            "no double-slash path component allowed in endpoints"
         );
     }
 
