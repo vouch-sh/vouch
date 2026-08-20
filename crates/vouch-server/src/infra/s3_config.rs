@@ -808,10 +808,7 @@ impl ServerConfig {
             self.rp_name = v.clone();
         }
         if let Some(v) = &s3.base_url {
-            // Normalize: strip trailing slashes so the issuer and every
-            // endpoint derived from `base_url` remain spec-compliant —
-            // mirrors the normalization applied in `Args::from_args`.
-            self.base_url = v.trim_end_matches('/').to_string();
+            self.base_url = crate::config::BaseUrl::new(v);
         }
         if let Some(v) = &s3.jwt_secret {
             self.jwt_secret = SecretString::from(v.clone());

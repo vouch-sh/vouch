@@ -682,7 +682,7 @@ pub(crate) async fn browser_login_complete(
         rp_id: auth_state.rp_id.clone(),
         // Browser sets clientDataJSON.origin to the calling page's origin
         // (the server's base_url), which may be a subdomain of rp_id.
-        expected_origin: state.config().base_url.clone(),
+        expected_origin: state.config().base_url.to_string(),
         challenge: auth_state.challenge.clone(),
         stored_counter,
         // Tolerate loopback origin variations only in development (no TLS).
@@ -767,7 +767,7 @@ pub(crate) async fn browser_login_complete(
     }
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
-    let client_id = state.config().base_url.clone();
+    let client_id = state.config().base_url.to_string();
     let auth_now = Timestamp::now();
 
     // Snapshot org domain at session creation so the federation claims are a

@@ -121,7 +121,7 @@ pub fn org_issuer_or_base(
             )
         })
     } else {
-        Ok(config.base_url.clone())
+        Ok(config.base_url.to_string())
     }
 }
 

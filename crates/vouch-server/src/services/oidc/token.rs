@@ -888,7 +888,7 @@ async fn generate_id_token(
     let has_email = params.scope.contains(OAuthScope::Email);
 
     let claims = IdTokenClaims {
-        iss: state.config().base_url.clone(),
+        iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud: params.client_id.to_string(),
         exp,

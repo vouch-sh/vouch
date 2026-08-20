@@ -41,7 +41,7 @@ pub(crate) async fn install_page(
         download_macos: state.config().cli_download_macos.clone(),
         download_linux: state.config().cli_download_linux.clone(),
         download_windows: state.config().cli_download_windows.clone(),
-        server_url: state.config().base_url.clone(),
+        server_url: state.config().base_url.to_string(),
         auth,
     }
 }

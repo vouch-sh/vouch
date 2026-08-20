@@ -75,7 +75,7 @@ pub(crate) async fn home_page(
     let idp_entries = build_idp_entries(&state.idps);
 
     HomeTemplate {
-        server_url: state.config().base_url.clone(),
+        server_url: state.config().base_url.to_string(),
         org_name: state.config().get_org_display_name().to_string(),
         has_downloads,
         download_macos: state.config().cli_download_macos.clone(),

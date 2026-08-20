@@ -206,7 +206,7 @@ mod redirect_tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: format!("https://{rp_id}"),
+            base_url: crate::config::BaseUrl::new(format!("https://{rp_id}")),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,
