@@ -1490,6 +1490,8 @@ pub struct TestClientSpec {
     pub userinfo_signed_response_alg: Option<crate::db::JwsAlgorithm>,
     /// Introspection JWT signing algorithm override. Default: `None`.
     pub introspection_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    /// JARM response signing algorithm override. Default: `None` (ES256).
+    pub authorization_signed_response_alg: Option<crate::db::JwsAlgorithm>,
     /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
     pub with_secret: bool,
     /// Restrict request-object signing algorithm. Default: `None`.
@@ -1521,6 +1523,7 @@ impl Default for TestClientSpec {
             tls_client_certificate_bound_access_tokens: false,
             userinfo_signed_response_alg: Option::None,
             introspection_signed_response_alg: Option::None,
+            authorization_signed_response_alg: Option::None,
             with_secret: true,
             request_object_signing_alg: Option::None,
             require_signed_request_object: Option::None,
@@ -1609,7 +1612,7 @@ pub async fn create_test_client(
             } else {
                 Option::None
             },
-            authorization_signed_response_alg: Option::None,
+            authorization_signed_response_alg: spec.authorization_signed_response_alg,
             introspection_signed_response_alg: spec.introspection_signed_response_alg,
             request_object_signing_alg: spec.request_object_signing_alg,
             require_signed_request_object: spec.require_signed_request_object,

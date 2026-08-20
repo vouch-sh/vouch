@@ -106,6 +106,9 @@ pub(crate) struct AuthorizeQuery {
     response_mode: Option<String>,
 }
 
+mod error_response;
+pub(crate) use error_response::oauth_error_response;
+
 // ---------------------------------------------------------------------------
 // Security gate types
 // ---------------------------------------------------------------------------
@@ -123,6 +126,33 @@ pub(crate) struct AuthorizeQuery {
 struct ResolvedClient {
     client: OAuthClient,
     redirect_uri: String,
+    response_mode: ResponseMode,
+}
+
+/// The request context for a PAR-backed authorization.
+///
+/// `response_mode` is a hint, not the authoritative value: the mode the client
+/// pushed lives in the PAR record, which is already gone whenever an error
+/// needs rendering here. It still beats an unconditional 302 — a form_post
+/// client that receives query params on its registered redirect_uri has no
+/// way to read them.
+#[derive(Clone, Copy)]
+struct ParRequestContext<'a> {
+    request_uri: &'a str,
+    client_id: &'a str,
+    fallback_redirect_uri: Option<&'a str>,
+    response_mode: ResponseMode,
+}
+
+/// What an error response has to be rendered against.
+///
+/// Kept together so a code path cannot hold one without the other: the client
+/// is needed to sign a JARM response, and the mode decides whether the error
+/// is a query redirect, a form post, or a signed JWT. Passing the mode alone
+/// is how error exits ended up as unconditional 302s.
+#[derive(Clone, Copy)]
+struct ErrorTarget<'a> {
+    client: &'a OAuthClient,
     response_mode: ResponseMode,
 }
 
@@ -337,7 +367,10 @@ async fn check_session_and_authorize(
             store_pending_and_redirect(
                 state,
                 validated,
-                resolved.response_mode,
+                ErrorTarget {
+                    client: &resolved.client,
+                    response_mode: resolved.response_mode,
+                },
                 None,
                 par_to_consume.map(|(uri, _)| uri),
             )
@@ -436,9 +469,16 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             }
             return handle_par_request(
                 &state,
-                request_uri,
-                &client_id,
-                params.redirect_uri.as_deref(),
+                ParRequestContext {
+                    request_uri,
+                    client_id: &client_id,
+                    fallback_redirect_uri: params.redirect_uri.as_deref(),
+                    response_mode: params
+                        .response_mode
+                        .as_deref()
+                        .and_then(ResponseMode::parse)
+                        .unwrap_or(ResponseMode::Query),
+                },
                 jar,
             )
             .await;
@@ -688,10 +728,14 @@ async fn handle_jar_request(
 /// registered URIs before issuing any 302 (RFC 9126 §7.2, RFC 6749 §4.1.2.1).
 async fn lookup_par(
     state: &Arc<AppState>,
-    request_uri: &str,
-    client_id: &str,
-    fallback_redirect_uri: Option<&str>,
+    ctx: ParRequestContext<'_>,
 ) -> Result<db::PushedAuthorizationRequest, Response> {
+    let ParRequestContext {
+        request_uri,
+        client_id,
+        fallback_redirect_uri,
+        response_mode,
+    } = ctx;
     match db::get_pushed_authorization_request(&state.store, request_uri, client_id).await {
         Ok(Some(p)) => Ok(p),
         Ok(None) => {
@@ -705,20 +749,16 @@ async fn lookup_par(
             if let Some(uri) = fallback_redirect_uri {
                 match db::get_oauth_client_by_client_id(&state.store, client_id).await {
                     Ok(Some(client)) if client.is_valid_redirect_uri(uri) => {
-                        if let Ok(mut redirect) = url::Url::parse(uri) {
-                            {
-                                let mut q = redirect.query_pairs_mut();
-                                q.append_pair("error", "invalid_request_uri");
-                                q.append_pair(
-                                    "error_description",
-                                    "Invalid or expired request_uri",
-                                );
-                                q.append_pair("iss", &state.config().base_url);
-                            }
-                            return Err(
-                                axum::response::Redirect::to(redirect.as_str()).into_response()
-                            );
-                        }
+                        return Err(oauth_error_response(
+                            state,
+                            &client,
+                            uri,
+                            "invalid_request_uri",
+                            "Invalid or expired request_uri",
+                            None,
+                            response_mode,
+                        )
+                        .await);
                     }
                     Ok(Some(_)) => {
                         // URI not registered — fall through to error page.
@@ -760,13 +800,11 @@ async fn lookup_par(
 /// Phase C: session check + code issuance.
 async fn handle_par_request(
     state: &Arc<AppState>,
-    request_uri: &str,
-    client_id: &str,
-    fallback_redirect_uri: Option<&str>,
+    ctx: ParRequestContext<'_>,
     jar: CookieJar,
 ) -> Response {
     // FAPI 2.0 Section 5.3.2.2 Note 3: Look up the PAR without consuming it.
-    let par = match lookup_par(state, request_uri, client_id, fallback_redirect_uri).await {
+    let par = match lookup_par(state, ctx).await {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -843,7 +881,7 @@ async fn handle_par_request(
         validated,
         &jar,
         ReauthPolicy::Always,
-        Some((request_uri, client_id)),
+        Some((ctx.request_uri, ctx.client_id)),
     )
     .await
 }
@@ -1320,7 +1358,7 @@ fn resolve_redirect_uri(
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
-    response_mode: ResponseMode,
+    target: ErrorTarget<'_>,
     prompt_override: Option<Prompt>,
     par_request_uri: Option<&str>,
 ) -> Response {
@@ -1350,7 +1388,7 @@ async fn store_pending_and_redirect(
         prompt: prompt_str,
         dpop_jkt: validated.dpop_jkt(),
         authorization_details: ad_value.as_ref(),
-        response_mode,
+        response_mode: target.response_mode,
         par_request_uri,
     };
 
@@ -1379,17 +1417,19 @@ async fn store_pending_and_redirect(
         }
         Err(e) => {
             tracing::error!("Failed to create pending OAuth authorization: {}", e);
-            // At this point the redirect_uri has been validated (ResolvedClient constructed),
-            // so it is safe to redirect with the error. However we don't have the
-            // ResolvedClient here — use a bare redirect as a best-effort fallback.
-            build_authorization_redirect(
+            // The redirect_uri is validated by now (ResolvedClient was
+            // constructed), so returning the error to the client is safe — and
+            // it must honour the requested response_mode like every other exit.
+            oauth_error_response(
+                state,
+                target.client,
                 validated.redirect_uri(),
-                &[
-                    ("error", "server_error"),
-                    ("error_description", "Failed to initiate login"),
-                    ("iss", &state.config().base_url),
-                ],
+                "server_error",
+                "Failed to initiate login",
+                validated.state(),
+                target.response_mode,
             )
+            .await
         }
     }
 }
@@ -1498,7 +1538,10 @@ async fn authorize_authenticated_user(
         return store_pending_and_redirect(
             state,
             validated,
-            response_mode,
+            ErrorTarget {
+                client: oauth_client,
+                response_mode,
+            },
             Some(Prompt::Login),
             par_to_consume.map(|(uri, _)| uri),
         )
@@ -1729,107 +1772,11 @@ async fn issue_code_and_redirect(
     }
 }
 
-/// Build an authorization redirect URL with the given query parameters.
-fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
-    match build_redirect_url_with_params(redirect_uri, params) {
-        Ok(url) => Redirect::to(&url).into_response(),
-        Err(_) => Redirect::to(redirect_uri).into_response(),
-    }
-}
-
-/// Create an OAuth error response, dispatching on `response_mode`.
-///
-/// - `Jwt`: wraps error in a JARM signed JWT.
-/// - `FormPost`: delivers error via HTML auto-submitting form.
-/// - `Query`: delivers via query-string redirect (RFC 6749).
-///
-/// Includes the `iss` parameter per RFC 9207 in all modes.
-async fn oauth_error_response(
-    app_state: &Arc<AppState>,
-    client: &OAuthClient,
-    redirect_uri: &str,
-    error: &str,
-    description: &str,
-    oauth_state: Option<&str>,
-    response_mode: ResponseMode,
-) -> Response {
-    match response_mode {
-        ResponseMode::Jwt => {
-            oauth_error_redirect_jarm(
-                app_state,
-                client,
-                redirect_uri,
-                error,
-                description,
-                oauth_state,
-            )
-            .await
-        }
-        ResponseMode::FormPost => {
-            let mut params = vec![
-                ("error".to_string(), error.to_string()),
-                ("error_description".to_string(), description.to_string()),
-                ("iss".to_string(), app_state.config().base_url.to_string()),
-            ];
-            if let Some(s) = oauth_state {
-                params.push(("state".to_string(), s.to_string()));
-            }
-            FormPostResponseTemplate {
-                redirect_uri: redirect_uri.to_string(),
-                params,
-            }
-            .into_response()
-        }
-        ResponseMode::Query => {
-            let issuer = &app_state.config().base_url;
-            let mut params = vec![("error", error), ("error_description", description)];
-            if let Some(state_param) = oauth_state {
-                params.push(("state", state_param));
-            }
-            params.push(("iss", issuer));
-            build_authorization_redirect(redirect_uri, &params)
-        }
-    }
-}
-
-/// Create an OAuth error redirect response using JARM encoding.
-///
-/// Falls back to plain query parameters if JARM JWT signing fails.
-async fn oauth_error_redirect_jarm(
-    state: &Arc<AppState>,
-    client: &OAuthClient,
-    redirect_uri: &str,
-    error: &str,
-    description: &str,
-    oauth_state: Option<&str>,
-) -> Response {
-    match crate::services::oidc::jarm::build_jarm_error_jwt(
-        state,
-        client,
-        error,
-        Some(description),
-        oauth_state,
-    )
-    .await
-    {
-        Ok(jwt) => {
-            let url = build_jarm_redirect_url(redirect_uri, &jwt);
-            axum::response::Redirect::to(&url).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to build JARM error JWT: {e}");
-            let issuer = &state.config().base_url;
-            let mut params = vec![("error", error), ("error_description", description)];
-            if let Some(state_param) = oauth_state {
-                params.push(("state", state_param));
-            }
-            params.push(("iss", issuer));
-            build_authorization_redirect(redirect_uri, &params)
-        }
-    }
-}
-
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::db::{
@@ -1910,5 +1857,66 @@ mod tests {
         ]);
         let result = resolve_redirect_uri(None, &client);
         assert!(result.is_err());
+    }
+
+    /// JARM §2.1 requires the response be a JWT "even in case of an error
+    /// response", and clients "MUST NOT" accept `alg: none`. When signing
+    /// fails there is no conformant response to put on the redirect, so the
+    /// redirect must not be taken — returning plain parameters would send the
+    /// client exactly what it is obliged to discard while looking, to the
+    /// user, like the flow completed.
+    #[tokio::test]
+    async fn jarm_signing_failure_does_not_fall_back_to_unsigned_parameters() {
+        use crate::test_utils::{TestClientSpec, create_test_client, create_test_user};
+
+        // No RSA key is configured in the test state, so a client that asks
+        // for RS256 JARM makes signing fail for real rather than by mocking.
+        let state = crate::test_utils::test_app_state().await;
+        let user = create_test_user(&state.store, "jarm-fail@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                authorization_signed_response_alg: Some(JwsAlgorithm::Rs256),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        assert!(
+            state.oidc_rsa_key.is_none(),
+            "test state must have no RSA key for signing to fail"
+        );
+
+        let response = oauth_error_response(
+            &state,
+            &client,
+            "https://example.com/callback",
+            "access_denied",
+            "user denied",
+            Some("opaque-state"),
+            ResponseMode::Jwt,
+        )
+        .await;
+
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .is_none(),
+            "must not redirect: there is no conformant response to send"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            !body.contains("opaque-state") && !body.contains("access_denied"),
+            "must not leak the response parameters outside a signed JWT: {body}"
+        );
     }
 }
