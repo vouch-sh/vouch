@@ -496,6 +496,63 @@ async fn test_rfc9126_par_rejects_missing_response_type() {
     );
 }
 
+/// The message that lists supported prompt values is only useful if the
+/// endpoint actually accepts them. The service-layer parse test passed for
+/// months while this endpoint's message was wrong, so pin acceptance here.
+#[tokio::test]
+async fn test_rfc9126_par_accepts_consent_prompt() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-consent@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("consent")).await;
+    assert!(
+        request_uri.starts_with("urn:ietf:params:oauth:request_uri:"),
+        "prompt=consent must be accepted, got {request_uri}"
+    );
+}
+
+/// An unsupported `response_mode` must be rejected with a message naming
+/// every mode the endpoint really accepts — `form_post` was omitted.
+#[tokio::test]
+async fn test_rfc9126_par_rejects_unsupported_response_mode() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-badmode@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &response_mode=fragment",
+        urlencoding::encode(&client.client_id),
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {response_body}");
+    assert!(
+        response_body.contains("form_post"),
+        "the supported-values list must name form_post: {response_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
     // OIDC Core Section 3.1.2.1: Unsupported prompt values must be rejected.

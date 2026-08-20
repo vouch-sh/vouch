@@ -519,7 +519,10 @@ async fn handle_direct_request(
                     .error_redirect(
                         state,
                         "invalid_request",
-                        "Unsupported prompt value. Supported values: login, none, consent",
+                        &format!(
+                            "Unsupported prompt value. Supported values: {}",
+                            crate::services::oidc::authorization::Prompt::supported_values()
+                        ),
                         params.state.as_deref(),
                     )
                     .await;

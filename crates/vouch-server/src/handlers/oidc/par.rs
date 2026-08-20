@@ -405,7 +405,10 @@ pub(crate) async fn par(
                     return par_error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request",
-                        "Unsupported prompt value. Supported values: login, none, consent",
+                        &format!(
+                            "Unsupported prompt value. Supported values: {}",
+                            crate::services::oidc::authorization::Prompt::supported_values()
+                        ),
                     );
                 }
             },
@@ -508,7 +511,10 @@ pub(crate) async fn par(
                 return par_error_response(
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
-                    "Unsupported response_mode. Supported values: query, jwt, query.jwt",
+                    &format!(
+                        "Unsupported response_mode. Supported values: {}",
+                        crate::db::documents::oauth::ResponseMode::supported_values()
+                    ),
                 );
             }
         },
