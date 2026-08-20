@@ -546,7 +546,6 @@ fn subject_confirmation_bearer_method_passes() {
             "_req123",
             "https://vouch.example.com/saml/acs",
             now,
-            false
         )
         .is_ok()
     );
@@ -569,7 +568,6 @@ fn subject_confirmation_non_bearer_method_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        false,
     )
     .unwrap_err();
     assert!(
@@ -595,7 +593,6 @@ fn subject_confirmation_missing_method_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        false,
     )
     .unwrap_err();
     assert!(
@@ -645,7 +642,7 @@ fn subject_confirmation_multiple_one_valid_bearer_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
     assert!(
         result.is_ok(),
         "Expected Ok when at least one SubjectConfirmation is valid, got: {result:?}"
@@ -676,7 +673,7 @@ fn subject_confirmation_multiple_all_invalid_recipient_returns_error() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let err = validate_subject_confirmation(assertion, "_req123", acs, now, false).unwrap_err();
+    let err = validate_subject_confirmation(assertion, "_req123", acs, now).unwrap_err();
     assert!(
         matches!(err, ResponseError::DestinationMismatch { .. }),
         "Expected DestinationMismatch when all Recipients are wrong, got: {err}"
@@ -706,7 +703,7 @@ fn subject_confirmation_mixed_methods_one_valid_bearer_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
     assert!(
         result.is_ok(),
         "Expected Ok when a bearer SubjectConfirmation is present alongside a non-bearer one, got: {result:?}"
@@ -741,7 +738,7 @@ fn subject_confirmation_multiple_first_expired_second_valid_passes() {
     let xml = assertion_with_subject_confirmations(&confirmations);
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let result = validate_subject_confirmation(assertion, "_req123", acs, now, false);
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
     assert!(
         result.is_ok(),
         "Expected Ok when a later SubjectConfirmation is valid despite an expired first one, got: {result:?}"
@@ -1424,7 +1421,6 @@ fn subject_confirmation_missing_subject_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        false,
     )
     .unwrap_err();
     assert!(
@@ -1449,7 +1445,6 @@ fn subject_confirmation_empty_children_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        false,
     )
     .unwrap_err();
     assert!(
@@ -1622,7 +1617,6 @@ fn subject_confirmation_require_irt_missing_irt_returns_error() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        true,
     )
     .unwrap_err();
     assert!(
@@ -1658,7 +1652,6 @@ fn subject_confirmation_require_irt_present_matching_passes() {
             "_req123",
             "https://vouch.example.com/saml/acs",
             now,
-            true,
         )
         .is_ok()
     );
@@ -1690,7 +1683,6 @@ fn subject_confirmation_require_irt_mismatch_fails() {
         "_req123",
         "https://vouch.example.com/saml/acs",
         now,
-        true,
     )
     .unwrap_err();
     assert!(
@@ -1699,10 +1691,11 @@ fn subject_confirmation_require_irt_mismatch_fails() {
     );
 }
 
-/// When `require_irt` is false and SubjectConfirmationData.InResponseTo is
-/// absent, validation MUST pass (existing behavior for Response-signed case).
+/// SAML Profiles 4.1.4.3 requires the bearer SubjectConfirmationData to
+/// carry InResponseTo for a solicited response, "Regardless of the SAML
+/// binding used". An assertion without it is rejected whatever is signed.
 #[test]
-fn subject_confirmation_no_require_irt_missing_irt_passes() {
+fn subject_confirmation_missing_irt_is_rejected() {
     let now = Timestamp::now();
     let future = now
         .checked_add(jiff::Span::new().hours(1))
@@ -1720,15 +1713,16 @@ fn subject_confirmation_no_require_irt_missing_irt_passes() {
     );
     let doc = roxmltree::Document::parse(&xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(
+        assertion,
+        "_req123",
+        "https://vouch.example.com/saml/acs",
+        now,
+    )
+    .unwrap_err();
     assert!(
-        validate_subject_confirmation(
-            assertion,
-            "_req123",
-            "https://vouch.example.com/saml/acs",
-            now,
-            false,
-        )
-        .is_ok()
+        matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
+        "Expected MissingSubjectConfirmationInResponseTo, got: {err}"
     );
 }
 
@@ -1945,11 +1939,14 @@ fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
 
 // --- Response-signed complement tests ---
 
-/// COMPLEMENT CASE: When the Response itself is signed,
-/// Response.InResponseTo is covered by the signature and can be trusted.
-/// SubjectConfirmationData.InResponseTo is NOT required in this case.
+/// Signing the Response does not excuse a missing
+/// SubjectConfirmationData.InResponseTo. SAML Profiles 4.1.4.3 lists the
+/// check under "Regardless of the SAML binding used, the service provider
+/// MUST do the following", with no exemption based on which element carries
+/// the signature — and 4.1.4.5 requires the assertion to be signed for the
+/// POST binding anyway, so the attribute is always inside signed content.
 #[test]
-fn response_signed_missing_scd_irt_passes() {
+fn response_signed_missing_scd_irt_is_still_rejected() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
 
@@ -1973,9 +1970,12 @@ fn response_signed_missing_scd_irt_passes() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_6", &provider);
-    let assertion = result.expect("Expected Ok for Response-signed with SCD.InResponseTo absent");
-    assert_eq!(assertion.email, "alice@example.com");
+    let err = validate_saml_response(&base64_response, "_request_irt_6", &provider)
+        .expect_err("a solicited response must carry SubjectConfirmationData.InResponseTo");
+    assert!(
+        matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
+        "Expected MissingSubjectConfirmationInResponseTo, got: {err}"
+    );
 }
 
 /// When the Response is signed and SCD.InResponseTo is present and matches,

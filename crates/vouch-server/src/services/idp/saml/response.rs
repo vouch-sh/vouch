@@ -8,6 +8,10 @@
 //!
 //! - XSW mitigations: extracts identity only from the verified signed element
 //! - Multiple assertions are rejected
+//! - Only solicited responses are accepted: the ACS handler requires a stored
+//!   request ID before calling in, so SAML Profiles 4.1.5 ("An unsolicited
+//!   <Response> MUST NOT contain an InResponseTo attribute") is satisfied by
+//!   construction — there is no unsolicited path to guard
 //! - Clock skew tolerance is capped at 120 seconds
 //! - Replay prevention: callers must consume the state record after this returns Ok
 
@@ -299,21 +303,12 @@ pub(crate) fn validate_saml_response(
     // Step 11: Validate SubjectConfirmation Method is bearer (Core 2.4.1.2)
     // Step 12: Validate SubjectConfirmationData (Profiles 4.1.4.3)
     //
-    // When only the Assertion is signed (Response is unsigned), the
-    // `Response.InResponseTo` attribute is not covered by any signature and
-    // can be modified without invalidating the assertion signature. In that
-    // case, require `SubjectConfirmationData.InResponseTo` — which lives
-    // inside the signed Assertion — as the signed binding to the expected
-    // request ID. This prevents an attacker with MITM capability from
-    // modifying the unsigned `Response.InResponseTo` to impersonate a victim.
-    let response_signed = signed_element.has_tag_name((NS_SAMLP, "Response"));
-    validate_subject_confirmation(
-        assertion,
-        expected_request_id,
-        &provider.acs_url,
-        now,
-        !response_signed,
-    )?;
+    // The bearer `SubjectConfirmationData.InResponseTo` is the binding to the
+    // request, and it is required regardless of which element is signed. It
+    // lives inside the assertion, which the POST binding requires to be
+    // signed (4.1.4.5); `Response.InResponseTo` sits outside and can be
+    // modified without invalidating that signature, so it is never relied on.
+    validate_subject_confirmation(assertion, expected_request_id, &provider.acs_url, now)?;
 
     // Step 10: Extract email
     let email = extract_email(assertion, provider.email_attribute.as_deref())?;
@@ -487,7 +482,6 @@ fn validate_subject_confirmation(
     expected_request_id: &str,
     acs_url: &str,
     now: Timestamp,
-    require_irt: bool,
 ) -> Result<(), ResponseError> {
     // SAML Profiles 4.1.4.3: Subject MUST be present for Web Browser SSO.
     let subject = assertion
@@ -520,13 +514,8 @@ fn validate_subject_confirmation(
     // single-confirmation failures still report a specific cause.
     let mut first_error: Option<ResponseError> = None;
     for confirmation in confirmations {
-        match validate_single_subject_confirmation(
-            confirmation,
-            expected_request_id,
-            acs_url,
-            now,
-            require_irt,
-        ) {
+        match validate_single_subject_confirmation(confirmation, expected_request_id, acs_url, now)
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 first_error.get_or_insert(e);
@@ -546,17 +535,27 @@ fn validate_subject_confirmation(
 /// SAML Profiles Section 4.1.4.3: SubjectConfirmationData Recipient,
 /// InResponseTo, and NotOnOrAfter MUST be validated.
 ///
-/// When `require_irt` is true (Response is not signed, assertion-only
-/// signature), `SubjectConfirmationData.InResponseTo` MUST be present and
-/// match the expected request ID. The unsigned `Response.InResponseTo`
-/// attribute can be modified without invalidating the assertion signature,
-/// so it must not be the sole binding to the expected request ID.
+/// `SubjectConfirmationData.InResponseTo` MUST be present and match the
+/// expected request ID. SAML Profiles 4.1.4.3 lists this under "Regardless
+/// of the SAML binding used, the service provider MUST do the following":
+///
+///   "Verify that the InResponseTo attribute in the bearer
+///    <SubjectConfirmationData> equals the ID of its original
+///    <AuthnRequest> message, unless the response is unsolicited (see
+///    Section 4.1.5), in which case the attribute MUST NOT be present"
+///
+/// The requirement does not depend on which element carries the signature.
+/// Only the POST binding is accepted here, and 4.1.4.5 requires that "the
+/// enclosed assertion(s) MUST be signed" for it, so this attribute is
+/// always inside signed content and the check can always be made. The
+/// `Response.InResponseTo` attribute sits outside the assertion and is
+/// modifiable without invalidating its signature, so it is never the
+/// binding relied upon.
 fn validate_single_subject_confirmation(
     confirmation: roxmltree::Node<'_, '_>,
     expected_request_id: &str,
     acs_url: &str,
     now: Timestamp,
-    require_irt: bool,
 ) -> Result<(), ResponseError> {
     // SAML Core 2.4.1.2: Verify Method is bearer
     let method = confirmation.attribute("Method").unwrap_or("");
@@ -586,25 +585,18 @@ fn validate_single_subject_confirmation(
         });
     }
 
-    // Check InResponseTo matches request ID.
-    //
-    // When the Response is not signed (assertion-only signature), the
-    // unsigned Response.InResponseTo cannot be trusted as the binding to
-    // the expected request ID. Require SubjectConfirmationData.InResponseTo,
-    // which is inside the signed Assertion and therefore covered by the
-    // signature.
-    let in_response_to = conf_data.attribute("InResponseTo");
-
-    if require_irt && in_response_to.is_none() {
+    // SAML Profiles 4.1.4.3: the InResponseTo attribute in the bearer
+    // SubjectConfirmationData MUST equal the original AuthnRequest ID. This
+    // is the only binding to the request that lives inside signed content;
+    // absence of it is a failure, not a case to skip.
+    let Some(in_response_to) = conf_data.attribute("InResponseTo") else {
         return Err(ResponseError::MissingSubjectConfirmationInResponseTo);
-    }
+    };
 
-    if let Some(irt) = in_response_to
-        && irt != expected_request_id
-    {
+    if in_response_to != expected_request_id {
         return Err(ResponseError::InResponseToMismatch {
             expected: expected_request_id.to_string(),
-            actual: irt.to_string(),
+            actual: in_response_to.to_string(),
         });
     }
 
