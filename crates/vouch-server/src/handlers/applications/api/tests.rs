@@ -1377,10 +1377,10 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
 }
 
 // Complement: explicitly setting `fapi_profile: "none"` on a non-FAPI
-// `private_key_jwt` client must clear JWKS (documented behaviour). This
-// guards against the fix over-preserving JWKS in the explicit-clear case.
+// Clearing JWKS on a `private_key_jwt` client would leave it unable to
+// authenticate, with no way back through this endpoint. Refuse it end to end.
 #[tokio::test]
-async fn test_update_application_clears_jwks_when_fapi_profile_explicitly_none() {
+async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "pkjwt-clear@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -1412,15 +1412,19 @@ async fn test_update_application_clears_jwks_when_fapi_profile_explicitly_none()
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.contains("missing_jwks"),
+        "error code should identify the missing keys: {body}"
+    );
 
     let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
         .await
         .expect("db lookup")
         .expect("client still exists");
     assert!(
-        persisted.jwks.is_none(),
-        "JWKS must be cleared when fapi_profile is explicitly set to none"
+        persisted.jwks.is_some(),
+        "a rejected update must leave the client's keys intact"
     );
 }
 
