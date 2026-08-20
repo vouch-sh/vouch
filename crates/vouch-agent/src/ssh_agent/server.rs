@@ -5,11 +5,18 @@ use crate::error::{AgentError, Result};
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket};
 use crate::wire;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UnixListener;
 use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 /// Maximum number of concurrent SSH agent connections.
 const MAX_SSH_CONNECTIONS: usize = 64;
+
+/// Maximum time to wait for in-flight connections to finish during shutdown
+/// before aborting them.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::provisioning::{handle_request_identities, handle_sign_request};
 use super::state::SshAgentState;
@@ -43,15 +50,24 @@ impl SshAgentServer {
     /// Run the SSH agent server.
     ///
     /// Stops accepting new connections when the shutdown signal is received.
-    /// In-flight connections continue until they complete naturally.
+    /// In-flight connections continue until they complete naturally or the
+    /// drain timeout expires.
     pub async fn run(&self) -> Result<()> {
         let path = ssh_agent_socket_path()?;
         let listener = bind_socket(&path).await?;
 
         info!("SSH agent listening on {}", path.display());
 
+        self.run_listener(listener).await
+    }
+
+    /// Accept loop and graceful-drain core, separated from [`run`](Self::run)
+    /// so tests can drive it against a temporary listener without touching
+    /// `XDG_RUNTIME_DIR`.
+    async fn run_listener(&self, listener: UnixListener) -> Result<()> {
         let mut shutdown = self.shutdown_rx.clone();
         let semaphore = Arc::new(Semaphore::new(MAX_SSH_CONNECTIONS));
+        let mut tasks: JoinSet<()> = JoinSet::new();
 
         loop {
             tokio::select! {
@@ -66,7 +82,7 @@ impl SshAgentServer {
                     };
                     let state = Arc::clone(&self.state);
                     let agent_state = self.agent_state.clone();
-                    tokio::spawn(async move {
+                    tasks.spawn(async move {
                         let _permit = permit;
                         if let Err(e) = handle_ssh_connection(conn, state, agent_state).await {
                             debug!("SSH agent connection error: {e}");
@@ -80,7 +96,34 @@ impl SshAgentServer {
             }
         }
 
+        drain_connections(&mut tasks).await;
+
         Ok(())
+    }
+}
+
+/// Wait for in-flight connection tasks to finish, aborting any that do not
+/// complete within [`SHUTDOWN_DRAIN_TIMEOUT`].
+async fn drain_connections(tasks: &mut JoinSet<()>) {
+    if tasks.is_empty() {
+        return;
+    }
+    info!(
+        count = tasks.len(),
+        "Waiting for in-flight SSH connections to complete"
+    );
+    let drain = async { while tasks.join_next().await.is_some() {} };
+    match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain).await {
+        Ok(()) => info!("All in-flight SSH connections completed gracefully"),
+        Err(_) => {
+            let remaining = tasks.len();
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            warn!(
+                count = remaining,
+                "Shutdown drain timed out, aborted remaining SSH connections"
+            );
+        }
     }
 }
 
@@ -146,6 +189,19 @@ impl Drop for SshAgentServer {
 )]
 mod tests {
     use super::*;
+    use crate::state::AgentState;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::watch;
+
+    /// Build an `SshAgentServer` backed by a temp-dir listener.
+    fn make_server(shutdown_rx: watch::Receiver<bool>) -> Arc<SshAgentServer> {
+        Arc::new(SshAgentServer::with_agent_state(
+            SshAgentState::new(),
+            AgentState::new(),
+            shutdown_rx,
+        ))
+    }
 
     /// End-to-end over a real socket: a same-UID client passes
     /// `accept_authorized` and gets an identities reply, proving the peer
@@ -177,5 +233,78 @@ mod tests {
 
         drop(client);
         server.abort();
+    }
+
+    /// The SSH agent accept loop breaks and `run_listener` returns `Ok(())`
+    /// when the shutdown watch channel is signaled.
+    #[tokio::test]
+    async fn run_listener_stops_on_shutdown() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("ssh-shutdown.sock");
+        let listener = bind_socket(&path).await.expect("bind");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = make_server(shutdown_rx);
+        let server_clone = Arc::clone(&server);
+        let task = tokio::spawn(async move { server_clone.run_listener(listener).await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        shutdown_tx.send(true).expect("send shutdown");
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("run_listener should return within 5s")
+            .expect("task should not panic");
+        assert!(result.is_ok(), "run_listener should return Ok");
+    }
+
+    /// An in-flight SSH agent request completes even when shutdown arrives
+    /// immediately after the request is written.
+    #[tokio::test]
+    async fn inflight_request_completes_on_shutdown() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("ssh-drain.sock");
+        let listener = bind_socket(&path).await.expect("bind");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = make_server(shutdown_rx);
+        let server_clone = Arc::clone(&server);
+        let task = tokio::spawn(async move { server_clone.run_listener(listener).await });
+
+        // Connect and verify the server is accepting and processing.
+        let mut client = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect");
+        wire::write_message(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES])
+            .await
+            .expect("write first request");
+        let reply = wire::read_message(&mut client)
+            .await
+            .expect("read first reply")
+            .expect("reply present");
+        assert!(!reply.is_empty(), "expected an identities answer");
+
+        // Send a second request and immediately signal shutdown.
+        wire::write_message(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES])
+            .await
+            .expect("write second request");
+        shutdown_tx.send(true).expect("send shutdown");
+
+        // The in-flight response should still arrive during drain.
+        let reply = tokio::time::timeout(Duration::from_secs(10), wire::read_message(&mut client))
+            .await
+            .expect("reply should arrive within 10 s")
+            .expect("read second reply")
+            .expect("reply present");
+        assert!(!reply.is_empty(), "expected an identities answer");
+
+        drop(client);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run_listener should return within 10s")
+            .expect("task should not panic");
+        assert!(result.is_ok(), "run_listener should return Ok");
     }
 }
