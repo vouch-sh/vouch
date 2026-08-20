@@ -229,9 +229,12 @@ async fn test_rfc9470_acr_values_too_long_rejected() {
 
 #[tokio::test]
 async fn test_rfc9470_max_age_zero_forces_reauth() {
-    // RFC 9470 / OIDC Core Section 3.1.2.1: max_age=0 means the user must
-    // re-authenticate regardless of how fresh the session is. The server
-    // should store OAuth params and redirect to /login.
+    // RFC 9470 / OIDC Core Section 3.1.2.1: max_age=0 means re-authentication
+    // is required when the session age *exceeds* 0 (strict `>`). A session
+    // that is at least one second old must re-authenticate; the server should
+    // store OAuth params and redirect to /login. (A same-second session with
+    // age == 0 satisfies max_age=0 and is tested separately by the post-login
+    // completion test.)
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "maxage-zero@example.com").await;
@@ -239,6 +242,10 @@ async fn test_rfc9470_max_age_zero_forces_reauth() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Age the session past the 0-second boundary so re-auth is deterministically
+    // required (age > 0 evaluates true).
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -496,7 +503,9 @@ async fn test_rfc9470_prompt_none_without_session_returns_login_required() {
 #[tokio::test]
 async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
     // OIDC Core Section 3.1.2.1: prompt=none combined with max_age=0 means
-    // "re-auth is needed but don't show UI" — must return login_required.
+    // "re-auth is needed (session age exceeds 0) but don't show UI" — must
+    // return login_required. The session is aged past the 0-second boundary
+    // so re-auth is deterministically required.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "prompt-none-maxage@example.com").await;
@@ -504,6 +513,10 @@ async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Age the session past the 0-second boundary so re-auth is deterministically
+    // required (age > 0 evaluates true) under prompt=none.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -910,6 +923,11 @@ async fn test_rfc9470_max_age_zero_completes_after_reauth() {
     // Step 1: existing session triggers re-auth with max_age=0.
     let old_session = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
+    // Age the session past the 0-second boundary so the pre-login check
+    // deterministically requires re-auth (age > 0 evaluates true). The
+    // post-login check is exercised separately with a fresh session below.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
     let state_param = "maxage-zero-complete";
@@ -1022,7 +1040,7 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
     let challenge = sha256_base64url(verifier);
     let state_param = "maxage-stale-reject";
 
-    // max_age=1 with a 2-second-old session: pre-login check (age >= max_age)
+    // max_age=1 with a 2-second-old session: pre-login check (age > max_age)
     // triggers re-auth and stores a pending auth record carrying max_age=1.
     let response = http_get_full(
         &app,
@@ -1102,5 +1120,146 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
     assert!(
         error_location.contains(&format!("state={state_param}")),
         "Error redirect must echo state parameter: {error_location}"
+    );
+}
+
+// ========================================================================
+// RFC 9470 / OIDC Core — max_age pre-login boundary validation
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9470_max_age_boundary_accepts_session_at_threshold() {
+    // OIDC Core Section 3.1.2.1: a session whose age is exactly equal to
+    // max_age is within the "allowable elapsed time" and must NOT trigger
+    // re-authentication. The pre-login check uses strict `>` (not `>=`),
+    // so `age == max_age` evaluates to "not exceeded".
+    //
+    // This is the pre-login counterpart to the post-login boundary check in
+    // `complete_pending_auth`. Using `>=` here would reject the boundary and
+    // force unnecessary re-authentication — the reported bug.
+    //
+    // The session's `created_at` is backdated to exactly `max_age` seconds ago
+    // via a direct database update so the boundary is hit deterministically
+    // (no flaky `tokio::time::sleep` timing).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-boundary@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Backdate the session so its age is exactly max_age (60 seconds).
+    let max_age: u64 = 60;
+    backdate_session_created_at(&state, &session_token, i64::try_from(max_age).unwrap_or(60)).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-boundary";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&max_age={max_age}&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Boundary session (age == max_age) should proceed, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // A session at the threshold must receive a code, NOT be redirected to
+    // /login for re-authentication.
+    assert!(
+        location.contains("code="),
+        "Session at max_age boundary (age == max_age) must NOT be forced to \
+         re-authenticate; expected code redirect, got: {location}"
+    );
+    assert!(
+        !location.starts_with("/login"),
+        "Session at max_age boundary must not redirect to /login: {location}"
+    );
+    assert!(
+        !location.contains("error=login_required"),
+        "Session at max_age boundary must not get login_required: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_pre_login_exceeds_forces_reauth() {
+    // Counterpart to the boundary acceptance test: a session whose age
+    // *exceeds* max_age by exactly one second (age == max_age + 1) must
+    // trigger re-authentication. This guards against accidentally relaxing
+    // the check to `<` or `<=`.
+    //
+    // The session's `created_at` is backdated to `max_age + 1` seconds ago
+    // for a deterministic, non-flaky result.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-exceeds@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Backdate one second past the threshold.
+    let max_age: u64 = 60;
+    let backdate_secs = i64::try_from(max_age.saturating_add(1)).unwrap_or(61);
+    backdate_session_created_at(&state, &session_token, backdate_secs).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-exceeds";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&max_age={max_age}&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Session exceeding max_age must redirect for re-auth, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "Session exceeding max_age must redirect to /login with pending_auth: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "Session exceeding max_age must NOT receive a code: {location}"
     );
 }

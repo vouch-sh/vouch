@@ -1457,7 +1457,14 @@ async fn authorize_authenticated_user(
                     let Ok(age) = u64::try_from(age_secs) else {
                         return true;
                     };
-                    age >= max_age
+                    // Force re-auth only when the session age *exceeds* max_age
+                    // (strict `>`). A session exactly at the threshold
+                    // (age == max_age) is within the "allowable elapsed time"
+                    // per OIDC Core Section 3.1.2.1 and must not trigger
+                    // re-authentication. This is consistent with the
+                    // post-login check in `complete_pending_auth` and the
+                    // established pattern in `keys.rs` and `dpop.rs`.
+                    age > max_age
                 })
         }
     };

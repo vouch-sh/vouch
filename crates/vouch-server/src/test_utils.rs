@@ -1153,6 +1153,50 @@ pub async fn create_test_session_with_iat(
     result.token.expose_secret().to_string()
 }
 
+/// Backdate a session's `created_at` timestamp in the database so tests can
+/// exercise exact `max_age` boundary conditions without sleeping.
+///
+/// Sets the session document's `created_at` to `now - age_secs` seconds, then
+/// invalidates the session cache so the next request reads the backdated value.
+/// The age computed at request time is `age_secs` (truncated to whole seconds)
+/// as long as the request is processed within one second of the backdate.
+///
+/// # Panics
+///
+/// Panics if the session cannot be found or the database update fails.
+pub async fn backdate_session_created_at(state: &AppState, token: &str, age_secs: i64) {
+    let token_hash = crate::crypto::hash_token(token);
+    let now = jiff::Timestamp::now();
+    let session = crate::db::get_session_by_token_hash(&state.store, &token_hash, now)
+        .await
+        .expect("Failed to look up session for backdating")
+        .expect("Session must exist and not be expired for backdating");
+    let backdated = now
+        .checked_sub(jiff::Span::new().seconds(age_secs))
+        .expect("valid timestamp subtraction");
+    let backdated_str = backdated.to_string();
+    let session_id = &session.id;
+    match state.store.pool() {
+        Pool::Sqlite(p) => {
+            sqlx::query("UPDATE documents SET created_at = ? WHERE id = ?")
+                .bind(&backdated_str)
+                .bind(session_id)
+                .execute(p)
+                .await
+                .expect("Failed to backdate session created_at");
+        }
+        Pool::Postgres(p) => {
+            sqlx::query("UPDATE documents SET created_at = ? WHERE id = ?")
+                .bind(&backdated_str)
+                .bind(session_id)
+                .execute(p)
+                .await
+                .expect("Failed to backdate session created_at");
+        }
+    }
+    state.session_cache.invalidate(&token_hash);
+}
+
 /// Create a test session bound to a specific OAuth client.
 ///
 /// Used for tests that require the token's `client_id` to match a specific
