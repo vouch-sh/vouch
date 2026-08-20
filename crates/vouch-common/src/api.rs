@@ -148,7 +148,8 @@ pub struct DeviceTokenRequest {
 #[derive(Serialize, Deserialize)]
 pub struct DeviceTokenResponse {
     /// JWT access token.
-    pub access_token: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub access_token: secrecy::SecretString,
     /// Token type ("Bearer" or "DPoP" for sender-constrained tokens).
     pub token_type: String,
     /// Seconds until token expires.
@@ -446,7 +447,8 @@ pub struct SshCaPublicKeyResponse {
 #[derive(Serialize, Deserialize)]
 pub struct CloudTokenResponse {
     /// OIDC ID token for use with cloud provider identity federation.
-    pub id_token: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub id_token: secrecy::SecretString,
     /// Token validity period in seconds.
     pub expires_in: u64,
 }
@@ -515,6 +517,28 @@ where
     serializer.serialize_str(secret.expose_secret())
 }
 
+/// Serialize an `Option<SecretString>` by exposing its value.
+///
+/// The `Option` counterpart of [`serialize_secret_string`], with the same
+/// deliberate-exposure contract. `None` serializes as an explicit `null` —
+/// matching `Option<String>` — so wire formats are unchanged on fields that
+/// don't use `skip_serializing_if`.
+///
+/// Use with `#[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]`.
+pub fn serialize_opt_secret_string<S>(
+    secret: &Option<secrecy::SecretString>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use secrecy::ExposeSecret;
+    match secret {
+        Some(value) => serializer.serialize_some(value.expose_secret()),
+        None => serializer.serialize_none(),
+    }
+}
+
 impl std::fmt::Debug for GitHubTokenResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubTokenResponse")
@@ -564,7 +588,7 @@ mod tests {
     #[test]
     fn test_cloud_token_response_debug_redacts_id_token() {
         let response = CloudTokenResponse {
-            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".to_string(),
+            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".into(),
             expires_in: 28_800,
         };
         let debug = format!("{response:?}");

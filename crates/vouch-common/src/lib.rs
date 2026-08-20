@@ -42,7 +42,7 @@ pub use api::{
     ListKeysResponse, OAuthError, RegisterCompleteRequest, RegisterCompleteResponse,
     RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
     SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
-    serialize_secret_string,
+    serialize_opt_secret_string, serialize_secret_string,
 };
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::ApiError;

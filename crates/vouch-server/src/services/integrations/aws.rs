@@ -134,7 +134,7 @@ pub(crate) type AwsResult<T> = Result<T, AwsError>;
 /// Result of issuing an AWS OIDC token.
 pub(crate) struct AwsTokenResult {
     /// The signed OIDC ID token.
-    pub id_token: String,
+    pub id_token: secrecy::SecretString,
     /// Token validity in seconds.
     pub expires_in: u64,
 }
@@ -258,7 +258,7 @@ pub(crate) async fn issue_aws_token(
     }
 
     Ok(AwsTokenResult {
-        id_token,
+        id_token: id_token.into(),
         expires_in,
     })
 }
@@ -272,13 +272,14 @@ pub(crate) async fn issue_aws_token(
 mod tests {
     use super::*;
     use crate::crypto::keys::OidcRsaSigningKey;
+    use secrecy::ExposeSecret;
 
     /// The signed OIDC ID token is a bearer credential for AWS STS and
     /// must never appear in `{:?}` output.
     #[test]
     fn test_aws_token_result_debug_redacts_id_token() {
         let result = AwsTokenResult {
-            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".to_string(),
+            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".into(),
             expires_in: 28_800,
         };
         let debug = format!("{result:?}");
@@ -362,10 +363,10 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let header = decode_jwt_header(&result.id_token);
+        let header = decode_jwt_header(result.id_token.expose_secret());
         assert_eq!(header["alg"], "RS256", "AWS token must use RS256");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         assert_eq!(claims["iss"], BASE_URL, "iss must match the issuer URL");
         assert_eq!(claims["aud"], BASE_URL, "aud must be the issuer URL");
         assert_eq!(claims["sub"], USER_EMAIL, "sub must be the user email");
@@ -386,7 +387,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         let tags = &claims["https://aws.amazon.com/tags"];
         assert!(tags.is_object(), "aws tags claim must be present");
 
@@ -424,7 +425,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         let tags = &claims["https://aws.amazon.com/tags"];
         let principal_tags = &tags["principal_tags"];
 
@@ -459,7 +460,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         let tags = &claims["https://aws.amazon.com/tags"];
         let principal_tags = &tags["principal_tags"];
 
@@ -499,7 +500,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         let tags = &claims["https://aws.amazon.com/tags"];
         let principal_tags = &tags["principal_tags"];
 
@@ -532,7 +533,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         let tags = &claims["https://aws.amazon.com/tags"];
         let principal_tags = &tags["principal_tags"];
         let transitive_keys: Vec<&str> = tags["transitive_tag_keys"]
@@ -586,7 +587,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         assert_eq!(claims["iss"], org_issuer, "iss must be the org issuer");
         assert_eq!(claims["aud"], org_issuer, "aud must equal the org issuer");
     }
@@ -628,7 +629,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         assert_eq!(
             claims["https://aws.amazon.com/roles"],
             serde_json::json!([role]),
@@ -651,7 +652,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         assert!(
             claims.get("https://aws.amazon.com/roles").is_none(),
             "roles claim must be absent when no pin is requested"
@@ -672,7 +673,7 @@ mod tests {
         .await
         .expect("issue_aws_token should succeed");
 
-        let claims = decode_jwt_payload(&result.id_token);
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
         assert_eq!(
             claims["hardware_aaguid"], TEST_AAGUID,
             "hardware_aaguid claim must reflect the supplied snapshot"
