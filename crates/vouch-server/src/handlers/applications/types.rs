@@ -288,7 +288,8 @@ pub(crate) struct UpdateApplicationRequest {
 pub(crate) struct CreateApplicationResponse {
     pub id: String,
     pub client_id: String,
-    pub client_secret: Option<String>,
+    #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
+    pub client_secret: Option<secrecy::SecretString>,
     pub name: String,
     pub application_type: String,
     pub access_scope: String,
@@ -404,7 +405,8 @@ pub(crate) struct AddSecretRequest {
 #[derive(Serialize)]
 pub(crate) struct AddSecretResponse {
     pub secret_id: String,
-    pub client_secret: String,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    pub client_secret: secrecy::SecretString,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,
 }
