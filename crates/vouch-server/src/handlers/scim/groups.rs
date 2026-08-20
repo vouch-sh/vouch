@@ -143,6 +143,34 @@ pub(super) fn create_scim_group_error_response(err: anyhow::Error) -> Response {
         .into_response()
 }
 
+/// Map a group member operation error onto its SCIM wire response.
+///
+/// Member writes (`add_scim_group_member`,
+/// `replace_scim_group_members`, `remove_scim_group_member`) can fail two
+/// ways. A NUL byte in the `user_id` index is a client error and returns
+/// `400 invalidValue` via [`super::invalid_index_value_response`]. Every
+/// other failure — HPKE decryption, JSON or timestamp parsing, DB
+/// connection or timeout, exhausted OCC retries — is an infrastructure
+/// fault and returns `500 INTERNAL SERVER ERROR`, matching
+/// [`create_scim_group_error_response`] and the attribute-update arms of
+/// [`patch_group`].
+///
+/// Without this, a non-`InvalidIndexValue` member failure was logged and
+/// swallowed, so a PATCH/POST returned `200`/`201` with stale membership
+/// — violating the documented atomicity guarantee that a rejected
+/// operation leaves the record untouched.
+pub(super) fn member_op_error_response(err: anyhow::Error) -> Response {
+    if let Some(resp) = super::invalid_index_value_response(&err) {
+        return resp.into_response();
+    }
+    tracing::error!("Failed to update group members: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ScimError::new(500, "Failed to update group members")),
+    )
+        .into_response()
+}
+
 /// POST /scim/v2/Groups (RFC 7644 Section 3.3).
 ///
 /// Creates a new Group resource. Returns 201 Created on success.
@@ -192,10 +220,7 @@ pub(crate) async fn create_group(
                 db::add_scim_group_member(&state.store, &db_group.id, &auth.org_id, &member.value)
                     .await
             {
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return resp.into_response();
-                }
-                tracing::warn!("Failed to add member {} to group: {e}", member.value);
+                return member_op_error_response(e);
             }
         }
     }
@@ -339,10 +364,7 @@ async fn apply_member_op(
                     continue;
                 };
                 if let Err(e) = db::add_scim_group_member(db, group_id, org_id, user_id).await {
-                    if let Some(resp) = super::invalid_index_value_response(&e) {
-                        return Err(resp.into_response());
-                    }
-                    tracing::warn!("Failed to add member: {e}");
+                    return Err(member_op_error_response(e));
                 }
             }
             Ok(())
@@ -359,10 +381,7 @@ async fn apply_member_op(
                 .filter_map(|m| m.get("value").and_then(|v| v.as_str()).map(String::from))
                 .collect();
             if let Err(e) = db::replace_scim_group_members(db, group_id, org_id, &user_ids).await {
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return Err(resp.into_response());
-                }
-                tracing::error!("Failed to replace group members: {e}");
+                return Err(member_op_error_response(e));
             }
             Ok(())
         }
@@ -393,7 +412,7 @@ async fn apply_member_op(
             };
             for user_id in user_ids {
                 if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
-                    tracing::warn!("Failed to remove member: {e}");
+                    return Err(member_op_error_response(e));
                 }
             }
             Ok(())

@@ -1001,3 +1001,245 @@ async fn test_scim_patch_group_remove_members_by_value_list() {
     let members = group["members"].as_array().map_or(0, Vec::len);
     assert_eq!(members, 0, "member must have been removed: {body}");
 }
+
+// ========================================================================
+// Infrastructure errors in member operations — 500, not 200/201
+// ========================================================================
+//
+// A NUL byte in `user_id` is a client error (400 invalidValue), tested
+// above. But `add_scim_group_member` / `remove_scim_group_member` also
+// call `find_by_indexes`, which can fail with non-retryable infrastructure
+// errors: HPKE decryption failure, JSON parse failure on a corrupted
+// document, or timestamp parse failure. These must surface as 500
+// INTERNAL_SERVER_ERROR, not be swallowed into a 200 OK with stale
+// membership — the documented atomicity guarantee says a rejected
+// operation leaves the record untouched.
+//
+// Each test corrupts a membership document's `data` column in the DB so
+// `find_by_indexes` hits a JSON parse error, then verifies the PATCH
+// returns 500 through the full axum router.
+
+/// Corrupt every `scim_group_member` document for `group_id` so that
+/// `find_by_indexes` fails with a deserialization (infrastructure) error
+/// rather than an `InvalidIndexValue` client error.
+async fn corrupt_group_member_docs(state: &crate::AppState, group_id: &str) {
+    use crate::db::Pool;
+    if let Pool::Sqlite(p) = state.store.pool() {
+        sqlx::query(
+            "UPDATE documents SET data = 'not-valid-json' \
+             WHERE doc_type = 'scim_group_member' \
+             AND id IN (\
+                SELECT document_id FROM document_indexes \
+                WHERE index_field = 'group_id' AND index_value = ?\
+             )",
+        )
+        .bind(group_id)
+        .execute(p)
+        .await
+        .expect("corrupt member docs");
+    }
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_member_infrastructure_error_returns_500() {
+    // If `find_by_indexes` fails with a deserialization error while
+    // checking whether the member already exists, the PATCH must return
+    // 500 — not 200 OK with the member silently absent.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-infra-add-member", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a user.
+    let (_, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"infra-add@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create a group with that user as a member.
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"InfraAdd","members":[{{"value":"{user_id}"}}]}}"#
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Corrupt the membership document so `find_by_indexes` fails.
+    corrupt_group_member_docs(&state, group_id).await;
+
+    // PATCH add the same member — `add_scim_group_member` calls
+    // `find_by_indexes` which hits the corrupted doc and fails.
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "add", "path": "members", "value": [{"value": user_id}]}]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "infrastructure error in add-member must return 500, not 200: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "500");
+    assert!(
+        error.get("scimType").is_none_or(|v| v.is_null()),
+        "infrastructure errors must not carry a scimType: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_remove_member_infrastructure_error_returns_500() {
+    // If `find_by_indexes` fails with a deserialization error while
+    // locating the member to remove, the PATCH must return 500 — not
+    // 200 OK with the member silently left in place.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-infra-remove-member", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a user.
+    let (_, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"infra-remove@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create a group with that user as a member.
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"InfraRemove","members":[{{"value":"{user_id}"}}]}}"#
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Corrupt the membership document so `find_by_indexes` fails.
+    corrupt_group_member_docs(&state, group_id).await;
+
+    // PATCH remove the member — `remove_scim_group_member` calls
+    // `find_by_indexes` which hits the corrupted doc and fails.
+    let patch = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"remove","path":"members[value eq \"{user_id}\"]"}}]}}"#
+    );
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "infrastructure error in remove-member must return 500, not 200: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "500");
+    assert!(
+        error.get("scimType").is_none_or(|v| v.is_null()),
+        "infrastructure errors must not carry a scimType: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_replace_members_infrastructure_error_returns_500() {
+    // `replace_scim_group_members` deletes existing members by index and
+    // inserts new ones. Corrupting an existing membership document's data
+    // makes the `delete_by_index` scan fail to deserialize it, surfacing
+    // as 500 rather than 200 OK with a partial replacement.
+    let (app, state) = test_app().await;
+    let token =
+        create_test_scim_token(&state.store, "test-infra-replace-members", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a user.
+    let (_, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"infra-replace@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create a group with that user as a member.
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"InfraReplace","members":[{{"value":"{user_id}"}}]}}"#
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Corrupt the membership document so deserialization fails during
+    // `replace_scim_group_members`'s `delete_by_index` scan.
+    corrupt_group_member_docs(&state, group_id).await;
+
+    // PATCH replace members with a new (valid) user_id.
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "members", "value": [{"value": "00000000-0000-7000-0000-000000000001"}]}]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "infrastructure error in replace-members must return 500, not 200: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "500");
+}
