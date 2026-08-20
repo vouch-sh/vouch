@@ -42,6 +42,7 @@ make audit              # cargo-deny: advisories, licenses, bans (dependency cha
 Project-specific gates:
 
 - **No-panic policy** — clippy denies `unwrap`/`expect`/`panic`/`[]` indexing/`as` casts outside the `vouch-tests` crate. `make lint` must be clean.
+- **Spec claims are quoted, not remembered** — before opening the PR, re-read every normative claim in the diff and the description ("per RFC X", "the spec requires", "this is a violation"). Each needs a section number and a verbatim quote from the document, fetched this session. Check the strength is reported accurately: a SHOULD described as a violation, or a MUST described as a preference, both mislead the reviewer. See `.claude/rules/specs-are-source-of-truth.md`.
 - **Live-test credential/serialization paths** that unit tests can't catch — OIDC token issuance, FIDO2 assertion verification, RFC 9421 signing, DB migrations across SQLite/Postgres/DSQL.
 - **i18n parity** — adding UI strings requires matching Fluent catalog entries; the completeness tests fail otherwise.
 - **No internal review labels** in code, comments, or test names — sweep changed files with `rg -n '\b([A-Z]{1,4}[0-9]{1,2}|GAP[0-9]+)\b'` before committing (CLAUDE.md "What NOT to Do" #11).
