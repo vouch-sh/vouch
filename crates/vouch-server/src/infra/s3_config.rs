@@ -55,8 +55,10 @@ pub struct S3ConfigSource {
 pub struct S3TlsConfig {
     /// Base64-encoded PEM certificate.
     pub cert: Option<String>,
-    /// Base64-encoded PEM private key.
-    pub key: Option<String>,
+    /// Base64-encoded PEM private key. Serialized by exposure: this type
+    /// round-trips the operator-provisioned S3 config object.
+    #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
+    pub key: Option<SecretString>,
 }
 
 // Custom Debug that redacts private key to prevent accidental log exposure.
@@ -157,7 +159,8 @@ pub enum S3IdpEntry {
         id: String,
         issuer: String,
         client_id: String,
-        client_secret: String,
+        #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+        client_secret: SecretString,
     },
     Saml {
         id: String,
@@ -250,13 +253,13 @@ pub struct S3GithubConfig {
     /// GitHub App name (slug).
     pub app_name: Option<String>,
     /// Base64-encoded PEM RSA private key.
-    pub app_key: Option<String>,
+    pub app_key: Option<SecretString>,
     /// Webhook secret.
-    pub webhook_secret: Option<String>,
+    pub webhook_secret: Option<SecretString>,
     /// OAuth client ID.
     pub client_id: Option<String>,
     /// OAuth client secret.
-    pub client_secret: Option<String>,
+    pub client_secret: Option<SecretString>,
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
@@ -297,7 +300,7 @@ pub struct S3Config {
     /// Example: { "us-east-1": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres" }
     pub dsql_endpoints: Option<HashMap<String, String>>,
     /// JWT signing secret.
-    pub jwt_secret: Option<String>,
+    pub jwt_secret: Option<SecretString>,
     /// Session duration in hours.
     pub session_hours: Option<u64>,
 
@@ -342,20 +345,20 @@ pub struct S3Config {
 
     // SSH CA key (base64-encoded PEM Ed25519 private key)
     /// SSH CA private key.
-    pub ssh_ca_key: Option<String>,
+    pub ssh_ca_key: Option<SecretString>,
 
     /// AWS KMS key ID for SSH CA signing (multi-region `mrk-` prefix).
     pub ssh_ca_kms_key_id: Option<String>,
 
     // OIDC signing key (base64-encoded PEM EC P-256 private key)
     /// OIDC signing key.
-    pub oidc_signing_key: Option<String>,
+    pub oidc_signing_key: Option<SecretString>,
 
     /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
     pub oidc_signing_kms_key_id: Option<String>,
 
     /// OIDC RSA signing key (base64-encoded PEM RSA-3072 private key).
-    pub oidc_rsa_signing_key: Option<String>,
+    pub oidc_rsa_signing_key: Option<SecretString>,
 
     /// AWS KMS key ID for OIDC RSA signing (RSA_3072).
     pub oidc_rsa_signing_kms_key_id: Option<String>,
@@ -695,21 +698,15 @@ async fn apply_config_update(
 
     // Track if TLS config changed
     let old_tls_cert = new_config.tls_cert.clone();
-    let old_tls_key = new_config
-        .tls_key
-        .as_ref()
-        .map(|s| s.expose_secret().to_string());
+    let old_tls_key = new_config.tls_key.clone();
 
     // Merge S3 config (runtime update — oidc block check is skipped for runtime updates)
     new_config.merge_s3_config(&s3_config, true)?;
 
     // Check if TLS config changed
     let tls_changed = new_config.tls_cert != old_tls_cert
-        || new_config
-            .tls_key
-            .as_ref()
-            .map(|s| s.expose_secret().to_string())
-            != old_tls_key;
+        || new_config.tls_key.as_ref().map(|s| s.expose_secret())
+            != old_tls_key.as_ref().map(|s| s.expose_secret());
 
     // Reload TLS if configured and changed
     if tls_changed && let (Some(cert), Some(key)) = (&new_config.tls_cert, &new_config.tls_key) {
@@ -759,7 +756,7 @@ impl ServerConfig {
                     self.tls_cert = Some(v.clone());
                 }
                 if let Some(v) = &tls.key {
-                    self.tls_key = Some(SecretString::from(v.clone()));
+                    self.tls_key = Some(v.clone());
                 }
             }
             // All other fields are ignored at runtime
@@ -811,7 +808,7 @@ impl ServerConfig {
             self.base_url = crate::config::BaseUrl::new(v);
         }
         if let Some(v) = &s3.jwt_secret {
-            self.jwt_secret = SecretString::from(v.clone());
+            self.jwt_secret = v.clone();
         }
         if let Some(v) = s3.session_hours {
             self.session_hours = v;
@@ -834,7 +831,7 @@ impl ServerConfig {
                 self.tls_cert = Some(v.clone());
             }
             if let Some(v) = &tls.key {
-                self.tls_key = Some(SecretString::from(v.clone()));
+                self.tls_key = Some(v.clone());
             }
         }
 
@@ -883,22 +880,22 @@ impl ServerConfig {
                 self.github_app_name = Some(v.clone());
             }
             if let Some(v) = &github.app_key {
-                self.github_app_key = Some(SecretString::from(v.clone()));
+                self.github_app_key = Some(v.clone());
             }
             if let Some(v) = &github.webhook_secret {
-                self.github_webhook_secret = Some(SecretString::from(v.clone()));
+                self.github_webhook_secret = Some(v.clone());
             }
             if let Some(v) = &github.client_id {
                 self.github_app_client_id = Some(v.clone());
             }
             if let Some(v) = &github.client_secret {
-                self.github_app_client_secret = Some(SecretString::from(v.clone()));
+                self.github_app_client_secret = Some(v.clone());
             }
         }
 
         // SSH CA key
         if let Some(v) = &s3.ssh_ca_key {
-            self.ssh_ca_key = Some(SecretString::from(v.clone()));
+            self.ssh_ca_key = Some(v.clone());
         }
         if let Some(v) = &s3.ssh_ca_kms_key_id {
             self.ssh_ca_kms_key_id = Some(v.clone());
@@ -906,7 +903,7 @@ impl ServerConfig {
 
         // OIDC signing key
         if let Some(v) = &s3.oidc_signing_key {
-            self.oidc_signing_key = Some(SecretString::from(v.clone()));
+            self.oidc_signing_key = Some(v.clone());
         }
         if let Some(v) = &s3.oidc_signing_kms_key_id {
             self.oidc_signing_kms_key_id = Some(v.clone());
@@ -914,7 +911,7 @@ impl ServerConfig {
 
         // OIDC RSA signing key
         if let Some(v) = &s3.oidc_rsa_signing_key {
-            self.oidc_rsa_signing_key = Some(SecretString::from(v.clone()));
+            self.oidc_rsa_signing_key = Some(v.clone());
         }
         if let Some(v) = &s3.oidc_rsa_signing_kms_key_id {
             self.oidc_rsa_signing_kms_key_id = Some(v.clone());
@@ -1063,7 +1060,7 @@ mod tests {
         let s3 = S3Config {
             tls: Some(S3TlsConfig {
                 cert: Some("base64cert".to_string()),
-                key: Some("base64key".to_string()),
+                key: Some("base64key".into()),
             }),
             ..Default::default()
         };
@@ -1118,10 +1115,10 @@ mod tests {
             github: Some(S3GithubConfig {
                 app_id: Some(12345),
                 app_name: Some("my-app".to_string()),
-                app_key: Some("base64key".to_string()),
-                webhook_secret: Some("secret".to_string()),
+                app_key: Some("base64key".into()),
+                webhook_secret: Some("secret".into()),
                 client_id: Some("client-id".to_string()),
-                client_secret: Some("client-secret".to_string()),
+                client_secret: Some("client-secret".into()),
             }),
             ..Default::default()
         };
@@ -1144,7 +1141,7 @@ mod tests {
             session_hours: Some(24),
             tls: Some(S3TlsConfig {
                 cert: Some("new_cert".to_string()),
-                key: Some("new_key".to_string()),
+                key: Some("new_key".into()),
             }),
             ..Default::default()
         };
@@ -1170,7 +1167,7 @@ mod tests {
             session_hours: Some(24),
             tls: Some(S3TlsConfig {
                 cert: Some("new_cert".to_string()),
-                key: Some("new_key".to_string()),
+                key: Some("new_key".into()),
             }),
             ..Default::default()
         };
@@ -1372,8 +1369,11 @@ mod tests {
         let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
 
         assert_eq!(
-            config.oidc_rsa_signing_key,
-            Some("base64encodedpemkey".to_string())
+            config
+                .oidc_rsa_signing_key
+                .as_ref()
+                .map(|s| s.expose_secret()),
+            Some("base64encodedpemkey")
         );
         assert_eq!(
             config.oidc_rsa_signing_kms_key_id,
@@ -1388,7 +1388,7 @@ mod tests {
         assert!(config.oidc_rsa_signing_kms_key_id.is_none());
 
         let s3 = S3Config {
-            oidc_rsa_signing_key: Some("base64encodedpemkey".to_string()),
+            oidc_rsa_signing_key: Some("base64encodedpemkey".into()),
             oidc_rsa_signing_kms_key_id: Some("mrk-rsa-key-123".to_string()),
             ..Default::default()
         };
@@ -1408,7 +1408,7 @@ mod tests {
         let mut config = crate::test_utils::test_config();
 
         let s3 = S3Config {
-            oidc_rsa_signing_key: Some("base64encodedpemkey".to_string()),
+            oidc_rsa_signing_key: Some("base64encodedpemkey".into()),
             oidc_rsa_signing_kms_key_id: Some("mrk-rsa-key-123".to_string()),
             ..Default::default()
         };
@@ -1582,7 +1582,7 @@ mod tests {
             id: "google".to_string(),
             issuer: "https://accounts.google.com".to_string(),
             client_id: "client-abc".to_string(),
-            client_secret: "secret-xyz".to_string(),
+            client_secret: "secret-xyz".into(),
         };
         match entry.into_idp_config() {
             IdpConfig::Oidc(oidc) => {
@@ -1629,7 +1629,7 @@ mod tests {
             id: "google".to_string(),
             issuer: "https://accounts.google.com".to_string(),
             client_id: "client-abc".to_string(),
-            client_secret: "should-not-leak".to_string(),
+            client_secret: "should-not-leak".into(),
         };
         let debug = format!("{entry:?}");
         assert!(debug.contains("[REDACTED]"), "must redact secret: {debug}");
@@ -1655,7 +1655,7 @@ mod tests {
             rp_id: Some("hijacked.example.com".to_string()),
             tls: Some(S3TlsConfig {
                 cert: Some("new-cert-base64".to_string()),
-                key: Some("new-key-base64".to_string()),
+                key: Some("new-key-base64".into()),
             }),
             ..Default::default()
         };
@@ -1739,7 +1739,7 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
         let s3 = S3Config {
             tls: Some(S3TlsConfig {
                 cert: Some(TEST_CERT_PEM.to_string()),
-                key: Some(TEST_KEY_PEM.to_string()),
+                key: Some(TEST_KEY_PEM.into()),
             }),
             ..Default::default()
         };
@@ -1768,7 +1768,7 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
         let s3 = S3Config {
             tls: Some(S3TlsConfig {
                 cert: Some("garbage-not-a-cert".to_string()),
-                key: Some("garbage-not-a-key".to_string()),
+                key: Some("garbage-not-a-key".into()),
             }),
             ..Default::default()
         };
