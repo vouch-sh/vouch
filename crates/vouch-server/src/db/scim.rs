@@ -1134,16 +1134,14 @@ async fn try_indexed_group_lookup(
     // "Engineering". The `co`/`sw` operators are already case-insensitive via
     // the in-memory fallback in `list_scim_groups`.
     //
-    // When the indexed lookup returns empty, fall through (`None`) instead of
-    // short-circuiting on an empty vector. This lets `list_scim_groups` reach
-    // the in-memory case-insensitive filter (`apply_scim_group_filter`), which
-    // catches groups whose `display_name` index was written before this
-    // normalization — legacy rows still carry their original mixed-case
-    // casing. That fallback is bounded by the 10k `FilterTooBroad` guard in
-    // `list_scim_groups`, consistent with the `co`/`sw`/`ew` operators, which
-    // already route through it. As legacy groups are re-written through normal
-    // SCIM create/update calls, their index rows are re-stored lowercased and
-    // the indexed path becomes authoritative again.
+    // An empty result is returned as `Some(vec![])`, matching the `externalId`
+    // branch below and the user lookup: the indexed path is authoritative, so
+    // "no such group" is an answer rather than a reason to rescan. Falling
+    // through to the unindexed scan instead would hand every miss to the
+    // 10k `FilterTooBroad` guard in `list_scim_groups`, and a miss is the
+    // normal case — Okta and Entra both query `displayName eq` to check
+    // whether a group exists before creating it, so above 10k groups the
+    // common provisioning path would start returning 400.
     if let Some(f) = parse_scim_filter(filter, "displayName")?
         && f.op == ScimFilterOp::Eq
     {
@@ -1154,9 +1152,6 @@ async fn try_indexed_group_lookup(
                 ("org_id", org_id),
             ])
             .await?;
-        if docs.is_empty() {
-            return Ok(None);
-        }
         return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
     }
 

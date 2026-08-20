@@ -400,13 +400,19 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
 }
 
 #[tokio::test]
-async fn test_scim_filter_group_display_name_eq_legacy_mixed_case_index() {
-    // Groups written before displayName index normalization still carry
-    // their original (mixed-case) value in the `display_name` index row.
-    // The indexed lookup is lowercased, so it misses such a legacy row;
-    // the function must then fall through to the in-memory case-insensitive
-    // filter (`apply_scim_group_filter`) instead of short-circuiting on an
-    // empty result.
+async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
+    // An index row written before displayName normalization still carries its
+    // original mixed-case value, so a lowercased indexed lookup misses it.
+    // That is accepted rather than papered over: the row is re-stored
+    // lowercased the next time the group is written through normal SCIM
+    // create/update, matching the decision taken for the user path when the
+    // same normalization landed there.
+    //
+    // The alternative — falling through to the unindexed scan on any miss —
+    // is worse than the gap it closes. A miss is the normal case, since Okta
+    // and Entra both query `displayName eq` to check whether a group exists
+    // before creating it, so above the 10k `FilterTooBroad` threshold the
+    // common provisioning path would return 400 instead of an empty list.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -414,10 +420,7 @@ async fn test_scim_filter_group_display_name_eq_legacy_mixed_case_index() {
         .await
         .expect("Failed to create group");
 
-    // Simulate a pre-normalization index row by rewriting the stored
-    // `display_name` index value back to its original (mixed-case) form.
-    // The document body is left untouched, so `display_name` stays
-    // "Engineering" for display.
+    // Simulate a pre-normalization index row.
     let crate::db::pool::Pool::Sqlite(pool) = store.pool() else {
         panic!("in-memory test DB must be SQLite");
     };
@@ -431,7 +434,6 @@ async fn test_scim_filter_group_display_name_eq_legacy_mixed_case_index() {
     .await
     .expect("rewrite display_name index to legacy mixed-case");
 
-    // Lowercase filter against the legacy mixed-case index.
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
@@ -441,15 +443,31 @@ async fn test_scim_filter_group_display_name_eq_legacy_mixed_case_index() {
     )
     .await
     .expect("Failed to filter groups");
+
+    // An empty answer, not a rescan and not an error.
     assert_eq!(
-        total, 1,
-        "legacy mixed-case index must be found via the in-memory fallback"
+        total, 0,
+        "stale index row is not found by the indexed lookup"
     );
+    assert!(groups.is_empty());
+
+    // Re-writing the group re-stores the index lowercased, and it is findable
+    // again — which is what makes the gap self-healing rather than permanent.
+    update_scim_group(&store, &group.id, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to update group");
+
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName eq "engineering""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "re-saved group is findable case-insensitively");
     assert_eq!(groups.len(), 1);
-    assert_eq!(
-        groups[0].display_name, "Engineering",
-        "original casing must be preserved in the document body"
-    );
 }
 
 #[tokio::test]
