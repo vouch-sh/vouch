@@ -155,11 +155,22 @@ pub(crate) async fn create_application_form(
         );
     }
 
-    // All input validated — now fetch org_id from DB (only needed for org-scoped apps)
+    // All input validated — now fetch org_id from DB (only needed for org-scoped apps).
+    // A lookup failure must not fall through to `None`: for an
+    // organization-scoped application that persists a NULL org_id, creating an
+    // app detached from the org that should own it.
     let user_org_id = if auth.has_org {
         match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) => user.org_id,
-            _ => None,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!("Failed to load user {user_id} for app org scoping: {e}");
+                return error_page(
+                    Tr::new("apps-error-title-error"),
+                    Tr::new("apps-error-create-failed"),
+                    "/applications/new",
+                );
+            }
         }
     } else {
         None
@@ -399,11 +410,17 @@ pub(crate) async fn update_application_form(
         );
     }
 
-    // Get user's org_id for org-scoped apps
+    // Get user's org_id for org-scoped apps. A lookup failure must not fall
+    // through to `None`: for an organization-scoped application that persists
+    // a NULL org_id, silently detaching it from the org that owns it.
     let user_org_id = if auth.has_org {
         match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) => user.org_id,
-            _ => None,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!("Failed to load user {user_id} for app org scoping: {e}");
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     } else {
         None
@@ -425,7 +442,12 @@ pub(crate) async fn update_application_form(
     // security-profile radio group always submits fapi_profile; selecting
     // Standard for a client that is already FAPI is rejected above, so what
     // reaches here either enables FAPI or leaves a non-FAPI client standard.
-    let fapi = compute_fapi_update_fields(&validated, &client);
+    let fapi = match compute_fapi_update_fields(&validated, &client) {
+        Ok(fapi) => fapi,
+        Err(e) => {
+            return validation_error_response(&e, format!("/applications/{}", app_id));
+        }
+    };
 
     // Update the application
     if let Err(e) = db::update_oauth_client(
@@ -433,7 +455,12 @@ pub(crate) async fn update_application_form(
         &UpdateOAuthClientParams {
             id: &app_id,
             name,
-            description: form.description.as_deref(),
+            // Fall back to the stored value, matching the API path: a request
+            // that omits the field is not asking to erase it.
+            description: form
+                .description
+                .as_deref()
+                .or(client.description.as_deref()),
             redirect_uris: &redirect_uris,
             access_scope,
             org_id,

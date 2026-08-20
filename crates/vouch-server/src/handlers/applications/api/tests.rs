@@ -1321,6 +1321,113 @@ async fn test_update_application_rejects_fapi_downgrade() {
     );
 }
 
+// Regression: a non-FAPI `private_key_jwt` client (e.g. one created via
+// authenticated dynamic registration) carries JWKS for `private_key_jwt`
+// auth. A PATCH that omits both `fapi_profile` and `jwks` must preserve the
+// existing JWKS so the client can still authenticate. Previously the JWKS was
+// silently cleared, breaking all subsequent token requests.
+#[tokio::test]
+async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-preserve@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"name": "Updated Name"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        .await
+        .expect("db lookup")
+        .expect("client still exists");
+    assert!(
+        persisted.jwks.is_some(),
+        "JWKS must be preserved after update that omits fapi_profile"
+    );
+    assert_eq!(
+        persisted.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+        "auth method must be unchanged"
+    );
+}
+
+// Complement: explicitly setting `fapi_profile: "none"` on a non-FAPI
+// Clearing JWKS on a `private_key_jwt` client would leave it unable to
+// authenticate, with no way back through this endpoint. Refuse it end to end.
+#[tokio::test]
+async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-clear@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"fapi_profile": "none"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.contains("missing_jwks"),
+        "error code should identify the missing keys: {body}"
+    );
+
+    let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        .await
+        .expect("db lookup")
+        .expect("client still exists");
+    assert!(
+        persisted.jwks.is_some(),
+        "a rejected update must leave the client's keys intact"
+    );
+}
+
 #[tokio::test]
 async fn test_update_application_should_reject_empty_name() {
     let (app, state) = test_app().await;
