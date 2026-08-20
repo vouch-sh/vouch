@@ -76,6 +76,8 @@ impl PendingJti {
         let Some(jti) = self.jti else {
             return Ok(None);
         };
+        // Not a database call: a timestamp overflow here is an internal
+        // fault, and `DatabaseError` is the variant that renders it as a 500.
         let expires_at = Timestamp::now()
             .checked_add(self.max_lifetime.seconds())
             .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
@@ -150,8 +152,7 @@ pub async fn authenticate_client_jwt(
 
     // 3. Look up client
     let client = db::get_oauth_client_by_client_id(&state.store, assertion_client_id)
-        .await
-        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?
+        .await?
         .ok_or(ClientAuthError::InvalidClient)?;
 
     if !client.active {
@@ -303,11 +304,18 @@ async fn resolve_client_decoding_key(
     client: &OAuthClient,
     header: &JwtAssertionHeader,
 ) -> Result<jsonwebtoken::DecodingKey, ClientAuthError> {
-    // Only `jwks_uri` clients (no inline JWKS) need the cached fetch — skip
-    // the extra DB round trip for the common inline case, and degrade
-    // gracefully on DB errors so a transient outage cannot fail closed for
-    // inline-JWKS clients (matching `infra::httpsig`).
-    let jwks_cache = if client.jwks.is_some() {
+    // Only a client with a `jwks_uri` can force-refresh, and the cache is what
+    // rate-limits that refresh, so gate on the URI rather than on inline JWKS.
+    // A client configured with both still reaches the kid-miss refresh path
+    // (`find_matching_key_with_refresh`), where a `None` cache disables the
+    // 10-second interval and turns every miss into an outbound fetch — before
+    // signature verification, so an unauthenticated caller could drive it.
+    //
+    // The cache is an optimization, not a dependency: a read failure degrades
+    // to an uncached fetch rather than failing authentication. Reporting a
+    // transient DB fault as `invalid_client` tells a client its credentials
+    // are wrong and stops it retrying.
+    let jwks_cache = if client.jwks_uri.is_none() {
         None
     } else {
         crate::db::get_jwks_cache(&state.store, &client.id)
@@ -716,13 +724,54 @@ mod tests {
         assert!(matches!(result, Err(ClientAuthError::InvalidCredentials)));
     }
 
+    /// A client configured with both inline JWKS and a `jwks_uri` still
+    /// reaches the kid-miss refresh path, where the cache is what enforces the
+    /// 10-second refresh interval. Gating the read on inline JWKS rather than
+    /// on the URI would hand that client a `None` cache and turn every miss
+    /// into an outbound fetch — before signature verification, so an
+    /// unauthenticated caller could drive it.
+    #[tokio::test]
+    async fn dual_config_client_still_loads_the_jwks_cache() {
+        let state = make_state().await;
+        let (mut client, _kid) = make_client_with_jwks(&state).await;
+        client.jwks_uri = Some("https://client.example/jwks.json".to_string());
+
+        // With a URI present the cache must be consulted, so a failed read is
+        // observable: drop the table and confirm resolution still degrades
+        // gracefully rather than failing authentication.
+        match &state.db {
+            db::Pool::Sqlite(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+            db::Pool::Postgres(pool) => {
+                sqlx::query("DROP TABLE documents")
+                    .execute(pool)
+                    .await
+                    .expect("drop documents table");
+            }
+        }
+
+        let header = JwtAssertionHeader {
+            alg: "ES256".to_string(),
+            kid: Some("no-such-key".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+        assert!(
+            !matches!(result, Err(ClientAuthError::DatabaseError(_))),
+            "a cache read failure must not surface as a hard database error"
+        );
+    }
+
     /// Regression: an inline-JWKS client must resolve its decoding key even
     /// when the JWKS cache DB read fails. Before the fix,
     /// `resolve_client_decoding_key` loaded the cache unconditionally and
     /// mapped any DB error to `InvalidCredentials`, failing closed for
     /// inline-JWKS clients during a transient DB outage — even though their
     /// signing keys are embedded and need no cache. The cache lookup is now
-    /// skipped when `client.jwks` is present, matching `infra::httpsig`.
+    /// skipped when the client has no `jwks_uri` to refresh from.
     #[tokio::test]
     async fn test_resolve_client_decoding_key_inline_jwks_ignores_cache_db_error() {
         let state = make_state().await;

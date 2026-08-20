@@ -54,10 +54,25 @@ impl KeyResolver for OAuthClientKeyResolver {
         async move {
             let client_id = client_id?;
 
-            let client = crate::db::get_oauth_client_by_client_id(&self.state.store, &client_id)
-                .await
-                .ok()
-                .flatten()?;
+            // `KeyResolver` returns an `Option`, so a lookup failure and an
+            // unknown client are indistinguishable to the caller and both
+            // reject the request. Failing closed is right — an unresolvable
+            // key cannot verify a signature — but the cause has to be visible,
+            // or a database outage reads as a flood of signature failures.
+            let client = match crate::db::get_oauth_client_by_client_id(
+                &self.state.store,
+                &client_id,
+            )
+            .await
+            {
+                Ok(client) => client?,
+                Err(e) => {
+                    tracing::warn!(
+                        "Client lookup failed for {client_id} during signature verification: {e}"
+                    );
+                    return None;
+                }
+            };
 
             // Only clients registered with `jwks_uri` (no inline JWKS) need the
             // cached fetch — skip the extra DB round trip for the common inline case.

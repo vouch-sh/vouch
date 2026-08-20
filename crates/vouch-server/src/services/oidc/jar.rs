@@ -358,7 +358,11 @@ pub async fn validate_request_object(
     // the extra DB round trip for the common inline case, and degrade
     // gracefully on DB errors so a transient outage cannot fail closed for
     // inline-JWKS clients (matching `infra::httpsig`).
-    let jwks_cache = if client.jwks.is_some() {
+    //
+    // Gate on the URI, not on inline JWKS: a client configured with both still
+    // reaches the kid-miss refresh path, where a `None` cache disables the
+    // 10-second refresh interval.
+    let jwks_cache = if client.jwks_uri.is_none() {
         None
     } else {
         crate::db::get_jwks_cache(&state.store, &client.id)
