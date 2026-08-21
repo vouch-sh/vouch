@@ -1046,15 +1046,19 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     .await
     .expect("authorize device auth");
 
-    // Verify the authenticator_id is set before the cascade.
+    // Verify the approval references the authenticator before the cascade.
     let before = get_device_auth_by_id(&store, &request_id)
         .await
         .expect("get device auth")
         .expect("must exist before cascade");
+    let approval = match before.state {
+        DeviceAuthState::Authorized(approval) => Some(approval),
+        _ => None,
+    }
+    .expect("expected authorized state before cascade");
     assert_eq!(
-        before.authenticator_id.as_deref(),
-        Some(auth_id.as_str()),
-        "authenticator_id must be set before cascade delete"
+        approval.authenticator_id, auth_id,
+        "approval must reference the authenticator before cascade delete"
     );
 
     // Delete the authenticator — this triggers the cascade.
@@ -1062,13 +1066,15 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
         .await
         .expect("delete authenticator");
 
-    // The device_auth_request must now have authenticator_id cleared.
+    // The approval's evidence is gone, so the request must read as denied
+    // rather than stay redeemable (RFC 8628 §3.5 access_denied).
     let after = get_device_auth_by_id(&store, &request_id)
         .await
         .expect("get device auth")
         .expect("device auth request must still exist after cascade");
     assert!(
-        after.authenticator_id.is_none(),
-        "authenticator_id must be cleared by cascade delete"
+        matches!(after.state, DeviceAuthState::Denied),
+        "cascade delete must void the approval, got {:?}",
+        after.state
     );
 }

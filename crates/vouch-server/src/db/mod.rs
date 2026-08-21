@@ -96,10 +96,12 @@ pub use organizations::{
 pub use organizations::create_organization;
 
 // Re-export device auth types and functions
+#[cfg(test)]
+pub use device_auth::deny_device_auth;
 pub use device_auth::{
-    AuthorizeDeviceAuthParams, DeviceAuthRequest, DeviceAuthStatus, OidcState,
-    authorize_device_auth, create_device_auth_request, create_oidc_state,
-    delete_expired_device_auth_requests, delete_expired_oidc_states, deny_device_auth,
+    AuthorizeDeviceAuthParams, DeviceAuthApproval, DeviceAuthRequest, DeviceAuthState,
+    DeviceAuthStatus, OidcState, authorize_device_auth, create_device_auth_request,
+    create_oidc_state, delete_expired_device_auth_requests, delete_expired_oidc_states,
     get_device_auth_by_code_hash, get_device_auth_by_user_code, get_oidc_state,
     try_consume_device_auth, try_consume_oidc_state, update_device_auth_poll_time,
 };

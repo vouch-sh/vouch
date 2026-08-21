@@ -2,7 +2,7 @@
 //! Device Authorization Grant handlers (RFC 8628).
 
 use crate::AppState;
-use crate::db::{self, DeviceAuthStatus};
+use crate::db::{self, DeviceAuthState};
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
@@ -285,19 +285,19 @@ pub(crate) async fn device_token(
         ));
     }
 
-    match request.status {
-        DeviceAuthStatus::Pending => Err(oauth_error(
+    match request.state {
+        DeviceAuthState::Pending => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::authorization_pending(),
         )),
-        DeviceAuthStatus::Denied => Err(oauth_error(
+        DeviceAuthState::Denied => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::access_denied(),
         )),
-        DeviceAuthStatus::Consumed => {
+        DeviceAuthState::Consumed { user_id } => {
             // RFC 8628 Section 3.5: Device code already used.
             // Replay detected — revoke all tokens for the affected user.
-            if let Some(ref user_id) = request.user_id {
+            if let Some(ref user_id) = user_id {
                 revoke_sessions_for_device_replay(&state, user_id).await;
             }
             Err(oauth_error(
@@ -305,7 +305,7 @@ pub(crate) async fn device_token(
                 OAuthError::invalid_grant(),
             ))
         }
-        DeviceAuthStatus::Authorized => {
+        DeviceAuthState::Authorized(stale_approval) => {
             // RFC 9449 / FAPI 2.0: Validate the DPoP proof if present.
             // This happens BEFORE consuming the device code so that a
             // `use_dpop_nonce` or `invalid_dpop_proof` response does not
@@ -402,8 +402,10 @@ pub(crate) async fn device_token(
                 .map(|c| c.thumbprint.clone());
 
             // RFC 8628 Section 3.5: Atomically consume the device
-            // code before issuing a token. The returned claim is the
-            // structural proof that this caller won the consume; it is
+            // code before issuing a token. The returned approval is the
+            // attribution read in the same atomic step — issuance never
+            // uses the raceable top-of-handler read — and the claim is
+            // the structural proof that this caller won the consume,
             // threaded into TokenIssuanceProof below.
             //
             // `AlreadyConsumed` is deliberately indistinguishable between a
@@ -411,17 +413,13 @@ pub(crate) async fn device_token(
             // concurrent caller just consumed (race loser) — see
             // `try_consume_device_auth`. Match the authorization code flow's
             // defensive "replay = full logout" posture and revoke all of the
-            // user's OAuth sessions in either case. We use `request.user_id`
-            // (read at the top of the handler, set when the device was
-            // authorized) rather than a fresh lookup, since it is already
-            // available and immune to read-snapshot timing under WAL.
-            let device_claim =
+            // user's OAuth sessions in either case, attributed via the
+            // approval read at the top of the handler.
+            let (approval, device_claim) =
                 match db::try_consume_device_auth(&state.store, &device_code_hash).await {
-                    Ok(claim) => claim,
+                    Ok(consumed) => consumed,
                     Err(db::claim::ClaimError::AlreadyConsumed) => {
-                        if let Some(ref user_id) = request.user_id {
-                            revoke_sessions_for_device_replay(&state, user_id).await;
-                        }
+                        revoke_sessions_for_device_replay(&state, &stale_approval.user_id).await;
                         return Err(oauth_error(
                             StatusCode::BAD_REQUEST,
                             OAuthError::invalid_grant(),
@@ -442,21 +440,12 @@ pub(crate) async fn device_token(
                         ));
                     }
                 };
-
-            // An authorized request always carries these fields; a missing one
-            // is an internal state inconsistency, not a client mistake.
-            let missing = |field: &str| {
-                tracing::error!("Authorized device auth request missing {field}");
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::server_error(),
-                )
-            };
-            let user_id = request.user_id.ok_or_else(|| missing("user_id"))?;
-            let user_email = request.user_email.ok_or_else(|| missing("user_email"))?;
-            let authenticator_id = request
-                .authenticator_id
-                .ok_or_else(|| missing("authenticator_id"))?;
+            let db::DeviceAuthApproval {
+                user_id,
+                user_email,
+                authenticator_id,
+                hardware_verified,
+            } = approval;
 
             // Use the registered client_id from the device auth request.
             let client_id = request
@@ -532,7 +521,7 @@ pub(crate) async fn device_token(
                     // Mirrors how the browser approved this request, so the
                     // claim the credential endpoints gate on reflects whether
                     // the authenticator was actually exercised.
-                    hardware_verification: if request.hardware_verified {
+                    hardware_verification: if hardware_verified {
                         crate::services::auth::HardwareVerification::Verified
                     } else {
                         crate::services::auth::HardwareVerification::NotVerified
@@ -889,6 +878,70 @@ mod tests {
         assert_eq!(
             error["error"], "access_denied",
             "Denied auth should return access_denied"
+        );
+    }
+
+    /// RFC 8628 §3.5 (https://www.rfc-editor.org/rfc/rfc8628#section-3.5):
+    ///
+    /// > access_denied
+    /// >    The authorization request was denied.
+    ///
+    /// Deleting the approving authenticator before the device redeems the
+    /// code voids the approval: the poll answers `access_denied`, not a 500,
+    /// and the device code is not burned on the way to the error.
+    #[tokio::test]
+    async fn test_rfc8628_poll_after_approving_authenticator_deleted() {
+        let (app, state) = test_app().await;
+
+        let device_code = "test_deleted_authenticator_code";
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().hours(1))
+            .expect("expiry");
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &hash_device_code(device_code),
+            "GONE-CODE",
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, "deleted-approver@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize device");
+
+        crate::db::delete_authenticator(&state.store, &auth_id)
+            .await
+            .expect("delete authenticator");
+
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+            ),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "access_denied",
+            "deleted approver must void the approval: {body}"
         );
     }
 
