@@ -9,6 +9,7 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::token::validate_dpop_if_present;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -222,15 +223,25 @@ pub(crate) async fn device_token(
     headers: HeaderMap,
     Json(req): Json<DeviceTokenRequest>,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
-    // Validate grant type
-    if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
-        return Err(oauth_error(
-            StatusCode::BAD_REQUEST,
-            OAuthError {
-                error: "unsupported_grant_type".to_string(),
-                error_description: Some("Expected device_code grant type".to_string()),
-            },
-        ));
+    // Validate grant type through the owning enum; exhaustive so a new
+    // grant variant forces this dispatch to be revisited.
+    match req.grant_type.parse::<OAuthGrantType>() {
+        Ok(OAuthGrantType::DeviceCode) => {}
+        Ok(
+            OAuthGrantType::AuthorizationCode
+            | OAuthGrantType::ClientCredentials
+            | OAuthGrantType::TokenExchange
+            | OAuthGrantType::Fido2Assertion,
+        )
+        | Err(_) => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                OAuthError {
+                    error: "unsupported_grant_type".to_string(),
+                    error_description: Some("Expected device_code grant type".to_string()),
+                },
+            ));
+        }
     }
 
     // Validate device_code format before hashing and DB lookup.
