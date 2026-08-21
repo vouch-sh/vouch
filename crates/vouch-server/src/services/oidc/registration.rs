@@ -22,6 +22,7 @@ use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    jwks_has_fapi_allowed_key,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::oidc::grant_type::OAuthGrantType;
@@ -387,6 +388,23 @@ pub async fn register_client(
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "FAPI 2.0 requires jwks or jwks_uri",
+            ));
+        }
+        // Only for private_key_jwt: its JWKS carries client-assertion signing
+        // keys, so an inline JWKS must have at least one key usable with
+        // FAPI_ALLOWED (ES256/PS256/EdDSA) — see db::jwks_has_fapi_allowed_key.
+        // Without this, a client could register as FAPI 2.0 with an
+        // RS256-only JWKS and be unable to authenticate at the token endpoint
+        // from the start. tls_client_auth/self_signed_tls_client_auth JWKS
+        // conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
+        // check does not apply to them.
+        if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+            && let Some(ref jwks) = jwks_auth.jwks_value
+            && !jwks_has_fapi_allowed_key(jwks)
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
             ));
         }
         FapiProfile::Fapi2Security
@@ -1238,15 +1256,41 @@ pub async fn update_client_configuration(
 
     // PUT is a full replacement, so re-check the auth-method/JWKS
     // relationship enforced at initial registration against the client's
-    // (immutable) registered auth method. Without this, a private_key_jwt
-    // client could clear its JWKS and end up unable to authenticate.
-    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+    // (immutable) registered auth method and FAPI profile. A private_key_jwt
+    // client (FAPI or not) needs key material to authenticate at all; a FAPI
+    // 2.0 client of any auth method needs it too — register_client requires
+    // jwks/jwks_uri for every FAPI client, not just private_key_jwt ones
+    // (RFC 7592 §2.2: omitted fields are treated as cleared, so a PUT that
+    // drops both would otherwise silently strip a client's only key material).
+    if (client.is_fapi()
+        || client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt)
         && mutable_request.jwks.is_none()
         && mutable_request.jwks_uri.is_none()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
-            "private_key_jwt requires jwks or jwks_uri",
+            "FAPI 2.0 or private_key_jwt requires jwks or jwks_uri",
+        ));
+    }
+
+    // FAPI 2.0's profile is immutable post-registration (see the comment
+    // below), so `client.fapi_profile` already reflects what this update
+    // preserves. Only for private_key_jwt: its JWKS carries client-assertion
+    // signing keys, so an inline JWKS replacing the client's key material
+    // must have at least one key usable with FAPI_ALLOWED — see
+    // db::jwks_has_fapi_allowed_key. tls_client_auth/self_signed_tls_client_auth
+    // JWKS conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
+    // check does not apply to them. A remote jwks_uri can't be inspected
+    // synchronously, so this only guards the inline case, same as
+    // registration and the admin application API.
+    if client.is_fapi()
+        && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && let Some(ref jwks) = mutable_request.jwks
+        && !jwks_has_fapi_allowed_key(jwks)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
         ));
     }
 
