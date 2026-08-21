@@ -331,6 +331,14 @@ impl ResponseMode {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    /// Accepted wire values in table order, for discovery metadata
+    /// (`response_modes_supported`). Reads [`Self::ACCEPTED`], so the
+    /// discovery document cannot advertise a mode the parser rejects.
+    #[must_use]
+    pub fn supported_wire_values() -> Vec<&'static str> {
+        Self::ACCEPTED.iter().map(|(value, _)| *value).collect()
+    }
 }
 
 /// FAPI 2.0 compliance profile.

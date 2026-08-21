@@ -458,7 +458,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             .into_response();
         }
 
-        if request_uri.starts_with("urn:ietf:params:oauth:request_uri:") {
+        if request_uri.starts_with(crate::db::par::REQUEST_URI_URN_PREFIX) {
             // RFC 9126: PAR URN — must be reasonably sized.
             if request_uri.len() > 256 {
                 return AuthorizeDeniedTemplate {
