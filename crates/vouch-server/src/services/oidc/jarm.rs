@@ -46,7 +46,7 @@ struct JarmErrorClaims {
 ///
 /// Uses `client.authorization_signed_response_alg` if explicitly set;
 /// defaults to ES256 which is FAPI 2.0 compliant (PS256, ES256, EdDSA
-/// per FAPI 2.0 Section 5.2.2.1). RS256 is only used when a client
+/// per FAPI 2.0 Section 5.4.1). RS256 is only used when a client
 /// explicitly registers with `authorization_signed_response_alg=RS256`.
 fn select_alg(_state: &AppState, client: &OAuthClient) -> &'static str {
     match client.authorization_signed_response_alg {

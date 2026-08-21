@@ -223,7 +223,7 @@ pub(crate) async fn par(
     let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
 
-    // RFC 8705 §2 / FAPI 2.0 §5.2.2: mTLS dispatch. When the client is
+    // RFC 8705 §2 / FAPI 2.0 §5.3.2.1: mTLS dispatch. When the client is
     // registered with `tls_client_auth` or `self_signed_tls_client_auth`
     // and no body-level credential has authenticated it, verify the TLS
     // client certificate. Must run before FAPI auth-method validation so
@@ -262,7 +262,7 @@ pub(crate) async fn par(
 
     // FAPI 2.0: Validate client authentication method.
     //
-    // FAPI 2.0 Section 5.2.2 requires `private_key_jwt`. Client secrets and
+    // FAPI 2.0 Section 5.3.2.1 requires `private_key_jwt`. Client secrets and
     // public-client ("none") authentication are rejected for FAPI clients.
     // The method is derived from the verification witnesses — what this
     // request actually authenticated with — not the registered

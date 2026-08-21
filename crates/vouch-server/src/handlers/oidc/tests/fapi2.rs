@@ -496,7 +496,7 @@ async fn test_fapi2_dpop_code_binding_missing_dpop_at_token() {
 
 #[tokio::test]
 async fn test_fapi2_authorize_rejects_without_par() {
-    // FAPI 2.0 Section 5.2.2: FAPI clients MUST use PAR.
+    // FAPI 2.0 Section 5.3.2.2: FAPI clients MUST use PAR.
     // A direct GET /oauth/authorize without request_uri must return an error page.
     let (app, state) = test_app().await;
 
@@ -531,7 +531,7 @@ async fn test_fapi2_authorize_rejects_without_par() {
 
 #[tokio::test]
 async fn test_fapi2_par_accepts_private_key_jwt() {
-    // FAPI 2.0 Section 5.2.2: FAPI clients must use private_key_jwt.
+    // FAPI 2.0 Section 5.3.2.1: FAPI clients must use private_key_jwt.
     // Verify that a FAPI client using the correct private_key_jwt authentication
     // is accepted at the PAR endpoint.
     //
@@ -586,7 +586,7 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     );
 }
 
-/// FAPI 2.0 Section 5.2.2: the auth-method gate must judge the method the
+/// FAPI 2.0 Section 5.3.2.1: the auth-method gate must judge the method the
 /// request ACTUALLY authenticated with, not the registered one. A stale
 /// client secret on a client registered as private_key_jwt must be
 /// rejected at PAR (#706).
@@ -649,7 +649,7 @@ async fn test_fapi2_par_rejects_client_id_only_for_private_key_jwt_client() {
 
 #[tokio::test]
 async fn test_fapi2_token_rejects_without_dpop() {
-    // FAPI 2.0 Section 5.2.2: Sender-constrained tokens are required.
+    // FAPI 2.0 Section 5.3.2.1: Sender-constrained tokens are required.
     // A FAPI client that authenticates with private_key_jwt but omits the
     // DPoP header must be rejected.
     let (app, state) = test_app().await;
@@ -857,7 +857,7 @@ async fn test_fapi2_non_fapi_client_secret_basic() {
 
 #[tokio::test]
 async fn test_fapi2_discovery_excludes_rs256() {
-    // FAPI 2.0 Section 5.2.2: RS256 must NOT appear in any algorithm list.
+    // FAPI 2.0 Section 5.4.1: RS256 must NOT appear in any algorithm list.
     let (app, _state) = test_app().await;
 
     let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
@@ -865,7 +865,7 @@ async fn test_fapi2_discovery_excludes_rs256() {
 
     let doc: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
 
-    // FAPI 2.0 Section 5.2.2 restricts RS256 from DPoP and token endpoint auth signing.
+    // FAPI 2.0 Section 5.4.1 restricts RS256 from DPoP and token endpoint auth signing.
     // request_object_signing_alg_values_supported intentionally includes RS256 to support
     // OIDC Basic Profile conformance (oidcc-request-uri-signed-rs256). The JAR validator
     // enforces PS256/ES256/EdDSA for FAPI clients at runtime via validate_fapi_algorithm().
@@ -887,7 +887,7 @@ async fn test_fapi2_discovery_excludes_rs256() {
 
 #[tokio::test]
 async fn test_fapi2_discovery_includes_fapi_algorithms() {
-    // FAPI 2.0 Section 5.2.2: PS256, ES256, EdDSA must be in signing algorithm lists.
+    // FAPI 2.0 Section 5.4.1: PS256, ES256, EdDSA must be in signing algorithm lists.
     let (app, _state) = test_app().await;
 
     let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
@@ -1123,7 +1123,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
 // ============================================================================
 // FAPI 2.0 Device Authorization Grant (RFC 8628) — Sender Constraints
 //
-// FAPI 2.0 Section 5.2.2 requires sender-constrained access tokens. The
+// FAPI 2.0 Section 5.3.2.1 requires sender-constrained access tokens. The
 // device code grant must enforce this for FAPI clients, consistent with the
 // authorization code and FIDO2 assertion grants.
 // ============================================================================
@@ -1181,7 +1181,7 @@ fn device_token_body(device_code: &str) -> String {
     )
 }
 
-/// FAPI 2.0 Section 5.2.2: A FAPI client completing device flow without a
+/// FAPI 2.0 Section 5.3.2.1: A FAPI client completing device flow without a
 /// sender constraint (DPoP or mTLS) must be rejected with `invalid_request`.
 /// The device code must NOT be consumed so the client can retry with a proof.
 #[tokio::test]
@@ -1528,7 +1528,7 @@ async fn test_fapi2_device_flow_unknown_client_id_rejected() {
 // ============================================================================
 // FAPI 2.0 Token Exchange (RFC 8693) — Sender Constraints
 //
-// FAPI 2.0 Section 5.2.2 applies to every grant a FAPI client can use.
+// FAPI 2.0 Section 5.3.2.1 applies to every grant a FAPI client can use.
 // Without enforcement here, a FAPI client could exchange a DPoP-bound
 // subject_token for an unbound access token, undoing the sender constraint
 // in one hop.
@@ -1625,7 +1625,7 @@ async fn test_fapi2_token_exchange_with_dpop_issues_bound_token() {
 // ============================================================================
 // FAPI 2.0 Client Credentials (RFC 6749 §4.4) — Sender Constraints
 //
-// FAPI 2.0 Section 5.2.2 applies to every grant a FAPI client can reach.
+// FAPI 2.0 Section 5.3.2.1 applies to every grant a FAPI client can reach.
 // The client_credentials grant is reachable by any registered client — the
 // token endpoint does not gate grants by the client's registered
 // `grant_types` — so it must enforce sender-constraining like the others.

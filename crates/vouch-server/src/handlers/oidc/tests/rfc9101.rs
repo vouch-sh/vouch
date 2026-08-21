@@ -157,8 +157,9 @@ async fn test_rfc9101_discovery_includes_request_object_signing_alg_values_suppo
     assert!(alg_strs.contains(&"PS256"), "Must support PS256");
     assert!(alg_strs.contains(&"EdDSA"), "Must support EdDSA");
     // RS256 is advertised for non-FAPI clients (OIDC Basic Profile conformance).
-    // FAPI 2.0 Section 5.2.2 restricts DPoP/token-endpoint signing, not JAR signing.
-    // The JAR validator enforces PS256/ES256/EdDSA for FAPI clients at runtime.
+    // Vouch deliberately advertises RS256 for JAR request objects while the JAR
+    // validator enforces the FAPI 2.0 Section 5.4.1 set (PS256/ES256/EdDSA) for
+    // FAPI clients at runtime.
     assert!(
         alg_strs.contains(&"RS256"),
         "RS256 must be advertised for OIDC Basic Profile conformance (oidcc-request-uri-signed-rs256)"

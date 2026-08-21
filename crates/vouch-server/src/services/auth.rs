@@ -462,7 +462,7 @@ impl SenderConstraintProof {
     ///
     /// Three independent requirements, all enforced here so that no grant
     /// enforces a different subset:
-    /// - FAPI 2.0 Section 5.2.2 — a FAPI client's tokens must be
+    /// - FAPI 2.0 Section 5.3.2.1 — a FAPI client's tokens must be
     ///   sender-constrained by DPoP or mTLS.
     /// - RFC 9449 Section 5 — a client that registered
     ///   `dpop_bound_access_tokens` must present a DPoP proof. mTLS does not

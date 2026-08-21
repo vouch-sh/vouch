@@ -29,7 +29,7 @@ pub const STANDARD_CLOCK_SKEW_SECONDS: i64 = 10;
 
 /// Validate FAPI 2.0 constraints on an authorization request.
 ///
-/// FAPI 2.0 Section 5.2.2 requires Pushed Authorization Requests (PAR).
+/// FAPI 2.0 Section 5.3.2.2 requires Pushed Authorization Requests (PAR).
 /// The `request_uri` must be present, obtained from a prior PAR endpoint call.
 ///
 /// Non-FAPI clients pass validation unconditionally.
@@ -50,7 +50,7 @@ pub fn validate_fapi_authorization_request(
         return Ok(());
     }
 
-    // FAPI 2.0 Section 5.2.2: PAR is required
+    // FAPI 2.0 Section 5.3.2.2: PAR is required
     if !has_par {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
@@ -63,7 +63,7 @@ pub fn validate_fapi_authorization_request(
 
 /// Sender-constraint mechanisms present on a token request.
 ///
-/// FAPI 2.0 Section 5.2.2 requires at least one of these for FAPI clients.
+/// FAPI 2.0 Section 5.3.2.1 requires at least one of these for FAPI clients.
 #[derive(Debug, Clone, Copy)]
 pub struct SenderConstraints {
     /// A valid DPoP proof was provided in the request.
@@ -74,7 +74,7 @@ pub struct SenderConstraints {
 
 /// Validate FAPI 2.0 constraints on a token request.
 ///
-/// FAPI 2.0 Section 5.2.2 requires sender-constrained access tokens,
+/// FAPI 2.0 Section 5.3.2.1 requires sender-constrained access tokens,
 /// so FAPI clients must present at least one mechanism in `constraints`.
 ///
 /// Non-FAPI clients pass validation unconditionally.
@@ -90,7 +90,7 @@ pub(crate) fn validate_fapi_token_request(
         return Ok(());
     }
 
-    // FAPI 2.0 Section 5.2.2: Sender-constrained tokens required (DPoP or mTLS)
+    // FAPI 2.0 Section 5.3.2.1: Sender-constrained tokens required (DPoP or mTLS)
     if !constraints.dpop && !constraints.mtls_cert {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
@@ -141,7 +141,7 @@ pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> Service
 
 /// Validate that the client authentication method is allowed for FAPI 2.0.
 ///
-/// FAPI 2.0 Section 5.2.2 requires `private_key_jwt` (mTLS support is deferred).
+/// FAPI 2.0 Section 5.3.2.1 requires `private_key_jwt` (mTLS support is deferred).
 ///
 /// Non-FAPI clients pass validation unconditionally.
 ///

@@ -1626,7 +1626,7 @@ async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
 }
 
 // ========================================================================
-// RFC 8705 §2 / FAPI 2.0 §5.2.2 — mTLS Client Authentication at PAR
+// RFC 8705 §2 / FAPI 2.0 §5.3.2.1 — mTLS Client Authentication at PAR
 //
 // PAR must apply the same mTLS dispatch as the token endpoint: a client
 // registered with tls_client_auth must present a valid TLS client
