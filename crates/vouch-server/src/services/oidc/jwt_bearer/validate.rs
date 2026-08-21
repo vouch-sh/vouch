@@ -4,17 +4,12 @@
 //! Provides shared validation logic used by both JWT client authentication
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
+use crate::db::JwsAlgorithm;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-
-/// Supported algorithms for JWT assertions (asymmetric only).
-///
-/// HS* and "none" are unconditionally rejected to prevent symmetric key
-/// confusion attacks (RFC 7523 Section 3).
-pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "PS256", "EdDSA"];
 
 /// Clock skew tolerance in seconds.
 ///
@@ -129,18 +124,64 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
         )
     })?;
 
-    // Validate algorithm
-    if !SUPPORTED_ALGORITHMS.contains(&header.alg.as_str()) {
+    // Structural algorithm check: only asymmetric algorithms are ever accepted.
+    // HS* and "none" are unconditionally rejected to prevent symmetric key
+    // confusion attacks (RFC 7523 Section 3). This does not consider the
+    // presenting client — the per-client-profile allowlist (e.g. excluding
+    // RS256 for FAPI clients) is applied later via
+    // `validate_client_assertion_algorithm`, once the client is resolved.
+    if header.alg.parse::<JwsAlgorithm>().is_err() {
+        let supported = JwsAlgorithm::CLIENT_ASSERTION_ALLOWED
+            .iter()
+            .map(JwsAlgorithm::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "Unsupported JWT assertion algorithm: {}. Supported: ES256, RS256, PS256, EdDSA",
+                "Unsupported JWT assertion algorithm: {}. Supported: {supported}",
                 header.alg
             ),
         ));
     }
 
     Ok(header)
+}
+
+/// Validate that a client assertion's algorithm is permitted for the presenting
+/// client's profile.
+///
+/// Distinct from the structural check in [`parse_assertion_header`] (which only
+/// rejects symmetric/`none` algorithms): this enforces the per-client allowlist,
+/// e.g. FAPI 2.0 clients restricted to [`JwsAlgorithm::FAPI_ALLOWED`]. Callers
+/// select `allowed` via `client.fapi_profile.client_assertion_algorithms()`
+/// (`crate::db::FapiProfile::client_assertion_algorithms`).
+///
+/// # Errors
+/// Returns `ServiceError::OAuth` with `invalid_client` if `alg` is not in `allowed`.
+pub fn validate_client_assertion_algorithm(
+    alg: &str,
+    allowed: &[JwsAlgorithm],
+) -> ServiceResult<()> {
+    let permitted = alg
+        .parse::<JwsAlgorithm>()
+        .is_ok_and(|parsed| allowed.contains(&parsed));
+    if !permitted {
+        let allowed_list = allowed
+            .iter()
+            .map(JwsAlgorithm::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            format!(
+                "Client assertion algorithm '{alg}' is not permitted for this client. \
+                 Allowed: {allowed_list}"
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validate a JWT assertion's signature and claims.
@@ -318,12 +359,17 @@ mod tests {
     }
 
     #[test]
-    fn test_supported_algorithms() {
-        assert!(SUPPORTED_ALGORITHMS.contains(&"ES256"));
-        assert!(SUPPORTED_ALGORITHMS.contains(&"RS256"));
-        assert!(SUPPORTED_ALGORITHMS.contains(&"EdDSA"));
-        assert!(!SUPPORTED_ALGORITHMS.contains(&"HS256"));
-        assert!(!SUPPORTED_ALGORITHMS.contains(&"none"));
+    fn test_structural_algorithm_gate_matches_client_assertion_allowed() {
+        // parse_assertion_header's structural gate accepts exactly the algorithms
+        // JwsAlgorithm can parse — the same four CLIENT_ASSERTION_ALLOWED names.
+        for alg in JwsAlgorithm::CLIENT_ASSERTION_ALLOWED {
+            assert!(
+                alg.as_str().parse::<JwsAlgorithm>().is_ok(),
+                "{alg} must be structurally accepted"
+            );
+        }
+        assert!("HS256".parse::<JwsAlgorithm>().is_err());
+        assert!("none".parse::<JwsAlgorithm>().is_err());
     }
 
     #[test]
@@ -984,5 +1030,45 @@ mod tests {
     fn test_map_algorithm_ps256() {
         let alg = map_algorithm("PS256").expect("PS256 should be mapped");
         assert_eq!(alg, jsonwebtoken::Algorithm::PS256);
+    }
+
+    // ====================================================================
+    // validate_client_assertion_algorithm tests (#1003)
+    // ====================================================================
+
+    #[test]
+    fn test_validate_client_assertion_algorithm_allows_listed() {
+        assert!(validate_client_assertion_algorithm("ES256", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
+        assert!(validate_client_assertion_algorithm("PS256", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
+        assert!(validate_client_assertion_algorithm("EdDSA", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
+    }
+
+    #[test]
+    fn test_validate_client_assertion_algorithm_rejects_unlisted() {
+        let result = validate_client_assertion_algorithm("RS256", &JwsAlgorithm::FAPI_ALLOWED);
+        assert!(
+            result.is_err(),
+            "RS256 must be rejected against FAPI_ALLOWED"
+        );
+        let err = result.unwrap_err();
+        let desc = oauth_error_description(&err);
+        assert!(
+            desc.contains("Allowed: ES256, PS256, EdDSA"),
+            "error message must list the allowed set, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn test_validate_client_assertion_algorithm_allows_rs256_in_wider_set() {
+        assert!(
+            validate_client_assertion_algorithm("RS256", &JwsAlgorithm::CLIENT_ASSERTION_ALLOWED)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_client_assertion_algorithm_rejects_unparseable() {
+        let result = validate_client_assertion_algorithm("HS256", &JwsAlgorithm::FAPI_ALLOWED);
+        assert!(result.is_err(), "HS256 must be rejected outright");
     }
 }

@@ -680,7 +680,7 @@ fn validate_temporal_claims(
 )]
 mod tests {
     use super::*;
-    use crate::services::oidc::jwt_bearer::SUPPORTED_ALGORITHMS;
+    use crate::db::JwsAlgorithm;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.
@@ -808,7 +808,12 @@ mod tests {
 
     #[test]
     fn test_jar_supported_algorithms_includes_ps256() {
-        assert!(SUPPORTED_ALGORITHMS.contains(&"PS256"));
+        assert!(JwsAlgorithm::CLIENT_ASSERTION_ALLOWED.contains(&JwsAlgorithm::Ps256));
+        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "PS256", "typ": "JWT"}));
+        assert!(
+            parse_request_object_header(&jwt).is_ok(),
+            "PS256 must be structurally accepted"
+        );
     }
 
     // ========================================================================

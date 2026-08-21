@@ -34,6 +34,7 @@ pub(super) enum AppValidationError {
     FapiMissingJwks,
     PrivateKeyJwtMissingJwks,
     FapiDowngradeUnsupported,
+    FapiJwksNoAllowedAlgorithm,
     JwksNotJson,
     JwksMissingKeys,
     InvalidJwksUri,
@@ -53,6 +54,7 @@ impl AppValidationError {
             Self::FapiRequiresConfidentialClient => "invalid_fapi_profile",
             Self::FapiMissingJwks | Self::PrivateKeyJwtMissingJwks => "missing_jwks",
             Self::FapiDowngradeUnsupported => "fapi_downgrade_unsupported",
+            Self::FapiJwksNoAllowedAlgorithm => "fapi_jwks_algorithm_unsupported",
             Self::JwksNotJson | Self::JwksMissingKeys => "invalid_jwks",
             Self::InvalidJwksUri => "invalid_jwks_uri",
         }
@@ -100,6 +102,13 @@ impl AppValidationError {
             Self::FapiDowngradeUnsupported => {
                 "A FAPI 2.0 application cannot be changed to a standard profile. \
                  Create a new standard application instead."
+                    .to_string()
+            }
+            Self::FapiJwksNoAllowedAlgorithm => {
+                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA \
+                 (RFC 7523 client-assertion signing). None of the configured keys \
+                 are usable: every key declares an alg outside that set. Add a \
+                 compatible key, or remove the alg constraint from an existing one."
                     .to_string()
             }
             Self::JwksNotJson => "JWKS must be valid JSON".to_string(),
@@ -205,6 +214,17 @@ pub(super) fn validate_create_application<'a>(
 
     let jwks = jwks_trimmed.map(parse_jwks).transpose()?;
     validate_jwks_uri(jwks_uri)?;
+
+    // FAPI validation: an inline JWKS must have at least one key the
+    // FAPI_ALLOWED validator can actually select (see jwks_has_fapi_allowed_key).
+    // A jwks_uri can't be inspected synchronously, so this only guards the
+    // inline case; the same is true of validate_update_fapi.
+    if is_fapi
+        && let Some(ref parsed_jwks) = jwks
+        && !jwks_has_fapi_allowed_key(parsed_jwks)
+    {
+        return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
+    }
 
     Ok(ValidatedCreateApp {
         name,
@@ -354,6 +374,20 @@ pub(super) fn validate_update_fapi(
         && client.jwks_uri.is_none()
     {
         return Err(AppValidationError::FapiMissingJwks);
+    }
+
+    // FAPI validation: an inline JWKS (submitted or already on the client) must
+    // have at least one key usable with FAPI_ALLOWED. Reached whenever the
+    // request declares `fapi_profile=fapi2_security` — a fresh upgrade or an
+    // explicit re-confirmation — same scope as the FapiMissingJwks check above.
+    // A JWKS-only update that omits `fapi_profile` on an already-FAPI client
+    // takes the early return above and is not re-validated here, matching that
+    // check's existing scope; the client stays FAPI either way, so this is a
+    // known gap shared by both checks, not one this change introduces.
+    if let Some(jwks) = validated.jwks.as_ref().or(client.jwks.as_ref())
+        && !jwks_has_fapi_allowed_key(jwks)
+    {
+        return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
 
     Ok(())
@@ -573,6 +607,39 @@ fn parse_jwks(jwks_json: &str) -> Result<serde_json::Value, AppValidationError> 
         return Err(AppValidationError::JwksMissingKeys);
     }
     Ok(val)
+}
+
+/// Returns `true` when `jwks` contains at least one key the FAPI 2.0
+/// client-assertion validator (`FapiProfile::client_assertion_algorithms`, which
+/// yields `JwsAlgorithm::FAPI_ALLOWED` for `FapiProfile::Fapi2Security`) could
+/// actually use: a key that declares no `alg` but has a `kty` the runtime
+/// matcher can select for ES256/PS256/EdDSA (`EC`/`RSA`/`OKP`), or a key whose
+/// declared `alg` is ES256, PS256, or EdDSA outright.
+///
+/// A key search skips a JWK whose declared `alg` differs from the assertion's
+/// header (`jwt_bearer/jwks.rs`), so a JWKS made only of `alg: RS256` keys would
+/// leave a FAPI client with no algorithm it is both allowed to use and has a
+/// matching key for — permanently unauthenticatable, the same "no way back"
+/// failure [`AppValidationError::FapiDowngradeUnsupported`] prevents on the
+/// standard-profile transition. The `kty` check on the no-`alg` branch closes
+/// the same bug class for an incompatible or missing `kty` (e.g. `oct`): the
+/// runtime matcher (`jwt_bearer/jwks.rs`) only ever selects `EC`/`RSA`/`OKP`
+/// for ES256/PS256/EdDSA, so a key with any other `kty` is unmatchable
+/// regardless of `alg`.
+fn jwks_has_fapi_allowed_key(jwks: &serde_json::Value) -> bool {
+    let Some(keys) = jwks.get("keys").and_then(|k| k.as_array()) else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        let Some(alg) = key.get("alg").and_then(|a| a.as_str()) else {
+            return key
+                .get("kty")
+                .and_then(|v| v.as_str())
+                .is_some_and(|kty| matches!(kty, "EC" | "RSA" | "OKP"));
+        };
+        alg.parse::<JwsAlgorithm>()
+            .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
+    })
 }
 
 fn validate_jwks_uri(jwks_uri: Option<&str>) -> Result<(), AppValidationError> {
@@ -915,6 +982,274 @@ mod tests {
         assert!(fields.jwks.is_some(), "request JWKS used");
         assert_eq!(fields.jwks_uri, Some("https://client.example/jwks.json"));
         assert!(fields.dpop_bound_access_tokens);
+    }
+
+    // ========================================================================
+    // FAPI upgrade requires a usable key (#1003 round 2) — a JWKS made only of
+    // alg-pinned keys outside FAPI_ALLOWED (ES256/PS256/EdDSA) leaves a FAPI
+    // client with no algorithm it can both present and match a key for: the
+    // client-assertion validator rejects RS256 for FAPI clients
+    // (jwt_bearer/client_auth.rs), and key selection skips a JWK whose
+    // declared alg differs from the assertion's (jwt_bearer/jwks.rs) — so an
+    // RS256-only key can never be selected for the algorithms FAPI does
+    // allow. This mirrors FapiDowngradeUnsupported: refuse the transition
+    // instead of persisting an application that can no longer authenticate.
+    // ========================================================================
+
+    fn rs256_only_jwks_json() -> String {
+        serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]})
+            .to_string()
+    }
+
+    // An RSA key with no `alg` constraint: RS256-shaped key material, but usable
+    // with PS256 because nothing pins it to RS256. Distinguishes "no key at all
+    // works" from "the alg happens to be spelled out and disallowed" — the guard
+    // must key off the declared alg, not the key type.
+    fn unpinned_rsa_jwks_json() -> String {
+        serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}).to_string()
+    }
+
+    fn eddsa_jwks_json() -> String {
+        serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "x": "x"}]})
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn fapi_upgrade_rejected_when_jwks_has_no_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "fapi-upgrade-rs256@example.com").await;
+        let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let jwks = rs256_only_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let err = validate_update_fapi(&validated, &client)
+            .expect_err("RS256-only JWKS must be rejected for a FAPI upgrade");
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    #[tokio::test]
+    async fn fapi_upgrade_accepted_when_jwks_has_an_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "fapi-upgrade-es256@example.com").await;
+        let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let jwks = fapi_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("a JWKS with no alg constraint must pass the FAPI upgrade guard");
+    }
+
+    #[tokio::test]
+    async fn fapi_upgrade_accepted_when_jwks_has_unpinned_rsa_key() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "fapi-upgrade-rsa-unpinned@example.com").await;
+        let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let jwks = unpinned_rsa_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("an unpinned RSA key (usable with PS256) must pass the FAPI upgrade guard");
+    }
+
+    #[tokio::test]
+    async fn fapi_upgrade_accepted_when_jwks_has_eddsa_key() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "fapi-upgrade-eddsa@example.com").await;
+        let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let jwks = eddsa_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("an OKP/EdDSA key must pass the FAPI upgrade guard");
+    }
+
+    // The guard also fires on an explicit re-confirmation (fapi_profile
+    // resubmitted, not just a fresh non-FAPI -> FAPI transition): swapping the
+    // JWKS of an already-FAPI client to an RS256-only key would strand it
+    // exactly the same way. A JWKS-only update that omits `fapi_profile`
+    // entirely is a known, pre-existing gap shared with FapiMissingJwks (see
+    // the comment on the guard) — out of scope here.
+    #[tokio::test]
+    async fn fapi_reconfirm_rejected_when_new_jwks_has_no_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let client = fapi_test_client(&state, "fapi-reconfirm-rs256@example.com").await;
+
+        let jwks = rs256_only_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let err = validate_update_fapi(&validated, &client)
+            .expect_err("RS256-only JWKS must be rejected on FAPI re-confirmation");
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    #[test]
+    fn fapi_create_rejected_when_jwks_has_no_allowed_algorithm_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = rs256_only_jwks_json();
+        let err = validate_create_application(CreateAppInput {
+            name: "Payments",
+            application_type: "web",
+            redirect_uris: &redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect_err("RS256-only JWKS must be rejected at FAPI creation");
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    #[test]
+    fn fapi_create_accepted_when_jwks_has_unpinned_rsa_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = unpinned_rsa_jwks_json();
+        validate_create_application(CreateAppInput {
+            name: "Payments",
+            application_type: "web",
+            redirect_uris: &redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("an unpinned RSA key (usable with PS256) must pass FAPI creation");
+    }
+
+    #[test]
+    fn fapi_create_accepted_when_jwks_has_eddsa_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = eddsa_jwks_json();
+        validate_create_application(CreateAppInput {
+            name: "Payments",
+            application_type: "web",
+            redirect_uris: &redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("an OKP/EdDSA key must pass FAPI creation");
+    }
+
+    #[test]
+    fn jwks_has_fapi_allowed_key_covers_alg_and_kty_cases() {
+        let no_alg = serde_json::json!({"keys": [{"kty": "EC"}]});
+        assert!(jwks_has_fapi_allowed_key(&no_alg), "no alg field survives");
+
+        // The nuance that motivated this guard: an RSA key normally used for
+        // RS256 survives if it declares no alg constraint, because it can then
+        // be presented with PS256 instead.
+        let unpinned_rsa = serde_json::json!({"keys": [{"kty": "RSA"}]});
+        assert!(
+            jwks_has_fapi_allowed_key(&unpinned_rsa),
+            "an RSA key with no alg field survives (usable with PS256)"
+        );
+
+        let es256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256"}]});
+        assert!(jwks_has_fapi_allowed_key(&es256));
+
+        let ps256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256"}]});
+        assert!(jwks_has_fapi_allowed_key(&ps256));
+
+        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "alg": "EdDSA"}]});
+        assert!(jwks_has_fapi_allowed_key(&eddsa));
+
+        let rs256_only = serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256"}]});
+        assert!(!jwks_has_fapi_allowed_key(&rs256_only));
+
+        // A kty the runtime matcher never selects for ES256/PS256/EdDSA (e.g. a
+        // symmetric "oct" key) must not survive just because it omits alg —
+        // it's unmatchable at runtime regardless.
+        let unmatchable_kty_no_alg = serde_json::json!({"keys": [{"kty": "oct"}]});
+        assert!(
+            !jwks_has_fapi_allowed_key(&unmatchable_kty_no_alg),
+            "a kty outside EC/RSA/OKP must not survive on a missing alg"
+        );
+
+        let mixed = serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "RS256"}, {"kty": "EC", "alg": "ES256"}]
+        });
+        assert!(
+            jwks_has_fapi_allowed_key(&mixed),
+            "one usable key is enough"
+        );
+
+        let empty = serde_json::json!({"keys": []});
+        assert!(!jwks_has_fapi_allowed_key(&empty));
+
+        let no_keys_field = serde_json::json!({});
+        assert!(!jwks_has_fapi_allowed_key(&no_keys_field));
     }
 
     // ========================================================================

@@ -7,7 +7,7 @@
 use super::jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 use super::validate::{
     JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified, map_algorithm,
-    parse_assertion_header, validate_jwt_assertion,
+    parse_assertion_header, validate_client_assertion_algorithm, validate_jwt_assertion,
 };
 use crate::AppState;
 use crate::db::claim::ClaimError;
@@ -165,6 +165,19 @@ pub async fn authenticate_client_jwt(
             "Client {} attempted private_key_jwt but is configured for {}",
             client.client_id,
             client.token_endpoint_auth_method.as_str()
+        );
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+
+    // 4b. FAPI 2.0 Section 5.4.1: restrict the assertion algorithm to the
+    // client's profile. See JwsAlgorithm::FAPI_ALLOWED. Checked before JWKS
+    // resolution so a disallowed algorithm never triggers a JWKS fetch.
+    let allowed_algorithms = client.fapi_profile.client_assertion_algorithms();
+    if let Err(e) = validate_client_assertion_algorithm(&header.alg, allowed_algorithms) {
+        tracing::warn!(
+            "Client {} used disallowed client-assertion algorithm '{}': {e}",
+            client.client_id,
+            header.alg
         );
         return Err(ClientAuthError::InvalidCredentials);
     }

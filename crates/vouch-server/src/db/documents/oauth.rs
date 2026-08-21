@@ -265,6 +265,17 @@ impl JwsAlgorithm {
     /// This is a `shall` (MUST-strength) requirement, and the three-algorithm list is
     /// restrictive: `RS256` is deliberately not among them.
     pub const FAPI_ALLOWED: [Self; 3] = [Self::Es256, Self::Ps256, Self::EdDsa];
+
+    /// Algorithms permitted for `private_key_jwt` (RFC 7523 §2.2) client-assertion
+    /// signing by clients not opted into FAPI 2.0 ([`FapiProfile::None`]):
+    /// [`Self::FAPI_ALLOWED`] plus `RS256`.
+    ///
+    /// [`FapiProfile::client_assertion_algorithms`] selects this per client, and
+    /// [`FapiProfile::client_assertion_algorithms_union`] — what discovery's
+    /// `token_endpoint_auth_signing_alg_values_supported` (`services/oidc/discovery.rs`)
+    /// actually advertises — is derived from it, not an independently maintained copy.
+    pub const CLIENT_ASSERTION_ALLOWED: [Self; 4] =
+        [Self::Es256, Self::Rs256, Self::Ps256, Self::EdDsa];
 }
 
 impl std::str::FromStr for JwsAlgorithm {
@@ -366,6 +377,12 @@ pub enum FapiProfile {
 }
 
 impl FapiProfile {
+    /// Every profile variant. [`Self::client_assertion_algorithms_union`] iterates
+    /// this, so a new variant added here without a matching arm in
+    /// [`Self::client_assertion_algorithms`] fails to compile (non-exhaustive match)
+    /// rather than silently inheriting another profile's allowlist.
+    pub const ALL: [Self; 2] = [Self::None, Self::Fapi2Security];
+
     /// Returns the canonical string representation used in the wire format.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -373,6 +390,37 @@ impl FapiProfile {
             Self::None => "none",
             Self::Fapi2Security => "fapi2_security",
         }
+    }
+
+    /// Algorithms this profile permits for `private_key_jwt` (RFC 7523 §2.2)
+    /// client-assertion signing. Callers select this per client via
+    /// `client.fapi_profile.client_assertion_algorithms()`
+    /// (`services/oidc/jwt_bearer/client_auth.rs`).
+    #[must_use]
+    pub fn client_assertion_algorithms(&self) -> &'static [JwsAlgorithm] {
+        match self {
+            Self::None => &JwsAlgorithm::CLIENT_ASSERTION_ALLOWED,
+            Self::Fapi2Security => &JwsAlgorithm::FAPI_ALLOWED,
+        }
+    }
+
+    /// The union of every profile's [`Self::client_assertion_algorithms`], over
+    /// [`Self::ALL`]. Discovery's `token_endpoint_auth_signing_alg_values_supported`
+    /// (`services/oidc/discovery.rs`) is exactly this union, so it cannot advertise
+    /// an algorithm no profile enforces, or omit one some profile does — the
+    /// advertised and enforced sets are structurally tied, not asserted equal in a
+    /// docstring.
+    #[must_use]
+    pub fn client_assertion_algorithms_union() -> Vec<JwsAlgorithm> {
+        let mut union: Vec<JwsAlgorithm> = Vec::new();
+        for profile in Self::ALL {
+            for alg in profile.client_assertion_algorithms() {
+                if !union.contains(alg) {
+                    union.push(*alg);
+                }
+            }
+        }
+        union
     }
 }
 

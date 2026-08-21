@@ -15,4 +15,3 @@ pub mod jwks;
 pub mod validate;
 
 pub use jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
-pub use validate::SUPPORTED_ALGORITHMS;

@@ -176,6 +176,70 @@ pub(super) async fn create_test_jwt_client(
     (client, pkcs8_bytes)
 }
 
+/// Generate an RS256 signing key pair. Returns (key_pair, JWK public key).
+///
+/// Used for per-client-profile algorithm enforcement tests (#1003): shared
+/// across `rfc7523.rs` (token endpoint) and `rfc9126.rs` (PAR).
+pub(super) fn generate_rs256_signing_key() -> (aws_lc_rs::rsa::KeyPair, serde_json::Value) {
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};
+    use aws_lc_rs::signature::KeyPair as _;
+
+    let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
+    let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
+    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
+        .expect("parse RSA SPKI components");
+
+    let jwk = serde_json::json!({
+        "kty": "RSA",
+        "n": URL_SAFE_NO_PAD.encode(&n_bytes),
+        "e": URL_SAFE_NO_PAD.encode(&e_bytes),
+        "use": "sig",
+        "alg": "RS256",
+        "kid": "test-key-1"
+    });
+
+    (key_pair, jwk)
+}
+
+/// Sign a client-assertion JWT with an RS256 key pair.
+pub(super) fn sign_client_assertion_rs256(
+    key_pair: &aws_lc_rs::rsa::KeyPair,
+    client_id: &str,
+    audience: &str,
+) -> String {
+    use aws_lc_rs::signature::RSA_PKCS1_SHA256;
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({ "alg": "RS256", "typ": "JWT", "kid": "test-key-1" });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + 60,
+        "jti": uuid::Uuid::now_v7().to_string()
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let mut sig_bytes = vec![0u8; key_pair.public_modulus_len()];
+    key_pair
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig_bytes,
+        )
+        .expect("RS256 signing");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig_bytes);
+
+    format!("{signing_input}.{sig_b64}")
+}
+
 pub(super) use crate::test_utils::build_client_assertion;
 
 /// Build a JWT assertion for `private_key_jwt` client auth, deliberately

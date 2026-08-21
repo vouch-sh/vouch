@@ -773,6 +773,102 @@ async fn test_non_fapi_client_accepts_token_endpoint_audience() {
 }
 
 // ========================================================================
+// Per-client-profile algorithm enforcement (#1003)
+//
+// FAPI 2.0 Section 5.4.1 restricts private_key_jwt client-assertion signing to
+// PS256/ES256/EdDSA (JwsAlgorithm::FAPI_ALLOWED); RS256 is deliberately excluded.
+// Non-FAPI clients keep RS256 via JwsAlgorithm::CLIENT_ASSERTION_ALLOWED. Both
+// profiles accepting ES256 is already exercised by every other test in this file
+// (e.g. test_fapi_client_accepts_issuer_audience, test_rfc7523_private_key_jwt_client_auth_full_flow).
+// ========================================================================
+
+#[tokio::test]
+async fn test_fapi_client_rejects_rs256_assertion() {
+    // FAPI 2.0 Section 5.4.1: RS256 must be rejected for FAPI-profile clients,
+    // even though the assertion is otherwise well-formed and correctly signed.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi-rs256-reject@example.com").await;
+
+    let (key_pair, jwk) = generate_rs256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let base_url = &state.config().base_url;
+    let assertion = sign_client_assertion_rs256(&key_pair, &client.client_id, base_url);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "FAPI client with RS256 assertion must be rejected: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "FAPI client RS256 rejection must be invalid_client: {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_non_fapi_client_accepts_rs256_assertion() {
+    // RFC 7523 does not restrict client-assertion algorithms; non-FAPI clients
+    // keep RS256 via JwsAlgorithm::CLIENT_ASSERTION_ALLOWED.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "nonfapi-rs256-accept@example.com").await;
+
+    let (key_pair, jwk) = generate_rs256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let base_url = &state.config().base_url;
+    let token_endpoint_url = format!("{base_url}/oauth/token");
+    let assertion = sign_client_assertion_rs256(&key_pair, &client.client_id, &token_endpoint_url);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    // Client auth must succeed. The grant may fail (unauthorized_client) but
+    // invalid_client would mean client auth itself failed.
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_client",
+        "Non-FAPI client with RS256 assertion must pass client auth (status={status}): {resp_body}"
+    );
+}
+
+// ========================================================================
 // RFC 7523 §3 — `jti` is OPTIONAL for non-FAPI clients
 //
 // Regression tests for PR #409: a committed JTI must not be treated as
