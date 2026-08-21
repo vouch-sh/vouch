@@ -52,6 +52,13 @@
 //! - [`org_keys`] - Per-organization issuer signing keys and operator rotation
 //! - [`mtls`] - mTLS client authentication (crate-local)
 
+/// Every accepted `response_type`. The authorize-endpoint validator,
+/// registration validation, and discovery's `response_types_supported`
+/// all read this list, so an advertised type cannot be unacceptable and
+/// vice versa. Vouch issues only authorization codes (RFC 6749 §4.1.1);
+/// implicit and hybrid response types are not supported.
+pub(crate) const SUPPORTED_RESPONSE_TYPES: &[&str] = &["code"];
+
 pub mod authorization;
 pub mod authorization_details;
 pub mod claims;

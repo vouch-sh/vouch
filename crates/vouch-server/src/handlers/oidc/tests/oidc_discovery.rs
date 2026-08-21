@@ -422,3 +422,197 @@ async fn test_oidc_discovery_hardware_claims_not_in_claims_supported() {
         "claims_supported must not include hardware_aaguid (removed for OIDC conformance)"
     );
 }
+
+// ── Advertised-vs-enforced drift guards ─────────────────────────────────
+// Same shape as test_oidc_discovery_grant_types_match_token_parser: each
+// advertised list must equal its enforcement source, and every advertised
+// value must round-trip through the code that enforces it.
+
+#[tokio::test]
+async fn test_oidc_discovery_response_modes_match_parser() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["response_modes_supported"]
+        .as_array()
+        .expect("response_modes_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("mode is a string").to_string())
+        .collect();
+
+    let source: BTreeSet<String> = crate::db::ResponseMode::supported_wire_values()
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    assert_eq!(
+        discovered, source,
+        "discovery response_modes_supported must exactly match ResponseMode::ACCEPTED"
+    );
+    for mode in &discovered {
+        assert!(
+            crate::db::ResponseMode::parse(mode).is_some(),
+            "discovery advertises a response_mode the parser rejects: {mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_response_types_match_validator() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["response_types_supported"]
+        .as_array()
+        .expect("response_types_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("type is a string").to_string())
+        .collect();
+
+    let source: BTreeSet<String> = crate::services::oidc::SUPPORTED_RESPONSE_TYPES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+    assert_eq!(
+        discovered, source,
+        "discovery response_types_supported must exactly match the authorize validator"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_code_challenge_methods_match_parser() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["code_challenge_methods_supported"]
+        .as_array()
+        .expect("code_challenge_methods_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("method is a string").to_string())
+        .collect();
+
+    let source: BTreeSet<String> =
+        crate::services::oidc::authorization::CodeChallengeMethod::SUPPORTED
+            .iter()
+            .map(|m| m.as_str().to_string())
+            .collect();
+
+    assert_eq!(
+        discovered, source,
+        "discovery code_challenge_methods_supported must exactly match the PKCE parser"
+    );
+    for method in &discovered {
+        assert!(
+            crate::services::oidc::authorization::CodeChallengeMethod::parse(method).is_some(),
+            "discovery advertises a code_challenge_method the parser rejects: {method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_scopes_match_parser() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["scopes_supported"]
+        .as_array()
+        .expect("scopes_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("scope is a string").to_string())
+        .collect();
+
+    let source: BTreeSet<String> = crate::services::oidc::OAuthScope::all()
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+
+    assert_eq!(
+        discovered, source,
+        "discovery scopes_supported must exactly match OAuthScope::all()"
+    );
+    for scope in &discovered {
+        assert!(
+            crate::services::oidc::OAuthScope::parse(scope).is_some(),
+            "discovery advertises a scope the parser rejects: {scope}"
+        );
+    }
+}
+
+/// `claims_supported` mirrors [`crate::services::oidc::token::IdTokenClaims`]:
+/// a fully populated token must emit exactly the advertised claims plus the
+/// deliberately unadvertised ones (`cnf`, and the custom hardware claims —
+/// see `test_oidc_discovery_hardware_claims_not_in_claims_supported`).
+#[tokio::test]
+async fn test_oidc_discovery_claims_match_id_token_struct() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let advertised: BTreeSet<String> = discovery["claims_supported"]
+        .as_array()
+        .expect("claims_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("claim is a string").to_string())
+        .collect();
+
+    let source: BTreeSet<String> = crate::services::oidc::token::ADVERTISED_ID_TOKEN_CLAIMS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        advertised, source,
+        "discovery claims_supported must exactly match ADVERTISED_ID_TOKEN_CLAIMS"
+    );
+
+    let claims = crate::services::oidc::token::IdTokenClaims {
+        iss: "https://issuer.example".to_string(),
+        sub: "user".to_string(),
+        aud: "client".to_string(),
+        exp: 1,
+        iat: 1,
+        auth_time: Some(1),
+        nonce: Some("nonce".to_string()),
+        email: Some("user@example.com".to_string()),
+        email_verified: Some(true),
+        hardware_verified: Some(true),
+        hardware_aaguid: Some("aaguid".to_string()),
+        cnf: Some(crate::services::oidc::claims::CnfClaim {
+            jkt: Some("thumbprint".to_string()),
+            x5t_s256: None,
+        }),
+        amr: Some(vec![crate::services::auth::AuthMethod::HardwareKey]),
+        acr: Some("acr".to_string()),
+        at_hash: Some("hash".to_string()),
+    };
+    let serialized = serde_json::to_value(&claims).expect("serialize IdTokenClaims");
+    let emitted: BTreeSet<String> = serialized
+        .as_object()
+        .expect("IdTokenClaims serializes to an object")
+        .keys()
+        .cloned()
+        .collect();
+
+    let expected: BTreeSet<String> = source
+        .into_iter()
+        .chain(
+            ["cnf", "hardware_verified", "hardware_aaguid"]
+                .iter()
+                .map(ToString::to_string),
+        )
+        .collect();
+    assert_eq!(
+        emitted, expected,
+        "IdTokenClaims fields drifted from claims_supported: \
+         update ADVERTISED_ID_TOKEN_CLAIMS (or the unadvertised set here)"
+    );
+}

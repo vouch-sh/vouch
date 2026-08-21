@@ -117,8 +117,13 @@ pub struct CreateParParams<'a> {
 /// Returns an error if the CSPRNG fails.
 fn generate_request_uri() -> Result<String> {
     let encoded = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
-    Ok(format!("urn:ietf:params:oauth:request_uri:{encoded}"))
+    Ok(format!("{REQUEST_URI_URN_PREFIX}{encoded}"))
 }
+
+/// RFC 9126 Section 2.2 `request_uri` URN prefix. Issued by
+/// [`generate_request_uri`] and matched by the authorize endpoint to
+/// route PAR lookups — one constant so the two cannot drift.
+pub(crate) const REQUEST_URI_URN_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
 /// Create a pushed authorization request.
 ///

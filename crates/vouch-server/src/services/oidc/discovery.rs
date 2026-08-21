@@ -7,10 +7,11 @@
 //! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
-use crate::db::{JwsAlgorithm, TokenEndpointAuthMethod};
+use crate::db::{JwsAlgorithm, ResponseMode, TokenEndpointAuthMethod};
 use crate::error::ServiceError;
 use crate::services::auth::ACR_AAL3;
 use crate::services::oidc::OAuthScope;
+use crate::services::oidc::authorization::CodeChallengeMethod;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use serde::Serialize;
 use std::sync::Arc;
@@ -211,13 +212,14 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             .iter()
             .map(|s| s.as_str().to_string())
             .collect(),
-        response_types_supported: vec!["code".to_string()],
-        response_modes_supported: vec![
-            "query".to_string(),
-            "form_post".to_string(),
-            "jwt".to_string(),
-            "query.jwt".to_string(),
-        ],
+        response_types_supported: super::SUPPORTED_RESPONSE_TYPES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        response_modes_supported: ResponseMode::supported_wire_values()
+            .into_iter()
+            .map(String::from)
+            .collect(),
         grant_types_supported: OAuthGrantType::supported_wire_values()
             .into_iter()
             .map(String::from)
@@ -231,22 +233,15 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         token_endpoint_auth_methods_supported: auth_methods.clone(),
         revocation_endpoint_auth_methods_supported: auth_methods.clone(),
         introspection_endpoint_auth_methods_supported: auth_methods,
-        claims_supported: vec![
-            "sub".to_string(),
-            "iss".to_string(),
-            "aud".to_string(),
-            "exp".to_string(),
-            "iat".to_string(),
-            "auth_time".to_string(),
-            "nonce".to_string(),
-            "at_hash".to_string(),
-            "email".to_string(),
-            "email_verified".to_string(),
-            "amr".to_string(),
-            "acr".to_string(),
-        ],
+        claims_supported: super::token::ADVERTISED_ID_TOKEN_CLAIMS
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         claims_parameter_supported: false,
-        code_challenge_methods_supported: vec!["S256".to_string()],
+        code_challenge_methods_supported: CodeChallengeMethod::SUPPORTED
+            .iter()
+            .map(|m| m.as_str().to_string())
+            .collect(),
         // RS256 excluded per FAPI 2.0 Section 5.2.2.
         dpop_signing_alg_values_supported: Some(vec![
             JwsAlgorithm::Es256,

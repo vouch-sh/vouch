@@ -30,16 +30,19 @@ pub enum CodeChallengeMethod {
 }
 
 impl CodeChallengeMethod {
+    /// Every accepted `code_challenge_method`, in the order advertised in
+    /// discovery metadata (`code_challenge_methods_supported`).
+    /// [`parse`](Self::parse) reads this table, so an advertised method
+    /// cannot be unparseable.
+    pub const SUPPORTED: &'static [Self] = &[Self::S256];
+
     /// Parse a code challenge method from a string value.
     ///
     /// Only `S256` is accepted per RFC 9700. Returns `None` for `plain`
     /// and all other unsupported methods.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "S256" => Some(Self::S256),
-            _ => None,
-        }
+        Self::SUPPORTED.iter().copied().find(|m| m.as_str() == s)
     }
 
     /// Return the string representation used in OAuth parameters.
@@ -456,7 +459,7 @@ pub fn validate_authorize_request(
     params: AuthorizeRequestParams,
 ) -> ServiceResult<ValidatedAuthRequest> {
     // RFC 6749 Section 4.1.1: response_type must be "code"
-    if params.response_type != "code" {
+    if !super::SUPPORTED_RESPONSE_TYPES.contains(&params.response_type.as_str()) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::UnsupportedResponseType,
             "Only 'code' response type is supported",

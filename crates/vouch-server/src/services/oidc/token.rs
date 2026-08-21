@@ -271,6 +271,26 @@ pub struct IdTokenClaims {
     pub at_hash: Option<String>,
 }
 
+/// The [`IdTokenClaims`] fields advertised in discovery's
+/// `claims_supported`, kept next to the struct they mirror. The custom
+/// claims (`hardware_verified`, `hardware_aaguid`) and `cnf` are emitted
+/// but deliberately not advertised. A drift test serializes a fully
+/// populated [`IdTokenClaims`] and checks its keys against this list.
+pub(crate) const ADVERTISED_ID_TOKEN_CLAIMS: &[&str] = &[
+    "sub",
+    "iss",
+    "aud",
+    "exp",
+    "iat",
+    "auth_time",
+    "nonce",
+    "at_hash",
+    "email",
+    "email_verified",
+    "amr",
+    "acr",
+];
+
 /// Exchange an authorization code for tokens.
 ///
 /// # Arguments
