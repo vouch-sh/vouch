@@ -591,7 +591,7 @@ pub async fn register_client(
             },
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: Some(jwks_auth.auth_method),
+            token_endpoint_auth_method: jwks_auth.auth_method,
             jwks: jwks_auth.jwks_value.as_ref(),
             jwks_uri: jwks_auth.jwks_uri.as_deref(),
             fapi_profile: Some(fapi_profile),

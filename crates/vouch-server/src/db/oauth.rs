@@ -88,6 +88,28 @@ pub struct OAuthClient {
     pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
+/// Old↔new stored-row mapping: rows persisted while secretless client
+/// types still fell back to the RFC 7591 §2 default `client_secret_basic`
+/// are read as the public-client method `none`. No writer produces
+/// `spa`/`native` + `client_secret_basic` deliberately — manual
+/// registration derives the method from the application type, and dynamic
+/// registration infers `spa`/`native` only when the requested method is
+/// `none` (`determine_client_type`).
+///
+/// RFC 7591 §2 (<https://www.rfc-editor.org/rfc/rfc7591#section-2>):
+/// > "none": The client is a public client as defined in OAuth 2.0,
+/// > Section 2.1, and does not have a client secret.
+fn normalize_stored_auth_method(
+    application_type: OAuthClientType,
+    stored: TokenEndpointAuthMethod,
+) -> TokenEndpointAuthMethod {
+    if !application_type.requires_secret() && stored == TokenEndpointAuthMethod::ClientSecretBasic {
+        TokenEndpointAuthMethod::None
+    } else {
+        stored
+    }
+}
+
 impl From<Document<OAuthClientDoc>> for OAuthClient {
     fn from(doc: Document<OAuthClientDoc>) -> Self {
         Self {
@@ -107,7 +129,10 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             resource_uris: doc.data.resource_uris,
             jwks: doc.data.jwks,
             jwks_uri: doc.data.jwks_uri,
-            token_endpoint_auth_method: doc.data.token_endpoint_auth_method,
+            token_endpoint_auth_method: normalize_stored_auth_method(
+                doc.data.application_type,
+                doc.data.token_endpoint_auth_method,
+            ),
             request_object_signing_alg: doc.data.request_object_signing_alg,
             require_signed_request_object: doc.data.require_signed_request_object,
             fapi_profile: doc.data.fapi_profile,
@@ -214,7 +239,7 @@ pub struct CreateOAuthClientParams<'a> {
     pub access_scope: AccessScope,
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
-    pub token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub jwks: Option<&'a serde_json::Value>,
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: Option<FapiProfile>,
@@ -270,7 +295,7 @@ pub async fn create_oauth_client(
         resource_uris: params.resource_uris.to_vec(),
         jwks: params.jwks.cloned(),
         jwks_uri: params.jwks_uri.map(String::from),
-        token_endpoint_auth_method: params.token_endpoint_auth_method.unwrap_or_default(),
+        token_endpoint_auth_method: params.token_endpoint_auth_method,
         request_object_signing_alg: params.request_object_signing_alg,
         require_signed_request_object: params.require_signed_request_object,
         fapi_profile: params.fapi_profile.unwrap_or_default(),
@@ -1466,7 +1491,7 @@ mod tests {
                 access_scope: AccessScope::Public,
                 org_id: None,
                 resource_uris: &[],
-                token_endpoint_auth_method: None,
+                token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
                 jwks: None,
                 jwks_uri: None,
                 fapi_profile: None,

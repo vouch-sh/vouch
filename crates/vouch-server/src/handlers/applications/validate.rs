@@ -396,10 +396,15 @@ pub(super) fn build_create_params<'a>(
         access_scope: ctx.access_scope,
         org_id: ctx.org_id,
         resource_uris: ctx.resource_uris,
+        // RFC 7591 §2 (https://www.rfc-editor.org/rfc/rfc7591#section-2):
+        // > "none": The client is a public client as defined in OAuth 2.0,
+        // > Section 2.1, and does not have a client secret.
         token_endpoint_auth_method: if is_fapi {
-            Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        } else if validated.app_type.requires_secret() {
+            TokenEndpointAuthMethod::ClientSecretBasic
         } else {
-            None
+            TokenEndpointAuthMethod::None
         },
         jwks: if is_fapi {
             validated.jwks.as_ref()
@@ -625,7 +630,7 @@ mod tests {
 
         assert_eq!(
             params.token_endpoint_auth_method,
-            Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            TokenEndpointAuthMethod::PrivateKeyJwt
         );
         assert_eq!(params.fapi_profile, Some(FapiProfile::Fapi2Security));
         assert_eq!(params.dpop_bound_access_tokens, Some(true));
@@ -665,11 +670,52 @@ mod tests {
             },
         );
 
-        assert_eq!(params.token_endpoint_auth_method, None);
+        assert_eq!(
+            params.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::ClientSecretBasic
+        );
         assert_eq!(params.fapi_profile, None);
         assert_eq!(params.dpop_bound_access_tokens, None);
         assert!(params.jwks.is_none());
         assert!(params.jwks_uri.is_none());
+    }
+
+    #[test]
+    fn create_params_public_types_get_auth_method_none() {
+        let redirect_uris = vec!["https://app.example.com/cb".to_string()];
+        for app_type in ["spa", "native"] {
+            let validated = validate_create_application(CreateAppInput {
+                name: "Public App",
+                application_type: app_type,
+                redirect_uris: &redirect_uris,
+                resource_uris: &[],
+                post_logout_redirect_uris: None,
+                access_scope: None,
+                fapi_profile: None,
+                jwks: None,
+                jwks_uri: None,
+            })
+            .expect("valid create input");
+
+            let params = build_create_params(
+                &validated,
+                CreateAppContext {
+                    user_id: "user-1",
+                    description: None,
+                    redirect_uris: &redirect_uris,
+                    resource_uris: &[],
+                    post_logout_redirect_uris: None,
+                    access_scope: AccessScope::Personal,
+                    org_id: None,
+                },
+            );
+
+            assert_eq!(
+                params.token_endpoint_auth_method,
+                TokenEndpointAuthMethod::None,
+                "{app_type} clients are public (RFC 7591 §2 \"none\")"
+            );
+        }
     }
 
     #[test]

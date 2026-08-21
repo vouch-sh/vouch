@@ -865,6 +865,125 @@ async fn test_create_application_returns_client_credentials() {
     );
 }
 
+/// RFC 7591 §2 (https://www.rfc-editor.org/rfc/rfc7591#section-2),
+/// `token_endpoint_auth_method`:
+///
+/// > "none": The client is a public client as defined in OAuth 2.0,
+/// > Section 2.1, and does not have a client secret.
+///
+/// SPA clients are issued no secret, so they must be stored as public
+/// clients — otherwise the token endpoint's public-client chokepoint
+/// (`NoClientAuth::for_public_client`) rejects them with `invalid_client`
+/// and no authorization-code flow can complete.
+#[tokio::test]
+async fn test_create_spa_application_is_public_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "spa-public@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "SPA App", "application_type": "spa", "redirect_uris": ["https://app.example.com/callback"]}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(
+        json["client_secret"].is_null(),
+        "public clients must not be issued a secret"
+    );
+
+    let client_id = json["client_id"].as_str().unwrap();
+    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::None,
+        "secretless client types must be stored as public clients"
+    );
+    assert!(
+        crate::services::auth::NoClientAuth::for_public_client(&client).is_ok(),
+        "token endpoint must accept the SPA client as public"
+    );
+}
+
+/// Same invariant as the SPA case: `native` clients are issued no secret
+/// and must be stored as public clients (RFC 7591 §2 `"none"`).
+#[tokio::test]
+async fn test_create_native_application_is_public_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "native-public@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "Native App", "application_type": "native", "redirect_uris": ["http://127.0.0.1:8400/callback"]}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(json["client_secret"].is_null());
+
+    let client_id = json["client_id"].as_str().unwrap();
+    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::None,
+    );
+    assert!(crate::services::auth::NoClientAuth::for_public_client(&client).is_ok());
+}
+
+/// Confidential (`web`) clients keep the RFC 7591 §2 default:
+///
+/// > If unspecified or omitted, the default is "client_secret_basic",
+/// > denoting the HTTP Basic authentication scheme as specified in
+/// > Section 2.3.1 of OAuth 2.0.
+#[tokio::test]
+async fn test_create_web_application_is_confidential_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "web-confidential@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "Web App", "application_type": "web", "redirect_uris": ["https://example.com/callback"]}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(json["client_secret"].as_str().is_some());
+
+    let client_id = json["client_id"].as_str().unwrap();
+    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::ClientSecretBasic,
+    );
+}
+
 #[tokio::test]
 async fn test_create_application_requires_auth() {
     let (app, _state) = test_app().await;

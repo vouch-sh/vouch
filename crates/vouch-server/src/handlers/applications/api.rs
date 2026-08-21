@@ -95,8 +95,6 @@ pub(crate) async fn create_application_api(
         jwks_uri: req.jwks_uri.as_deref(),
     })?;
     let name = validated.name;
-    let app_type = validated.app_type;
-    let is_fapi = validated.is_fapi;
 
     // ── Authentication — validated input is good, now check credentials ──
     // Deferred so a malformed body still answers 400 rather than 401; an
@@ -146,8 +144,9 @@ pub(crate) async fn create_application_api(
         )
     })?;
 
-    // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
-    let client_secret = if app_type.requires_secret() && !is_fapi {
+    let client_secret = if client.token_endpoint_auth_method
+        == db::TokenEndpointAuthMethod::ClientSecretBasic
+    {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 

@@ -169,7 +169,7 @@ mod tests {
                 access_scope: crate::db::AccessScope::Organization,
                 org_id: None,
                 resource_uris: &[],
-                token_endpoint_auth_method: None,
+                token_endpoint_auth_method: crate::db::TokenEndpointAuthMethod::ClientSecretBasic,
                 jwks: None,
                 jwks_uri: None,
                 fapi_profile: None,
