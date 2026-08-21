@@ -24,6 +24,7 @@ use crate::db::{
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::services::oidc::grant_type::OAuthGrantType;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -36,21 +37,20 @@ use subtle::ConstantTimeEq;
 // Allowed Grant and Response Types
 // ============================================================================
 
-/// Grant types that this server accepts for dynamic registration.
-/// Note: `refresh_token` is accepted in registration but the server never
-/// issues refresh tokens — clients that request it will simply never
+/// Grant types accepted in registration beyond what the token endpoint
+/// dispatches ([`OAuthGrantType`]). `refresh_token` is accepted so
+/// standard client libraries can register unmodified, but the server
+/// never issues refresh tokens — clients that request it simply never
 /// receive one in token responses.
-const ALLOWED_GRANT_TYPES: &[&str] = &[
-    "authorization_code",
-    "client_credentials",
-    "refresh_token",
-    "urn:ietf:params:oauth:grant-type:device_code",
-    "urn:ietf:params:oauth:grant-type:token-exchange",
-    "urn:ietf:params:oauth:grant-type:fido2-assertion",
-];
+const REGISTRATION_ONLY_GRANT_TYPES: &[&str] = &["refresh_token"];
 
-/// Response types that this server accepts for dynamic registration.
-const ALLOWED_RESPONSE_TYPES: &[&str] = &["code"];
+/// Every grant type this server accepts for dynamic registration: the
+/// token endpoint's dispatch set plus the registration-only extras.
+fn allowed_grant_types() -> Vec<&'static str> {
+    let mut allowed = OAuthGrantType::supported_wire_values();
+    allowed.extend_from_slice(REGISTRATION_ONLY_GRANT_TYPES);
+    allowed
+}
 
 /// Maximum number of redirect URIs per client.
 const MAX_REDIRECT_URIS: usize = 25;
@@ -910,8 +910,9 @@ fn validate_grant_and_response_types(
         .take()
         .unwrap_or_else(|| "client_secret_basic".to_string());
 
+    let allowed_grants = allowed_grant_types();
     for gt in &grant_types {
-        if !ALLOWED_GRANT_TYPES.contains(&gt.as_str()) {
+        if !allowed_grants.contains(&gt.as_str()) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 format!("Unsupported grant type: '{gt}'"),
@@ -919,7 +920,7 @@ fn validate_grant_and_response_types(
         }
     }
     for rt in &response_types {
-        if !ALLOWED_RESPONSE_TYPES.contains(&rt.as_str()) {
+        if !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&rt.as_str()) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 format!("Unsupported response type: '{rt}'"),

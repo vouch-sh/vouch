@@ -645,33 +645,39 @@ fn test_response_serialization_includes_secret_fields_when_present() {
 
 #[test]
 fn test_allowed_grant_types_includes_expected() {
+    let allowed = allowed_grant_types();
     assert!(
-        ALLOWED_GRANT_TYPES.contains(&"authorization_code"),
+        allowed.contains(&"authorization_code"),
         "authorization_code must be an allowed grant type"
     );
     assert!(
-        ALLOWED_GRANT_TYPES.contains(&"client_credentials"),
+        allowed.contains(&"client_credentials"),
         "client_credentials must be an allowed grant type"
     );
     assert!(
-        ALLOWED_GRANT_TYPES.contains(&"urn:ietf:params:oauth:grant-type:device_code"),
+        allowed.contains(&"urn:ietf:params:oauth:grant-type:device_code"),
         "device_code URN must be an allowed grant type"
     );
     assert!(
-        ALLOWED_GRANT_TYPES.contains(&"refresh_token"),
+        allowed.contains(&"refresh_token"),
         "refresh_token must be accepted in registration (though never issued)"
     );
 }
 
-/// Every grant the token endpoint dispatches must also be registrable.
-/// `ALLOWED_GRANT_TYPES` is a deliberate superset (it adds `refresh_token`),
-/// so this guards one direction: no dispatchable grant is unregistrable.
+/// The registration-only delta must stay disjoint from the token
+/// endpoint's dispatch set. Every dispatchable grant being registrable is
+/// guaranteed by construction (`allowed_grant_types` is the union); this
+/// guards the other direction — if a delta entry ever becomes
+/// dispatchable, it must be removed from the delta.
 #[test]
-fn every_dispatched_grant_is_registrable() {
-    for grant in crate::services::oidc::grant_type::OAuthGrantType::supported_wire_values() {
+fn registration_only_grants_are_not_dispatchable() {
+    for grant in REGISTRATION_ONLY_GRANT_TYPES {
         assert!(
-            ALLOWED_GRANT_TYPES.contains(&grant),
-            "token-endpoint grant {grant} must also be an allowed registration grant"
+            grant
+                .parse::<crate::services::oidc::grant_type::OAuthGrantType>()
+                .is_err(),
+            "{grant} is dispatched by the token endpoint; \
+             remove it from REGISTRATION_ONLY_GRANT_TYPES"
         );
     }
 }
@@ -679,8 +685,8 @@ fn every_dispatched_grant_is_registrable() {
 #[test]
 fn test_allowed_response_types_includes_code() {
     assert!(
-        ALLOWED_RESPONSE_TYPES.contains(&"code"),
-        "'code' must be in the allowed response types set"
+        crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"code"),
+        "'code' must be in the supported response types set"
     );
 }
 
@@ -692,7 +698,7 @@ fn test_allowed_response_types_includes_code() {
 #[test]
 fn test_implicit_grant_not_allowed() {
     assert!(
-        !ALLOWED_GRANT_TYPES.contains(&"implicit"),
+        !allowed_grant_types().contains(&"implicit"),
         "The implicit grant type must not be allowed (deprecated by RFC 9700)"
     );
 }
@@ -701,7 +707,7 @@ fn test_implicit_grant_not_allowed() {
 #[test]
 fn test_token_response_type_not_allowed() {
     assert!(
-        !ALLOWED_RESPONSE_TYPES.contains(&"token"),
+        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"token"),
         "'token' response type must not be allowed (implicit flow)"
     );
 }
@@ -710,7 +716,7 @@ fn test_token_response_type_not_allowed() {
 #[test]
 fn test_id_token_response_type_not_allowed() {
     assert!(
-        !ALLOWED_RESPONSE_TYPES.contains(&"id_token"),
+        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"id_token"),
         "'id_token' response type must not be allowed (implicit flow)"
     );
 }
