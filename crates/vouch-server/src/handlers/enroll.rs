@@ -309,7 +309,7 @@ pub(crate) async fn device_verify_submit(
     }
 
     // Check if already used
-    if request.status != db::DeviceAuthStatus::Pending {
+    if !matches!(request.state, db::DeviceAuthState::Pending) {
         return DeviceVerifyTemplate {
             error: Some("This code has already been used.".to_string()),
             user_code: None,
@@ -884,7 +884,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             .await
             .ok()
             .flatten()
-            .is_some_and(|r| r.status == db::DeviceAuthStatus::Pending);
+            .is_some_and(|r| matches!(r.state, db::DeviceAuthState::Pending));
         if !pending {
             tracing::error!("Device auth '{device_auth_id}' is missing or already settled");
             return ErrorTemplate {

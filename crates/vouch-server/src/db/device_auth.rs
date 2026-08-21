@@ -11,22 +11,78 @@ use jiff::Timestamp;
 // Re-export DeviceAuthStatus from documents module
 pub use super::documents::device_auth::DeviceAuthStatus;
 
+/// Approval evidence recorded when a pending request is authorized.
+///
+/// Only [`state_from_stored`] constructs one, and only from a row whose
+/// approval fields are all present — the device-code grant cannot reach
+/// token issuance holding a partial approval.
+#[derive(Debug, Clone)]
+pub struct DeviceAuthApproval {
+    pub user_id: String,
+    pub user_email: String,
+    /// Authenticator that approved the request.
+    pub authenticator_id: String,
+    /// Whether the approving browser session completed a WebAuthn ceremony.
+    /// The device-code grant issues its token with this as the
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
+}
+
+/// Domain state of a device authorization request. The stored document
+/// keeps the status and the approval fields separate so rows stay readable
+/// across a rolling deploy; this enum is what consumers see, and it has no
+/// approval-less `Authorized`.
+#[derive(Debug)]
+pub enum DeviceAuthState {
+    Pending,
+    Authorized(DeviceAuthApproval),
+    Denied,
+    /// `user_id` is retained for replay revocation; `None` on rows written
+    /// before approval attribution was recorded.
+    Consumed {
+        user_id: Option<String>,
+    },
+}
+
+/// An `authorized` row whose approval fields are incomplete — the approving
+/// authenticator was deleted before redemption — has no approval left to
+/// redeem and reads as denied. RFC 8628 §3.5
+/// (<https://www.rfc-editor.org/rfc/rfc8628#section-3.5>):
+///
+/// > access_denied
+/// >    The authorization request was denied.
+fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
+    match data.status {
+        DeviceAuthStatus::Pending => DeviceAuthState::Pending,
+        DeviceAuthStatus::Denied => DeviceAuthState::Denied,
+        DeviceAuthStatus::Authorized => {
+            match (&data.user_id, &data.user_email, &data.authenticator_id) {
+                (Some(user_id), Some(user_email), Some(authenticator_id)) => {
+                    DeviceAuthState::Authorized(DeviceAuthApproval {
+                        user_id: user_id.clone(),
+                        user_email: user_email.clone(),
+                        authenticator_id: authenticator_id.clone(),
+                        hardware_verified: data.hardware_verified,
+                    })
+                }
+                _ => DeviceAuthState::Denied,
+            }
+        }
+        DeviceAuthStatus::Consumed => DeviceAuthState::Consumed {
+            user_id: data.user_id.clone(),
+        },
+    }
+}
+
 /// Device authorization request record.
 #[derive(Debug)]
 pub struct DeviceAuthRequest {
     pub id: String,
     pub device_code_hash: String,
     pub user_code: String,
-    pub status: DeviceAuthStatus,
+    pub state: DeviceAuthState,
     /// OAuth client_id that initiated this device authorization.
     pub client_id: Option<String>,
-    pub user_id: Option<String>,
-    pub user_email: Option<String>,
-    pub authenticator_id: Option<String>,
-    /// Whether the approving browser session completed a WebAuthn ceremony.
-    /// The device-code grant issues its token with this as the
-    /// `hardware_verified` claim.
-    pub hardware_verified: bool,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
@@ -35,16 +91,13 @@ pub struct DeviceAuthRequest {
 
 impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
     fn from(doc: Document<DeviceAuthRequestDoc>) -> Self {
+        let state = state_from_stored(&doc.data);
         Self {
             id: doc.id,
             device_code_hash: doc.data.device_code_hash,
             user_code: doc.data.user_code,
-            status: doc.data.status,
+            state,
             client_id: doc.data.client_id,
-            user_id: doc.data.user_id,
-            user_email: doc.data.user_email,
-            authenticator_id: doc.data.authenticator_id,
-            hardware_verified: doc.data.hardware_verified,
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
@@ -249,6 +302,11 @@ pub async fn authorize_device_auth(
 /// Uses `compare_and_update` (OCC) for the same reason as
 /// [`authorize_device_auth`]: two concurrent denials (or a concurrent
 /// authorize + deny) cannot both win under READ COMMITTED.
+///
+/// Test-only: no production path denies explicitly — a request either gets
+/// approved, expires, or is voided when its approving authenticator is
+/// deleted (`delete_authenticator`).
+#[cfg(test)]
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("deny_device_auth called with empty id");
@@ -307,15 +365,18 @@ pub struct DeviceCodeClaim {
 
 /// Try to consume an authorized device code (RFC 8628 Section 3.5).
 ///
-/// On success returns a [`DeviceCodeClaim`] witness — proof that this caller
-/// won the optimistic-concurrency consume. All "lost" cases (not found,
-/// not currently `Authorized`, expired, or concurrent consumer won via
-/// version mismatch) map to [`ClaimError::AlreadyConsumed`] — deliberately
-/// indistinguishable, each rejected as an invalid_grant.
+/// On success returns the [`DeviceAuthApproval`] read in the same atomic
+/// step plus a [`DeviceCodeClaim`] witness — proof that this caller won the
+/// optimistic-concurrency consume. Token issuance takes its user
+/// attribution from this approval, never from an earlier (raceable) read.
+/// All "lost" cases (not found, no redeemable approval, expired, or
+/// concurrent consumer won via version mismatch) map to
+/// [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable, each
+/// rejected as an invalid_grant.
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
-) -> std::result::Result<DeviceCodeClaim, ClaimError> {
+) -> std::result::Result<(DeviceAuthApproval, DeviceCodeClaim), ClaimError> {
     let now = Timestamp::now();
 
     let doc = store
@@ -326,8 +387,10 @@ pub async fn try_consume_device_auth(
         return Err(ClaimError::AlreadyConsumed);
     };
 
-    // Only consume if currently Authorized and not expired.
-    if doc.data.status != DeviceAuthStatus::Authorized || doc.data.expires_at <= now {
+    let DeviceAuthState::Authorized(approval) = state_from_stored(&doc.data) else {
+        return Err(ClaimError::AlreadyConsumed);
+    };
+    if doc.data.expires_at <= now {
         return Err(ClaimError::AlreadyConsumed);
     }
 
@@ -341,7 +404,7 @@ pub async fn try_consume_device_auth(
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
     if won {
-        Ok(DeviceCodeClaim { _private: () })
+        Ok((approval, DeviceCodeClaim { _private: () }))
     } else {
         Err(ClaimError::AlreadyConsumed)
     }

@@ -42,8 +42,7 @@ async fn test_device_auth_request_lifecycle() {
         .expect("Device auth should exist");
 
     assert_eq!(request.user_code, user_code);
-    assert_eq!(request.status, DeviceAuthStatus::Pending);
-    assert!(request.user_id.is_none());
+    assert!(matches!(request.state, DeviceAuthState::Pending));
 
     // Get by user code
     let request = get_device_auth_by_user_code(&store, user_code)
@@ -111,7 +110,7 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, DeviceAuthStatus::Pending);
+    assert!(matches!(request.state, DeviceAuthState::Pending));
 
     // Authorize the request
     authorize_device_auth(
@@ -132,10 +131,56 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, DeviceAuthStatus::Authorized);
-    assert_eq!(request.user_id, Some(user_id.clone()));
-    assert_eq!(request.user_email, Some(user.email.clone()));
-    assert_eq!(request.authenticator_id, Some(auth_id));
+    let approval = match request.state {
+        DeviceAuthState::Authorized(approval) => Some(approval),
+        _ => None,
+    }
+    .expect("expected authorized state");
+    assert_eq!(approval.user_id, user_id);
+    assert_eq!(approval.user_email, user.email);
+    assert_eq!(approval.authenticator_id, auth_id);
+}
+
+/// Rows written before authenticator deletion voided approvals can carry
+/// `authorized` with a cleared `authenticator_id`; `state_from_stored`
+/// reads them as denied (RFC 8628 §3.5 access_denied), never as an
+/// approval with missing evidence.
+#[tokio::test]
+async fn test_authorized_row_with_cleared_authenticator_reads_denied() {
+    let (store, _audit) = test_db().await;
+
+    let doc = super::documents::device_auth::DeviceAuthRequestDoc {
+        device_code_hash: "legacy_cleared_hash".to_string(),
+        user_code: "LGCY-0001".to_string(),
+        status: DeviceAuthStatus::Authorized,
+        client_id: None,
+        user_id: Some("user_a".to_string()),
+        user_email: Some("a@example.com".to_string()),
+        authenticator_id: None,
+        hardware_verified: true,
+        expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+        interval_seconds: 5,
+        last_poll_at: None,
+        consumed_at: None,
+    };
+    store.insert(&doc).await.expect("insert legacy-shaped row");
+
+    let request = get_device_auth_by_code_hash(&store, "legacy_cleared_hash")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert!(
+        matches!(request.state, DeviceAuthState::Denied),
+        "incomplete approval must read as denied, got {:?}",
+        request.state
+    );
+
+    // And the code cannot be consumed.
+    let result = try_consume_device_auth(&store, "legacy_cleared_hash").await;
+    assert!(
+        result.is_err(),
+        "incomplete approval must not be redeemable"
+    );
 }
 
 #[tokio::test]
@@ -245,7 +290,7 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         .await
         .expect("get")
         .expect("should exist");
-    assert_eq!(request.status, DeviceAuthStatus::Consumed);
+    assert!(matches!(request.state, DeviceAuthState::Consumed { .. }));
     assert!(request.consumed_at.is_some(), "consumed_at should be set");
 }
 
@@ -467,8 +512,12 @@ async fn test_double_authorization_should_fail() {
         .await
         .expect("get")
         .expect("exists");
-    assert_eq!(req.status, DeviceAuthStatus::Authorized);
-    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+    let approval = match req.state {
+        DeviceAuthState::Authorized(approval) => Some(approval),
+        _ => None,
+    }
+    .expect("expected authorized state");
+    assert_eq!(approval.user_id, "user_a");
 }
 
 #[tokio::test]
@@ -505,8 +554,7 @@ async fn test_authorize_after_deny_should_fail() {
         .await
         .expect("get")
         .expect("exists");
-    assert_eq!(req.status, DeviceAuthStatus::Denied);
-    assert!(req.user_id.is_none());
+    assert!(matches!(req.state, DeviceAuthState::Denied));
 }
 
 #[tokio::test]
@@ -544,8 +592,12 @@ async fn test_deny_after_authorize_should_fail() {
         .await
         .expect("get")
         .expect("exists");
-    assert_eq!(req.status, DeviceAuthStatus::Authorized);
-    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+    let approval = match req.state {
+        DeviceAuthState::Authorized(approval) => Some(approval),
+        _ => None,
+    }
+    .expect("expected authorized state");
+    assert_eq!(approval.user_id, "user_a");
 }
 
 #[tokio::test]
@@ -574,5 +626,5 @@ async fn test_double_deny_should_fail() {
         .await
         .expect("get")
         .expect("exists");
-    assert_eq!(req.status, DeviceAuthStatus::Denied);
+    assert!(matches!(req.state, DeviceAuthState::Denied));
 }

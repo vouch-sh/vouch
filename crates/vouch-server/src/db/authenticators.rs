@@ -3,7 +3,7 @@
 
 use super::document_type::Document;
 use super::documents::authenticator::AuthenticatorDoc;
-use super::documents::device_auth::DeviceAuthRequestDoc;
+use super::documents::device_auth::{DeviceAuthRequestDoc, DeviceAuthStatus};
 use super::documents::session::SessionDoc;
 use super::store::{DocumentStore, StoreTransaction};
 use super::users::User;
@@ -200,18 +200,30 @@ pub async fn count_authenticators_for_user(store: &DocumentStore, user_id: &str)
     store.count::<AuthenticatorDoc>("user_id", user_id).await
 }
 
+/// Void any approval that referenced a now-deleted authenticator. The
+/// approval's evidence is gone, so an `authorized` request is denied
+/// rather than left redeemable (RFC 8628 §3.5 `access_denied`); consumed
+/// requests keep their attribution for replay revocation.
+fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
+    d.authenticator_id = None;
+    if d.status == DeviceAuthStatus::Authorized {
+        d.status = DeviceAuthStatus::Denied;
+    }
+}
+
 /// Delete an authenticator by ID.
 ///
 /// Performs application-level cascade deletes:
-/// 1. Clear authenticator_id references in device_auth_requests
+/// 1. Void device_auth_request approvals that referenced this authenticator
 /// 2. Delete sessions using this authenticator
 /// 3. Delete the authenticator
 pub async fn delete_authenticator(store: &DocumentStore, authenticator_id: &str) -> Result<u64> {
-    // 1. Clear authenticator_id references in device_auth_requests
     store
-        .update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", authenticator_id, |d| {
-            d.authenticator_id = None;
-        })
+        .update_by_index::<DeviceAuthRequestDoc, _>(
+            "authenticator_id",
+            authenticator_id,
+            detach_authenticator_from_device_auth,
+        )
         .await?;
 
     // 2. Delete sessions using this authenticator
@@ -233,9 +245,11 @@ pub async fn delete_authenticator_in_tx(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
 ) -> Result<()> {
-    tx.update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", authenticator_id, |d| {
-        d.authenticator_id = None;
-    })
+    tx.update_by_index::<DeviceAuthRequestDoc, _>(
+        "authenticator_id",
+        authenticator_id,
+        detach_authenticator_from_device_auth,
+    )
     .await?;
     tx.delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
         .await?;

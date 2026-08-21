@@ -454,12 +454,10 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         .await
         .expect("device auth lookup")
         .expect("device auth exists");
-    assert_eq!(
-        request.status,
-        crate::db::DeviceAuthStatus::Pending,
+    assert!(
+        matches!(request.state, crate::db::DeviceAuthState::Pending),
         "IdP sign-in alone must not release the waiting CLI"
     );
-    assert!(!request.hardware_verified);
 
     let approvals = state
         .audit
