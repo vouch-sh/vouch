@@ -2,6 +2,7 @@
 //! RFC 9449 — DPoP (Demonstration of Proof of Possession) tests.
 
 use super::helpers::*;
+use std::collections::BTreeSet;
 
 // ========================================================================
 // DPoP Integration Tests (RFC 9449)
@@ -687,6 +688,94 @@ async fn test_rfc9449_dpop_symmetric_algorithm_rejected() {
     assert!(
         status == StatusCode::UNAUTHORIZED || status == StatusCode::BAD_REQUEST,
         "Symmetric algorithm DPoP proof should be rejected, got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9449_dpop_rs256_algorithm_rejected() {
+    // RS256 is a valid JwsAlgorithm but is not in JwsAlgorithm::FAPI_ALLOWED, so
+    // DPoP proofs declaring it must be rejected. This proof carries a REAL RSA
+    // keypair and a REAL RS256 signature over the signing input: if the
+    // SUPPORTED_ALGORITHMS gate were ever removed, this exact proof would pass
+    // signature verification and the request would succeed — so the test fails
+    // for the algorithm rejection specifically, not for an incidental
+    // malformed-JWK or bad-signature side effect (unlike the HS256 sibling
+    // below, which short-circuits at JWK deserialization since HS256 has no
+    // asymmetric JWK shape to embed).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "dpop-rs256@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};
+    use aws_lc_rs::signature::{KeyPair as _, RSA_PKCS1_SHA256};
+
+    let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
+    let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
+    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
+        .expect("parse RSA SPKI components");
+
+    let jwk = serde_json::json!({
+        "kty": "RSA",
+        "n": URL_SAFE_NO_PAD.encode(&n_bytes),
+        "e": URL_SAFE_NO_PAD.encode(&e_bytes)
+    });
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "RS256",
+        "jwk": jwk
+    });
+    let claims = serde_json::json!({
+        "jti": uuid::Uuid::now_v7().to_string(),
+        "htm": "GET",
+        "htu": format!("{}/oauth/userinfo", state.config().base_url),
+        "iat": jiff::Timestamp::now().as_second()
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let mut sig_bytes = vec![0u8; key_pair.public_modulus_len()];
+    key_pair
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig_bytes,
+        )
+        .expect("RS256 signing");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig_bytes);
+    let real_proof = format!("{signing_input}.{sig_b64}");
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {access_token}")),
+            ("DPoP", &real_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "RS256 DPoP proof must be rejected by the algorithm allowlist: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_dpop_proof");
+    assert!(
+        error["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unsupported DPoP algorithm"),
+        "rejection must be the algorithm-allowlist error, not a different DPoP failure: {body}"
     );
 }
 
@@ -1614,4 +1703,75 @@ async fn test_rfc9449_userinfo_dpop_bound_token_in_post_body_rejected() {
         StatusCode::UNAUTHORIZED,
         "DPoP-bound token via POST body must return 401: {body}"
     );
+}
+
+// ========================================================================
+// Advertised-vs-enforced drift guards — same shape as
+// test_oidc_discovery_grant_types_match_token_parser in oidc_discovery.rs.
+// ========================================================================
+
+#[tokio::test]
+async fn test_dpop_signing_algs_match_supported_algorithms() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["dpop_signing_alg_values_supported"]
+        .as_array()
+        .expect("dpop_signing_alg_values_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("alg should be string").to_string())
+        .collect();
+
+    let supported: BTreeSet<String> = crate::services::oidc::dpop::SUPPORTED_ALGORITHMS
+        .iter()
+        .map(|alg| alg.as_str().to_string())
+        .collect();
+
+    assert_eq!(
+        discovered, supported,
+        "discovery dpop_signing_alg_values_supported must exactly match dpop::SUPPORTED_ALGORITHMS"
+    );
+
+    for alg in &discovered {
+        assert!(
+            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            "discovery advertises a DPoP algorithm JwsAlgorithm cannot parse: {alg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_token_endpoint_auth_signing_algs_match_fapi_allowed() {
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> =
+        discovery["token_endpoint_auth_signing_alg_values_supported"]
+            .as_array()
+            .expect("token_endpoint_auth_signing_alg_values_supported is an array")
+            .iter()
+            .map(|v| v.as_str().expect("alg should be string").to_string())
+            .collect();
+
+    let source: BTreeSet<String> = crate::db::JwsAlgorithm::FAPI_ALLOWED
+        .iter()
+        .map(|alg| alg.as_str().to_string())
+        .collect();
+
+    assert_eq!(
+        discovered, source,
+        "discovery token_endpoint_auth_signing_alg_values_supported must exactly match \
+         JwsAlgorithm::FAPI_ALLOWED"
+    );
+
+    for alg in &discovered {
+        assert!(
+            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            "discovery advertises a token endpoint auth algorithm JwsAlgorithm cannot parse: {alg}"
+        );
+    }
 }

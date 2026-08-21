@@ -191,8 +191,9 @@ pub struct ProtectedResourceMetadata {
     pub authorization_details_types_supported: Option<Vec<String>>,
 
     /// RFC 9728 §2 + RFC 9449 §5.1: OPTIONAL. JWS algorithms accepted
-    /// in DPoP proofs at this resource. RS256 is deliberately absent
-    /// (FAPI 2.0 §5.2.2 excludes it).
+    /// in DPoP proofs at this resource. See
+    /// [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation
+    /// excluding RS256.
     pub dpop_signing_alg_values_supported: Vec<JwsAlgorithm>,
 
     /// RFC 9728 §2 + RFC 9449: OPTIONAL. `true` means every access
@@ -307,12 +308,7 @@ pub async fn build_protected_resource_metadata(
         .map(|s| s.as_str().to_string())
         .collect();
 
-    let dpop_signing_alg_values_supported = vec![
-        // RS256 excluded per FAPI 2.0 §5.2.2 (matches discovery.rs).
-        JwsAlgorithm::Es256,
-        JwsAlgorithm::Ps256,
-        JwsAlgorithm::EdDsa,
-    ];
+    let dpop_signing_alg_values_supported = JwsAlgorithm::FAPI_ALLOWED.to_vec();
 
     // Build the metadata first with an empty `signed_metadata`; sign
     // a copy of the claims; then populate `signed_metadata`. The

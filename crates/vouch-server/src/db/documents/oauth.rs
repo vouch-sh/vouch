@@ -251,6 +251,20 @@ impl JwsAlgorithm {
             Self::EdDsa => "EdDSA",
         }
     }
+
+    /// Algorithms permitted for FAPI 2.0-scoped signing (DPoP proofs, token endpoint
+    /// client authentication, and other FAPI-profiled JWTs).
+    ///
+    /// FAPI 2.0 Security Profile, Section 5.4.1 "General requirements"
+    /// (<https://openid.net/specs/fapi-security-profile-2_0-final.html>) reads:
+    ///
+    /// > Authorization servers, clients, and resource servers when creating or processing
+    /// > JWTs shall adhere to \[RFC8725\]; use `PS256`, `ES256`, or `EdDSA` (using the
+    /// > `Ed25519` variant) algorithms; and not use or accept the `none` algorithm.
+    ///
+    /// This is a `shall` (MUST-strength) requirement, and the three-algorithm list is
+    /// restrictive: `RS256` is deliberately not among them.
+    pub const FAPI_ALLOWED: [Self; 3] = [Self::Es256, Self::Ps256, Self::EdDsa];
 }
 
 impl std::str::FromStr for JwsAlgorithm {

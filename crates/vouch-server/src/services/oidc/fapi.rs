@@ -6,7 +6,7 @@
 //!
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
-use crate::db::{OAuthClient, TokenEndpointAuthMethod};
+use crate::db::{JwsAlgorithm, OAuthClient, TokenEndpointAuthMethod};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
@@ -17,11 +17,6 @@ pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
 /// 60 seconds is sufficient for the client to exchange the code after redirect.
 /// Matches the FAPI 2.0 recommendation — no reason for standard clients to be laxer.
 pub const STANDARD_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
-
-/// Algorithms allowed for FAPI 2.0 clients.
-///
-/// RS256 is explicitly excluded per FAPI 2.0 Section 5.2.2 due to known weaknesses.
-pub const FAPI_ALLOWED_ALGORITHMS: &[&str] = &["PS256", "ES256", "EdDSA"];
 
 /// FAPI 2.0 clock skew tolerance for acceptance (tighter than standard).
 pub const FAPI_CLOCK_SKEW_ACCEPT_SECONDS: i64 = 10;
@@ -108,8 +103,7 @@ pub(crate) fn validate_fapi_token_request(
 
 /// Validate that an algorithm is allowed for a FAPI 2.0 client.
 ///
-/// FAPI 2.0 Section 5.2.2 prohibits RS256 due to known weaknesses.
-/// Only PS256, ES256, and EdDSA are permitted.
+/// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
 ///
 /// Non-FAPI clients pass validation unconditionally.
 ///
@@ -127,13 +121,18 @@ pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> Service
         return Ok(());
     }
 
-    if !FAPI_ALLOWED_ALGORITHMS.contains(&algorithm) {
+    let allowed = algorithm
+        .parse::<JwsAlgorithm>()
+        .is_ok_and(|alg| JwsAlgorithm::FAPI_ALLOWED.contains(&alg));
+    if !allowed {
+        let allowed_list = JwsAlgorithm::FAPI_ALLOWED
+            .iter()
+            .map(JwsAlgorithm::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
-            format!(
-                "FAPI 2.0 does not allow algorithm '{}'. Allowed: PS256, ES256, EdDSA",
-                algorithm
-            ),
+            format!("FAPI 2.0 does not allow algorithm '{algorithm}'. Allowed: {allowed_list}"),
         ));
     }
 
@@ -379,7 +378,15 @@ mod tests {
     #[test]
     fn test_validate_fapi_algorithm_rejects_rs256() {
         let client = fapi_client();
-        assert!(validate_fapi_algorithm(&client, "RS256").is_err());
+        let result = validate_fapi_algorithm(&client, "RS256");
+        assert!(result.is_err(), "RS256 must be rejected");
+        if let Err(err) = result {
+            let message = err.oauth_description();
+            assert!(
+                message.contains("Allowed: ES256, PS256, EdDSA"),
+                "error message must pin the FAPI_ALLOWED wire order, got: {message}"
+            );
+        }
     }
 
     #[test]
@@ -550,13 +557,13 @@ mod tests {
 
     #[test]
     fn test_fapi_allowed_algorithms_excludes_rs256() {
-        assert!(!FAPI_ALLOWED_ALGORITHMS.contains(&"RS256"));
+        assert!(!JwsAlgorithm::FAPI_ALLOWED.contains(&JwsAlgorithm::Rs256));
     }
 
     #[test]
     fn test_fapi_allowed_algorithms_includes_required() {
-        assert!(FAPI_ALLOWED_ALGORITHMS.contains(&"PS256"));
-        assert!(FAPI_ALLOWED_ALGORITHMS.contains(&"ES256"));
-        assert!(FAPI_ALLOWED_ALGORITHMS.contains(&"EdDSA"));
+        assert!(JwsAlgorithm::FAPI_ALLOWED.contains(&JwsAlgorithm::Ps256));
+        assert!(JwsAlgorithm::FAPI_ALLOWED.contains(&JwsAlgorithm::Es256));
+        assert!(JwsAlgorithm::FAPI_ALLOWED.contains(&JwsAlgorithm::EdDsa));
     }
 }
