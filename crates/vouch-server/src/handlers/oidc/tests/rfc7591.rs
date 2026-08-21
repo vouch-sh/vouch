@@ -1034,6 +1034,171 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 }
 
 // ========================================================================
+// FAPI 2.0 JWKS algorithm usability — a client that registers as FAPI 2.0
+// with a JWKS containing no key usable under ES256/PS256/EdDSA would be
+// unable to authenticate at the token endpoint from the moment it's created.
+// See db::jwks_has_fapi_allowed_key.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7591_rejects_fapi_registration_with_rs256_only_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "fapi-rs256-only").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "RS256-only JWKS must be rejected for a FAPI 2.0 registration: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_fapi_registration_with_unpinned_rsa_jwks() {
+    // An RSA key with no `alg` constraint is usable with PS256, so it must
+    // not be rejected the same way an alg: RS256 key is.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "fapi-rsa-unpinned").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an unpinned RSA key must pass FAPI 2.0 registration: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_fapi_mtls_registration_with_rs256_alg_pinned_x5c_jwks() {
+    // RFC 8705 §2.2.2: a self_signed_tls_client_auth JWKS conveys the
+    // client's certificate via x5c; alg/kty are "not utilized in this
+    // context". The FAPI client-assertion algorithm guard must not apply to
+    // this auth method — it exists for private_key_jwt's signing keys.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "fapi-mtls-rs256-alg").await;
+
+    let cert_der = make_test_cert_der("fapi-mtls-client");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [x5c_b64]}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "mTLS FAPI registration with an alg-pinned x5c JWKS must succeed: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
+    // RFC 7523 does not restrict client-assertion algorithms; non-FAPI
+    // clients keep RS256. Symmetric with the existing PUT-side test
+    // (test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client).
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "nonfapi-rs256-only").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "RS256 must remain unrestricted for a non-FAPI registration: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_fapi_registration_with_jwks_uri_only() {
+    // A remote jwks_uri can't be inspected synchronously, so the algorithm
+    // guard only applies to an inline jwks — documented scope limit, not a gap.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "fapi-jwks-uri-only").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks_uri": "https://example.com/.well-known/jwks.json"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a jwks_uri-only FAPI registration must not be blocked by the inline-only guard: {body}"
+    );
+}
+
+// ========================================================================
 // RFC 7591 Section 2: Unknown fields MUST be ignored
 // ========================================================================
 

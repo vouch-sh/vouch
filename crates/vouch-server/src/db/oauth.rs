@@ -229,6 +229,58 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
     }
 }
 
+// ============================================================================
+// FAPI 2.0 JWKS algorithm-usability check (shared between the admin
+// application API and RFC 7591/7592 dynamic client registration, so the rule
+// lives in exactly one place)
+// ============================================================================
+
+/// Returns `true` when `jwks` contains at least one key the FAPI 2.0
+/// client-assertion validator (`FapiProfile::client_assertion_algorithms`, which
+/// yields `JwsAlgorithm::FAPI_ALLOWED` for `FapiProfile::Fapi2Security`) could
+/// actually use: a key whose `use` (if present) is `sig`, and that either
+/// declares no `alg` but has a `kty` the runtime matcher can select for
+/// ES256/PS256/EdDSA (`EC`/`RSA`/`OKP`), or declares `alg` as ES256, PS256, or
+/// EdDSA outright.
+///
+/// A key search skips a JWK whose declared `alg` differs from the assertion's
+/// header, or whose `use` is present and not `sig`
+/// (`services/oidc/jwt_bearer/jwks.rs`). So a JWKS made only of `alg: RS256`
+/// keys would leave a FAPI client with no algorithm it is both allowed to use
+/// and has a matching key for, and a JWKS made only of `use: "enc"` keys would
+/// leave it with no key the search selects at all — both permanently
+/// unauthenticatable. The `kty` check on the no-`alg` branch closes the same
+/// bug class for an incompatible or missing `kty` (e.g. `oct`): the runtime
+/// matcher only ever selects `EC`/`RSA`/`OKP` for ES256/PS256/EdDSA, so a key
+/// with any other `kty` is unmatchable regardless of `alg`.
+///
+/// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
+/// application creation and update (`handlers/applications/validate.rs`) and
+/// RFC 7591/7592 dynamic client registration (`services/oidc/registration.rs`).
+#[must_use]
+pub fn jwks_has_fapi_allowed_key(jwks: &serde_json::Value) -> bool {
+    let Some(keys) = jwks.get("keys").and_then(|k| k.as_array()) else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        let use_is_sig = key
+            .get("use")
+            .and_then(|u| u.as_str())
+            .is_none_or(|u| u == "sig");
+        if !use_is_sig {
+            return false;
+        }
+        let Some(alg) = key.get("alg").and_then(|a| a.as_str()) else {
+            return key
+                .get("kty")
+                .and_then(|v| v.as_str())
+                .is_some_and(|kty| matches!(kty, "EC" | "RSA" | "OKP"));
+        };
+        alg.parse::<JwsAlgorithm>()
+            .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
+    })
+}
+
 /// Parameters for creating a new OAuth client application.
 pub struct CreateOAuthClientParams<'a> {
     pub user_id: Option<&'a str>,

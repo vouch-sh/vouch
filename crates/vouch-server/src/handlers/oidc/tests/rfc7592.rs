@@ -27,6 +27,298 @@ async fn register_dynamic_client(app: &axum::Router) -> (String, String) {
     (client_id, token)
 }
 
+/// Register a FAPI 2.0 client (`dpop_bound_access_tokens`, the given
+/// `auth_method`, and the given inline JWKS) via POST /oauth/register.
+/// Returns `(client_id, registration_access_token)`.
+async fn register_fapi_dynamic_client(
+    app: &axum::Router,
+    auth_method: &str,
+    jwks: serde_json::Value,
+) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "token_endpoint_auth_method": auth_method,
+        "jwks": jwks,
+        "client_name": "RFC7592 FAPI Test Client"
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "FAPI registration failed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+/// A valid ES256 JWK — usable with FAPI 2.0's algorithm allowlist.
+fn es256_jwk() -> serde_json::Value {
+    serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+        "use": "sig",
+        "alg": "ES256"
+    })
+}
+
+// =========================================================================
+// FAPI 2.0 JWKS algorithm usability on PUT — RFC 7592 §2.2 is a full
+// replacement, so a PUT that swaps in an RS256-only JWKS must be rejected
+// exactly like initial registration. See db::jwks_has_fapi_allowed_key.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_rs256_only_jwks_for_fapi_client() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "private_key_jwt",
+        serde_json::json!({"keys": [es256_jwk()]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "RS256-only JWKS must be rejected on a FAPI client's PUT: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_unpinned_rsa_jwks_for_fapi_client() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "private_key_jwt",
+        serde_json::json!({"keys": [es256_jwk()]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unpinned RSA key must pass a FAPI client's PUT: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client() {
+    let (app, _state) = test_app().await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {"keys": [es256_jwk()]}
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration failed: {reg_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id");
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token");
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "RS256 must remain unrestricted for a non-FAPI client's PUT: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_fapi_mtls_client_clearing_jwks() {
+    // RFC 7592 §2.2 full replacement: an update that omits both jwks and
+    // jwks_uri must not silently clear a FAPI client's key material, even
+    // for an mTLS auth method the algorithm-usability guard doesn't apply to
+    // (that guard is private_key_jwt-only; this presence check is not).
+    let (app, _state) = test_app().await;
+    let cert_der = make_test_cert_der("fapi-mtls-put-client");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "self_signed_tls_client_auth",
+        serde_json::json!({"keys": [{"kty": "RSA", "x5c": [x5c_b64]}]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a FAPI mTLS client's PUT must not be able to clear its key material: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_jwks_uri_only_for_fapi_client() {
+    // A remote jwks_uri can't be inspected synchronously, so the algorithm
+    // guard only applies to an inline jwks — documented scope limit.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "private_key_jwt",
+        serde_json::json!({"keys": [es256_jwk()]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks_uri": "https://example.com/.well-known/jwks.json"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a jwks_uri-only PUT must not be blocked by the inline-only guard: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_rs256_alg_pinned_x5c_jwks_for_fapi_mtls_client() {
+    // RFC 8705 §2.2.2: a self_signed_tls_client_auth JWKS conveys the
+    // client's certificate via x5c; alg/kty are not utilized in this
+    // context. The FAPI client-assertion algorithm guard must not apply to
+    // this auth method on PUT either — same carve-out as registration.
+    let (app, _state) = test_app().await;
+    let initial_cert = make_test_cert_der("fapi-mtls-put-initial");
+    let initial_x5c = base64::engine::general_purpose::STANDARD.encode(&initial_cert);
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "self_signed_tls_client_auth",
+        serde_json::json!({"keys": [{"kty": "RSA", "x5c": [initial_x5c]}]}),
+    )
+    .await;
+
+    let new_cert = make_test_cert_der("fapi-mtls-put-updated");
+    let new_x5c = base64::engine::general_purpose::STANDARD.encode(&new_cert);
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [new_x5c]}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an alg-pinned RS256 x5c JWKS must pass a FAPI mTLS client's PUT: {body}"
+    );
+}
+
 // =========================================================================
 // PUT /oauth/register/:client_id — Update Client Configuration
 // =========================================================================

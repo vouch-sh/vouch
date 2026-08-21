@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 
 use crate::db::{
     AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
-    RegistrationSource, TokenEndpointAuthMethod,
+    RegistrationSource, TokenEndpointAuthMethod, jwks_has_fapi_allowed_key,
 };
 use crate::error::ServiceError;
 use crate::services::oidc::ResourceUri;
@@ -107,8 +107,10 @@ impl AppValidationError {
             Self::FapiJwksNoAllowedAlgorithm => {
                 "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA \
                  (RFC 7523 client-assertion signing). None of the configured keys \
-                 are usable: every key declares an alg outside that set. Add a \
-                 compatible key, or remove the alg constraint from an existing one."
+                 are usable: each either declares an alg outside that set, has a \
+                 kty the signing-key matcher can't select for those algorithms, or \
+                 is marked for a non-signing use. Add a compatible key, or adjust \
+                 an existing one's alg/kty/use."
                     .to_string()
             }
             Self::JwksNotJson => "JWKS must be valid JSON".to_string(),
@@ -402,9 +404,19 @@ pub(super) fn validate_update_fapi(
         return Err(AppValidationError::FapiMissingJwks);
     }
 
-    // FAPI validation: an inline JWKS (submitted or already on the client)
-    // must have at least one key usable with FAPI_ALLOWED.
-    if let Some(jwks) = validated.jwks.as_ref().or(client.jwks.as_ref())
+    // Only for private_key_jwt: its JWKS carries client-assertion signing
+    // keys, so an inline JWKS (submitted or already on the client) must have
+    // at least one key usable with FAPI_ALLOWED. tls_client_auth/
+    // self_signed_tls_client_auth JWKS conveys certificates via x5c instead
+    // (RFC 8705 §2.2.2), so this check does not apply to them. The effective
+    // auth method — not just the stored one — matters here: an explicit
+    // `fapi_profile` in this request forces private_key_jwt regardless of
+    // what the client currently uses (`compute_fapi_update_fields`), so this
+    // mirrors that same computation rather than re-deriving a second one.
+    let effective_is_private_key_jwt = validated.is_fapi
+        || client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt;
+    if effective_is_private_key_jwt
+        && let Some(jwks) = validated.jwks.as_ref().or(client.jwks.as_ref())
         && !jwks_has_fapi_allowed_key(jwks)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
@@ -619,39 +631,6 @@ fn parse_jwks(jwks_json: &str) -> Result<serde_json::Value, AppValidationError> 
         return Err(AppValidationError::JwksMissingKeys);
     }
     Ok(val)
-}
-
-/// Returns `true` when `jwks` contains at least one key the FAPI 2.0
-/// client-assertion validator (`FapiProfile::client_assertion_algorithms`, which
-/// yields `JwsAlgorithm::FAPI_ALLOWED` for `FapiProfile::Fapi2Security`) could
-/// actually use: a key that declares no `alg` but has a `kty` the runtime
-/// matcher can select for ES256/PS256/EdDSA (`EC`/`RSA`/`OKP`), or a key whose
-/// declared `alg` is ES256, PS256, or EdDSA outright.
-///
-/// A key search skips a JWK whose declared `alg` differs from the assertion's
-/// header (`jwt_bearer/jwks.rs`), so a JWKS made only of `alg: RS256` keys would
-/// leave a FAPI client with no algorithm it is both allowed to use and has a
-/// matching key for — permanently unauthenticatable, the same "no way back"
-/// failure [`AppValidationError::FapiDowngradeUnsupported`] prevents on the
-/// standard-profile transition. The `kty` check on the no-`alg` branch closes
-/// the same bug class for an incompatible or missing `kty` (e.g. `oct`): the
-/// runtime matcher (`jwt_bearer/jwks.rs`) only ever selects `EC`/`RSA`/`OKP`
-/// for ES256/PS256/EdDSA, so a key with any other `kty` is unmatchable
-/// regardless of `alg`.
-fn jwks_has_fapi_allowed_key(jwks: &serde_json::Value) -> bool {
-    let Some(keys) = jwks.get("keys").and_then(|k| k.as_array()) else {
-        return false;
-    };
-    keys.iter().any(|key| {
-        let Some(alg) = key.get("alg").and_then(|a| a.as_str()) else {
-            return key
-                .get("kty")
-                .and_then(|v| v.as_str())
-                .is_some_and(|kty| matches!(kty, "EC" | "RSA" | "OKP"));
-        };
-        alg.parse::<JwsAlgorithm>()
-            .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
-    })
 }
 
 fn validate_jwks_uri(jwks_uri: Option<&str>) -> Result<(), AppValidationError> {
@@ -1263,6 +1242,52 @@ mod tests {
             .expect("a redirect_uris-only update must not be affected by the FAPI JWKS checks");
     }
 
+    // The algorithm-usability check is private_key_jwt-only: a FAPI
+    // self_signed_tls_client_auth client's JWKS conveys certificates via
+    // x5c, not client-assertion signing keys, so an alg-pinned RS256 x5c
+    // entry must not block an otherwise-unrelated admin edit.
+    #[tokio::test]
+    async fn fapi_metadata_only_update_accepted_for_mtls_client_with_rs256_alg_pinned_x5c_jwks() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "fapi-mtls-admin-edit@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
+                jwks: TestJwks::Custom(
+                    serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "x5c": ["ZmFrZS1jZXJ0"]}]}),
+                ),
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let redirect_uris = vec!["https://example.com/callback".to_string()];
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: Some(&redirect_uris),
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client).expect(
+            "a metadata-only update to a FAPI mTLS client must not be blocked by the \
+             private_key_jwt-only algorithm guard",
+        );
+    }
+
     // Reverse edge: a request that omits `fapi_profile` AND `jwks` still
     // validates the STORED jwks, because the client remains FAPI regardless.
     // Simulates a client whose stored JWKS predates this guard (e.g. created
@@ -1414,6 +1439,24 @@ mod tests {
         assert!(
             jwks_has_fapi_allowed_key(&mixed),
             "one usable key is enough"
+        );
+
+        // The runtime matcher also filters on `use`: an otherwise-usable key
+        // marked for encryption is never selected for signature verification.
+        let enc_only = serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "use": "enc"}]
+        });
+        assert!(
+            !jwks_has_fapi_allowed_key(&enc_only),
+            "a use: enc key must not survive even with an allowed alg"
+        );
+
+        let explicit_sig = serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "use": "sig"}]
+        });
+        assert!(
+            jwks_has_fapi_allowed_key(&explicit_sig),
+            "an explicit use: sig key survives"
         );
 
         let empty = serde_json::json!({"keys": []});
