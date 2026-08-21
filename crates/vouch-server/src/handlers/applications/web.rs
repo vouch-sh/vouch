@@ -139,8 +139,6 @@ pub(crate) async fn create_application_form(
         Err(e) => return validation_error_response(&e, "/applications/new".to_string()),
     };
     let name = validated.name;
-    let app_type = validated.app_type;
-    let is_fapi = validated.is_fapi;
 
     // Validated access scope (format checked in validate_create_application;
     // org-membership check stays here because it depends on the auth context).
@@ -211,8 +209,9 @@ pub(crate) async fn create_application_form(
         }
     };
 
-    // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
-    let client_secret = if app_type.requires_secret() && !is_fapi {
+    let client_secret = if client.token_endpoint_auth_method
+        == db::TokenEndpointAuthMethod::ClientSecretBasic
+    {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -250,9 +249,9 @@ pub(crate) async fn create_application_form(
     ApplicationCreatedTemplate {
         name: name.to_string(),
         client_id,
+        requires_secret: client_secret.is_some(),
         client_secret,
         application_type: form.application_type,
-        requires_secret: app_type.requires_secret() && !is_fapi,
         auth,
     }
     .into_response()

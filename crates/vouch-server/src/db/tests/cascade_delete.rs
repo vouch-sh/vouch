@@ -208,7 +208,7 @@ async fn test_oauth_client_cascade_delete() {
             access_scope: AccessScope::default(),
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: None,
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
             jwks: None,
             jwks_uri: None,
             fapi_profile: None,

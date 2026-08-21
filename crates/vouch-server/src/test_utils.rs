@@ -1583,7 +1583,7 @@ pub async fn create_test_client(
             access_scope: spec.access_scope,
             org_id: spec.org_id.as_deref(),
             resource_uris: &spec.resource_uris,
-            token_endpoint_auth_method: spec.token_endpoint_auth_method,
+            token_endpoint_auth_method: spec.token_endpoint_auth_method.unwrap_or_default(),
             jwks: jwks_value.as_ref(),
             jwks_uri: spec.jwks_uri.as_deref(),
             fapi_profile: spec.fapi_profile,
