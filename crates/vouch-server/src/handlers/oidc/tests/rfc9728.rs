@@ -18,6 +18,7 @@ use crate::infra::resource_metadata::WELL_KNOWN_SUFFIX;
 use crate::services::oidc::protected_resource::{PROTECTED_RESOURCE_PREFIXES, SIGNED_METADATA_TYP};
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::collections::BTreeSet;
 
 // Shared RFC 7235 `WWW-Authenticate` mini-parser. The full grammar is
 // not needed — we only extract parameter values so tests can verify
@@ -183,7 +184,7 @@ async fn test_rfc9728_required_fields_present() {
     assert!(dpop_strs.contains(&"EdDSA"));
     assert!(
         !dpop_strs.contains(&"RS256"),
-        "FAPI 2.0 §5.2.2 excludes RS256 from DPoP"
+        "FAPI 2.0 §5.4.1 excludes RS256 from DPoP"
     );
 
     // signed_metadata MUST be present (we always sign).
@@ -276,6 +277,60 @@ async fn test_rfc9728_resource_signing_algs_match_available_keys() {
         .expect("resource_signing_alg_values_supported must be array");
     let alg_strs: Vec<&str> = algs.iter().filter_map(|v| v.as_str()).collect();
     assert_eq!(alg_strs, vec!["ES256"]);
+}
+
+/// Drift guard: the protected-resource metadata's `dpop_signing_alg_values_supported`
+/// must exactly match `JwsAlgorithm::FAPI_ALLOWED`, the same source the AS discovery
+/// document derives its `dpop_signing_alg_values_supported` from. Checks both
+/// representations of the field — the plain JSON and the `signed_metadata` JWT
+/// payload, which RFC 9728 §3.3 requires to mirror the outer JSON — since they
+/// are built independently and could drift from each other. Same shape as
+/// `test_dpop_signing_algs_match_supported_algorithms` in `tests/rfc9449.rs`.
+#[tokio::test]
+async fn test_rfc9728_dpop_signing_algs_match_fapi_allowed() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let outer: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let source: BTreeSet<String> = crate::db::JwsAlgorithm::FAPI_ALLOWED
+        .iter()
+        .map(|alg| alg.as_str().to_string())
+        .collect();
+
+    let extract_algs = |doc: &serde_json::Value| -> BTreeSet<String> {
+        doc["dpop_signing_alg_values_supported"]
+            .as_array()
+            .expect("dpop_signing_alg_values_supported must be array")
+            .iter()
+            .map(|v| v.as_str().expect("alg should be string").to_string())
+            .collect()
+    };
+
+    let outer_algs = extract_algs(&outer);
+    assert_eq!(
+        outer_algs, source,
+        "protected-resource dpop_signing_alg_values_supported must exactly match \
+         JwsAlgorithm::FAPI_ALLOWED"
+    );
+
+    let jwt = outer["signed_metadata"]
+        .as_str()
+        .expect("signed_metadata must be string");
+    let signed_algs = extract_algs(&decode_jwt_payload(jwt));
+    assert_eq!(
+        signed_algs, source,
+        "signed_metadata.dpop_signing_alg_values_supported must exactly match \
+         JwsAlgorithm::FAPI_ALLOWED"
+    );
+
+    for alg in &source {
+        assert!(
+            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            "FAPI_ALLOWED wire string does not round-trip through JwsAlgorithm parsing: {alg}"
+        );
+    }
 }
 
 #[tokio::test]

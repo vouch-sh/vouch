@@ -16,15 +16,15 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::db::{self, store::DocumentStore};
+use crate::db::{self, JwsAlgorithm, store::DocumentStore};
 
 /// Nonce validity in seconds (5 minutes).
 const NONCE_VALIDITY_SECONDS: i64 = 300;
 
 /// Supported DPoP signing algorithms (asymmetric only per RFC 9449).
 ///
-/// RS256 is excluded per FAPI 2.0 Section 5.2.2.
-pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "PS256", "EdDSA"];
+/// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
+pub const SUPPORTED_ALGORITHMS: &[JwsAlgorithm] = &JwsAlgorithm::FAPI_ALLOWED;
 
 /// DPoP JWT header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,10 +265,13 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
 
 /// Parse a DPoP proof JWT header (without signature verification or claims parsing).
 ///
-/// Extracts only the header to obtain the JWK and algorithm. Used internally
-/// by `parse_and_verify_dpop_proof` to build the decoding key before
+/// Extracts the header to obtain the JWK and algorithm, parsing the `alg`
+/// wire string into a [`JwsAlgorithm`] exactly once. The typed value is
+/// threaded onward to `build_decoding_key` and the `jsonwebtoken::Algorithm`
+/// mapping in `parse_and_verify_dpop_proof`. Used internally by
+/// `parse_and_verify_dpop_proof` to build the decoding key before
 /// performing combined signature verification + claims extraction.
-fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
+fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopError> {
     let header_part = proof
         .split('.')
         .next()
@@ -312,11 +315,15 @@ fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
         )));
     }
 
-    if !SUPPORTED_ALGORITHMS.contains(&header.alg.as_str()) {
+    let alg: JwsAlgorithm = header
+        .alg
+        .parse()
+        .map_err(|_| DpopError::UnsupportedAlgorithm(header.alg.clone()))?;
+    if !SUPPORTED_ALGORITHMS.contains(&alg) {
         return Err(DpopError::UnsupportedAlgorithm(header.alg.clone()));
     }
 
-    Ok(header)
+    Ok((header, alg))
 }
 
 /// Parse and verify a DPoP proof in a single pass.
@@ -328,17 +335,19 @@ fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
 ///
 /// Returns the parsed header and verified claims.
 fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopError> {
-    let header = parse_dpop_header(proof)?;
+    let (header, alg) = parse_dpop_header(proof)?;
 
     // Build decoding key from JWK
-    let decoding_key = build_decoding_key(&header.jwk, &header.alg)?;
+    let decoding_key = build_decoding_key(&header.jwk, alg)?;
 
-    // Map algorithm string to jsonwebtoken Algorithm
-    let algorithm = match header.alg.as_str() {
-        "ES256" => jsonwebtoken::Algorithm::ES256,
-        "PS256" => jsonwebtoken::Algorithm::PS256,
-        "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
-        alg => return Err(DpopError::UnsupportedAlgorithm(alg.to_string())),
+    // Map the typed algorithm to jsonwebtoken's Algorithm enum.
+    let algorithm = match alg {
+        JwsAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
+        JwsAlgorithm::Ps256 => jsonwebtoken::Algorithm::PS256,
+        JwsAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
+        JwsAlgorithm::Rs256 => {
+            return Err(DpopError::UnsupportedAlgorithm(header.alg.clone()));
+        }
     };
 
     // Build validation settings
@@ -466,39 +475,57 @@ pub fn normalize_uri(uri: &str) -> String {
 }
 
 /// Build a `DecodingKey` from a DPoP JWK.
-fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::DecodingKey, DpopError> {
-    match (jwk, alg) {
-        (DpopJwk::Ec(ec), "ES256") => {
-            if ec.kty != "EC" || ec.crv != "P-256" {
-                return Err(DpopError::InvalidFormat(
-                    "ES256 requires EC key with P-256 curve".to_string(),
-                ));
+fn build_decoding_key(
+    jwk: &DpopJwk,
+    alg: JwsAlgorithm,
+) -> Result<jsonwebtoken::DecodingKey, DpopError> {
+    match alg {
+        JwsAlgorithm::Es256 => match jwk {
+            DpopJwk::Ec(ec) => {
+                if ec.kty != "EC" || ec.crv != "P-256" {
+                    return Err(DpopError::InvalidFormat(
+                        "ES256 requires EC key with P-256 curve".to_string(),
+                    ));
+                }
+                // jsonwebtoken expects base64url-encoded strings
+                jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y)
+                    .map_err(|e| DpopError::InvalidFormat(format!("Invalid EC key: {e}")))
             }
-            // jsonwebtoken expects base64url-encoded strings
-            jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y)
-                .map_err(|e| DpopError::InvalidFormat(format!("Invalid EC key: {e}")))
-        }
-        (DpopJwk::Rsa(rsa), "PS256") => {
-            if rsa.kty != "RSA" {
-                return Err(DpopError::InvalidFormat(
-                    "PS256 requires RSA key".to_string(),
-                ));
+            DpopJwk::Rsa(_) | DpopJwk::Okp(_) => {
+                Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
-            // jsonwebtoken expects base64url-encoded strings
-            jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
-                .map_err(|e| DpopError::InvalidFormat(format!("Invalid RSA key: {e}")))
-        }
-        (DpopJwk::Okp(okp), "EdDSA") => {
-            if okp.kty != "OKP" || okp.crv != "Ed25519" {
-                return Err(DpopError::InvalidFormat(
-                    "EdDSA requires OKP key with Ed25519 curve".to_string(),
-                ));
+        },
+        JwsAlgorithm::Ps256 => match jwk {
+            DpopJwk::Rsa(rsa) => {
+                if rsa.kty != "RSA" {
+                    return Err(DpopError::InvalidFormat(
+                        "PS256 requires RSA key".to_string(),
+                    ));
+                }
+                // jsonwebtoken expects base64url-encoded strings
+                jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
+                    .map_err(|e| DpopError::InvalidFormat(format!("Invalid RSA key: {e}")))
             }
-            // jsonwebtoken expects base64url-encoded string
-            jsonwebtoken::DecodingKey::from_ed_components(&okp.x)
-                .map_err(|e| DpopError::InvalidFormat(format!("Invalid Ed25519 key: {e}")))
-        }
-        _ => Err(DpopError::UnsupportedAlgorithm(alg.to_string())),
+            DpopJwk::Ec(_) | DpopJwk::Okp(_) => {
+                Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
+            }
+        },
+        JwsAlgorithm::EdDsa => match jwk {
+            DpopJwk::Okp(okp) => {
+                if okp.kty != "OKP" || okp.crv != "Ed25519" {
+                    return Err(DpopError::InvalidFormat(
+                        "EdDSA requires OKP key with Ed25519 curve".to_string(),
+                    ));
+                }
+                // jsonwebtoken expects base64url-encoded string
+                jsonwebtoken::DecodingKey::from_ed_components(&okp.x)
+                    .map_err(|e| DpopError::InvalidFormat(format!("Invalid Ed25519 key: {e}")))
+            }
+            DpopJwk::Ec(_) | DpopJwk::Rsa(_) => {
+                Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
+            }
+        },
+        JwsAlgorithm::Rs256 => Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string())),
     }
 }
 

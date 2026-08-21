@@ -1689,7 +1689,7 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_client_bad_jwt() {
     assert_eq!(json["error"], "invalid_client");
 }
 
-/// FAPI 2.0 §5.2.2: FAPI clients require sender-constrained access tokens.
+/// FAPI 2.0 §5.3.2.1: FAPI clients require sender-constrained access tokens.
 /// `private_key_jwt` alone is client authentication — not sender-constraint.
 /// Without DPoP and without mTLS, the token endpoint must reject with
 /// `invalid_request` "FAPI 2.0 requires sender-constrained access tokens

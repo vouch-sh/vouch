@@ -71,7 +71,7 @@ pub struct OidcDiscoveryDocument {
     pub code_challenge_methods_supported: Vec<String>,
     /// RFC 9449 Section 5.1: Supported DPoP JWS signing algorithms.
     ///
-    /// RS256 is excluded per FAPI 2.0 Section 5.2.2.
+    /// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported ACR values.
@@ -86,8 +86,7 @@ pub struct OidcDiscoveryDocument {
     pub resource_indicators_supported: Option<bool>,
     /// RFC 7523: Supported JWS algorithms for JWT client authentication.
     ///
-    /// Includes PS256 and EdDSA per FAPI 2.0 requirements; RS256 is excluded
-    /// per FAPI 2.0 Section 5.2.2.
+    /// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// RFC 9126: URL of the Pushed Authorization Request endpoint.
@@ -99,9 +98,9 @@ pub struct OidcDiscoveryDocument {
     pub request_parameter_supported: bool,
     /// RFC 9101: Supported JWS algorithms for Request Object signing.
     ///
-    /// RS256 is included because FAPI 2.0 Section 5.2.2 restricts DPoP and token endpoint
-    /// auth signing, not JAR signing. The validation layer enforces PS256/ES256/EdDSA for
-    /// FAPI-profile clients; RS256 JARs from non-FAPI clients are accepted and advertised.
+    /// RS256 is included because [`JwsAlgorithm::FAPI_ALLOWED`] restricts DPoP and token
+    /// endpoint auth signing, not JAR signing. The validation layer enforces PS256/ES256/EdDSA
+    /// for FAPI-profile clients; RS256 JARs from non-FAPI clients are accepted and advertised.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_object_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// JARM: Supported JWS algorithms for authorization response signing.
@@ -242,24 +241,14 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             .iter()
             .map(|m| m.as_str().to_string())
             .collect(),
-        // RS256 excluded per FAPI 2.0 Section 5.2.2.
-        dpop_signing_alg_values_supported: Some(vec![
-            JwsAlgorithm::Es256,
-            JwsAlgorithm::Ps256,
-            JwsAlgorithm::EdDsa,
-        ]),
+        dpop_signing_alg_values_supported: Some(JwsAlgorithm::FAPI_ALLOWED.to_vec()),
         acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
         // RFC 9207: Advertise that we include `iss` in authorization responses
         authorization_response_iss_parameter_supported: true,
         // RFC 8707: Advertise resource indicator support
         resource_indicators_supported: Some(true),
         // RFC 7523: JWT client auth signing algorithms.
-        // PS256 and EdDSA added per FAPI 2.0; RS256 excluded per FAPI 2.0 Section 5.2.2.
-        token_endpoint_auth_signing_alg_values_supported: Some(vec![
-            JwsAlgorithm::Es256,
-            JwsAlgorithm::Ps256,
-            JwsAlgorithm::EdDsa,
-        ]),
+        token_endpoint_auth_signing_alg_values_supported: Some(JwsAlgorithm::FAPI_ALLOWED.to_vec()),
         // RFC 9126: Pushed Authorization Request endpoint
         pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
         require_pushed_authorization_requests: false,

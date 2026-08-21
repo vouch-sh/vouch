@@ -343,7 +343,7 @@ pub async fn validate_request_object(
     }
 
     // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
-    // RS256 is excluded per FAPI 2.0 Section 5.2.2 — use PS256, ES256, or EdDSA.
+    // RS256 is excluded per FAPI 2.0 Section 5.4.1 — use PS256, ES256, or EdDSA.
     if let Err(e) =
         crate::services::oidc::fapi::validate_fapi_algorithm(client, &assertion_header.alg)
     {

@@ -742,7 +742,7 @@ async fn handle_client_credentials_grant(
             }
         };
 
-    // FAPI 2.0 Section 5.2.2: sender-constrained access tokens required
+    // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
     // (DPoP or mTLS), same as every other grant a FAPI client can reach.
     let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
@@ -937,7 +937,7 @@ async fn handle_token_exchange_grant(
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
-    // FAPI 2.0 Section 5.2.2: sender-constrained access tokens required
+    // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
     // (DPoP or mTLS) on every grant a FAPI client can use — without this, a
     // FAPI client could exchange a bound subject_token for an unbound one.
     // Mirrors `handle_authorization_code_grant`.
