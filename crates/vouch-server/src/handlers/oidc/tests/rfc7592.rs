@@ -320,6 +320,141 @@ async fn test_rfc7592_put_accepts_rs256_alg_pinned_x5c_jwks_for_fapi_mtls_client
 }
 
 // =========================================================================
+// RFC 8705 §2.2.2: self_signed_tls_client_auth's certificate is carried in
+// the JWKS's x5c member, so a PUT that clears it must be rejected even for
+// a non-FAPI client — the earlier test above only covered the FAPI case.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_non_fapi_self_signed_client_clearing_jwks() {
+    let (app, _state) = test_app().await;
+    let cert_der = make_test_cert_der("non-fapi-self-signed-put-client");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks": {"keys": [{"kty": "RSA", "x5c": [x5c_b64]}]}
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-FAPI self_signed_tls_client_auth client's PUT must not be able to clear its \
+         key material: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_self_signed_client_swapping_in_certificate_less_jwks() {
+    // `jwks_has_x5c`: a PUT can replace the inline JWKS with one that still
+    // satisfies the bare presence check but carries no x5c anywhere — must
+    // be rejected the same as clearing it outright.
+    let (app, _state) = test_app().await;
+    let cert_der = make_test_cert_der("self-signed-put-swap-client");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks": {"keys": [{"kty": "RSA", "x5c": [x5c_b64]}]}
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a certificate-less JWKS must be rejected on PUT for self_signed_tls_client_auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+// =========================================================================
+// JWKS write-path shape validation — a type-invalid member must be rejected
+// on PUT through the same typed representation registration uses.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_jwks_with_type_invalid_key_member() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {"keys": [{"kty": "EC", "use": 123}]}
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a type-invalid JWK member must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+// =========================================================================
 // PUT /oauth/register/:client_id — Update Client Configuration
 // =========================================================================
 

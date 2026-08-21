@@ -22,7 +22,7 @@ use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
-    jwks_has_fapi_allowed_key,
+    jwks_has_fapi_allowed_key, jwks_has_x5c,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::oidc::grant_type::OAuthGrantType;
@@ -370,13 +370,7 @@ pub async fn register_client(
     let is_fapi2 = dpop_bound || cert_bound;
     let fapi_profile = if is_fapi2 {
         // Require FAPI-compliant auth method
-        let is_fapi_auth = matches!(
-            jwks_auth.auth_method,
-            TokenEndpointAuthMethod::PrivateKeyJwt
-                | TokenEndpointAuthMethod::TlsClientAuth
-                | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        );
-        if !is_fapi_auth {
+        if !jwks_auth.auth_method.is_fapi_compatible() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "FAPI 2.0 requires token_endpoint_auth_method \
@@ -400,7 +394,7 @@ pub async fn register_client(
         // check does not apply to them.
         if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
             && let Some(ref jwks) = jwks_auth.jwks_value
-            && !jwks_has_fapi_allowed_key(jwks)
+            && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
         {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
@@ -1014,15 +1008,28 @@ fn validate_jwks_fields(
             "jwks and jwks_uri are mutually exclusive",
         ));
     }
-    if let Some(jwks) = jwks
-        && !jwks
+    if let Some(jwks) = jwks {
+        if !jwks
             .get("keys")
             .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks must be a JSON object with a non-empty \"keys\" array",
-        ));
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "jwks must be a JSON object with a non-empty \"keys\" array",
+            ));
+        }
+        // Reject a JWKS with a type-invalid member (e.g. "alg": true) at
+        // submission time, through the same typed representation the RFC
+        // 7523 client-assertion verifier uses at runtime — see
+        // db::JwkSet. Otherwise the client would be accepted here but
+        // permanently unable to authenticate once the runtime verifier
+        // fails to parse the same document.
+        if db::parse_jwks_set(jwks).is_err() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "jwks contains a key with an invalid field type",
+            ));
+        }
     }
     if let Some(uri) = jwks_uri {
         match url::Url::parse(uri) {
@@ -1055,13 +1062,36 @@ fn validate_jwks_and_auth_method(
         )
     })?;
 
-    if auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && jwks_value.is_none()
+    // private_key_jwt authenticates with a client-assertion signing key, and
+    // self_signed_tls_client_auth's certificate is carried in the JWKS's
+    // `x5c` member (RFC 8705 §2.2.2) — both need key material to
+    // authenticate at all. tls_client_auth authenticates via PKI subject
+    // DN/SAN instead, so it needs none.
+    if matches!(
+        auth_method,
+        TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+    ) && jwks_value.is_none()
         && jwks_uri.is_none()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
-            "private_key_jwt requires jwks or jwks_uri",
+            "private_key_jwt and self_signed_tls_client_auth require jwks or jwks_uri",
+        ));
+    }
+
+    // self_signed_tls_client_auth's certificate is carried by a key's `x5c`
+    // member; an inline JWKS with none anywhere would pass the presence
+    // check above but leave the client unable to ever complete mTLS
+    // authentication — see db::jwks_has_x5c. A remote jwks_uri can't be
+    // inspected synchronously, so this only guards the inline case, same as
+    // the FAPI algorithm-usability check.
+    if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        && let Some(ref jwks) = jwks_value
+        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "self_signed_tls_client_auth requires a JWKS key with an x5c certificate",
         ));
     }
 
@@ -1257,19 +1287,44 @@ pub async fn update_client_configuration(
     // PUT is a full replacement, so re-check the auth-method/JWKS
     // relationship enforced at initial registration against the client's
     // (immutable) registered auth method and FAPI profile. A private_key_jwt
-    // client (FAPI or not) needs key material to authenticate at all; a FAPI
-    // 2.0 client of any auth method needs it too — register_client requires
-    // jwks/jwks_uri for every FAPI client, not just private_key_jwt ones
-    // (RFC 7592 §2.2: omitted fields are treated as cleared, so a PUT that
-    // drops both would otherwise silently strip a client's only key material).
+    // or self_signed_tls_client_auth client (FAPI or not) needs key material
+    // to authenticate at all — the former for client-assertion signing keys,
+    // the latter for its certificate, carried in the JWKS's `x5c` member
+    // (RFC 8705 §2.2.2). A FAPI 2.0 client of any auth method needs it too —
+    // register_client requires jwks/jwks_uri for every FAPI client, not just
+    // these two (RFC 7592 §2.2: omitted fields are treated as cleared, so a
+    // PUT that drops both would otherwise silently strip a client's only key
+    // material).
     if (client.is_fapi()
-        || client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt)
+        || matches!(
+            client.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+                | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        ))
         && mutable_request.jwks.is_none()
         && mutable_request.jwks_uri.is_none()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
-            "FAPI 2.0 or private_key_jwt requires jwks or jwks_uri",
+            "FAPI 2.0, private_key_jwt, or self_signed_tls_client_auth requires jwks or jwks_uri",
+        ));
+    }
+
+    // self_signed_tls_client_auth's certificate is carried by a key's `x5c`
+    // member (RFC 8705 §2.2.2 describes this representation); an inline JWKS
+    // replacing the client's key material with none would pass the presence
+    // check above but leave the client unable to ever complete mTLS
+    // authentication again — see db::jwks_has_x5c. Applies regardless of
+    // FAPI status, unlike the algorithm-usability check below (this auth
+    // method exists for non-FAPI clients too). A remote jwks_uri can't be
+    // inspected synchronously, so this only guards the inline case.
+    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        && let Some(ref jwks) = mutable_request.jwks
+        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "self_signed_tls_client_auth requires a JWKS key with an x5c certificate",
         ));
     }
 
@@ -1286,7 +1341,7 @@ pub async fn update_client_configuration(
     if client.is_fapi()
         && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
         && let Some(ref jwks) = mutable_request.jwks
-        && !jwks_has_fapi_allowed_key(jwks)
+        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,

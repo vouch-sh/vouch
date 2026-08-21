@@ -187,6 +187,17 @@ impl TokenEndpointAuthMethod {
             Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
         }
     }
+
+    /// Returns `true` for the auth methods FAPI 2.0 clients may use:
+    /// `private_key_jwt` (client-assertion signing) or mTLS
+    /// (`tls_client_auth`, `self_signed_tls_client_auth`).
+    #[must_use]
+    pub fn is_fapi_compatible(&self) -> bool {
+        matches!(
+            self,
+            Self::PrivateKeyJwt | Self::TlsClientAuth | Self::SelfSignedTlsClientAuth
+        )
+    }
 }
 
 impl std::str::FromStr for TokenEndpointAuthMethod {

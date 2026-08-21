@@ -7,45 +7,8 @@
 use super::validate::JwtAssertionHeader;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
+use crate::db::{JwkEntry, JwkSet};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use serde::Deserialize;
-
-/// A JSON Web Key Set (RFC 7517 Section 5).
-#[derive(Debug, Deserialize)]
-pub struct JwkSet {
-    /// The keys in the set.
-    pub keys: Vec<JwkEntry>,
-}
-
-/// A single JWK entry in a JWKS.
-#[derive(Debug, Deserialize)]
-pub struct JwkEntry {
-    /// Key type (e.g., "EC", "RSA", "OKP").
-    pub kty: String,
-    /// Key ID (optional).
-    #[serde(default)]
-    pub kid: Option<String>,
-    /// Algorithm (optional).
-    #[serde(default)]
-    pub alg: Option<String>,
-    /// Key use (optional, e.g., "sig").
-    #[serde(rename = "use", default)]
-    pub use_: Option<String>,
-
-    // EC key components
-    #[serde(default)]
-    pub crv: Option<String>,
-    #[serde(default)]
-    pub x: Option<String>,
-    #[serde(default)]
-    pub y: Option<String>,
-
-    // RSA key components
-    #[serde(default)]
-    pub n: Option<String>,
-    #[serde(default)]
-    pub e: Option<String>,
-}
 
 /// Resolve the JWKS for a client — from inline `jwks` or fetched `jwks_uri`.
 ///
@@ -109,7 +72,7 @@ async fn resolve_jwks_uri(
 
 /// Parse a JWKS from a `serde_json::Value`.
 fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
-    serde_json::from_value(value.clone()).map_err(|e| {
+    crate::db::parse_jwks_set(value).map_err(|e| {
         tracing::debug!("Failed to parse JWKS value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })
@@ -355,6 +318,7 @@ mod tests {
             y: Some(EC_Y.to_string()),
             n: None,
             e: None,
+            x5c: None,
         }
     }
 
@@ -369,6 +333,7 @@ mod tests {
             y: None,
             n: Some(RSA_N.to_string()),
             e: Some(RSA_E.to_string()),
+            x5c: None,
         }
     }
 
@@ -386,6 +351,7 @@ mod tests {
             y: None,
             n: None,
             e: None,
+            x5c: None,
         }
     }
 
