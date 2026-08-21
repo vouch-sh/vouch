@@ -7,7 +7,7 @@
 //! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
-use crate::db::{JwsAlgorithm, ResponseMode, TokenEndpointAuthMethod};
+use crate::db::{FapiProfile, JwsAlgorithm, ResponseMode, TokenEndpointAuthMethod};
 use crate::error::ServiceError;
 use crate::services::auth::ACR_AAL3;
 use crate::services::oidc::OAuthScope;
@@ -86,7 +86,10 @@ pub struct OidcDiscoveryDocument {
     pub resource_indicators_supported: Option<bool>,
     /// RFC 7523: Supported JWS algorithms for JWT client authentication.
     ///
-    /// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
+    /// The union of every [`FapiProfile`]'s allowed set — see
+    /// [`FapiProfile::client_assertion_algorithms_union`]. FAPI 2.0 clients are
+    /// restricted to [`JwsAlgorithm::FAPI_ALLOWED`] at enforcement time; this field
+    /// additionally advertises `RS256` because non-FAPI clients may use it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// RFC 9126: URL of the Pushed Authorization Request endpoint.
@@ -247,8 +250,13 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         authorization_response_iss_parameter_supported: true,
         // RFC 8707: Advertise resource indicator support
         resource_indicators_supported: Some(true),
-        // RFC 7523: JWT client auth signing algorithms.
-        token_endpoint_auth_signing_alg_values_supported: Some(JwsAlgorithm::FAPI_ALLOWED.to_vec()),
+        // RFC 7523: JWT client auth signing algorithms — the union of every
+        // FapiProfile's allowed set (RS256 comes in via the non-FAPI profile).
+        // Structurally derived, not an independently maintained list: see
+        // FapiProfile::client_assertion_algorithms_union.
+        token_endpoint_auth_signing_alg_values_supported: Some(
+            FapiProfile::client_assertion_algorithms_union(),
+        ),
         // RFC 9126: Pushed Authorization Request endpoint
         pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
         require_pushed_authorization_requests: false,

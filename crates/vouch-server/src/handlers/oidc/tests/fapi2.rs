@@ -856,8 +856,8 @@ async fn test_fapi2_non_fapi_client_secret_basic() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_fapi2_discovery_excludes_rs256() {
-    // FAPI 2.0 Section 5.4.1: RS256 must NOT appear in any algorithm list.
+async fn test_fapi2_discovery_dpop_excludes_rs256() {
+    // FAPI 2.0 Section 5.4.1: RS256 must NOT appear in FAPI-only algorithm lists.
     let (app, _state) = test_app().await;
 
     let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
@@ -865,14 +865,18 @@ async fn test_fapi2_discovery_excludes_rs256() {
 
     let doc: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
 
-    // FAPI 2.0 Section 5.4.1 restricts RS256 from DPoP and token endpoint auth signing.
-    // request_object_signing_alg_values_supported intentionally includes RS256 to support
-    // OIDC Basic Profile conformance (oidcc-request-uri-signed-rs256). The JAR validator
-    // enforces PS256/ES256/EdDSA for FAPI clients at runtime via validate_fapi_algorithm().
-    let alg_fields = [
-        "token_endpoint_auth_signing_alg_values_supported",
-        "dpop_signing_alg_values_supported",
-    ];
+    // dpop_signing_alg_values_supported is FAPI-scoped only (every DPoP proof is
+    // validated against JwsAlgorithm::FAPI_ALLOWED, not per-client), so RS256 stays
+    // excluded there. request_object_signing_alg_values_supported and
+    // token_endpoint_auth_signing_alg_values_supported both intentionally include
+    // RS256 for non-FAPI clients: OIDC Discovery 1.0 Section 3
+    // (<https://openid.net/specs/openid-connect-discovery-1_0.html>) and RFC 8414
+    // Section 2 (<https://www.rfc-editor.org/rfc/rfc8414>) both describe
+    // token_endpoint_auth_signing_alg_values_supported with "Servers SHOULD support
+    // RS256." The JAR and jwt_bearer validators still enforce PS256/ES256/EdDSA per
+    // FAPI-profile client at runtime via validate_fapi_algorithm() /
+    // FapiProfile::client_assertion_algorithms().
+    let alg_fields = ["dpop_signing_alg_values_supported"];
 
     for field in &alg_fields {
         if let Some(arr) = doc[field].as_array() {

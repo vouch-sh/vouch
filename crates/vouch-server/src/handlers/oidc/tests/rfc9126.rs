@@ -2566,6 +2566,52 @@ async fn test_rfc9126_par_rejects_private_key_jwt_with_bad_aud() {
 }
 
 #[tokio::test]
+async fn test_rfc9126_par_rejects_fapi_client_rs256_assertion() {
+    // #1003: per-client-profile algorithm enforcement runs inside
+    // authenticate_client_jwt, the single client-assertion verifier shared by
+    // every private_key_jwt call site — not just the token endpoint. FAPI 2.0
+    // Section 5.4.1 restricts client assertions to PS256/ES256/EdDSA, so RS256
+    // must be rejected at PAR exactly as it is at /oauth/token
+    // (test_fapi_client_rejects_rs256_assertion in tests/rfc7523.rs).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-fapi-rs256@example.com").await;
+    let (key_pair, jwk) = generate_rs256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let assertion =
+        sign_client_assertion_rs256(&key_pair, &client.client_id, &state.config().base_url);
+
+    let body = format!(
+        "client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        client.client_id, assertion,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "FAPI client with RS256 assertion must be rejected at PAR: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
+
+#[tokio::test]
 async fn test_rfc9126_par_rejects_private_key_jwt_with_nbf_too_far_future() {
     // RFC 7523 / FAPI 2.0: client_assertion `nbf` must be within clock-skew
     // tolerance of "now". An `nbf` 70 seconds in the future exceeds the FAPI

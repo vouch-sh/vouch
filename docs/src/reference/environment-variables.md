@@ -157,6 +157,16 @@ Vouch supports loading configuration from an S3 object for centralized managemen
 |----------|----------|---------|-------------|
 | `VOUCH_JWT_ASSERTION_MAX_LIFETIME` | No | `300` | Maximum lifetime (seconds) for `private_key_jwt` client-authentication JWT assertions (RFC 7523 §2.2 / §3). Assertions older than this are rejected. |
 
+The signing algorithm allowed for a client's assertion depends on its FAPI 2.0 profile, not
+just this lifetime bound. Applications with `fapi_profile = fapi2_security` may only sign
+assertions with ES256, PS256, or EdDSA (FAPI 2.0 Section 5.4.1); other applications may
+additionally use RS256. Discovery's `token_endpoint_auth_signing_alg_values_supported`
+advertises the full four-algorithm union — an application's own profile determines which of
+those it may actually use. Setting `fapi_profile = fapi2_security` on an application whose
+JWKS keys are all pinned to an algorithm outside that set (e.g. every key declares
+`"alg": "RS256"`) is refused with a `fapi_jwks_algorithm_unsupported` error, since the
+application would otherwise be unable to authenticate at all after the change.
+
 ## Protected Resource Metadata (RFC 9728)
 
 These optional variables configure descriptive metadata published in the OAuth 2.0 Protected Resource Metadata document at `/.well-known/oauth-protected-resource`.

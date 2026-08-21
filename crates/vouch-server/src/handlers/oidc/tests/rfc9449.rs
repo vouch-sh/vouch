@@ -1742,8 +1742,17 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
     }
 }
 
+/// Discovery must advertise exactly `FapiProfile::client_assertion_algorithms_union()`
+/// — the same derivation `services/oidc/discovery.rs` calls, over the same
+/// `FapiProfile::ALL` that `client.fapi_profile.client_assertion_algorithms()`
+/// selects per client — so this list is structurally tied to what the jwt_bearer validator
+/// (`services/oidc/jwt_bearer/client_auth.rs`) actually enforces per profile, not
+/// separately asserted equal. Per-profile enforcement itself (FAPI clients
+/// restricted to `FAPI_ALLOWED`, non-FAPI clients keeping RS256) is proven live by
+/// `test_fapi_client_rejects_rs256_assertion` and
+/// `test_non_fapi_client_accepts_rs256_assertion` in `tests/rfc7523.rs` (#1003).
 #[tokio::test]
-async fn test_token_endpoint_auth_signing_algs_match_fapi_allowed() {
+async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms_union() {
     let (app, _state) = test_app().await;
     let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
 
@@ -1757,7 +1766,7 @@ async fn test_token_endpoint_auth_signing_algs_match_fapi_allowed() {
             .map(|v| v.as_str().expect("alg should be string").to_string())
             .collect();
 
-    let source: BTreeSet<String> = crate::db::JwsAlgorithm::FAPI_ALLOWED
+    let source: BTreeSet<String> = crate::db::FapiProfile::client_assertion_algorithms_union()
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -1765,7 +1774,7 @@ async fn test_token_endpoint_auth_signing_algs_match_fapi_allowed() {
     assert_eq!(
         discovered, source,
         "discovery token_endpoint_auth_signing_alg_values_supported must exactly match \
-         JwsAlgorithm::FAPI_ALLOWED"
+         FapiProfile::client_assertion_algorithms_union()"
     );
 
     for alg in &discovered {

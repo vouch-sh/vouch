@@ -1447,6 +1447,53 @@ mod tests {
         assert_eq!(none_json, r#""none""#);
     }
 
+    #[test]
+    fn test_fapi_profile_client_assertion_algorithms_per_variant() {
+        assert_eq!(
+            FapiProfile::None.client_assertion_algorithms(),
+            &JwsAlgorithm::CLIENT_ASSERTION_ALLOWED
+        );
+        assert_eq!(
+            FapiProfile::Fapi2Security.client_assertion_algorithms(),
+            &JwsAlgorithm::FAPI_ALLOWED
+        );
+    }
+
+    #[test]
+    fn test_client_assertion_algorithms_union_contains_every_profile_set() {
+        let union = FapiProfile::client_assertion_algorithms_union();
+        for profile in FapiProfile::ALL {
+            for alg in profile.client_assertion_algorithms() {
+                assert!(
+                    union.contains(alg),
+                    "{profile:?}'s allowed algorithm {alg} must be in the union"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_assertion_algorithms_union_matches_client_assertion_allowed() {
+        // Non-FAPI already permits every algorithm any profile permits (RS256
+        // plus the FAPI-allowed three), so today the union equals it exactly.
+        // This pins that fact rather than assuming it: adding a profile with an
+        // algorithm outside CLIENT_ASSERTION_ALLOWED would fail this test, not
+        // silently widen or narrow what discovery advertises.
+        let mut union: Vec<&str> = FapiProfile::client_assertion_algorithms_union()
+            .iter()
+            .map(JwsAlgorithm::as_str)
+            .collect();
+        union.sort_unstable();
+
+        let mut allowed: Vec<&str> = JwsAlgorithm::CLIENT_ASSERTION_ALLOWED
+            .iter()
+            .map(JwsAlgorithm::as_str)
+            .collect();
+        allowed.sort_unstable();
+
+        assert_eq!(union, allowed);
+    }
+
     // ========================================================================
     // Test Helpers
     // ========================================================================
