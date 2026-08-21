@@ -328,6 +328,24 @@ pub(super) fn validate_update_format<'a>(
     })
 }
 
+/// The FAPI profile the client will have once this update is applied: the
+/// requested profile when `fapi_profile` was provided, otherwise the client's
+/// current profile (an absent field preserves it — see [`ValidatedUpdateApp`]).
+///
+/// Shared by [`validate_update_fapi`] (to decide whether the FAPI-specific
+/// checks apply) and [`compute_fapi_update_fields`] (to build the persisted
+/// `fapi_profile`), so the two cannot disagree about what "the client will be
+/// FAPI after this update" means.
+fn effective_fapi_profile(validated: &ValidatedUpdateApp<'_>, client: &OAuthClient) -> FapiProfile {
+    if validated.is_fapi {
+        FapiProfile::Fapi2Security
+    } else if validated.fapi_profile_provided {
+        FapiProfile::None
+    } else {
+        client.fapi_profile
+    }
+}
+
 /// Validate semantic rules for an update against the existing client record.
 ///
 /// Call after authentication and the ownership check.  This covers rules that
@@ -347,15 +365,23 @@ pub(super) fn validate_update_fapi(
         return Err(AppValidationError::MissingRedirectUris);
     }
 
-    if !validated.is_fapi {
-        // A FAPI client authenticates with private_key_jwt and therefore has
-        // no client secret. Moving it to a standard profile would switch it to
-        // client_secret_basic without minting one, so every subsequent token
-        // request would fail with invalid_client and the application would be
-        // unusable with no way back. Refuse the transition instead.
-        if validated.fapi_profile_provided && client.is_fapi() {
-            return Err(AppValidationError::FapiDowngradeUnsupported);
-        }
+    // A FAPI client authenticates with private_key_jwt and therefore has no
+    // client secret. Moving it to a standard profile would switch it to
+    // client_secret_basic without minting one, so every subsequent token
+    // request would fail with invalid_client and the application would be
+    // unusable with no way back. Refuse the explicit transition outright —
+    // this check is about the request declaring a downgrade, not about the
+    // effective post-merge profile below.
+    if !validated.is_fapi && validated.fapi_profile_provided && client.is_fapi() {
+        return Err(AppValidationError::FapiDowngradeUnsupported);
+    }
+
+    // Everything below applies whenever the client is FAPI *after* this
+    // update — whether the request just declared it, or it stays FAPI
+    // because `fapi_profile` was omitted. A JWKS-only edit to an
+    // already-FAPI client must be validated exactly like a fresh upgrade:
+    // its new JWKS can strand the client the same way.
+    if effective_fapi_profile(validated, client) == FapiProfile::None {
         return Ok(());
     }
 
@@ -376,14 +402,8 @@ pub(super) fn validate_update_fapi(
         return Err(AppValidationError::FapiMissingJwks);
     }
 
-    // FAPI validation: an inline JWKS (submitted or already on the client) must
-    // have at least one key usable with FAPI_ALLOWED. Reached whenever the
-    // request declares `fapi_profile=fapi2_security` — a fresh upgrade or an
-    // explicit re-confirmation — same scope as the FapiMissingJwks check above.
-    // A JWKS-only update that omits `fapi_profile` on an already-FAPI client
-    // takes the early return above and is not re-validated here, matching that
-    // check's existing scope; the client stays FAPI either way, so this is a
-    // known gap shared by both checks, not one this change introduces.
+    // FAPI validation: an inline JWKS (submitted or already on the client)
+    // must have at least one key usable with FAPI_ALLOWED.
     if let Some(jwks) = validated.jwks.as_ref().or(client.jwks.as_ref())
         && !jwks_has_fapi_allowed_key(jwks)
     {
@@ -502,15 +522,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     client: &'a OAuthClient,
 ) -> Result<FapiUpdateFields<'a>, AppValidationError> {
     let is_fapi = validated.is_fapi;
-
-    let fapi_profile = if is_fapi {
-        FapiProfile::Fapi2Security
-    } else if validated.fapi_profile_provided {
-        // Explicitly set to non-FAPI
-        FapiProfile::None
-    } else {
-        client.fapi_profile
-    };
+    let fapi_profile = effective_fapi_profile(validated, client);
 
     // A FAPI→standard transition never reaches here: `validate_update_fapi`
     // rejects it, because the client has no secret to fall back to.
@@ -858,6 +870,36 @@ mod tests {
             .expect("client exists")
     }
 
+    /// A FAPI client whose stored JWKS predates the algorithm-usability
+    /// guard: its only key is pinned to `alg: RS256`, unusable under
+    /// `FAPI_ALLOWED`.
+    async fn stale_jwks_fapi_client(
+        state: &crate::AppState,
+        email: &str,
+    ) -> crate::db::OAuthClient {
+        let user = create_test_user(&state.store, email).await;
+        let jwks = serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+        });
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Custom(jwks),
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists")
+    }
+
     // A non-FAPI client that authenticates with `private_key_jwt` and carries
     // JWKS — the shape produced by authenticated dynamic registration (RFC
     // 7591) when the caller supplies `token_endpoint_auth_method=private_key_jwt`
@@ -1122,9 +1164,7 @@ mod tests {
     // The guard also fires on an explicit re-confirmation (fapi_profile
     // resubmitted, not just a fresh non-FAPI -> FAPI transition): swapping the
     // JWKS of an already-FAPI client to an RS256-only key would strand it
-    // exactly the same way. A JWKS-only update that omits `fapi_profile`
-    // entirely is a known, pre-existing gap shared with FapiMissingJwks (see
-    // the comment on the guard) — out of scope here.
+    // exactly the same way.
     #[tokio::test]
     async fn fapi_reconfirm_rejected_when_new_jwks_has_no_allowed_algorithm_key() {
         let state = test_app_state().await;
@@ -1145,6 +1185,137 @@ mod tests {
         let err = validate_update_fapi(&validated, &client)
             .expect_err("RS256-only JWKS must be rejected on FAPI re-confirmation");
         assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    // A JWKS-only update that omits `fapi_profile` must still be validated:
+    // the field's absence preserves the client's existing profile, so a
+    // client that stays FAPI must have its new JWKS checked for a usable
+    // algorithm exactly as it would be on an explicit upgrade.
+    #[tokio::test]
+    async fn fapi_jwks_only_update_rejected_when_new_jwks_has_no_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let client = fapi_test_client(&state, "fapi-jwks-only-rs256@example.com").await;
+
+        let jwks = rs256_only_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let err = validate_update_fapi(&validated, &client).expect_err(
+            "RS256-only JWKS must be rejected on a JWKS-only update to an already-FAPI client",
+        );
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    #[tokio::test]
+    async fn fapi_jwks_only_update_accepted_when_new_jwks_has_an_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let client = fapi_test_client(&state, "fapi-jwks-only-eddsa@example.com").await;
+
+        let jwks = eddsa_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client).expect(
+            "a JWKS-only update with an allowed-algorithm key must pass on an already-FAPI client",
+        );
+    }
+
+    // No false positive: an ordinary update that never touches the JWKS must
+    // still pass for an already-FAPI client with a valid existing JWKS — the
+    // effective-profile check must not re-reject a client that was already fine.
+    #[tokio::test]
+    async fn fapi_metadata_only_update_unaffected_by_effective_profile_check() {
+        let state = test_app_state().await;
+        let client = fapi_test_client(&state, "fapi-metadata-only@example.com").await;
+
+        let redirect_uris = vec![
+            "https://example.com/callback".to_string(),
+            "https://example.com/callback2".to_string(),
+        ];
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: Some(&redirect_uris),
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("a redirect_uris-only update must not be affected by the FAPI JWKS checks");
+    }
+
+    // Reverse edge: a request that omits `fapi_profile` AND `jwks` still
+    // validates the STORED jwks, because the client remains FAPI regardless.
+    // Simulates a client whose stored JWKS predates this guard (e.g. created
+    // before it existed) — any subsequent update must surface the problem
+    // rather than silently continue to accept an unusable key.
+    #[tokio::test]
+    async fn fapi_metadata_only_update_rejected_when_stored_jwks_has_no_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let client = stale_jwks_fapi_client(&state, "fapi-stale-jwks@example.com").await;
+
+        let validated = update_input(None);
+        let err = validate_update_fapi(&validated, &client)
+            .expect_err("a metadata-only update must surface a pre-existing unusable stored JWKS");
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    // Same reverse edge, but with `fapi_profile` explicitly re-confirmed and
+    // JWKS left unspecified — the check must still fall back to the stored
+    // JWKS rather than treating "no jwks in this request" as "nothing to
+    // check".
+    #[tokio::test]
+    async fn fapi_reconfirm_rejected_when_stored_jwks_has_no_allowed_algorithm_key() {
+        let state = test_app_state().await;
+        let client = stale_jwks_fapi_client(&state, "fapi-reconfirm-stale-jwks@example.com").await;
+
+        let validated = update_input(Some("fapi2_security"));
+        let err = validate_update_fapi(&validated, &client).expect_err(
+            "an explicit re-confirmation with no new jwks must still check the stored JWKS",
+        );
+        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+    }
+
+    // No new restriction for non-FAPI clients: RS256 stays allowed, and a
+    // JWKS-only update never triggers the FAPI-only checks.
+    #[tokio::test]
+    async fn fapi_jwks_only_update_accepted_for_non_fapi_client() {
+        let state = test_app_state().await;
+        let client = non_fapi_pkjwt_client(&state, "nonfapi-jwks-only-rs256@example.com").await;
+
+        let jwks = rs256_only_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("RS256 must remain unrestricted for a non-FAPI client's JWKS-only update");
     }
 
     #[test]
