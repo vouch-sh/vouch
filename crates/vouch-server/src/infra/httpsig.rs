@@ -95,7 +95,10 @@ impl KeyResolver for OAuthClientKeyResolver {
                 // reading it verbatim let a key the client had already rotated
                 // out keep verifying signatures until the row happened to be
                 // replaced.
-                resolved = crate::infra::jwks::resolve_cached_jwks(
+                // This path doesn't act on whether the resolution fetched —
+                // that distinction only matters to the mTLS force-refetch
+                // retry gate (services/oidc/token.rs).
+                let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
                     &self.state.store,
                     &client.id,
                     uri,
@@ -108,6 +111,7 @@ impl KeyResolver for OAuthClientKeyResolver {
                     tracing::warn!("JWKS resolution failed for HTTP signature verification: {e}");
                 })
                 .ok()?;
+                resolved = value;
                 &resolved
             };
             let keys = jwks_value.get("keys")?.as_array()?;

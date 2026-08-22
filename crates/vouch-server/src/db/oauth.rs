@@ -520,6 +520,22 @@ pub async fn update_oauth_client(
     store: &DocumentStore,
     params: &UpdateOAuthClientParams<'_>,
 ) -> Result<()> {
+    // Same delete-before-modify ordering as `update_oauth_client_registration`
+    // (RFC 7592), and the same reasoning: check whether jwks_uri is changing
+    // before modifying the parent doc so the stale cache is gone before a
+    // reader could see the new URI paired with old-host keys. Bounded race: a
+    // concurrent JWKS refresh completing between this delete and the modify's
+    // internal re-fetch can repopulate the cache with old-URI keys; worst-case
+    // window is one TTL (~1h), self-corrected by the next cache miss.
+    let jwks_uri_changing = store
+        .get::<OAuthClientDoc>(params.id)
+        .await?
+        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.jwks_uri);
+
+    if jwks_uri_changing {
+        super::jwks_cache::delete_jwks_cache(store, params.id).await?;
+    }
+
     store
         .modify::<OAuthClientDoc, _>(params.id, |data| {
             data.name = params.name.to_string();

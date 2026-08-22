@@ -457,16 +457,9 @@ async fn resolve_non_jwt_auth(
             .into_oauth_response()
             .into_response());
         };
-        let jwks_cache_value = crate::db::get_jwks_cache(&state.store, &client.id)
+        return match crate::services::oidc::token::authenticate_client_mtls(state, &client, cert)
             .await
-            .ok()
-            .flatten()
-            .map(|c| c.value);
-        return match crate::services::oidc::token::authenticate_client_mtls(
-            &client,
-            cert,
-            jwks_cache_value.as_ref(),
-        ) {
+        {
             Ok(verification) => Ok((
                 crate::services::oidc::token::AuthenticatedClient {
                     client,
@@ -613,7 +606,7 @@ async fn handle_authorization_code_grant(
     if !matches!(client_auth, ClientAuthProof::MutualTls(_))
         && matches!(client_auth, ClientAuthProof::PrivateKeyJwt(_))
         && let Err(resp) =
-            validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await
+            validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await
     {
         return *resp;
     }
@@ -713,7 +706,7 @@ async fn handle_client_credentials_grant(
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
     let mtls_verification =
-        match validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await {
+        match validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await {
             Ok(v) => v,
             Err(resp) => return *resp,
         };
@@ -929,7 +922,7 @@ async fn handle_token_exchange_grant(
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
     let mtls_verification =
-        match validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await {
+        match validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await {
             Ok(v) => v,
             Err(resp) => return *resp,
         };
@@ -1213,7 +1206,7 @@ async fn handle_fido2_assertion_grant(
 /// Returns `Err(Box<Response>)` with a 401-equivalent OAuth error if the
 /// cert is absent or invalid.
 async fn validate_mtls_client_auth(
-    store: &crate::db::store::DocumentStore,
+    state: &Arc<AppState>,
     client: &crate::services::oidc::token::AuthenticatedClient,
     client_cert: &crate::handlers::extractors::OptionalClientCert,
 ) -> Result<Option<crate::services::oidc::token::MtlsCertVerification>, Box<Response>> {
@@ -1233,21 +1226,10 @@ async fn validate_mtls_client_auth(
             .into_response(),
         ));
     };
-    let jwks_cache_value = crate::db::get_jwks_cache(store, &client.client.id)
+    crate::services::oidc::token::authenticate_client_mtls(state, &client.client, cert)
         .await
-        .map_err(|e| {
-            tracing::warn!("JWKS cache lookup failed: {e}");
-        })
-        .ok()
-        .flatten()
-        .map(|c| c.value);
-    crate::services::oidc::token::authenticate_client_mtls(
-        &client.client,
-        cert,
-        jwks_cache_value.as_ref(),
-    )
-    .map(Some)
-    .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
+        .map(Some)
+        .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
 }
 
 /// Extract mTLS certificate thumbprint for certificate-bound access tokens
