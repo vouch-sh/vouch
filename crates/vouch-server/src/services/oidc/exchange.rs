@@ -20,14 +20,16 @@ use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 
-/// Token type URNs for RFC 8693.
+/// Token type URNs for RFC 8693 §3, re-exported under the names this module
+/// uses. The values live in [`vouch_common::protocol`] so the CLI's exchange
+/// requests are spelled from the same constants the server matches on.
 pub mod token_types {
     /// Access token type.
-    pub const ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
+    pub use vouch_common::protocol::TOKEN_TYPE_ACCESS_TOKEN as ACCESS_TOKEN;
     /// ID token type.
-    pub const ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
+    pub use vouch_common::protocol::TOKEN_TYPE_ID_TOKEN as ID_TOKEN;
     /// JWT type.
-    pub const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+    pub use vouch_common::protocol::TOKEN_TYPE_JWT as JWT;
 }
 
 /// Default lifetime for an exchanged OIDC ID token
@@ -750,11 +752,16 @@ mod tests {
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
+    /// The `token_types` aliases must map to the matching `protocol`
+    /// constants. A swapped `pub use` would still compile and would still
+    /// carry the RFC 8693 §3 prefix, so the prefix alone proves nothing.
     #[test]
-    fn test_token_type_urns() {
-        assert!(token_types::ACCESS_TOKEN.starts_with("urn:ietf:params:oauth:token-type:"));
-        assert!(token_types::ID_TOKEN.starts_with("urn:ietf:params:oauth:token-type:"));
-        assert!(token_types::JWT.starts_with("urn:ietf:params:oauth:token-type:"));
+    fn test_token_type_aliases_match_protocol_constants() {
+        use vouch_common::protocol;
+
+        assert_eq!(token_types::ACCESS_TOKEN, protocol::TOKEN_TYPE_ACCESS_TOKEN);
+        assert_eq!(token_types::ID_TOKEN, protocol::TOKEN_TYPE_ID_TOKEN);
+        assert_eq!(token_types::JWT, protocol::TOKEN_TYPE_JWT);
     }
 
     // =========================================================================

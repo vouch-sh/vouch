@@ -5,6 +5,11 @@
 //! The token handler (parsing and dispatch) and the discovery document
 //! (`grant_types_supported`) both derive from it, so the advertised set can
 //! never drift from the accepted set.
+//!
+//! The URN wire values come from [`vouch_common::protocol`], which the CLI
+//! spells its requests with — the enum owns dispatch, vouch-common owns bytes.
+
+use vouch_common::protocol;
 
 /// OAuth grant types supported by this server's token endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +64,9 @@ impl OAuthGrantType {
         match self {
             Self::AuthorizationCode => "authorization_code",
             Self::ClientCredentials => "client_credentials",
-            Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
-            Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
-            Self::Fido2Assertion => "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            Self::DeviceCode => protocol::GRANT_TYPE_DEVICE_CODE,
+            Self::TokenExchange => protocol::GRANT_TYPE_TOKEN_EXCHANGE,
+            Self::Fido2Assertion => protocol::GRANT_TYPE_FIDO2_ASSERTION,
         }
     }
 

@@ -15,6 +15,7 @@ pub mod fs;
 pub mod http;
 pub mod paths;
 pub mod posture;
+pub mod protocol;
 pub(crate) mod url;
 
 #[cfg(test)]

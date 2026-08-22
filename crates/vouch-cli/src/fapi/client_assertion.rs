@@ -47,8 +47,9 @@ impl std::fmt::Debug for ClientAssertion {
 }
 
 impl ClientAssertion {
-    /// The `client_assertion_type` value for `private_key_jwt` per RFC 7523.
-    pub const TYPE: &'static str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+    /// The `client_assertion_type` value for `private_key_jwt` per RFC 7523
+    /// §2.2. Shared with the server via [`vouch_common::protocol`].
+    pub const TYPE: &'static str = vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
 }
 
 /// Builder for `private_key_jwt` client assertions.

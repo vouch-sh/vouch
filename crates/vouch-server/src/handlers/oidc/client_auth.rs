@@ -19,10 +19,13 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::SecretString;
 use std::sync::Arc;
+use vouch_common::protocol;
 
 /// RFC 7521 Section 4.2: Expected client assertion type for JWT bearer.
-const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str =
-    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+///
+/// The value itself is fixed by RFC 7523 §2.2 and shared with the CLI via
+/// [`vouch_common::protocol`].
+const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str = protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
 
 /// Extracted client authentication method from a request.
 ///

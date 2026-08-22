@@ -34,18 +34,14 @@ use crate::config::Config;
 use crate::session::resolve_token;
 use vouch_cli::fapi::key_store::load_client_key;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder};
+use vouch_common::protocol::{
+    ERROR_USE_DPOP_NONCE, GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN,
+};
 
 /// Number of seconds shaved off the provider's stated `expires_in` when
 /// computing the cache expiry — gives callers a window to refresh before
 /// the token actually expires.
 const REFRESH_MARGIN_SECS: i64 = 60;
-
-/// RFC 8693 grant type for OAuth 2.0 token exchange.
-const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
-/// RFC 8693 token type URN for an access token (the subject token).
-const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
-/// RFC 8693 token type URN for an ID token (the requested token).
-const TOKEN_TYPE_ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
 
 /// Subset of the RFC 8693 token-exchange response we consume. Per RFC 8693
 /// §2.2.1 the issued security token — an OIDC ID token here — is always
@@ -218,7 +214,7 @@ async fn send_exchange(
     // RFC 9449: a `use_dpop_nonce` error carries a fresh nonce to retry with.
     let parsed_err = serde_json::from_str::<vouch_common::OAuthError>(&text).ok();
     if let Some(err) = &parsed_err
-        && err.error == "use_dpop_nonce"
+        && err.error == ERROR_USE_DPOP_NONCE
         && let Some(nonce) = nonce
     {
         return Ok(ExchangeOutcome::NeedNonce(nonce));

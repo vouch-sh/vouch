@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::io::{IsTerminal, Write, stdout};
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError, RegisterCompleteRequest,
-    RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse, protocol,
 };
 
 use crate::client::VouchClient;
@@ -266,7 +266,7 @@ async fn poll_for_token(
     fapi_key: Option<&vouch_cli::fapi::ClientKey>,
 ) -> Result<DeviceTokenResponse> {
     let request = DeviceTokenRequest {
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        grant_type: protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
         device_code: device_response.device_code.clone(),
     };
 
@@ -430,13 +430,13 @@ async fn poll_once(
 
     if let Ok(oauth_error) = serde_json::from_str::<OAuthError>(&error_text) {
         match oauth_error.error.as_str() {
-            "authorization_pending" => {
+            protocol::ERROR_AUTHORIZATION_PENDING => {
                 return Err(PollError::Pending);
             }
-            "slow_down" => return Err(PollError::SlowDown),
-            "access_denied" => return Err(PollError::Denied),
-            "expired_token" => return Err(PollError::Expired),
-            "use_dpop_nonce" => {
+            protocol::ERROR_SLOW_DOWN => return Err(PollError::SlowDown),
+            protocol::ERROR_ACCESS_DENIED => return Err(PollError::Denied),
+            protocol::ERROR_EXPIRED_TOKEN => return Err(PollError::Expired),
+            protocol::ERROR_USE_DPOP_NONCE => {
                 // RFC 9449: Server requires a DPoP nonce
                 if let Some(nonce) = response_dpop_nonce {
                     return Err(PollError::DpopNonce(nonce));
