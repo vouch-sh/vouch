@@ -22,7 +22,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction};
-use vouch_common::Fido2ChallengeResponse;
+use vouch_common::{Fido2ChallengeResponse, protocol};
 
 use super::enroll::expiry_offset_seconds;
 use crate::client::VouchClient;
@@ -255,8 +255,8 @@ async fn run_fapi_login(
         .context(tr!("err-failed-build-dpop-proof-token-request"))?;
 
     let token_request = Fido2AssertionTokenRequest {
-        grant_type: "urn:ietf:params:oauth:grant-type:fido2-assertion",
-        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        grant_type: protocol::GRANT_TYPE_FIDO2_ASSERTION,
+        client_assertion_type: protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
         client_assertion: client_assertion.assertion,
         assertion: assertion_b64.into(),
         scope: "openid email",
@@ -296,7 +296,7 @@ async fn run_fapi_login(
 
         // RFC 9449: if use_dpop_nonce is returned, retry once with the nonce.
         if let Ok(oauth_err) = serde_json::from_str::<vouch_common::OAuthError>(&body)
-            && oauth_err.error == "use_dpop_nonce"
+            && oauth_err.error == protocol::ERROR_USE_DPOP_NONCE
             && let Some(nonce) = dpop_nonce
         {
             return run_fapi_login_with_nonce(

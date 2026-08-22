@@ -138,7 +138,12 @@ pub struct DeviceCodeResponse {
 /// Request to exchange device code for token.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceTokenRequest {
-    /// Must be "urn:ietf:params:oauth:grant-type:device_code".
+    /// Must be [`crate::protocol::GRANT_TYPE_DEVICE_CODE`].
+    ///
+    /// Kept as `String` rather than a serde-renamed enum: the token handler
+    /// rejects a bad value with the RFC 6749 §5.2 error envelope, which a
+    /// deserialization failure would replace with an axum `JsonRejection`
+    /// carrying a different status and body.
     pub grant_type: String,
     /// Device code from device authorization response.
     pub device_code: String,

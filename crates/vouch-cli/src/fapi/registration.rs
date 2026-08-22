@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::key::ClientKey;
+use vouch_common::protocol;
 
 /// RFC 7591 client registration request body.
 ///
@@ -112,8 +113,8 @@ pub async fn register_fapi_client(
     let request = RegistrationRequest {
         token_endpoint_auth_method: "private_key_jwt",
         grant_types: vec![
-            "urn:ietf:params:oauth:grant-type:device_code",
-            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            protocol::GRANT_TYPE_DEVICE_CODE,
+            protocol::GRANT_TYPE_FIDO2_ASSERTION,
         ],
         response_types: vec![],
         dpop_bound_access_tokens: true,

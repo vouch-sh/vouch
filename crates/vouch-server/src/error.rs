@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use vouch_common::ApiError;
+use vouch_common::{ApiError, protocol};
 
 /// Service layer errors with protocol-aware conversions.
 #[derive(Debug, thiserror::Error)]
@@ -242,13 +242,13 @@ impl OAuthErrorCode {
             Self::InvalidScope => "invalid_scope",
             Self::ServerError => "server_error",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::AuthorizationPending => "authorization_pending",
-            Self::SlowDown => "slow_down",
-            Self::ExpiredToken => "expired_token",
-            Self::AccessDenied => "access_denied",
+            Self::AuthorizationPending => protocol::ERROR_AUTHORIZATION_PENDING,
+            Self::SlowDown => protocol::ERROR_SLOW_DOWN,
+            Self::ExpiredToken => protocol::ERROR_EXPIRED_TOKEN,
+            Self::AccessDenied => protocol::ERROR_ACCESS_DENIED,
             Self::InvalidToken => "invalid_token",
             Self::InvalidDpopProof => "invalid_dpop_proof",
-            Self::UseDpopNonce => "use_dpop_nonce",
+            Self::UseDpopNonce => protocol::ERROR_USE_DPOP_NONCE,
             Self::InvalidTarget => "invalid_target",
             Self::InsufficientUserAuthentication => "insufficient_user_authentication",
             Self::UnmetAuthenticationRequirements => "unmet_authentication_requirements",
