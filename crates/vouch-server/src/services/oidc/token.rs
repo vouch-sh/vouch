@@ -13,6 +13,7 @@ use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
 use crate::services::auth::{
     AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
@@ -964,15 +965,55 @@ async fn generate_id_token(
         .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")))
 }
 
+/// Resolve a `self_signed_tls_client_auth` client's JWKS as the raw
+/// `serde_json::Value` [`crate::services::oidc::mtls::verify_self_signed_tls_client_auth`]
+/// expects, reporting whether resolution fetched.
+///
+/// Mirrors the inline-vs-`jwks_uri` resolution the RFC 7523 client-assertion
+/// path uses (`jwt_bearer::jwks::resolve_client_jwks`): an inline `jwks`
+/// wins outright; otherwise the client's cached/fetched `jwks_uri` document
+/// is resolved via [`crate::infra::jwks::resolve_cached_jwks`] — the same
+/// TTL, stale-while-revalidate, and SSRF-guarded fetch primitive, so this
+/// path gets those guarantees for free rather than re-implementing them.
+/// [`crate::infra::jwks::JwksOrigin`] is that function's own report of
+/// whether it fetched, not re-derived here.
+async fn resolve_self_signed_jwks(
+    state: &Arc<AppState>,
+    client: &crate::db::OAuthClient,
+    jwks_cache: Option<&crate::db::documents::jwks_cache::JwksCacheDoc>,
+) -> ServiceResult<(serde_json::Value, JwksOrigin)> {
+    if let Some(jwks) = client.jwks.as_ref() {
+        return Ok((jwks.clone(), JwksOrigin::NoFetch));
+    }
+    let Some(uri) = client.jwks_uri.as_deref() else {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "self_signed_tls_client_auth requires jwks or jwks_uri",
+        ));
+    };
+    let allow_loopback = !state.config().tls_configured();
+    crate::infra::jwks::resolve_cached_jwks(
+        &state.store,
+        &client.id,
+        uri,
+        jwks_cache,
+        allow_loopback,
+        &state.http_client,
+    )
+    .await
+}
+
 /// Authenticate a client using mTLS certificate (RFC 8705 Section 2).
 ///
 /// Dispatches to the appropriate verification method based on the client's
-/// registered `token_endpoint_auth_method`. For `self_signed_tls_client_auth`,
-/// callers should pre-load the JWKS cache and pass it as `jwks_cache_value`.
-pub(crate) fn authenticate_client_mtls(
+/// registered `token_endpoint_auth_method`. `tls_client_auth` verifies
+/// against the client's registered PKI identity fields and never touches a
+/// JWKS. `self_signed_tls_client_auth` resolves its own JWKS cache/fetch —
+/// callers no longer pre-load it.
+pub(crate) async fn authenticate_client_mtls(
+    state: &Arc<AppState>,
     client: &crate::db::OAuthClient,
     cert: &crate::services::oidc::mtls::ClientCertificate,
-    jwks_cache_value: Option<&serde_json::Value>,
 ) -> Result<MtlsCertVerification, ClientAuthError> {
     match client.token_endpoint_auth_method {
         crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
@@ -988,14 +1029,86 @@ pub(crate) fn authenticate_client_mtls(
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
-            let jwks = client.jwks.as_ref().or(jwks_cache_value).ok_or_else(|| {
-                ClientAuthError::MtlsVerificationFailed(
-                    "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
-                )
-            })?;
-            crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
-                .map(|()| MtlsCertVerification { _private: () })
-                .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
+            // The cache read is only useful for a `jwks_uri` client — an
+            // inline-only client never consults it (matches
+            // `resolve_client_decoding_key`'s same gate for the RFC 7523
+            // path). The cache is an optimization, not a dependency even
+            // when read: a lookup failure degrades to an uncached fetch
+            // rather than failing authentication (same reasoning).
+            let jwks_cache = if client.jwks_uri.is_none() {
+                None
+            } else {
+                db::get_jwks_cache(&state.store, &client.id)
+                    .await
+                    .map_err(|e| {
+                        tracing::debug!("JWKS cache lookup failed for client {}: {e}", client.id);
+                    })
+                    .ok()
+                    .flatten()
+            };
+
+            let (jwks, origin) = resolve_self_signed_jwks(state, client, jwks_cache.as_ref())
+                .await
+                .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))?;
+
+            match crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, &jwks) {
+                Ok(()) => Ok(MtlsCertVerification { _private: () }),
+                Err(e) => {
+                    // On a certificate miss, force-refresh a `jwks_uri`-backed
+                    // client's JWKS and retry once — mirrors
+                    // `find_matching_key_with_refresh_client`'s kid-miss
+                    // policy for the same reason: the client may have rotated
+                    // its certificate since the cache was last populated.
+                    // Only meaningful when the JWKS just verified against
+                    // came from the cache: if resolution above already
+                    // fetched (`JwksOrigin::Fetched`), a further attempt
+                    // would just repeat it. This bounds every auth attempt
+                    // to at most one fetch, including against a permanently
+                    // unreachable host, whose `cached_at` never advances and
+                    // so cannot drive a freshness-based rate limit. No
+                    // cross-request throttle is applied beyond that bound —
+                    // repeated attempts across requests still cost one fetch
+                    // each, bounded upstream by the per-IP auth rate limiter.
+                    let Some(uri) = client.jwks_uri.as_deref() else {
+                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                    };
+                    if matches!(origin, JwksOrigin::Fetched) {
+                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                    }
+                    // A failed refetch falls back to the original error
+                    // rather than surfacing the fetch failure — same shape
+                    // as `find_matching_key_with_refresh_client`, so the
+                    // caller sees a consistent "certificate not registered"
+                    // rather than a raw network error. A successful refetch
+                    // re-verifies against the fresh JWKS and returns
+                    // whatever that produces, success or a new mismatch.
+                    let allow_loopback = !state.config().tls_configured();
+                    let Ok(fresh_jwks) = crate::infra::jwks::fetch_and_cache(
+                        &state.store,
+                        &client.id,
+                        uri,
+                        allow_loopback,
+                        &state.http_client,
+                    )
+                    .await
+                    .inspect_err(|fetch_err| {
+                        tracing::warn!(
+                            "JWKS force-refresh failed for client {}: {fetch_err}",
+                            client.id
+                        );
+                    }) else {
+                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                    };
+                    crate::services::oidc::mtls::verify_self_signed_tls_client_auth(
+                        cert,
+                        &fresh_jwks,
+                    )
+                    .map(|()| MtlsCertVerification { _private: () })
+                    .map_err(|fresh_err| {
+                        ClientAuthError::MtlsVerificationFailed(fresh_err.to_string())
+                    })
+                }
+            }
         }
         _ => Err(ClientAuthError::MtlsVerificationFailed(
             "client not registered for mTLS authentication".to_string(),
@@ -1174,6 +1287,7 @@ pub async fn validate_session_token(
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -1696,13 +1810,14 @@ mod tests {
     }
 
     /// TlsClientAuth client with matching subject_dn must authenticate successfully.
-    #[test]
-    fn test_authenticate_client_mtls_tls_client_auth_matching() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_matching() {
+        let state = crate::test_utils::test_app_state().await;
         let cert = make_cert_with_cn("test-mtls-client");
         let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
         let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             result.is_ok(),
             "matching subject_dn must authenticate successfully, got: {result:?}"
@@ -1710,15 +1825,16 @@ mod tests {
     }
 
     /// TlsClientAuth client with non-matching subject_dn must fail authentication.
-    #[test]
-    fn test_authenticate_client_mtls_tls_client_auth_mismatch() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_mismatch() {
+        let state = crate::test_utils::test_app_state().await;
         let cert = make_cert_with_cn("actual-client");
         let client = make_mtls_client(
             TokenEndpointAuthMethod::TlsClientAuth,
             Some("CN=expected-different-client"),
         );
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             result.is_err(),
             "non-matching subject_dn must fail authentication"
@@ -1730,12 +1846,13 @@ mod tests {
     }
 
     /// Client with ClientSecretBasic auth method cannot use mTLS authentication.
-    #[test]
-    fn test_authenticate_client_mtls_wrong_method() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_wrong_method() {
+        let state = crate::test_utils::test_app_state().await;
         let cert = make_cert_with_cn("wrong-method-client");
         let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             result.is_err(),
             "non-mTLS auth method must fail mTLS authentication"
@@ -1748,10 +1865,11 @@ mod tests {
 
     /// `SelfSignedTlsClientAuth` succeeds when the client JWKS contains an x5c
     /// entry matching the presented certificate (RFC 8705 Section 2.2).
-    #[test]
-    fn test_authenticate_client_mtls_self_signed_matching() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_matching() {
         use base64::Engine;
 
+        let state = crate::test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-client");
         let cert =
             crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
@@ -1765,7 +1883,7 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             result.is_ok(),
             "matching x5c must authenticate successfully: {result:?}"
@@ -1773,13 +1891,14 @@ mod tests {
     }
 
     /// `SelfSignedTlsClientAuth` fails when the client has no JWKS configured.
-    #[test]
-    fn test_authenticate_client_mtls_self_signed_no_jwks() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_no_jwks() {
+        let state = crate::test_utils::test_app_state().await;
         let cert = make_cert_with_cn("self-signed-no-jwks");
         let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         // client.jwks is None (default from make_mtls_client)
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "missing JWKS must return MtlsVerificationFailed: {result:?}"
@@ -1787,10 +1906,11 @@ mod tests {
     }
 
     /// `SelfSignedTlsClientAuth` fails when the JWKS x5c contains a different cert.
-    #[test]
-    fn test_authenticate_client_mtls_self_signed_mismatch() {
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_mismatch() {
         use base64::Engine;
 
+        let state = crate::test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-cert");
         let other_der = make_self_signed_cert_der("self-signed-other");
         let cert =
@@ -1805,10 +1925,260 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert, None);
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "non-matching x5c must return MtlsVerificationFailed: {result:?}"
+        );
+    }
+
+    // =========================================================================
+    // authenticate_client_mtls — self_signed_tls_client_auth jwks_uri fetch/cache
+    //
+    // No test harness in this codebase serves a JWKS over a live mock HTTPS
+    // server (`fetch_jwks` requires `https://` unconditionally; `wiremock`
+    // here only serves plain HTTP). These tests use the same technique the
+    // sibling RFC 7523 tests use instead (`infra::jwks::tests::cache_doc`,
+    // `find_matching_key_with_refresh_*`): a directly-seeded `JwksCacheDoc`
+    // proves cache consumption, and an unreachable `https://` URI proves a
+    // fetch attempt fails cleanly without ever needing a real network call.
+    // =========================================================================
+
+    /// Directly seed a `JwksCacheDoc` at the age this test needs — the public
+    /// `db::upsert_jwks_cache` always stamps `cached_at: now`, so TTL/rate-limit
+    /// boundary tests need this instead.
+    async fn seed_jwks_cache(
+        store: &crate::db::store::DocumentStore,
+        parent_id: &str,
+        value: serde_json::Value,
+        age_seconds: i64,
+    ) {
+        let doc = crate::db::documents::jwks_cache::JwksCacheDoc {
+            value,
+            cached_at: jiff::Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
+                .expect("cache age must be representable"),
+        };
+        store
+            .upsert(&format!("jwks_cache:{parent_id}"), &doc)
+            .await
+            .expect("seed jwks cache");
+    }
+
+    /// An unreachable JWKS host, standing in for a fetch failure without a
+    /// real network dependency. `test_app_state()` has no TLS configured, so
+    /// `allow_loopback` is `true` here (unlike `infra::jwks::tests`, which
+    /// tests the SSRF guard itself with `allow_loopback: false`) — the SSRF
+    /// guard permits this loopback destination, the connection is actually
+    /// dialed, and it fails on connection-refused (nothing listens on port 1).
+    const UNREACHABLE_JWKS_URI: &str = "https://127.0.0.1:1/jwks.json";
+
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_jwks_uri_uses_fresh_cache_without_fetching()
+    {
+        use base64::Engine;
+
+        let state = crate::test_utils::test_app_state().await;
+        let cert_der = make_self_signed_cert_der("self-signed-cached");
+        let cert =
+            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [x5c_b64]}]});
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        seed_jwks_cache(&state.store, &client.id, jwks, 60).await;
+
+        // Success proves the cached JWKS was used — the URI would fail if dialed.
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        assert!(
+            result.is_ok(),
+            "a fresh cache must authenticate without a fetch: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_jwks_uri_fetch_failure_is_clean() {
+        let state = crate::test_utils::test_app_state().await;
+        let cert = make_cert_with_cn("self-signed-fetch-failure");
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        // No cache row: this exercises first-ever resolution, not the
+        // post-verification retry path.
+
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "a fetch failure must resolve to a clean MtlsVerificationFailed, not a raw \
+             network error, a panic, or a hang: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_certificate_less_jwks_at_uri_fails_cleanly()
+    {
+        let state = crate::test_utils::test_app_state().await;
+        let cert = make_cert_with_cn("self-signed-no-x5c-at-uri");
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        // Cached JWKS has key material but no x5c — same "accepted at
+        // registration, unusable forever after" class PR 4 closed for the
+        // write path, now proven at the runtime verification path too.
+        let certificate_less = serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]});
+        seed_jwks_cache(&state.store, &client.id, certificate_less, 60).await;
+
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "a certificate-less JWKS resolved via jwks_uri must fail the same way as inline: \
+             {result:?}"
+        );
+    }
+
+    /// Extract the text of a `ClientAuthError::MtlsVerificationFailed`, or
+    /// panic — the retry tests below assert on it to distinguish a
+    /// fallback-to-original-error from a leaked fetch-failure message.
+    fn expect_mtls_verification_failed_text(
+        result: &Result<MtlsCertVerification, ClientAuthError>,
+    ) -> &str {
+        match result {
+            Err(ClientAuthError::MtlsVerificationFailed(msg)) => msg,
+            other => panic!("expected MtlsVerificationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_retries_after_cache_hit_on_certificate_miss()
+    {
+        use base64::Engine;
+
+        let state = crate::test_utils::test_app_state().await;
+        let cert_der = make_self_signed_cert_der("self-signed-rotated");
+        let other_der = make_self_signed_cert_der("self-signed-pre-rotation");
+        let cert =
+            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        // Cached cert predates a rotation but is well within the 1-hour TTL,
+        // so resolution serves it from cache (`JwksOrigin::NoFetch`) and the
+        // retry gate lets the force-refresh attempt proceed.
+        let other_x5c = base64::engine::general_purpose::STANDARD.encode(&other_der);
+        let stale_jwks =
+            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [other_x5c]}]});
+        seed_jwks_cache(&state.store, &client.id, stale_jwks, 60).await;
+
+        // The retry attempt hits the unreachable URI and fails, falling back
+        // to the original certificate-mismatch error — never a panic, a
+        // hang, or a leaked "failed to fetch" message (kills the mutation
+        // where the fetch error is surfaced instead of the fallback).
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        assert!(
+            expect_mtls_verification_failed_text(&result).contains("certificate not registered"),
+            "a failed retry must fall back to the original mismatch error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched()
+    {
+        use base64::Engine;
+
+        let state = crate::test_utils::test_app_state().await;
+        let cert_der = make_self_signed_cert_der("self-signed-fresh-miss");
+        let other_der = make_self_signed_cert_der("self-signed-fresh-other");
+        let cert =
+            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        // Cache is past the 1-hour TTL but within the 24-hour stale window:
+        // resolution attempts a fetch (fails against the unreachable URI)
+        // and falls back to serving this stale, mismatched document —
+        // `JwksOrigin::Fetched`. The retry-consideration branch must skip
+        // the force-refetch entirely rather than attempt a second one this
+        // request. Structural coverage, not a mutation-killing assertion for
+        // that specific gate: a skipped retry and an attempted-then-failed
+        // retry both fall back to the same original-error text by design,
+        // so this codebase has no way to distinguish them without a
+        // network-call-counting harness, which doesn't exist here — the
+        // gate itself is a 3-line, directly-readable early return
+        // (`resolve_self_signed_jwks_reports_fetched_for_stale_cache` above
+        // proves the flag it reads is computed correctly).
+        let other_x5c = base64::engine::general_purpose::STANDARD.encode(&other_der);
+        let mismatched_jwks =
+            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [other_x5c]}]});
+        seed_jwks_cache(&state.store, &client.id, mismatched_jwks, 7200).await;
+
+        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        assert!(
+            expect_mtls_verification_failed_text(&result).contains("certificate not registered"),
+            "a stale-fallback certificate miss must still resolve cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_self_signed_jwks_reports_no_fetch_for_fresh_cache() {
+        let state = crate::test_utils::test_app_state().await;
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
+        seed_jwks_cache(&state.store, &client.id, jwks.clone(), 60).await;
+
+        let cache = crate::db::get_jwks_cache(&state.store, &client.id)
+            .await
+            .expect("get_jwks_cache failed");
+        let (value, origin) = resolve_self_signed_jwks(&state, &client, cache.as_ref())
+            .await
+            .expect("resolution must succeed from a fresh cache");
+        assert_eq!(value, jwks);
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "a cache within the TTL must not fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_self_signed_jwks_reports_fetched_for_stale_cache() {
+        let state = crate::test_utils::test_app_state().await;
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
+        // Past the 1-hour TTL, within the 24-hour stale window: resolution
+        // attempts a fetch (fails against the unreachable URI) and falls
+        // back to this cached value.
+        seed_jwks_cache(&state.store, &client.id, jwks.clone(), 7200).await;
+
+        let cache = crate::db::get_jwks_cache(&state.store, &client.id)
+            .await
+            .expect("get_jwks_cache failed");
+        let (value, origin) = resolve_self_signed_jwks(&state, &client, cache.as_ref())
+            .await
+            .expect("a failed fetch within the stale window must fall back to the cache");
+        assert_eq!(value, jwks);
+        assert!(
+            matches!(origin, JwksOrigin::Fetched),
+            "a cache past the TTL must attempt a fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_self_signed_jwks_reports_no_fetch_for_inline_jwks() {
+        let state = crate::test_utils::test_app_state().await;
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "inline"}]});
+        client.jwks = Some(jwks.clone());
+        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+
+        let (value, origin) = resolve_self_signed_jwks(&state, &client, None)
+            .await
+            .expect("inline jwks must resolve without consulting jwks_uri");
+        assert_eq!(value, jwks);
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "inline jwks must win outright and never fetch"
         );
     }
 

@@ -22,6 +22,15 @@ const MAX_JWKS_RESPONSE_SIZE: usize = 256 * 1024;
 /// JWKS URI cache TTL in seconds (1 hour).
 pub(crate) const JWKS_CACHE_TTL_SECONDS: i64 = 3600;
 
+/// Per-request timeout for a JWKS fetch (seconds).
+///
+/// `AppState::http_client` has no client-level timeout configured, so an
+/// unbounded request to a stalling `jwks_uri` server would hang the calling
+/// request indefinitely — including the token endpoint, which resolves this
+/// synchronously as part of authenticating a client. Applied per-request
+/// here rather than on the shared client.
+const JWKS_FETCH_TIMEOUT_SECONDS: u64 = 10;
+
 /// Fetch a JWKS document from a remote URI.
 ///
 /// Enforces HTTPS-only and a response size cap.
@@ -50,13 +59,18 @@ async fn fetch_jwks(
     )
     .await?;
 
-    let response = http_client.get(uri).send().await.map_err(|e| {
-        tracing::warn!("Failed to fetch JWKS from {uri}: {e}");
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Failed to fetch JWKS from URI",
-        )
-    })?;
+    let response = http_client
+        .get(uri)
+        .timeout(std::time::Duration::from_secs(JWKS_FETCH_TIMEOUT_SECONDS))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to fetch JWKS from {uri}: {e}");
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Failed to fetch JWKS from URI",
+            )
+        })?;
 
     if !response.status().is_success() {
         return Err(ServiceError::oauth(
@@ -125,6 +139,22 @@ pub(crate) async fn fetch_and_cache(
     Ok(jwks_value)
 }
 
+/// Whether [`resolve_cached_jwks`] made a live network call.
+///
+/// Reported by the function itself rather than inferred by a caller from its
+/// inputs — a caller re-deriving this from the cache's freshness would be a
+/// second encoding of the same branch rule, liable to silently diverge if
+/// the TTL policy or fetch logic here changes without the mirror keeping up.
+#[derive(Debug)]
+pub(crate) enum JwksOrigin {
+    /// Served from a cache row within [`JWKS_CACHE_TTL_SECONDS`] — no
+    /// network call.
+    NoFetch,
+    /// A fetch was attempted — successfully, or falling back to a stale
+    /// cache after a failed one.
+    Fetched,
+}
+
 /// Resolve a client's JWKS, refetching when the cache is past its TTL.
 ///
 /// Returns the cached document while it is younger than
@@ -132,7 +162,7 @@ pub(crate) async fn fetch_and_cache(
 /// back to the stale cache while it is within [`JWKS_STALE_MAX_AGE_SECONDS`] so
 /// a brief outage at the client's JWKS host does not break verification —
 /// beyond that the error is surfaced, because a key rotated out long ago must
-/// stop verifying.
+/// stop verifying. Also reports whether it fetched, via [`JwksOrigin`].
 pub(crate) async fn resolve_cached_jwks(
     store: &db::store::DocumentStore,
     parent_id: &str,
@@ -140,22 +170,22 @@ pub(crate) async fn resolve_cached_jwks(
     cached: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
-) -> ServiceResult<serde_json::Value> {
+) -> ServiceResult<(serde_json::Value, JwksOrigin)> {
     if let Some(cache) = cached
         && cache.is_fresh(JWKS_CACHE_TTL_SECONDS)
     {
-        return Ok(cache.value.clone());
+        return Ok((cache.value.clone(), JwksOrigin::NoFetch));
     }
 
     match fetch_and_cache(store, parent_id, uri, allow_loopback, http_client).await {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok((value, JwksOrigin::Fetched)),
         Err(e) => {
             // Stale-while-revalidate, capped so a rotated-out key cannot verify
             // indefinitely just because the client's host is unreachable.
             if let Some(cache) = cached {
                 if cache.is_within_stale_window(JWKS_STALE_MAX_AGE_SECONDS) {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return Ok(cache.value.clone());
+                    return Ok((cache.value.clone(), JwksOrigin::Fetched));
                 }
                 tracing::warn!(
                     "JWKS fetch failed and stale cache too old ({}s)",
@@ -232,7 +262,7 @@ mod tests {
         let cached = cache_doc(60, "fresh-key");
 
         // The URI would fail if dialed, so a success proves no fetch happened.
-        let value = resolve_cached_jwks(
+        let (value, origin) = resolve_cached_jwks(
             &state.store,
             "client-fresh",
             UNREACHABLE_URI,
@@ -244,6 +274,7 @@ mod tests {
         .expect("a fresh cache must be served without a fetch");
 
         assert_eq!(value, cached.value);
+        assert!(matches!(origin, JwksOrigin::NoFetch));
     }
 
     /// Regression for #748: past the TTL, a key the client has rotated out must
@@ -277,7 +308,7 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let cached = cache_doc(JWKS_CACHE_TTL_SECONDS + 60, "recently-stale-key");
 
-        let value = resolve_cached_jwks(
+        let (value, origin) = resolve_cached_jwks(
             &state.store,
             "client-stale",
             UNREACHABLE_URI,
@@ -289,6 +320,10 @@ mod tests {
         .expect("a cache within the stale window must survive a failed fetch");
 
         assert_eq!(value, cached.value);
+        assert!(
+            matches!(origin, JwksOrigin::Fetched),
+            "a fetch was attempted, even though it fell back to the stale cache"
+        );
     }
 
     #[tokio::test]

@@ -242,17 +242,13 @@ pub(crate) async fn par(
                 "mTLS client certificate required",
             );
         };
-        let jwks_cache_value =
-            crate::db::get_jwks_cache(&state.store, &authenticated_client.client.id)
-                .await
-                .ok()
-                .flatten()
-                .map(|c| c.value);
         match crate::services::oidc::token::authenticate_client_mtls(
+            &state,
             &authenticated_client.client,
             cert,
-            jwks_cache_value.as_ref(),
-        ) {
+        )
+        .await
+        {
             Ok(verification) => Some(verification),
             Err(e) => return e.into_service_error().into_oauth_response().into_response(),
         }

@@ -58,7 +58,10 @@ async fn resolve_jwks_uri(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
-    let value = crate::infra::jwks::resolve_cached_jwks(
+    // This path doesn't act on whether the resolution fetched — that
+    // distinction only matters to the mTLS force-refetch retry gate
+    // (services/oidc/token.rs).
+    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
         store,
         parent_id,
         uri,
