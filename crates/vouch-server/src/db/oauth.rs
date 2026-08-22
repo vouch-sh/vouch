@@ -14,6 +14,7 @@ use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
 use jiff::Timestamp;
+use serde::Deserialize;
 
 /// Maximum number of active (non-revoked, non-expired) secrets per OAuth client.
 ///
@@ -235,6 +236,74 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 // lives in exactly one place)
 // ============================================================================
 
+/// A JSON Web Key Set (RFC 7517 Section 5).
+///
+/// The typed representation shared by write-time acceptance checks (this
+/// module: `jwks_has_fapi_allowed_key`, `jwks_has_x5c`) and the runtime RFC
+/// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
+/// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
+/// way in both places instead of silently read as absent by a separate,
+/// more lenient parser. Two other JWKS consumers still parse leniently from
+/// raw `serde_json::Value` and are unaffected by this type: the mTLS `x5c`
+/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`) and
+/// the RFC 9421 signature key resolver (`infra/httpsig.rs`).
+#[derive(Debug, Deserialize)]
+pub struct JwkSet {
+    /// The keys in the set.
+    pub keys: Vec<JwkEntry>,
+}
+
+/// A single JWK entry in a JWKS.
+#[derive(Debug, Deserialize)]
+pub struct JwkEntry {
+    /// Key type (e.g., "EC", "RSA", "OKP").
+    pub kty: String,
+    /// Key ID (optional).
+    #[serde(default)]
+    pub kid: Option<String>,
+    /// Algorithm (optional).
+    #[serde(default)]
+    pub alg: Option<String>,
+    /// Key use (optional, e.g., "sig").
+    #[serde(rename = "use", default)]
+    pub use_: Option<String>,
+
+    // EC key components
+    #[serde(default)]
+    pub crv: Option<String>,
+    #[serde(default)]
+    pub x: Option<String>,
+    #[serde(default)]
+    pub y: Option<String>,
+
+    // RSA key components
+    #[serde(default)]
+    pub n: Option<String>,
+    #[serde(default)]
+    pub e: Option<String>,
+
+    /// X.509 certificate chain (RFC 7517 §4.7) — the certificate carrier for
+    /// `self_signed_tls_client_auth` (RFC 8705 §2.2.2).
+    #[serde(default)]
+    pub x5c: Option<Vec<String>>,
+}
+
+/// Parse a raw JWKS JSON value into the typed [`JwkSet`].
+///
+/// Deserialization is strict: a member of the wrong JSON type (e.g. a
+/// boolean `alg`) fails the whole parse rather than being read as absent.
+/// Write paths (application create/update, RFC 7591/7592 registration) use
+/// this to reject a malformed submission outright. Callers evaluating a
+/// JWKS that may be pre-existing stored data (which could predate this
+/// check) should treat a parse failure as "no usable key" rather than a
+/// hard error — see `jwks_has_fapi_allowed_key`'s callers.
+///
+/// # Errors
+/// Returns the `serde_json` deserialization error on a shape mismatch.
+pub fn parse_jwks_set(value: &serde_json::Value) -> Result<JwkSet, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
 /// Returns `true` when `jwks` contains at least one key the FAPI 2.0
 /// client-assertion validator (`FapiProfile::client_assertion_algorithms`, which
 /// yields `JwsAlgorithm::FAPI_ALLOWED` for `FapiProfile::Fapi2Security`) could
@@ -258,27 +327,41 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// application creation and update (`handlers/applications/validate.rs`) and
 /// RFC 7591/7592 dynamic client registration (`services/oidc/registration.rs`).
 #[must_use]
-pub fn jwks_has_fapi_allowed_key(jwks: &serde_json::Value) -> bool {
-    let Some(keys) = jwks.get("keys").and_then(|k| k.as_array()) else {
-        return false;
-    };
-    keys.iter().any(|key| {
-        let use_is_sig = key
-            .get("use")
-            .and_then(|u| u.as_str())
-            .is_none_or(|u| u == "sig");
+pub fn jwks_has_fapi_allowed_key(jwks: &JwkSet) -> bool {
+    jwks.keys.iter().any(|key| {
+        let use_is_sig = key.use_.as_deref().is_none_or(|u| u == "sig");
         if !use_is_sig {
             return false;
         }
-        let Some(alg) = key.get("alg").and_then(|a| a.as_str()) else {
-            return key
-                .get("kty")
-                .and_then(|v| v.as_str())
-                .is_some_and(|kty| matches!(kty, "EC" | "RSA" | "OKP"));
+        let Some(alg) = key.alg.as_deref() else {
+            return matches!(key.kty.as_str(), "EC" | "RSA" | "OKP");
         };
         alg.parse::<JwsAlgorithm>()
             .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
     })
+}
+
+/// Returns `true` when `jwks` contains at least one key with a non-empty
+/// `x5c` member — `self_signed_tls_client_auth`'s certificate carrier (RFC
+/// 8705 §2.2.2 describes this representation; it is not itself a MUST). A
+/// JWKS with no `x5c` anywhere passes a bare presence check but leaves the
+/// client permanently unable to complete mTLS authentication:
+/// `verify_self_signed_tls_client_auth` (`services/oidc/mtls.rs`) only
+/// matches keys carrying an `x5c` entry and returns
+/// `CertificateNotRegistered` if none do — the same "accepted at
+/// registration, unusable forever after" class `jwks_has_fapi_allowed_key`
+/// closes for `private_key_jwt`.
+///
+/// Used wherever a `self_signed_tls_client_auth` client's inline JWKS is
+/// accepted or replaced: application creation and update
+/// (`handlers/applications/validate.rs`) and RFC 7591/7592 dynamic client
+/// registration (`services/oidc/registration.rs`). Not applicable to a
+/// `jwks_uri`, which can't be inspected synchronously.
+#[must_use]
+pub fn jwks_has_x5c(jwks: &JwkSet) -> bool {
+    jwks.keys
+        .iter()
+        .any(|key| key.x5c.as_ref().is_some_and(|c| !c.is_empty()))
 }
 
 /// Parameters for creating a new OAuth client application.
@@ -1347,6 +1430,85 @@ mod tests {
         ));
         // Garbage / relative URIs are rejected.
         assert!(!is_valid_post_logout_redirect_uri_str("not-a-url"));
+    }
+
+    // RFC 7517 §4.1 (<https://www.rfc-editor.org/rfc/rfc7517#section-4.1>):
+    // "The 'kty' value is a case-sensitive string. This member MUST be
+    // present in a JWK." No other member the struct models is required, and
+    // members it doesn't model (mTLS `x5t`, future extensions) must pass
+    // through rather than being rejected — `JwkEntry` has no
+    // `#[serde(deny_unknown_fields)]`, so the write-path shape gate only
+    // ever rejects a *known* member of the wrong JSON type, never an
+    // unrecognized one. `x5c` is itself a known, typed member (needed by
+    // `jwks_has_x5c`): a type-invalid `x5c` (e.g. a string instead of an
+    // array) now fails the parse the same way a type-invalid `alg` does —
+    // see `test_parse_jwks_set_rejects_type_invalid_x5c` below.
+    #[test]
+    fn test_parse_jwks_set_ignores_unknown_members_but_requires_kty() {
+        let with_x5c_and_future_member = serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "x5c": ["ZmFrZS1jZXJ0"],
+                "x5t#S256": "ZmFrZS10aHVtYnByaW50",
+                "some_future_extension": {"nested": true}
+            }]
+        });
+        let set = parse_jwks_set(&with_x5c_and_future_member)
+            .expect("unknown/future JWK members must not fail the parse");
+        assert_eq!(set.keys.len(), 1);
+        assert_eq!(
+            set.keys.first().and_then(|k| k.x5c.as_ref()),
+            Some(&vec!["ZmFrZS1jZXJ0".to_string()]),
+            "x5c is a known, typed member and must populate the struct"
+        );
+
+        let missing_kty = serde_json::json!({"keys": [{"alg": "ES256"}]});
+        assert!(
+            parse_jwks_set(&missing_kty).is_err(),
+            "kty is the only REQUIRED JWK member and must fail its absence"
+        );
+    }
+
+    #[test]
+    fn test_parse_jwks_set_rejects_type_invalid_x5c() {
+        let string_x5c = serde_json::json!({"keys": [{"kty": "RSA", "x5c": "not-an-array"}]});
+        assert!(parse_jwks_set(&string_x5c).is_err());
+
+        let non_string_entry = serde_json::json!({"keys": [{"kty": "RSA", "x5c": [123]}]});
+        assert!(parse_jwks_set(&non_string_entry).is_err());
+    }
+
+    #[test]
+    fn test_jwks_has_x5c() {
+        let with_x5c = parse_jwks_set(&serde_json::json!({
+            "keys": [{"kty": "RSA", "x5c": ["ZmFrZS1jZXJ0"]}]
+        }))
+        .expect("valid fixture");
+        assert!(jwks_has_x5c(&with_x5c));
+
+        let empty_x5c = parse_jwks_set(&serde_json::json!({
+            "keys": [{"kty": "RSA", "x5c": []}]
+        }))
+        .expect("valid fixture");
+        assert!(
+            !jwks_has_x5c(&empty_x5c),
+            "an empty x5c array carries no certificate"
+        );
+
+        let no_x5c = parse_jwks_set(&serde_json::json!({
+            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+        }))
+        .expect("valid fixture");
+        assert!(!jwks_has_x5c(&no_x5c));
+
+        let mixed = parse_jwks_set(&serde_json::json!({
+            "keys": [
+                {"kty": "RSA", "n": "n", "e": "AQAB"},
+                {"kty": "RSA", "x5c": ["ZmFrZS1jZXJ0"]}
+            ]
+        }))
+        .expect("valid fixture");
+        assert!(jwks_has_x5c(&mixed), "one x5c-bearing key is enough");
     }
 
     #[test]

@@ -141,7 +141,9 @@ pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> Service
 
 /// Validate that the client authentication method is allowed for FAPI 2.0.
 ///
-/// FAPI 2.0 Section 5.3.2.1 requires `private_key_jwt` (mTLS support is deferred).
+/// FAPI 2.0 Section 5.3.2.1 requires `private_key_jwt` or mTLS
+/// (`tls_client_auth`, `self_signed_tls_client_auth`) —
+/// see [`TokenEndpointAuthMethod::is_fapi_compatible`].
 ///
 /// Non-FAPI clients pass validation unconditionally.
 ///
@@ -153,7 +155,7 @@ pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> Service
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `invalid_client` if the method is not
-/// `private_key_jwt`.
+/// FAPI-compatible.
 pub fn validate_fapi_client_auth_method(
     client: &OAuthClient,
     auth_method: TokenEndpointAuthMethod,
@@ -162,18 +164,16 @@ pub fn validate_fapi_client_auth_method(
         return Ok(());
     }
 
-    match auth_method {
-        TokenEndpointAuthMethod::PrivateKeyJwt
-        | TokenEndpointAuthMethod::TlsClientAuth
-        | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => Ok(()),
-        _ => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            format!(
-                "FAPI 2.0 requires private_key_jwt or mTLS authentication, got '{}'",
-                auth_method.as_str()
-            ),
-        )),
+    if auth_method.is_fapi_compatible() {
+        return Ok(());
     }
+    Err(ServiceError::oauth(
+        OAuthErrorCode::InvalidClient,
+        format!(
+            "FAPI 2.0 requires private_key_jwt or mTLS authentication, got '{}'",
+            auth_method.as_str()
+        ),
+    ))
 }
 
 /// Return the clock skew tolerance for a client.

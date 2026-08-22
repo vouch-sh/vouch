@@ -1226,9 +1226,11 @@ fn test_validate_tls_client_auth_with_san_ip() {
 }
 
 /// self_signed_tls_client_auth does not require identity fields — accepted without them.
+/// It does require a jwks or jwks_uri (its certificate carrier, RFC 8705
+/// §2.2.2), supplied here so this test isolates the identity-fields concern.
 #[test]
 fn test_validate_self_signed_tls_client_auth_accepted_without_identity() {
-    let mut req = make_request_with_jwks(None, None);
+    let mut req = make_request_with_jwks(None, Some("https://example.com/jwks.json"));
     let result = validate_jwks_and_auth_method(&mut req, "self_signed_tls_client_auth");
     let validated = result.expect("self_signed_tls_client_auth must succeed without identity");
     assert_eq!(

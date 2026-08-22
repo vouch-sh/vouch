@@ -1199,6 +1199,191 @@ async fn test_rfc7591_accepts_fapi_registration_with_jwks_uri_only() {
 }
 
 // ========================================================================
+// RFC 8705 §2.2.2: self_signed_tls_client_auth's certificate is carried in
+// the JWKS's x5c member, so — unlike tls_client_auth, which authenticates
+// via PKI subject DN/SAN — it needs key material to authenticate at all,
+// FAPI or not.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7591_rejects_self_signed_registration_without_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "self-signed-no-jwks").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "self_signed_tls_client_auth without jwks or jwks_uri must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_self_signed_registration_with_jwks_uri_only() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "self-signed-jwks-uri").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks_uri": "https://example.com/.well-known/jwks.json"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "self_signed_tls_client_auth with jwks_uri only must be accepted: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_rejects_self_signed_registration_with_certificate_less_jwks() {
+    // `jwks_has_x5c`: a self-signed client's inline JWKS carrying no x5c
+    // passes the bare presence check but leaves the client unable to ever
+    // complete mTLS authentication — verify_self_signed_tls_client_auth
+    // (services/oidc/mtls.rs) matches only on x5c.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "self-signed-no-x5c").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a certificate-less JWKS must be rejected for self_signed_tls_client_auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_self_signed_registration_with_x5c_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "self-signed-with-x5c").await;
+
+    let cert_der = make_test_cert_der("self-signed-with-x5c-client");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "jwks": {"keys": [{"kty": "RSA", "x5c": [x5c_b64]}]}
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an x5c-bearing JWKS must be accepted for self_signed_tls_client_auth: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_accepts_tls_client_auth_registration_without_jwks() {
+    // tls_client_auth authenticates via PKI subject DN/SAN, not a JWKS — it
+    // must remain unaffected by the self_signed_tls_client_auth requirement.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-no-jwks").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=test-client"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "tls_client_auth without a JWKS must remain accepted: {body}"
+    );
+}
+
+// ========================================================================
+// JWKS write-path shape validation — a type-invalid member (e.g. a boolean
+// "alg") must be rejected at registration through the same typed
+// representation the RFC 7523 client-assertion verifier uses at runtime,
+// rather than silently accepted and left permanently unauthenticatable.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7591_rejects_jwks_with_type_invalid_key_member() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "type-invalid-jwks").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "EC", "alg": true}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a type-invalid JWK member must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+// ========================================================================
 // RFC 7591 Section 2: Unknown fields MUST be ignored
 // ========================================================================
 
