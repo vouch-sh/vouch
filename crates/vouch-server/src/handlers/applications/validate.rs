@@ -1629,6 +1629,34 @@ mod tests {
             "a kty outside EC/RSA/OKP must not survive on a missing alg"
         );
 
+        // An allowed alg must not rescue a kty that can't carry it: the
+        // runtime matcher selects EC for ES256, RSA for PS256, and OKP for
+        // EdDSA, so any other pairing is unmatchable at runtime even though
+        // the declared alg is FAPI-allowed.
+        let oct_with_allowed_alg = serde_json::json!({"keys": [{"kty": "oct", "alg": "ES256"}]});
+        assert!(
+            !jwks_has_fapi_allowed_key(&jwk_set(oct_with_allowed_alg)),
+            "an oct key must not survive by declaring an allowed alg"
+        );
+
+        let rsa_with_es256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256"}]});
+        assert!(
+            !jwks_has_fapi_allowed_key(&jwk_set(rsa_with_es256)),
+            "an RSA key declaring ES256 is unmatchable at runtime"
+        );
+
+        let ec_with_ps256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "PS256"}]});
+        assert!(
+            !jwks_has_fapi_allowed_key(&jwk_set(ec_with_ps256)),
+            "an EC key declaring PS256 is unmatchable at runtime"
+        );
+
+        let okp_with_es256 = serde_json::json!({"keys": [{"kty": "OKP", "alg": "ES256"}]});
+        assert!(
+            !jwks_has_fapi_allowed_key(&jwk_set(okp_with_es256)),
+            "an OKP key declaring ES256 is unmatchable at runtime"
+        );
+
         let mixed = serde_json::json!({
             "keys": [{"kty": "RSA", "alg": "RS256"}, {"kty": "EC", "alg": "ES256"}]
         });

@@ -360,10 +360,11 @@ pub fn parse_jwks_set(value: &serde_json::Value) -> Result<JwkSet, serde_json::E
 /// keys would leave a FAPI client with no algorithm it is both allowed to use
 /// and has a matching key for, and a JWKS made only of `use: "enc"` keys would
 /// leave it with no key the search selects at all — both permanently
-/// unauthenticatable. The `kty` check on the no-`alg` branch closes the same
-/// bug class for an incompatible or missing `kty` (e.g. `oct`): the runtime
-/// matcher only ever selects `EC`/`RSA`/`OKP` for ES256/PS256/EdDSA, so a key
-/// with any other `kty` is unmatchable regardless of `alg`.
+/// unauthenticatable. The `kty` check on both branches closes the same bug
+/// class for an incompatible or missing `kty`: the runtime matcher only ever
+/// selects `EC` for ES256, `RSA` for PS256, and `OKP` for EdDSA, so a key
+/// whose `kty` is anything else (e.g. `oct`, or `RSA` declaring `alg: ES256`)
+/// is unmatchable regardless of `alg`.
 ///
 /// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
 /// application creation and update (`handlers/applications/validate.rs`) and
@@ -388,8 +389,26 @@ pub fn jwks_has_fapi_allowed_key(jwks: &JwkSet) -> bool {
                 KeyType::Other(_) => false,
             };
         };
-        alg.parse::<JwsAlgorithm>()
-            .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
+        let Ok(parsed) = alg.parse::<JwsAlgorithm>() else {
+            return false;
+        };
+        if !JwsAlgorithm::FAPI_ALLOWED.contains(&parsed) {
+            return false;
+        }
+        // Same kty-per-alg selection rule as the runtime matcher
+        // (`jwt_bearer::jwks::find_matching_key` /
+        // `build_decoding_key_from_jwk`): a key whose `kty` can't carry its
+        // declared `alg` is unmatchable, so declaring an allowed `alg` alone
+        // must not count. Exhaustive for the same reason as the no-`alg`
+        // branch above.
+        let expected_kty = match parsed {
+            JwsAlgorithm::Es256 => KeyType::Ec,
+            JwsAlgorithm::Ps256 => KeyType::Rsa,
+            JwsAlgorithm::EdDsa => KeyType::Okp,
+            // Not FAPI-allowed; already rejected by the contains() gate.
+            JwsAlgorithm::Rs256 => return false,
+        };
+        key.kty == expected_kty
     })
 }
 
