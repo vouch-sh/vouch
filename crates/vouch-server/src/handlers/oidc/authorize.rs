@@ -13,6 +13,7 @@ use super::{
 use crate::AppState;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
+use crate::error::OAuthErrorCode;
 use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
@@ -224,7 +225,7 @@ impl ResolvedClient {
     async fn error_redirect(
         &self,
         state: &Arc<AppState>,
-        error: &str,
+        error: OAuthErrorCode,
         description: &str,
         oauth_state: Option<&str>,
     ) -> Response {
@@ -273,7 +274,7 @@ async fn run_security_pipeline(
         return Err(resolved
             .error_redirect(
                 state,
-                "invalid_request",
+                OAuthErrorCode::InvalidRequest,
                 &e.oauth_description(),
                 validated.state(),
             )
@@ -290,7 +291,7 @@ async fn run_security_pipeline(
         return Err(resolved
             .error_redirect(
                 state,
-                "invalid_request",
+                OAuthErrorCode::InvalidRequest,
                 &e.oauth_description(),
                 validated.state(),
             )
@@ -305,7 +306,7 @@ async fn run_security_pipeline(
         return Err(resolved
             .error_redirect(
                 state,
-                "invalid_request",
+                OAuthErrorCode::InvalidRequest,
                 "This client requires a signed Request Object (RFC 9101)",
                 validated.state(),
             )
@@ -358,7 +359,7 @@ async fn check_session_and_authorize(
                 return resolved
                     .error_redirect(
                         state,
-                        "login_required",
+                        OAuthErrorCode::LoginRequired,
                         "User is not authenticated and prompt=none was requested",
                         validated.state(),
                     )
@@ -558,7 +559,7 @@ async fn handle_direct_request(
                 return resolved
                     .error_redirect(
                         state,
-                        "invalid_request",
+                        OAuthErrorCode::InvalidRequest,
                         &format!(
                             "Unsupported prompt value. Supported values: {}",
                             crate::services::oidc::authorization::Prompt::supported_values()
@@ -594,9 +595,9 @@ async fn handle_direct_request(
         Err(e) => {
             let (error_code, description) = match &e {
                 crate::error::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
+                    (*code, description.clone())
                 }
-                _ => ("server_error", e.to_string()),
+                _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
                 .error_redirect(state, error_code, &description, params.state.as_deref())
@@ -689,9 +690,9 @@ async fn handle_jar_request(
         Err(e) => {
             let (error_code, description) = match &e {
                 crate::error::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
+                    (*code, description.clone())
                 }
-                _ => ("server_error", e.to_string()),
+                _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
                 .error_redirect(state, error_code, &description, query.state.as_deref())
@@ -753,7 +754,7 @@ async fn lookup_par(
                             state,
                             &client,
                             uri,
-                            "invalid_request_uri",
+                            OAuthErrorCode::InvalidRequestUri,
                             "Invalid or expired request_uri",
                             None,
                             response_mode,
@@ -851,9 +852,9 @@ async fn handle_par_request(
         Err(e) => {
             let (error_code, description) = match &e {
                 crate::error::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
+                    (*code, description.clone())
                 }
-                _ => ("server_error", e.to_string()),
+                _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
                 .error_redirect(state, error_code, &description, par.state.as_deref())
@@ -911,9 +912,9 @@ async fn handle_request_uri_fetch(
         Err(e) => {
             let (error_code, description) = match &e {
                 crate::error::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
+                    (*code, description.clone())
                 }
-                _ => ("server_error", e.to_string()),
+                _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
                 .error_redirect(state, error_code, &description, query.state.as_deref())
@@ -1180,7 +1181,7 @@ async fn complete_pending_auth(
             return resolved
                 .error_redirect(
                     state,
-                    "login_required",
+                    OAuthErrorCode::LoginRequired,
                     "Session exceeds requested max_age",
                     pending.state.as_deref(),
                 )
@@ -1202,7 +1203,7 @@ async fn complete_pending_auth(
                 return resolved
                     .error_redirect(
                         state,
-                        "invalid_request",
+                        OAuthErrorCode::InvalidRequest,
                         "The request_uri has already been used",
                         pending.state.as_deref(),
                     )
@@ -1213,7 +1214,7 @@ async fn complete_pending_auth(
                 return resolved
                     .error_redirect(
                         state,
-                        "server_error",
+                        OAuthErrorCode::ServerError,
                         "Failed to process pushed authorization request",
                         pending.state.as_deref(),
                     )
@@ -1424,7 +1425,7 @@ async fn store_pending_and_redirect(
                 state,
                 target.client,
                 validated.redirect_uri(),
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Failed to initiate login",
                 validated.state(),
                 target.response_mode,
@@ -1525,7 +1526,7 @@ async fn authorize_authenticated_user(
             state,
             oauth_client,
             validated.redirect_uri(),
-            "login_required",
+            OAuthErrorCode::LoginRequired,
             "Re-authentication required but prompt=none was requested",
             validated.state(),
             response_mode,
@@ -1589,7 +1590,7 @@ async fn issue_code_after_reauth_check(
                 state,
                 oauth_client,
                 validated.redirect_uri(),
-                "unmet_authentication_requirements",
+                OAuthErrorCode::UnmetAuthenticationRequirements,
                 "The requested authentication context class is not supported",
                 validated.state(),
                 response_mode,
@@ -1606,7 +1607,7 @@ async fn issue_code_after_reauth_check(
             state,
             oauth_client,
             validated.redirect_uri(),
-            "invalid_target",
+            OAuthErrorCode::InvalidTarget,
             "The requested resource is not registered for this client",
             validated.state(),
             response_mode,
@@ -1630,7 +1631,7 @@ async fn issue_code_after_reauth_check(
                     state,
                     oauth_client,
                     validated.redirect_uri(),
-                    "invalid_request",
+                    OAuthErrorCode::InvalidRequest,
                     "The request_uri has already been used or is invalid",
                     validated.state(),
                     response_mode,
@@ -1643,7 +1644,7 @@ async fn issue_code_after_reauth_check(
                     state,
                     oauth_client,
                     validated.redirect_uri(),
-                    "server_error",
+                    OAuthErrorCode::ServerError,
                     "Failed to process pushed authorization request",
                     validated.state(),
                     response_mode,
@@ -1720,7 +1721,7 @@ async fn issue_code_and_redirect(
                             state,
                             oauth_client,
                             redirect_uri,
-                            "server_error",
+                            OAuthErrorCode::ServerError,
                             "Failed to generate authorization response",
                             oauth_state,
                             response_mode,
@@ -1762,7 +1763,7 @@ async fn issue_code_and_redirect(
                 state,
                 oauth_client,
                 redirect_uri,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Failed to generate authorization code",
                 oauth_state,
                 response_mode,
@@ -1895,7 +1896,7 @@ mod tests {
             &state,
             &client,
             "https://example.com/callback",
-            "access_denied",
+            OAuthErrorCode::AccessDenied,
             "user denied",
             Some("opaque-state"),
             ResponseMode::Jwt,

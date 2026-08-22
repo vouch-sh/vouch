@@ -4,6 +4,7 @@
 use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 use crate::AppState;
 use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
+use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::error::ServiceError;
 use crate::services::auth::{ClientAuthProof, ParCreationProof};
@@ -182,7 +183,7 @@ pub(crate) async fn par(
     if params.request_uri.is_some() {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             "request_uri must not be provided in a pushed authorization request",
         );
     }
@@ -196,7 +197,7 @@ pub(crate) async fn par(
     {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request_object",
+            OAuthErrorCode::InvalidRequestObject,
             &e.oauth_description(),
         );
     }
@@ -214,7 +215,7 @@ pub(crate) async fn par(
     }) else {
         return par_error_response(
             StatusCode::UNAUTHORIZED,
-            "invalid_client",
+            OAuthErrorCode::InvalidClient,
             "Client authentication is required for pushed authorization requests",
         );
     };
@@ -238,7 +239,7 @@ pub(crate) async fn par(
         let Some(cert) = client_cert.0.as_ref() else {
             return par_error_response(
                 StatusCode::UNAUTHORIZED,
-                "invalid_client",
+                OAuthErrorCode::InvalidClient,
                 "mTLS client certificate required",
             );
         };
@@ -276,7 +277,7 @@ pub(crate) async fn par(
     ) {
         return par_error_response(
             StatusCode::UNAUTHORIZED,
-            "invalid_client",
+            OAuthErrorCode::InvalidClient,
             &e.oauth_description(),
         );
     }
@@ -291,7 +292,7 @@ pub(crate) async fn par(
     {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             "This client requires a signed Request Object (RFC 9101)",
         );
     }
@@ -311,7 +312,7 @@ pub(crate) async fn par(
                     nonce.to_string(),
                 )],
                 Json(OAuthErrorResponse {
-                    error: "use_dpop_nonce".to_string(),
+                    error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
                     error_description: Some(
                         "Authorization server requires nonce in DPoP proof".to_string(),
                     ),
@@ -323,14 +324,14 @@ pub(crate) async fn par(
         Err(e @ DpopError::Database(_)) => {
             return par_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 &e.to_string(),
             );
         }
         Err(e) => {
             return par_error_response(
                 StatusCode::BAD_REQUEST,
-                "invalid_dpop_proof",
+                OAuthErrorCode::InvalidDpopProof,
                 &e.to_string(),
             );
         }
@@ -344,17 +345,17 @@ pub(crate) async fn par(
         if !is_match {
             return par_error_response(
                 StatusCode::BAD_REQUEST,
-                "invalid_dpop_proof",
+                OAuthErrorCode::InvalidDpopProof,
                 "dpop_jkt parameter does not match DPoP proof JWK thumbprint",
             );
         }
     }
 
     // Helper: convert ServiceError to PAR error response fields.
-    let service_error_codes = |e: &ServiceError| -> (&str, String) {
+    let service_error_codes = |e: &ServiceError| -> (OAuthErrorCode, String) {
         match e {
-            ServiceError::OAuth { code, description } => (code.as_str(), description.clone()),
-            _ => ("server_error", e.to_string()),
+            ServiceError::OAuth { code, description } => (*code, description.clone()),
+            _ => (OAuthErrorCode::ServerError, e.to_string()),
         }
     };
 
@@ -376,7 +377,7 @@ pub(crate) async fn par(
         if request_params.client_id != authenticated_client.client.client_id {
             return par_error_response(
                 StatusCode::BAD_REQUEST,
-                "invalid_request_object",
+                OAuthErrorCode::InvalidRequestObject,
                 "client_id in Request Object does not match authenticated client",
             );
         }
@@ -400,7 +401,7 @@ pub(crate) async fn par(
                 None => {
                     return par_error_response(
                         StatusCode::BAD_REQUEST,
-                        "invalid_request",
+                        OAuthErrorCode::InvalidRequest,
                         &format!(
                             "Unsupported prompt value. Supported values: {}",
                             crate::services::oidc::authorization::Prompt::supported_values()
@@ -443,7 +444,7 @@ pub(crate) async fn par(
     if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &e.oauth_description(),
         );
     }
@@ -455,7 +456,7 @@ pub(crate) async fn par(
     {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             "redirect_uri is not registered for this client",
         );
     }
@@ -466,7 +467,7 @@ pub(crate) async fn par(
     {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_target",
+            OAuthErrorCode::InvalidTarget,
             "The requested resource is not registered for this client",
         );
     }
@@ -486,7 +487,7 @@ pub(crate) async fn par(
         if !is_match {
             return par_error_response(
                 StatusCode::BAD_REQUEST,
-                "invalid_dpop_proof",
+                OAuthErrorCode::InvalidDpopProof,
                 "dpop_jkt does not match DPoP proof JWK thumbprint",
             );
         }
@@ -506,7 +507,7 @@ pub(crate) async fn par(
             None => {
                 return par_error_response(
                     StatusCode::BAD_REQUEST,
-                    "invalid_request",
+                    OAuthErrorCode::InvalidRequest,
                     &format!(
                         "Unsupported response_mode. Supported values: {}",
                         crate::db::documents::oauth::ResponseMode::supported_values()
@@ -546,12 +547,12 @@ pub(crate) async fn par(
                 return match e {
                     ClientAuthError::InvalidCredentials => par_error_response(
                         StatusCode::UNAUTHORIZED,
-                        "invalid_client",
+                        OAuthErrorCode::InvalidClient,
                         "Client authentication failed",
                     ),
                     _ => par_error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "server_error",
+                        OAuthErrorCode::ServerError,
                         "Failed to complete client authentication",
                     ),
                 };
@@ -602,7 +603,7 @@ pub(crate) async fn par(
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Failed to store pushed authorization request",
             )
         }
@@ -610,11 +611,11 @@ pub(crate) async fn par(
 }
 
 /// Build a PAR error response.
-fn par_error_response(status: StatusCode, error: &str, description: &str) -> Response {
+fn par_error_response(status: StatusCode, error: OAuthErrorCode, description: &str) -> Response {
     (
         status,
         Json(OAuthErrorResponse {
-            error: error.to_string(),
+            error: error.as_str().to_string(),
             error_description: Some(description.to_string()),
             error_uri: None,
         }),

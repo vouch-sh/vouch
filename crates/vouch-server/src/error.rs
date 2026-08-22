@@ -141,9 +141,9 @@ pub enum OAuthErrorCode {
     UnsupportedGrantType,
     /// RFC 6749 Section 5.2: The requested scope is invalid or unknown.
     InvalidScope,
-    /// RFC 6749 Section 5.2: The authorization server encountered an unexpected condition.
+    /// RFC 6749 Section 4.1.2.1: The authorization server encountered an unexpected condition.
     ServerError,
-    /// RFC 6749 Section 5.2: The authorization server is temporarily unavailable.
+    /// RFC 6749 Section 4.1.2.1: The authorization server is temporarily unavailable.
     TemporarilyUnavailable,
     /// RFC 8628 Section 3.5: The authorization request is still pending.
     AuthorizationPending,
@@ -180,6 +180,13 @@ pub enum OAuthErrorCode {
     InvalidAuthorizationDetails,
     /// OIDC Core Section 6.2: The request_uri parameter value is invalid.
     InvalidRequestUri,
+    /// OIDC Core Section 3.1.2.6: "The Authorization Server requires
+    /// End-User authentication. This error MAY be returned when the prompt
+    /// parameter value in the Authentication Request is none, but the
+    /// Authentication Request cannot be completed without displaying a user
+    /// interface for End-User authentication."
+    /// <https://openid.net/specs/openid-connect-core-1_0.html#AuthError>
+    LoginRequired,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -202,7 +209,11 @@ impl OAuthErrorCode {
             | Self::InvalidRedirectUri
             | Self::InvalidClientMetadata
             | Self::InvalidAuthorizationDetails
-            | Self::InvalidRequestUri => StatusCode::BAD_REQUEST,
+            | Self::InvalidRequestUri
+            // `login_required` only ever travels as a redirect query
+            // parameter (OIDC Core 3.1.2.6), never as an HTTP status on a
+            // direct response, so this arm is currently unreachable.
+            | Self::LoginRequired => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -246,6 +257,7 @@ impl OAuthErrorCode {
             Self::InvalidClientMetadata => "invalid_client_metadata",
             Self::InvalidAuthorizationDetails => "invalid_authorization_details",
             Self::InvalidRequestUri => "invalid_request_uri",
+            Self::LoginRequired => "login_required",
         }
     }
 }
@@ -355,7 +367,7 @@ impl ServiceError {
             Self::NotFound(entity) => (
                 StatusCode::NOT_FOUND,
                 Json(OAuthErrorResponse {
-                    error: "invalid_request".to_string(),
+                    error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
                     error_description: Some(format!("{entity} not found")),
                     error_uri: None,
                 }),
@@ -363,7 +375,7 @@ impl ServiceError {
             Self::Validation(msg) => (
                 StatusCode::BAD_REQUEST,
                 Json(OAuthErrorResponse {
-                    error: "invalid_request".to_string(),
+                    error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
                     error_description: Some(msg),
                     error_uri: None,
                 }),
@@ -411,7 +423,7 @@ impl ServiceError {
             Self::Forbidden(_) => (
                 StatusCode::FORBIDDEN,
                 Json(OAuthErrorResponse {
-                    error: "access_denied".to_string(),
+                    error: OAuthErrorCode::AccessDenied.as_str().to_string(),
                     error_description: Some("Access denied".to_string()),
                     error_uri: None,
                 }),
@@ -429,7 +441,7 @@ impl ServiceError {
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(OAuthErrorResponse {
-                    error: "server_error".to_string(),
+                    error: OAuthErrorCode::ServerError.as_str().to_string(),
                     error_description: Some("Internal server error".to_string()),
                     error_uri: None,
                 }),
@@ -440,7 +452,12 @@ impl ServiceError {
     /// Build a `WWW-Authenticate` header value for RFC 9470 step-up challenges.
     fn build_www_authenticate(acr_values: &Option<String>, max_age: &Option<u64>) -> String {
         let mut params = vec![
-            ("error", "insufficient_user_authentication".to_string()),
+            (
+                "error",
+                OAuthErrorCode::InsufficientUserAuthentication
+                    .as_str()
+                    .to_string(),
+            ),
             (
                 "error_description",
                 "A recent authentication is required".to_string(),

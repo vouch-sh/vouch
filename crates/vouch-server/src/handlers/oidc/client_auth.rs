@@ -5,7 +5,7 @@
 //! (RFC 6749 Section 3.2) and the PAR endpoint (RFC 9126 Section 2).
 
 use crate::AppState;
-use crate::error::OAuthErrorResponse;
+use crate::error::{OAuthErrorCode, OAuthErrorResponse};
 use crate::services::oidc::{
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthenticatedClient, ClientCredentials, authenticate_client},
@@ -124,7 +124,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     // RFC 7521 Section 4.2: MUST NOT use more than one method
     if has_client_assertion && (has_basic || has_client_secret) {
         return Err(oauth_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             "client_assertion cannot be combined with Basic auth or client_secret",
         ));
     }
@@ -135,7 +135,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
         let assertion_type = params.client_assertion_type().unwrap_or("");
         if assertion_type != JWT_BEARER_CLIENT_ASSERTION_TYPE {
             return Err(oauth_error_response(
-                "invalid_request",
+                OAuthErrorCode::InvalidRequest,
                 &format!(
                     "Unsupported client_assertion_type. Expected: {JWT_BEARER_CLIENT_ASSERTION_TYPE}"
                 ),
@@ -242,11 +242,11 @@ pub(crate) async fn complete_client_auth(
 }
 
 /// Build an OAuth error response for parameter validation failures.
-fn oauth_error_response(error: &str, description: &str) -> Response {
+fn oauth_error_response(code: OAuthErrorCode, description: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(OAuthErrorResponse {
-            error: error.to_string(),
+            error: code.as_str().to_string(),
             error_description: Some(description.to_string()),
             error_uri: None,
         }),

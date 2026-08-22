@@ -29,6 +29,11 @@ pub mod services;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+/// `error` stays `pub(crate)`; this is the only type from it that needs to
+/// be nameable outside the crate, since `services::oidc::jarm::build_jarm_error_jwt`
+/// is unconditionally `pub` and takes it by value.
+pub use error::OAuthErrorCode;
+
 use arc_swap::ArcSwap;
 use axum::{
     Router,

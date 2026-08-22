@@ -173,7 +173,7 @@ async fn extract_resource_token(
                             // the fresh nonce lets the caller retry once.
                             return Err(ServiceError::api_with_header(
                                 StatusCode::UNAUTHORIZED,
-                                "use_dpop_nonce",
+                                crate::error::OAuthErrorCode::UseDpopNonce.as_str(),
                                 "Authorization server requires nonce in DPoP proof",
                                 ("DPoP-Nonce", nonce.as_str()),
                             ));
