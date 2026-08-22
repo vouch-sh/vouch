@@ -12,6 +12,7 @@
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db;
+use crate::error::OAuthErrorCode;
 use crate::handlers::generate_challenge;
 use axum::{
     Json,
@@ -59,7 +60,7 @@ pub(crate) async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Respo
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
-                    "error": "server_error",
+                    "error": OAuthErrorCode::ServerError.as_str(),
                     "error_description": "Failed to generate challenge"
                 })),
             )
@@ -91,7 +92,7 @@ pub(crate) async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Respo
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
-                    "error": "server_error",
+                    "error": OAuthErrorCode::ServerError.as_str(),
                     "error_description": "Failed to create challenge state"
                 })),
             )

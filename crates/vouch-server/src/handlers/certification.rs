@@ -30,6 +30,7 @@ use jiff::Timestamp;
 
 use crate::{
     AppState, db,
+    error::OAuthErrorCode,
     handlers::browser_login::hmac_sha256_base64url,
     handlers::session::create_session_cookie,
     services::auth::{
@@ -290,7 +291,7 @@ pub(crate) async fn deny_login(
         &state,
         &client,
         &pending.redirect_uri,
-        "access_denied",
+        OAuthErrorCode::AccessDenied,
         "User rejected authentication",
         pending.state.as_deref(),
         pending.response_mode,

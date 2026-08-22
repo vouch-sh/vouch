@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::db::OAuthClient;
+use crate::error::OAuthErrorCode;
 
 /// JARM JWT lifetime in seconds (10 minutes per the specification).
 const JARM_JWT_LIFETIME_SECONDS: i64 = 600;
@@ -99,7 +100,7 @@ pub async fn build_jarm_success_jwt(
 pub async fn build_jarm_error_jwt(
     state: &Arc<AppState>,
     client: &OAuthClient,
-    error: &str,
+    error: OAuthErrorCode,
     description: Option<&str>,
     state_param: Option<&str>,
 ) -> Result<String> {
@@ -111,7 +112,7 @@ pub async fn build_jarm_error_jwt(
         iss: issuer,
         aud: client.client_id.clone(),
         exp,
-        error: error.to_string(),
+        error: error.as_str().to_string(),
         error_description: description.map(str::to_string),
         state: state_param.map(str::to_string),
     };

@@ -233,7 +233,7 @@ pub(crate) async fn token(
         && !is_valid_pkce_verifier(v)
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             "code_verifier must be 43-128 characters and contain only [A-Za-z0-9\\-._~]",
         );
     }
@@ -241,7 +241,7 @@ pub(crate) async fn token(
         && v.len() > MAX_TOKEN_REDIRECT_URI_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("redirect_uri exceeds maximum length of {MAX_TOKEN_REDIRECT_URI_LEN}"),
         );
     }
@@ -249,7 +249,7 @@ pub(crate) async fn token(
         && v.len() > MAX_TOKEN_CLIENT_ID_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("client_id exceeds maximum length of {MAX_TOKEN_CLIENT_ID_LEN}"),
         );
     }
@@ -257,7 +257,7 @@ pub(crate) async fn token(
         && v.len() > MAX_TOKEN_SCOPE_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("scope exceeds maximum length of {MAX_TOKEN_SCOPE_LEN}"),
         );
     }
@@ -265,7 +265,7 @@ pub(crate) async fn token(
         && v.len() > MAX_TOKEN_RESOURCE_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("resource exceeds maximum length of {MAX_TOKEN_RESOURCE_LEN}"),
         );
     }
@@ -273,7 +273,7 @@ pub(crate) async fn token(
         && v.expose_secret().len() > MAX_ASSERTION_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("client_assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -281,7 +281,7 @@ pub(crate) async fn token(
         && v.expose_secret().len() > MAX_ASSERTION_LEN
     {
         return token_error_response(
-            "invalid_request",
+            OAuthErrorCode::InvalidRequest,
             &format!("assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -290,7 +290,7 @@ pub(crate) async fn token(
         && v.len() > MAX_ASSERTION_LEN
     {
         return token_error_response(
-            "invalid_authorization_details",
+            OAuthErrorCode::InvalidAuthorizationDetails,
             &format!("authorization_details exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -303,15 +303,10 @@ pub(crate) async fn token(
         Ok(parsed) => parsed,
         Err(_) => {
             let supported = OAuthGrantType::supported_wire_values().join(", ");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(OAuthErrorResponse {
-                    error: "unsupported_grant_type".to_string(),
-                    error_description: Some(format!("Supported grant types: {supported}")),
-                    error_uri: None,
-                }),
-            )
-                .into_response();
+            return token_error_response(
+                OAuthErrorCode::UnsupportedGrantType,
+                &format!("Supported grant types: {supported}"),
+            );
         }
     };
 
@@ -497,15 +492,7 @@ async fn handle_authorization_code_grant(
     let code = match &params.code {
         Some(c) => c,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(OAuthErrorResponse {
-                    error: "invalid_request".to_string(),
-                    error_description: Some("Missing code parameter".to_string()),
-                    error_uri: None,
-                }),
-            )
-                .into_response();
+            return token_error_response(OAuthErrorCode::InvalidRequest, "Missing code parameter");
         }
     };
 
@@ -1077,7 +1064,7 @@ async fn handle_fido2_assertion_grant(
         Some(a) => a.clone(),
         None => {
             return token_error_response(
-                "invalid_request",
+                OAuthErrorCode::InvalidRequest,
                 "Missing assertion parameter for fido2-assertion grant",
             );
         }
@@ -1099,7 +1086,7 @@ async fn handle_fido2_assertion_grant(
         },
         _ => {
             return token_error_response(
-                "invalid_client",
+                OAuthErrorCode::InvalidClient,
                 "fido2-assertion grant requires private_key_jwt client authentication",
             );
         }
@@ -1293,7 +1280,7 @@ pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
             nonce.to_string(),
         )],
         Json(OAuthErrorResponse {
-            error: "use_dpop_nonce".to_string(),
+            error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
             error_description: Some(
                 "Authorization server requires nonce in DPoP proof".to_string(),
             ),
@@ -1304,11 +1291,11 @@ pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
 }
 
 /// Build an OAuth error response for parameter validation failures.
-fn token_error_response(error: &str, description: &str) -> Response {
+fn token_error_response(code: OAuthErrorCode, description: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(OAuthErrorResponse {
-            error: error.to_string(),
+            error: code.as_str().to_string(),
             error_description: Some(description.to_string()),
             error_uri: None,
         }),

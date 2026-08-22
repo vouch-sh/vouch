@@ -9,6 +9,7 @@
 )]
 
 use serde_json::Value;
+use vouch_server::OAuthErrorCode;
 use vouch_server::db::{self, JwsAlgorithm, OAuthClient};
 use vouch_server::services::oidc::jarm::{build_jarm_error_jwt, build_jarm_success_jwt};
 use vouch_server::test_utils;
@@ -121,7 +122,7 @@ async fn rs256_without_rsa_key_returns_error() {
     let err = build_jarm_error_jwt(
         &harness.state,
         &client,
-        "invalid_request",
+        OAuthErrorCode::InvalidRequest,
         Some("bad request"),
         None,
     )
@@ -142,7 +143,7 @@ async fn error_jwt_carries_error_claims() {
     let jwt = build_jarm_error_jwt(
         &harness.state,
         &client,
-        "invalid_scope",
+        OAuthErrorCode::InvalidScope,
         Some("unknown scope"),
         Some("abc"),
     )
@@ -171,9 +172,15 @@ async fn error_jwt_omits_optional_fields() {
         .expect("create user");
     let client = client_with_alg(&harness, &user.id, None).await;
 
-    let jwt = build_jarm_error_jwt(&harness.state, &client, "access_denied", None, None)
-        .await
-        .expect("build minimal error jwt");
+    let jwt = build_jarm_error_jwt(
+        &harness.state,
+        &client,
+        OAuthErrorCode::AccessDenied,
+        None,
+        None,
+    )
+    .await
+    .expect("build minimal error jwt");
 
     let (_header, payload) = decode_jwt_unverified(&jwt);
     assert_eq!(

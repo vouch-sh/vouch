@@ -35,7 +35,7 @@ pub(crate) async fn oauth_error_response(
     app_state: &Arc<AppState>,
     client: &OAuthClient,
     redirect_uri: &str,
-    error: &str,
+    error: OAuthErrorCode,
     description: &str,
     oauth_state: Option<&str>,
     response_mode: ResponseMode,
@@ -54,7 +54,7 @@ pub(crate) async fn oauth_error_response(
         }
         ResponseMode::FormPost => {
             let mut params = vec![
-                ("error".to_string(), error.to_string()),
+                ("error".to_string(), error.as_str().to_string()),
                 ("error_description".to_string(), description.to_string()),
                 ("iss".to_string(), app_state.config().base_url.to_string()),
             ];
@@ -69,7 +69,10 @@ pub(crate) async fn oauth_error_response(
         }
         ResponseMode::Query => {
             let issuer = &app_state.config().base_url;
-            let mut params = vec![("error", error), ("error_description", description)];
+            let mut params = vec![
+                ("error", error.as_str()),
+                ("error_description", description),
+            ];
             if let Some(state_param) = oauth_state {
                 params.push(("state", state_param));
             }
@@ -87,7 +90,7 @@ pub(super) async fn oauth_error_redirect_jarm(
     state: &Arc<AppState>,
     client: &OAuthClient,
     redirect_uri: &str,
-    error: &str,
+    error: OAuthErrorCode,
     description: &str,
     oauth_state: Option<&str>,
 ) -> Response {

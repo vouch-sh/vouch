@@ -101,7 +101,7 @@ pub(crate) async fn userinfo(
         } else {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid_token",
+                OAuthErrorCode::InvalidToken,
                 "Unsupported authorization scheme. Use Bearer or DPoP",
             );
         }
@@ -125,7 +125,7 @@ pub(crate) async fn userinfo(
         if headers.get_all("DPoP").iter().count() > 1 {
             return oauth_error(
                 StatusCode::BAD_REQUEST,
-                OAuthErrorCode::InvalidDpopProof.as_str(),
+                OAuthErrorCode::InvalidDpopProof,
                 "Request must contain exactly one DPoP header",
             );
         }
@@ -134,7 +134,7 @@ pub(crate) async fn userinfo(
             None => {
                 return oauth_error(
                     StatusCode::BAD_REQUEST,
-                    OAuthErrorCode::InvalidDpopProof.as_str(),
+                    OAuthErrorCode::InvalidDpopProof,
                     "DPoP scheme requires DPoP proof header",
                 );
             }
@@ -171,7 +171,7 @@ pub(crate) async fn userinfo(
                     None => {
                         return oauth_error(
                             StatusCode::UNAUTHORIZED,
-                            "invalid_token",
+                            OAuthErrorCode::InvalidToken,
                             "Invalid or expired token",
                         );
                     }
@@ -183,7 +183,7 @@ pub(crate) async fn userinfo(
                         if !is_valid {
                             return oauth_error(
                                 StatusCode::UNAUTHORIZED,
-                                OAuthErrorCode::InvalidDpopProof.as_str(),
+                                OAuthErrorCode::InvalidDpopProof,
                                 "DPoP proof key does not match token binding",
                             );
                         }
@@ -193,7 +193,7 @@ pub(crate) async fn userinfo(
                         // but DPoP scheme was used
                         return oauth_error(
                             StatusCode::UNAUTHORIZED,
-                            OAuthErrorCode::InvalidDpopProof.as_str(),
+                            OAuthErrorCode::InvalidDpopProof,
                             "DPoP scheme used but token is not DPoP-bound",
                         );
                     }
@@ -216,14 +216,14 @@ pub(crate) async fn userinfo(
             Err(e @ DpopError::Database(_)) => {
                 return oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthErrorCode::ServerError.as_str(),
+                    OAuthErrorCode::ServerError,
                     &e.to_string(),
                 );
             }
             Err(e) => {
                 return oauth_error(
                     StatusCode::UNAUTHORIZED,
-                    OAuthErrorCode::InvalidDpopProof.as_str(),
+                    OAuthErrorCode::InvalidDpopProof,
                     &e.to_string(),
                 );
             }
@@ -239,7 +239,7 @@ pub(crate) async fn userinfo(
         {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid_token",
+                OAuthErrorCode::InvalidToken,
                 "Token is DPoP-bound but was presented with Bearer scheme. Use DPoP scheme instead",
             );
         }
@@ -261,14 +261,14 @@ pub(crate) async fn userinfo(
         Ok(None) => {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid_token",
+                OAuthErrorCode::InvalidToken,
                 "Invalid or expired token",
             );
         }
         Err(e) => {
             return oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 &e.to_string(),
             );
         }
@@ -328,7 +328,7 @@ async fn build_signed_userinfo_response(
             tracing::error!("Cannot determine client_id for signed userinfo response");
             return oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Cannot determine client identity for signed userinfo",
             );
         }
@@ -352,7 +352,7 @@ async fn build_signed_userinfo_response(
                 );
                 return oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
+                    OAuthErrorCode::ServerError,
                     "RS256 signing key unavailable",
                 );
             }
@@ -364,7 +364,7 @@ async fn build_signed_userinfo_response(
             tracing::error!("Unsupported userinfo signing algorithm: {other}");
             return oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Unsupported userinfo signing algorithm",
             );
         }
@@ -380,7 +380,7 @@ async fn build_signed_userinfo_response(
             tracing::error!("Failed to sign userinfo response: {e}");
             oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                OAuthErrorCode::ServerError,
                 "Failed to generate signed userinfo response",
             )
         }
@@ -422,7 +422,7 @@ fn verify_mtls_binding(
         None => {
             return Err(Box::new(oauth_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid_token",
+                OAuthErrorCode::InvalidToken,
                 "Token is certificate-bound but no client certificate was presented",
             )));
         }
@@ -433,7 +433,7 @@ fn verify_mtls_binding(
     if !is_valid {
         return Err(Box::new(oauth_error(
             StatusCode::UNAUTHORIZED,
-            "invalid_token",
+            OAuthErrorCode::InvalidToken,
             "Client certificate does not match token certificate binding",
         )));
     }
@@ -445,7 +445,8 @@ fn verify_mtls_binding(
 ///
 /// RFC 6750 Section 3: When the resource server returns a 401, it includes a
 /// `WWW-Authenticate` header indicating the supported scheme(s).
-fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
+fn oauth_error(status: StatusCode, error: OAuthErrorCode, description: &str) -> Response {
+    let error = error.as_str();
     let body = Json(OAuthErrorResponse {
         error: error.to_string(),
         error_description: Some(description.to_string()),

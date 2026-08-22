@@ -237,7 +237,7 @@ pub(crate) async fn device_token(
             return Err(oauth_error(
                 StatusCode::BAD_REQUEST,
                 OAuthError {
-                    error: "unsupported_grant_type".to_string(),
+                    error: OAuthErrorCode::UnsupportedGrantType.as_str().to_string(),
                     error_description: Some("Expected device_code grant type".to_string()),
                 },
             ));
@@ -334,7 +334,7 @@ pub(crate) async fn device_token(
                         return Err(oauth_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             OAuthError {
-                                error: "server_error".to_string(),
+                                error: OAuthErrorCode::ServerError.as_str().to_string(),
                                 error_description: Some(e.to_string()),
                             },
                         ));
@@ -343,7 +343,7 @@ pub(crate) async fn device_token(
                         return Err(oauth_error(
                             StatusCode::BAD_REQUEST,
                             OAuthError {
-                                error: "invalid_dpop_proof".to_string(),
+                                error: OAuthErrorCode::InvalidDpopProof.as_str().to_string(),
                                 error_description: Some(e.to_string()),
                             },
                         ));
@@ -367,7 +367,7 @@ pub(crate) async fn device_token(
                         return Err(oauth_error(
                             StatusCode::UNAUTHORIZED,
                             OAuthError {
-                                error: "invalid_client".to_string(),
+                                error: OAuthErrorCode::InvalidClient.as_str().to_string(),
                                 error_description: Some(
                                     "Unknown client_id for device authorization".to_string(),
                                 ),
