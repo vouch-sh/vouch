@@ -7,7 +7,7 @@
 use super::validate::JwtAssertionHeader;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{JwkEntry, JwkSet};
+use crate::db::{JwkEntry, JwkSet, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// Resolve the JWKS for a client — from inline `jwks` or fetched `jwks_uri`.
@@ -121,9 +121,9 @@ pub fn find_matching_key(
 
     // Fall back to matching by algorithm/key type
     let expected_kty = match header.alg.as_str() {
-        "ES256" => "EC",
-        "RS256" | "PS256" => "RSA",
-        "EdDSA" => "OKP",
+        "ES256" => KeyType::Ec,
+        "RS256" | "PS256" => KeyType::Rsa,
+        "EdDSA" => KeyType::Okp,
         _ => {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
@@ -227,8 +227,8 @@ fn build_decoding_key_from_jwk(
     key: &JwkEntry,
     alg: &str,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    match (key.kty.as_str(), alg) {
-        ("EC", "ES256") => {
+    match (&key.kty, alg) {
+        (KeyType::Ec, "ES256") => {
             let x = key.x.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing x component")
             })?;
@@ -240,7 +240,7 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        ("RSA", "RS256") | ("RSA", "PS256") => {
+        (KeyType::Rsa, "RS256" | "PS256") => {
             let n = key.n.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing n component")
             })?;
@@ -252,7 +252,7 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        ("OKP", "EdDSA") => {
+        (KeyType::Okp, "EdDSA") => {
             let x = key.x.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "OKP key missing x component")
             })?;
@@ -273,7 +273,18 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        _ => Err(ServiceError::oauth(
+        // Known kty, wrong alg for it. Kept as a separate arm from the
+        // `Other` case below rather than merged, so an unrecognized kty is
+        // a deliberate, visible decision here — both produce the same
+        // error today, but the split is what the "Other" case means, not
+        // an accident of a shared wildcard.
+        (KeyType::Ec | KeyType::Rsa | KeyType::Okp, _) => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "No matching key found in JWKS",
+        )),
+        // Unrecognized kty (RFC 7517 §4.1's registry is open — see
+        // `KeyType`): never selectable, regardless of alg.
+        (KeyType::Other(_), _) => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "No matching key found in JWKS",
         )),
@@ -312,7 +323,7 @@ mod tests {
 
     fn ec_jwk_entry(kid: Option<&str>, alg: Option<&str>, use_: Option<&str>) -> JwkEntry {
         JwkEntry {
-            kty: "EC".to_string(),
+            kty: KeyType::Ec,
             kid: kid.map(String::from),
             alg: alg.map(String::from),
             use_: use_.map(String::from),
@@ -327,7 +338,7 @@ mod tests {
 
     fn rsa_jwk_entry(kid: Option<&str>, alg: Option<&str>, use_: Option<&str>) -> JwkEntry {
         JwkEntry {
-            kty: "RSA".to_string(),
+            kty: KeyType::Rsa,
             kid: kid.map(String::from),
             alg: alg.map(String::from),
             use_: use_.map(String::from),
@@ -345,7 +356,7 @@ mod tests {
 
     fn okp_jwk_entry(kid: Option<&str>, alg: Option<&str>, use_: Option<&str>) -> JwkEntry {
         JwkEntry {
-            kty: "OKP".to_string(),
+            kty: KeyType::Okp,
             kid: kid.map(String::from),
             alg: alg.map(String::from),
             use_: use_.map(String::from),

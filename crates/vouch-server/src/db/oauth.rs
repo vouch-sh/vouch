@@ -253,11 +253,53 @@ pub struct JwkSet {
     pub keys: Vec<JwkEntry>,
 }
 
+/// JWK "kty" (Key Type) value (RFC 7517 §4.1).
+///
+/// The IANA "JSON Web Key Types" registry this parameter draws from is open
+/// to extension: RFC 7518 §7.4 (<https://www.rfc-editor.org/rfc/rfc7518>)
+/// — "This specification establishes the IANA 'JSON Web Key Types' registry
+/// for values of the JWK 'kty' (key type) parameter" — registers only `EC`,
+/// `RSA`, and `oct`. `OKP` was added later, by RFC 8037 §5
+/// (<https://www.rfc-editor.org/rfc/rfc8037>) — "'kty' Parameter Value:
+/// 'OKP'" — and more recently `AKP` by RFC 9964. An unrecognized value must
+/// therefore still parse (`Other`), just as an unrecognized value already
+/// does for the members this crate doesn't model (`x5t`, etc.) — it isn't
+/// selectable by any of the three known variants, so it stays unusable the
+/// same way `oct` or any other unmatched `kty` already is.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyType {
+    Ec,
+    Rsa,
+    Okp,
+    /// Any value outside the three this crate matches against. Carries the
+    /// original string for diagnostics; never selected by a signing-key or
+    /// FAPI-allowed-algorithm check.
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for KeyType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Exact-case match: RFC 7517 §4.1 (quoted above `parse_jwks_set`'s
+        // "kty" test) — "The 'kty' value is a case-sensitive string" — so
+        // e.g. "ec" is a *different*, unrecognized value, not `Ec`.
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "EC" => Self::Ec,
+            "RSA" => Self::Rsa,
+            "OKP" => Self::Okp,
+            _ => Self::Other(s),
+        })
+    }
+}
+
 /// A single JWK entry in a JWKS.
 #[derive(Debug, Deserialize)]
 pub struct JwkEntry {
-    /// Key type (e.g., "EC", "RSA", "OKP").
-    pub kty: String,
+    /// Key type (RFC 7517 §4.1).
+    pub kty: KeyType,
     /// Key ID (optional).
     #[serde(default)]
     pub kid: Option<String>,
@@ -334,7 +376,17 @@ pub fn jwks_has_fapi_allowed_key(jwks: &JwkSet) -> bool {
             return false;
         }
         let Some(alg) = key.alg.as_deref() else {
-            return matches!(key.kty.as_str(), "EC" | "RSA" | "OKP");
+            // An exhaustive match, not `matches!`: `matches!` isn't
+            // exhaustiveness-checked, so a `KeyType` variant added later
+            // without updating this arm would silently keep compiling here
+            // (unlike the exhaustive match in
+            // `jwt_bearer::jwks::build_decoding_key_from_jwk`, which would
+            // fail to compile until updated) instead of forcing the same
+            // explicit decision at both consumers.
+            return match key.kty {
+                KeyType::Ec | KeyType::Rsa | KeyType::Okp => true,
+                KeyType::Other(_) => false,
+            };
         };
         alg.parse::<JwsAlgorithm>()
             .is_ok_and(|parsed| JwsAlgorithm::FAPI_ALLOWED.contains(&parsed))
@@ -1482,6 +1534,32 @@ mod tests {
         assert!(
             parse_jwks_set(&missing_kty).is_err(),
             "kty is the only REQUIRED JWK member and must fail its absence"
+        );
+    }
+
+    #[test]
+    fn test_key_type_accepts_an_unrecognized_kty_registered_later_by_another_rfc() {
+        // "AKP" is a real, currently-registered IANA "kty" value (RFC 9964,
+        // "ML-DSA for JOSE and COSE") — chosen over a made-up string to
+        // prove the open-registry design against a genuine later addition,
+        // not just an arbitrary one this crate will never see.
+        let jwks = serde_json::json!({"keys": [{"kty": "AKP"}]});
+        let set = parse_jwks_set(&jwks).expect("an unrecognized kty must still parse");
+        assert_eq!(
+            set.keys.first().map(|k| &k.kty),
+            Some(&KeyType::Other("AKP".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_key_type_is_case_sensitive() {
+        // RFC 7517 §4.1 (quoted above): "The 'kty' value is a case-sensitive
+        // string" — "ec" is a different, unrecognized value, not `Ec`.
+        let jwks = serde_json::json!({"keys": [{"kty": "ec"}]});
+        let set = parse_jwks_set(&jwks).expect("valid JSON shape must still parse");
+        assert_eq!(
+            set.keys.first().map(|k| &k.kty),
+            Some(&KeyType::Other("ec".to_string()))
         );
     }
 
