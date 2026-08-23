@@ -7,7 +7,10 @@
 
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
-use crate::db::{AccessScope, Authenticator, OAuthClient, Session, TokenEndpointAuthMethod, User};
+use crate::db::{
+    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, Session, TokenEndpointAuthMethod,
+    User,
+};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
 use jiff::{Span, Timestamp};
@@ -177,6 +180,14 @@ pub struct AuthorizationCodeParams<'a> {
     /// in the id_token reflects the actual authentication event, not code issuance.
     /// When `None`, falls back to the code's `iat`.
     pub auth_time: Option<i64>,
+    /// RFC 9126: proof that the pushed authorization request backing this
+    /// authorization was consumed, or that the request was never pushed.
+    ///
+    /// Naming it here means every code-issuing flow has to say which case it
+    /// is in: a flow holding a `request_uri` can only obtain the proof from
+    /// [`ParConsumptionProof::consume`], so it cannot issue a code and leave
+    /// the `request_uri` replayable for the rest of its lifetime.
+    pub par: ParConsumptionProof,
 }
 
 /// Authorization request parameters (from query string).
@@ -665,6 +676,10 @@ pub async fn check_session_for_authorization(
 /// Stores the code hash in the database for single-use enforcement
 /// per RFC 6749 Section 10.5.
 ///
+/// `params.par` is the RFC 9126 chokepoint: the caller must supply a
+/// [`ParConsumptionProof`], so a pushed request reaches this function only
+/// after its `request_uri` has been consumed.
+///
 /// # Arguments
 /// * `state` - Application state
 /// * `params` - Parameters for the authorization code
@@ -678,6 +693,8 @@ pub async fn issue_authorization_code(
     state: &Arc<AppState>,
     params: AuthorizationCodeParams<'_>,
 ) -> ServiceResult<String> {
+    tracing::debug!(par = ?params.par, "PAR consumption proof consumed");
+
     let now = Timestamp::now();
     // Use the caller-supplied lifetime (FAPI 2.0 uses 60s, standard uses 300s).
     // Fallback to the supplied value if Span arithmetic overflows (shouldn't happen

@@ -290,6 +290,7 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
                 crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -375,6 +376,7 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
                 crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -462,6 +464,7 @@ async fn test_fapi2_dpop_code_binding_missing_dpop_at_token() {
                 crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -680,6 +683,7 @@ async fn test_fapi2_token_rejects_without_dpop() {
                 crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -771,6 +775,7 @@ async fn test_fapi2_non_fapi_client_standard_flow() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await

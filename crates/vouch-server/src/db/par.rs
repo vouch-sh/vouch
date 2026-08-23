@@ -188,77 +188,138 @@ pub enum ParConsumptionMode {
 
 /// Witness that a PAR record (RFC 9126) was atomically consumed by this
 /// caller. Construction is private to this module — the only path to an
-/// instance is a successful return from
-/// [`consume_pushed_authorization_request`], whose
+/// instance is a winning [`ParConsumptionProof::consume`], whose
 /// optimistic-concurrency `compare_and_update` guarantees that at most one
 /// concurrent caller succeeds. Holding a `ParStateClaim` is compile-time
 /// evidence that this caller's PAR consume "won" the OCC race.
 ///
-/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
-/// bound at the call site; today it is dropped immediately after
-/// consumption (the immediate consumer issues an auth code rather than a
-/// token), but the type exists so future code can require it as a
-/// precondition for PAR-derived downstream operations.
+/// Intentionally not `Clone`. The witness is carried by
+/// [`ParConsumptionProof`], which authorization-code issuance requires, so
+/// a flow that turns a pushed request into a code cannot leave the
+/// `request_uri` replayable for the rest of its lifetime.
 #[must_use = "the PAR record was atomically consumed; bind this witness so \
-              future code can require it as a precondition"]
+              authorization-code issuance can require it as a precondition"]
 #[derive(Debug)]
 pub struct ParStateClaim {
     _private: (),
 }
 
-/// Consume a pushed authorization request (single-use).
+/// The pushed authorization request an authorization flow is completing.
 ///
-/// On success returns a [`ParStateClaim`] witness — proof that this caller
-/// won the optimistic-concurrency consume. On any "lost" case (PAR not
-/// found, client_id mismatch, already consumed, or expired when expiry is
-/// enforced) returns [`ClaimError::AlreadyConsumed`]. These cases are
-/// deliberately indistinguishable from the caller's perspective: each is
-/// rejected as an invalid request_uri.
+/// Names the record to consume (RFC 9126 Section 2.2) together with the
+/// client it was issued to (Section 2.3) and the expiry policy that applies
+/// at consume time.
+#[derive(Debug, Clone, Copy)]
+pub struct ParRef<'a> {
+    /// The `request_uri` the client presented at the authorization endpoint.
+    pub request_uri: &'a str,
+    /// The client the `request_uri` was issued to.
+    pub client_id: &'a str,
+    /// Whether the PAR lifetime is still enforced for this consume.
+    pub mode: ParConsumptionMode,
+}
+
+/// Proof that the single-use obligation attached to an authorization request
+/// has been discharged: either the request never went through the PAR
+/// endpoint, or its record was consumed by this caller.
 ///
-/// # Client Binding
+/// Required by
+/// [`issue_authorization_code`](crate::services::oidc::authorization::issue_authorization_code).
+/// [`Self::consume`] is the only constructor that accepts a pushed request,
+/// and it carries the [`ParStateClaim`] the consume produced — so a code
+/// cannot be issued for a pushed request while its `request_uri` is still
+/// replayable for the rest of its lifetime.
 ///
-/// RFC 9126 Section 2.3: The authorization server MUST validate that the
-/// `client_id` form parameter matches the `client_id` that was used when
-/// the `request_uri` was created.
-pub async fn consume_pushed_authorization_request(
-    store: &DocumentStore,
-    request_uri: &str,
-    client_id: &str,
-    mode: ParConsumptionMode,
-) -> std::result::Result<ParStateClaim, ClaimError> {
-    let now = Timestamp::now();
+/// RFC 9126 Section 2.2 describes the reference:
+///
+/// > This URI is a single-use reference to the respective request data in
+/// > the subsequent authorization request.
+///
+/// and Section 7.3 states the requirement as a SHOULD:
+///
+/// > An attacker could replay a request URI captured from a legitimate
+/// > authorization request.  In order to cope with such attacks, the
+/// > authorization server SHOULD make the request URIs one-time use.
+#[must_use = "the proof was constructed to authorize a single code issuance; \
+              dropping it without calling issue_authorization_code is a bug"]
+#[derive(Debug)]
+pub struct ParConsumptionProof {
+    /// Held rather than dropped: the witness is the evidence this proof
+    /// asserts. `None` when the request was never pushed.
+    _claim: Option<ParStateClaim>,
+}
 
-    let doc = store
-        .find_one::<PushedAuthorizationRequestDoc>("request_uri", request_uri)
-        .await
-        .map_err(|e| ClaimError::Database(e.to_string()))?;
+impl ParConsumptionProof {
+    /// Consume the pushed authorization request backing this authorization.
+    ///
+    /// Consumption is single-use. Every "lost" case — record not found,
+    /// `client_id` mismatch, already consumed, or expired when expiry is
+    /// enforced — returns [`ClaimError::AlreadyConsumed`]. These are
+    /// deliberately indistinguishable from the caller's perspective: each is
+    /// rejected as an invalid `request_uri`.
+    ///
+    /// # Client Binding
+    ///
+    /// RFC 9126 Section 2.3: The authorization server MUST validate that the
+    /// `client_id` form parameter matches the `client_id` that was used when
+    /// the `request_uri` was created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClaimError::AlreadyConsumed`] when the record cannot be
+    /// claimed, and [`ClaimError::Database`] on a storage failure.
+    pub async fn consume(
+        store: &DocumentStore,
+        par: ParRef<'_>,
+    ) -> std::result::Result<Self, ClaimError> {
+        let now = Timestamp::now();
 
-    let Some(doc) = doc else {
-        return Err(ClaimError::AlreadyConsumed);
-    };
+        let doc = store
+            .find_one::<PushedAuthorizationRequestDoc>("request_uri", par.request_uri)
+            .await
+            .map_err(|e| ClaimError::Database(e.to_string()))?;
 
-    if doc.data.client_id != client_id || doc.data.consumed_at.is_some() {
-        return Err(ClaimError::AlreadyConsumed);
+        let Some(doc) = doc else {
+            return Err(ClaimError::AlreadyConsumed);
+        };
+
+        if doc.data.client_id != par.client_id || doc.data.consumed_at.is_some() {
+            return Err(ClaimError::AlreadyConsumed);
+        }
+
+        if par.mode == ParConsumptionMode::EnforceExpiry && doc.data.expires_at <= now {
+            return Err(ClaimError::AlreadyConsumed);
+        }
+
+        // Atomic consume via optimistic concurrency. If a concurrent caller
+        // already consumed this PAR between our read and write,
+        // compare_and_update returns false (version mismatch) — that caller
+        // wins the race and we report AlreadyConsumed.
+        let mut data = doc.data;
+        data.consumed_at = Some(now);
+        let won = store
+            .compare_and_update(&doc.id, doc.version, &data)
+            .await
+            .map_err(|e| ClaimError::Database(e.to_string()))?;
+        if won {
+            Ok(Self {
+                _claim: Some(ParStateClaim { _private: () }),
+            })
+        } else {
+            Err(ClaimError::AlreadyConsumed)
+        }
     }
 
-    if mode == ParConsumptionMode::EnforceExpiry && doc.data.expires_at <= now {
-        return Err(ClaimError::AlreadyConsumed);
-    }
-
-    // Atomic consume via optimistic concurrency. If a concurrent caller
-    // already consumed this PAR between our read and write,
-    // compare_and_update returns false (version mismatch) — that caller
-    // wins the race and we report AlreadyConsumed.
-    let mut data = doc.data;
-    data.consumed_at = Some(now);
-    let won = store
-        .compare_and_update(&doc.id, doc.version, &data)
-        .await
-        .map_err(|e| ClaimError::Database(e.to_string()))?;
-    if won {
-        Ok(ParStateClaim { _private: () })
-    } else {
-        Err(ClaimError::AlreadyConsumed)
+    /// Evidence that the authorization request carried no `request_uri`, so
+    /// there is no PAR record to consume.
+    ///
+    /// Use **only** where the request demonstrably did not come through the
+    /// PAR endpoint. Adding new call sites is an audit-relevant decision:
+    /// grep for this constructor before merging any change that introduces a
+    /// new caller — a flow that reaches code issuance holding a `request_uri`
+    /// must call [`Self::consume`] instead.
+    pub fn not_pushed() -> Self {
+        Self { _claim: None }
     }
 }
 

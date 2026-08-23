@@ -999,6 +999,7 @@ async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() 
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1081,6 +1082,7 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1382,6 +1384,7 @@ async fn test_rfc9449_token_public_client_dpop_use_dpop_nonce() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1453,6 +1456,7 @@ async fn test_rfc9449_token_confidential_client_requires_client_auth_with_dpop()
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1536,6 +1540,7 @@ async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
