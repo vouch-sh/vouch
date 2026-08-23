@@ -17,6 +17,47 @@ use std::path::Path;
 
 use super::kms_signer::KmsSignerEd25519;
 
+/// A CA private key that has been checked to be Ed25519.
+///
+/// Vouch's SSH CA issues `ssh-ed25519` certificates only, and the KMS
+/// variant is Ed25519 by construction. [`Ed25519CaKey::new`] is the sole
+/// way to build one and rejects every other algorithm, so [`SshCa::Local`]
+/// cannot be assembled around an RSA key: the wrong algorithm stops at load
+/// with an operator-facing error instead of failing later or producing a
+/// certificate the rest of the system does not expect.
+pub(crate) struct Ed25519CaKey(Box<PrivateKey>);
+
+impl Ed25519CaKey {
+    /// Wrap `key`, rejecting any algorithm other than Ed25519.
+    ///
+    /// # Errors
+    /// Returns an error naming the offending algorithm when `key` is not
+    /// Ed25519.
+    fn new(key: PrivateKey) -> Result<Self> {
+        let algorithm = key.algorithm();
+        if algorithm != Algorithm::Ed25519 {
+            bail!(
+                "SSH CA key must be Ed25519, but the supplied key is {}. \
+                 Vouch issues ssh-ed25519 certificates only — regenerate the \
+                 CA key with `ssh-keygen -t ed25519`.",
+                algorithm.as_str()
+            );
+        }
+        Ok(Self(Box::new(key)))
+    }
+
+    /// The CA public key.
+    fn public_key(&self) -> &PublicKey {
+        self.0.public_key()
+    }
+}
+
+impl AsRef<PrivateKey> for Ed25519CaKey {
+    fn as_ref(&self) -> &PrivateKey {
+        &self.0
+    }
+}
+
 /// SSH Certificate Authority.
 ///
 /// Supports two modes:
@@ -26,7 +67,7 @@ pub(crate) enum SshCa {
     /// Local Ed25519 private key for signing certificates.
     Local {
         /// CA private key for signing certificates.
-        private_key: Box<PrivateKey>,
+        private_key: Ed25519CaKey,
         /// Relying party ID (used in certificate key ID).
         rp_id: String,
     },
@@ -49,6 +90,7 @@ impl SshCa {
             super::pem::decode_base64_pem(pem_content).context("Failed to decode SSH CA key")?;
         let private_key = PrivateKey::from_openssh(pem.trim())
             .map_err(|e| anyhow::anyhow!("Failed to parse SSH CA key from PEM: {e}"))?;
+        let private_key = Ed25519CaKey::new(private_key)?;
 
         tracing::info!(
             "SSH CA loaded from PEM: {}",
@@ -59,7 +101,7 @@ impl SshCa {
         );
 
         Ok(Self::Local {
-            private_key: Box::new(private_key),
+            private_key,
             rp_id: rp_id.to_string(),
         })
     }
@@ -91,7 +133,7 @@ impl SshCa {
         };
 
         Ok(Self::Local {
-            private_key: Box::new(private_key),
+            private_key,
             rp_id: rp_id.to_string(),
         })
     }
@@ -125,15 +167,16 @@ impl SshCa {
     }
 
     /// Load an existing private key from file.
-    fn load_private_key(path: &Path) -> Result<PrivateKey> {
+    fn load_private_key(path: &Path) -> Result<Ed25519CaKey> {
         let key_data = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read SSH CA key from {}", path.display()))?;
-        PrivateKey::from_openssh(&key_data)
-            .map_err(|e| anyhow::anyhow!("Failed to parse SSH CA key: {e}"))
+        let key = PrivateKey::from_openssh(&key_data)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SSH CA key: {e}"))?;
+        Ed25519CaKey::new(key).with_context(|| format!("SSH CA key at {}", path.display()))
     }
 
     /// Generate a new Ed25519 keypair and save it.
-    fn create_and_save_key(path: &Path, rp_id: &str) -> Result<PrivateKey> {
+    fn create_and_save_key(path: &Path, rp_id: &str) -> Result<Ed25519CaKey> {
         tracing::info!("Generating new SSH CA keypair at {}", path.display());
 
         // Generate new Ed25519 keypair
@@ -186,7 +229,7 @@ impl SshCa {
         std::fs::write(&pub_path, pub_key_str)
             .with_context(|| format!("Failed to write CA public key to {}", pub_path.display()))?;
 
-        Ok(private_key)
+        Ed25519CaKey::new(private_key)
     }
 
     /// Get the CA public key in OpenSSH format.
@@ -297,7 +340,9 @@ impl SshCa {
             .extension("permit-user-rc", "")
             .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
 
-        // Sign the certificate — both variants produce ssh-ed25519 certificates
+        // Sign the certificate. Both variants produce ssh-ed25519
+        // certificates: `Ed25519CaKey` constrains the local key, and the KMS
+        // signer is Ed25519 by construction.
         let certificate = match self {
             Self::Local { private_key, .. } => builder
                 .sign(private_key.as_ref())
@@ -367,6 +412,8 @@ pub(crate) struct SignedCertificate {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -402,7 +449,7 @@ mod tests {
     fn test_serial_is_full_64bit_random() {
         let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let ca = SshCa::Local {
-            private_key: Box::new(ca_key),
+            private_key: Ed25519CaKey::new(ca_key).unwrap(),
             rp_id: "test.example.com".to_string(),
         };
 
@@ -439,7 +486,7 @@ mod tests {
         // Generate a CA keypair
         let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let ca = SshCa::Local {
-            private_key: Box::new(ca_key),
+            private_key: Ed25519CaKey::new(ca_key).unwrap(),
             rp_id: "test.example.com".to_string(),
         };
 
@@ -470,5 +517,103 @@ mod tests {
                 "Missing expected extension: {ext}"
             );
         }
+    }
+
+    /// Build a syntactically valid RSA private key without embedding real key
+    /// material. `TryFrom<KeypairData>` derives the public half and does not
+    /// validate RSA arithmetic, so arbitrary `Mpint` values are enough to
+    /// exercise an algorithm check.
+    fn rsa_private_key() -> PrivateKey {
+        use ssh_key::Mpint;
+        use ssh_key::private::{KeypairData, RsaKeypair, RsaPrivateKey};
+        use ssh_key::public::RsaPublicKey;
+
+        let mpint = |b: &[u8]| Mpint::from_positive_bytes(b).unwrap();
+        let keypair = RsaKeypair {
+            public: RsaPublicKey {
+                e: mpint(&[0x01, 0x00, 0x01]),
+                n: mpint(&[0xC0; 256]),
+            },
+            private: RsaPrivateKey {
+                d: mpint(&[0x11; 256]),
+                iqmp: mpint(&[0x22; 128]),
+                p: mpint(&[0x33; 128]),
+                q: mpint(&[0x44; 128]),
+            },
+        };
+        PrivateKey::new(KeypairData::Rsa(keypair), "rsa-test").unwrap()
+    }
+
+    /// The SSH CA is Ed25519-only. `ssh-key` parses RSA keys happily, so
+    /// without an explicit check an RSA CA key reaches certificate signing.
+    #[test]
+    fn test_ca_key_rejects_rsa() {
+        let err = Ed25519CaKey::new(rsa_private_key())
+            .err()
+            .expect("an RSA key must not be accepted as an SSH CA key")
+            .to_string();
+
+        assert!(
+            err.contains("ssh-rsa"),
+            "error must name the offending algorithm: {err}"
+        );
+        assert!(
+            err.contains("Ed25519"),
+            "error must name the expected algorithm: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ca_key_accepts_ed25519() {
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        assert!(Ed25519CaKey::new(key).is_ok());
+    }
+
+    /// `VOUCH_SSH_CA_KEY` (PEM content) is an operator-supplied path into the
+    /// CA, so the rejection must happen at load rather than at signing time.
+    #[test]
+    fn test_from_pem_rejects_rsa() {
+        let pem = rsa_private_key().to_openssh(LineEnding::LF).unwrap();
+        let err = SshCa::from_pem(&pem, "test.example.com")
+            .err()
+            .expect("from_pem must reject a non-Ed25519 CA key")
+            .to_string();
+        assert!(err.contains("ssh-rsa"), "{err}");
+    }
+
+    /// The key-file path is the other operator-supplied entry point.
+    #[test]
+    fn test_load_or_create_rejects_rsa_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca_key");
+        let pem = rsa_private_key().to_openssh(LineEnding::LF).unwrap();
+        std::fs::write(&path, pem.as_bytes()).unwrap();
+
+        let err = SshCa::load_or_create(&path, "test.example.com")
+            .err()
+            .expect("a non-Ed25519 key file must be rejected at load")
+            .to_string();
+        assert!(
+            err.contains(&path.display().to_string()),
+            "error must name the offending file: {err}"
+        );
+    }
+
+    /// Generating a fresh CA still yields a usable Ed25519 key.
+    #[test]
+    fn test_load_or_create_generates_ed25519() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca_key");
+
+        let ca = SshCa::load_or_create(&path, "test.example.com").unwrap();
+        match &ca {
+            SshCa::Local { private_key, .. } => {
+                assert_eq!(private_key.as_ref().algorithm(), Algorithm::Ed25519);
+            }
+            SshCa::Kms { .. } => panic!("expected a Local CA"),
+        }
+
+        // Reloading the key just written must also pass the algorithm check.
+        assert!(SshCa::load_or_create(&path, "test.example.com").is_ok());
     }
 }
