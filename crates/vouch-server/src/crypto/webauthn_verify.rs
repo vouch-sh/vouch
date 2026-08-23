@@ -28,7 +28,7 @@ use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
 
-use super::cose;
+use super::{cose, oid};
 use thiserror::Error;
 use vouch_common::protocol;
 
@@ -782,20 +782,13 @@ fn verify_attestation_sig_with_leaf_cert(
     // Determine algorithm from the certificate's public key algorithm OID
     let pk_alg_oid = spki.algorithm.oid;
 
-    // EC public key OID: 1.2.840.10045.2.1
-    const EC_PUBLIC_KEY: const_oid::ObjectIdentifier =
-        const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
-    // RSA encryption OID: 1.2.840.113549.1.1.1
-    const RSA_ENCRYPTION: const_oid::ObjectIdentifier =
-        const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
-
-    if pk_alg_oid == EC_PUBLIC_KEY {
+    if pk_alg_oid == oid::public_key::EC {
         let pk = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, pk_bytes);
         pk.verify(message, sig).map_err(|e| {
             tracing::warn!("Leaf cert ECDSA verification failed: {e}");
             VerifyError::SignatureInvalid
         })
-    } else if pk_alg_oid == RSA_ENCRYPTION {
+    } else if pk_alg_oid == oid::public_key::RSA {
         let pk =
             signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, pk_bytes);
         pk.verify(message, sig).map_err(|e| {

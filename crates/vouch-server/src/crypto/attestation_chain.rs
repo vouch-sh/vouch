@@ -7,6 +7,7 @@
 
 use std::sync::LazyLock;
 
+use super::oid;
 use aws_lc_rs::signature;
 use const_oid::ObjectIdentifier;
 use der::{Decode, DecodePem};
@@ -39,9 +40,8 @@ const YUBICO_CA_1_PEM: &str = include_str!("../../root_certs/yubico-ca-1.pem");
 // OID Constants
 // ============================================================================
 
-/// FIDO2 AAGUID extension OID (1.3.6.1.4.1.45724.1.1.4).
-/// Contains a 16-byte AAGUID wrapped in an OCTET STRING.
-const OID_FIDO_AAGUID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
+/// FIDO2 AAGUID extension OID (WebAuthn Level 2 Section 8.2.1).
+const OID_FIDO_AAGUID: ObjectIdentifier = oid::extension::FIDO_GEN_CE_AAGUID;
 
 // ============================================================================
 // Error & Result Types
@@ -213,31 +213,25 @@ fn verify_cert_signature(
     // Determine the signature algorithm from the certificate
     let alg_oid = subject.signature_algorithm.oid;
 
-    // OIDs for supported signature algorithms
-    const ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
-    const RSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
-    const RSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12");
-    const RSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13");
-
-    if alg_oid == ECDSA_SHA256 {
+    if alg_oid == oid::signature::ECDSA_SHA256 {
         let pk = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, pk_bytes);
         pk.verify(&tbs_bytes, sig_bytes)
             .map_err(|e| AttestationChainError::SignatureInvalid(format!("ECDSA-SHA256: {e}")))
-    } else if alg_oid == RSA_SHA256 {
+    } else if alg_oid == oid::signature::RSA_SHA256 {
         verify_rsa_signature(
             &signature::RSA_PKCS1_2048_8192_SHA256,
             pk_bytes,
             &tbs_bytes,
             sig_bytes,
         )
-    } else if alg_oid == RSA_SHA384 {
+    } else if alg_oid == oid::signature::RSA_SHA384 {
         verify_rsa_signature(
             &signature::RSA_PKCS1_2048_8192_SHA384,
             pk_bytes,
             &tbs_bytes,
             sig_bytes,
         )
-    } else if alg_oid == RSA_SHA512 {
+    } else if alg_oid == oid::signature::RSA_SHA512 {
         verify_rsa_signature(
             &signature::RSA_PKCS1_2048_8192_SHA512,
             pk_bytes,

@@ -13,6 +13,7 @@ pub mod hash;
 pub(crate) mod jwt;
 pub mod keys;
 pub(crate) mod kms_signer;
+pub(crate) mod oid;
 pub(crate) mod pem;
 pub(crate) mod ssh_ca;
 pub(crate) mod tpm_decrypt;
