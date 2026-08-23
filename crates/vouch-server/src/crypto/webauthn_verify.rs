@@ -15,11 +15,14 @@
 //! The [`CoseVerifier`] trait allows injecting test implementations for integration
 //! testing without requiring real cryptographic keys.
 //!
-//! # Type Safety
+//! # Inputs are untyped byte slices
 //!
-//! This module provides both untyped (`&[u8]`) and typed (`Encoded<T, E>`) interfaces.
-//! The typed interfaces use compile-time markers to prevent mixing up different
-//! binary data types (e.g., passing a credential_id where a signature is expected).
+//! Verification takes `&[u8]`. Callers hold
+//! [`vouch_common::encoding::Encoded<T, E>`], whose compile-time markers keep
+//! a credential ID from being passed where a signature belongs, but they decode
+//! before calling in — this module never sees the marker. Extending the typed
+//! representation inward would only pay off alongside the browser WebAuthn
+//! request types, which are still `String`; that migration is tracked in #1037.
 
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
@@ -336,13 +339,26 @@ fn verify_assertion_inner<V: CoseVerifier>(
 
     // 5. Verify counter is increasing.
     //
-    // Per WebAuthn Level 2 §6.1.1, a value of `authData.signCount <=
-    // storedSignCount` is a cloning signal whenever *either* value is nonzero.
-    // We therefore reject as soon as the *stored* counter is nonzero and the
-    // presented counter does not strictly increase — including a regression to
-    // zero. A credential that has ever reported a nonzero counter may never go
-    // backwards (YubiKeys always increment), so a zero arriving after a nonzero
-    // stored value is unambiguous evidence of cloning or forgery.
+    // WebAuthn Level 2 Section 6.1.1: "In subsequent authenticatorGetAssertion
+    // operations, the Relying Party compares the stored signature counter
+    // value with the new signCount value returned in the assertion's
+    // authenticator data. If either is non-zero, and the new signCount value
+    // is less than or equal to the stored value, a cloned authenticator may
+    // exist, or the authenticator may be malfunctioning."
+    //
+    // Rejecting is our choice, not the specification's. Section 7.2 leaves it
+    // open: "Whether the Relying Party updates storedSignCount in this case,
+    // or not, or fails the authentication ceremony or not, is Relying
+    // Party-specific." A malfunctioning authenticator is as consistent with
+    // the observation as a cloned one; we decline to distinguish them and fail
+    // closed, because this is a hardware-backed credential system where a
+    // counter regression should stop the ceremony rather than feed a risk
+    // score.
+    //
+    // The condition below reads `stored_counter != 0` where the specification
+    // says "either is non-zero". The two agree: the only case they treat
+    // differently is a nonzero presented counter against a zero stored
+    // counter, which cannot also satisfy `counter <= stored_counter`.
     //
     // Credentials that have only ever reported zero (counter-less
     // authenticators, e.g. some CTAP1 devices) keep `stored_counter == 0` and
