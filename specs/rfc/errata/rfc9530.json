@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "8158",
+    "doc-id": "RFC9530",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "B.2",
+    "orig_text": "Figure 14: Response with Both Content-Digest\r\n and Digest (Empty Content)\r\n\r\n",
+    "correct_text": "Figure 14: Response with Both Content-Digest \r\n and Repr-Digest (Empty Content)\r\n\r\n",
+    "notes": "Minor Editorial correction",
+    "submit_date": "2024-10-24",
+    "submitter_name": "Hugo Gonzalez Labrador",
+    "verifier_id": "",
+    "verifier_name": "Francesca Palombini",
+    "update_date": "2024-10-29 14:24:45"
+  },
+  {
+    "errata_id": "8273",
+    "doc-id": "RFC9530",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "Appendix A",
+    "orig_text": "These examples a not exhaustive.",
+    "correct_text": "These examples are not exhaustive.",
+    "notes": "This is a simple grammatical editorial issue.",
+    "submit_date": "2025-01-30",
+    "submitter_name": "Lucas Pardue",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2025-02-06 15:43:19"
+  },
+  {
+    "errata_id": "8890",
+    "doc-id": "RFC9530",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "B.4.",
+    "orig_text": "8B 08 80 7B 22 68 65 6C 6C 6F\r\n22 3A 20 22 77 6F 72 6C 64 22\r\n7D 0A 03",
+    "correct_text": "0B 09 80 7B 22 68 65 6C 6C 6F\r\n22 3A 20 22 77 6F 72 6C 64 22\r\n7D 0A 03",
+    "notes": "The Brotli representation provided in the examples in B.4 (Figure 18) and B.6 (Figure 21) aren't valid. Trying to decompress them via Node.js' zlib package and the brotli CLI fails:\r\n\r\n```\r\n$ node -e \"require('zlib').brotliDecompressSync(Buffer.from('8b08807b2268656c6c6f223a2022776f726c64227d0a03','hex'))\"\r\nnode:zlib:432\r\n      throw self[kError];\r\n      ^\r\n\r\nError: unexpected end of file\r\n  [...]\r\n  code: 'Z_BUF_ERROR'\r\n}\r\n```\r\n\r\n```\r\n$ echo 8b08807b2268656c6c6f223a2022776f726c64227d0a03 | xxd -r -p | brotli -d -c\r\ncorrupt input [con]\r\n```\r\n\r\nIn addition, the SHA-256 over the bytes in the original text is MklYnI/SsUF/5X7enJ2TU+DFjodRObdKLFaPPLe/Kcw=, not d435Qo+nKZ+gLcUHn7GQtQ72hiBVAgqoLsZnZPiTGPk= as used by the RFC in the Repr-Digest header field. The SHA-512 digest in Figure 21 is similarly incorrect.\r\n\r\nThe correct text only differs in the first two bytes. With this change, the response content is a valid Brotli compression of `{\"hello\": \"world\"}\\n`. The SHA-256 and SHA-512 digests in the Repr-Digest header fields then also match the representation's digests.",
+    "submit_date": "2026-04-25",
+    "submitter_name": "Marius Kleidl",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  }
+]

@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "5067",
+    "doc-id": "RFC7239",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "GLOBAL",
+    "orig_text": "proxy",
+    "correct_text": "message-forwarding agent",
+    "notes": "According to RFC 7230 Section 2.3, an HTTP \"proxy\" is a message-forwarding agent that is selected by the client. But this specification (as is clear from Section 1) uses the word \"proxy\" to refer also to message-forwarding agents that are *not* selected by the client.",
+    "submit_date": "2017-07-12",
+    "submitter_name": "Vasiliy Faronov",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "5275",
+    "doc-id": "RFC7239",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "4",
+    "orig_text": "Forwarded   = 1#forwarded-element\r\n",
+    "correct_text": "Forwarded   = forwarded-element *(OWS \",\" OWS forwarded-element)\r\nOWS = <Defined in [RFC7230], Section 3.2.3>\r\n",
+    "notes": "Currently the only mention of commas in the RFC is in the text:\r\n\r\n> A proxy server that wants to add a new \"Forwarded\" header field value can either append it to the last existing \"Forwarded\" header field after a comma separator or add a new field at the end of the header block.\r\n\r\nThis should be reflected in the ABNF.  The original ABNF suggests you just smash the forwarded-elements together with no delimiters.",
+    "submit_date": "2018-03-06",
+    "submitter_name": "W. Trevor King",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "7973",
+    "doc-id": "RFC7239",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "4",
+    "orig_text": "       Forwarded: for=\"_gazonk\"\r\n       Forwarded: For=\"[2001:db8:cafe::17]:4711\"",
+    "correct_text": "       Forwarded: for=\"_gazonk\"\r\n       Forwarded: for=\"[2001:db8:cafe::17]:4711\"",
+    "notes": "having an example that shows the parameter capitalized indicates that this would be acceptable usage, but nowhere else in the document indicates or implies that this parameter can be capitalized.\n --VERIFIER NOTES-- \n>    The top-level list is represented as a list of HTTP header\r\n>    field-values as defined in Section 3.2 of [RFC7230].  The first\r\n>    element in this list holds information added by the first proxy that\r\n>    implements and uses this header field, and each subsequent element\r\n>    holds information added by each subsequent proxy.  Because this\r\n>    header field is optional, any proxy in the chain may choose not to\r\n>    update this header field.  Each field-value is a semicolon-separated\r\n>    list; this sublist consists of parameter-identifier pairs.\r\n>    Parameter-identifier pairs are grouped together by an equals sign.\r\n>    Each parameter MUST NOT occur more than once per field-value.  The\r\n>    parameter names are case-insensitive.  The header field value can be\r\n>    defined in ABNF syntax as:\r\n\r\n\"The parameter names are case-insensitive\".",
+    "submit_date": "2024-06-07",
+    "submitter_name": "Kevin W. Finkenbinder",
+    "verifier_id": "",
+    "verifier_name": "Orie Steele",
+    "update_date": "2024-06-19 14:32:40"
+  }
+]

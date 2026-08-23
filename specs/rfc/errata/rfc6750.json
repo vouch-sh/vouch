@@ -1,0 +1,62 @@
+[
+  {
+    "errata_id": "6161",
+    "doc-id": "RFC6750",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Editorial",
+    "section": "4",
+    "orig_text": "4.  Example Access Token Response\r\n\r\n   Typically, a bearer token is returned to the client as part of an\r\n   OAuth 2.0 [RFC6749] access token response.  An example of such a\r\n   response is:\r\n\r\n     HTTP/1.1 200 OK\r\n     Content-Type: application/json;charset=UTF-8",
+    "correct_text": "4.  Example Access Token Response\r\n\r\n   Typically, a bearer token is returned to the client as part of an\r\n   OAuth 2.0 [RFC6749] access token response.  An example of such a\r\n   response is:\r\n\r\n     HTTP/1.1 200 OK\r\n     Content-Type: application/json",
+    "notes": "The IANA registration (see https://tools.ietf.org/html/rfc8259#section-11) does not support any parameters for the `application/json` media type. The `charset=UTF-8` parameter used in the example is therefore non-compliant and ought to be omitted.",
+    "submit_date": "2020-05-08",
+    "submitter_name": "Herbert Valerio Riedel",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  },
+  {
+    "errata_id": "5335",
+    "doc-id": "RFC6750",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "2.1",
+    "orig_text": "b64token",
+    "correct_text": "token68",
+    "notes": "Usage of b64token is confusing. Definition is self explanatory but could be easily confused with Base64.\r\n\r\nRFC7235 defines token68. Following some old RFC draft discussions (http://w3-org.9356.n7.nabble.com/p7-rename-b64token-to-token68-to-avoid-misunderstandings-td108256.html) I found that b64token was renamed to token68.\r\n\r\nI believe it's appropriate to use naming of token68 (instead of b64token) in RFC6750. So that it is less confusing as well as refers to an existing standard.",
+    "submit_date": "2018-04-26",
+    "submitter_name": "Kavindu Dodanduwa",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "9053",
+    "doc-id": "RFC6750",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "5.1",
+    "orig_text": "Content-Type: application/json;charset=UTF-8",
+    "correct_text": "Content-Type: application/json",
+    "notes": "JSON’s media type does not allow parameters (RFC 8259).\r\nThe example in RFC 6750 incorrectly uses:\r\n\r\nCode\r\napplication/json;charset=UTF-8\r\nStrict OAuth clients perform exact string equality when validating token responses. Because JSON forbids parameters, the charset version is treated as an unknown media type, causing token parsing to fail.\r\n\r\nThis behavior matches the failure mode described in Errata 6161.",
+    "submit_date": "2026-08-02",
+    "submitter_name": "Jen Kinder",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2026-08-03 16:35:07"
+  },
+  {
+    "errata_id": "9054",
+    "doc-id": "RFC6750",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "5.1",
+    "orig_text": "Code\r\nContent-Type: application/json;charset=UTF-8",
+    "correct_text": "Code\r\nContent-Type: application/json",
+    "notes": "JSON’s media type does not allow parameters (RFC 8259).\r\nThe example in RFC 6750 incorrectly uses:\r\n\r\nCode\r\napplication/json;charset=UTF-8\r\nStrict OAuth clients perform exact string equality when validating token responses. \r\nBecause JSON forbids parameters, the charset version is treated as an unknown \r\nmedia type, causing token parsing to fail.\r\n\r\nThis behavior matches the failure mode described in Errata 6161.",
+    "submit_date": "2026-08-02",
+    "submitter_name": "Jen Kinder",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2026-08-03 16:37:57"
+  }
+]

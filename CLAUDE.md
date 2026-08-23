@@ -20,6 +20,7 @@ vouch/
 │   └── vouch-tests/      # Integration + property-based tests
 ├── fuzz/                 # libfuzzer targets: BER, attestation objects, COSE keys, HTTP sigs
 ├── docs/                 # Internal sysadmin/operations mdBook — how to run the Vouch server; NOT public/end-user docs (build with `make docs-build`)
+├── specs/                # Cached text of every spec we implement — grep this before WebFetch (see specs/README.md)
 └── packaging/            # AMI and post-install scripts
 ```
 
@@ -310,6 +311,7 @@ cargo test --features yubikey-tests -- --ignored
 | FAPI client (CLI) | `crates/vouch-cli/src/fapi/` (key.rs, dpop.rs, client_assertion.rs, registration.rs) |
 | Integration tests | `crates/vouch-tests/tests/` |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
+| Cached spec text | `specs/` (roster: `specs/manifest.tsv`, errata: `specs/rfc/errata/`) |
 
 ## Key Design Decisions
 
@@ -332,7 +334,12 @@ Before implementing a feature:
 
 ## External Resources
 
-**Specifications:**
+**Specifications:** every document below is cached in `specs/` — grep it before
+fetching. Files under `specs/rfc/` and the `.txt` entries in `specs/openid/` are
+byte-identical to their origins and can be quoted directly; converted files
+(WebAuthn, CTAP, FAPI, JARM, SAML) carry a banner saying so. Refresh with
+`scripts/refresh-specs.sh`; see `specs/README.md`.
+
 - [FIDO2/CTAP2](https://fidoalliance.org/specs/fido-v2.0-ps-20190130/fido-client-to-authenticator-protocol-v2.0-ps-20190130.html)
 - [WebAuthn Level 2](https://www.w3.org/TR/webauthn-2/)
 - [RFC 6749 - OAuth 2.0](https://www.rfc-editor.org/rfc/rfc6749)

@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "8572",
+    "doc-id": "RFC1866",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Technical",
+    "section": "8.2.2",
+    "orig_text": "To process a form whose action URL is an HTTP URL and whose method is\r\n`GET', the user agent starts with the action URI and appends a `?'\r\nand the form data set (...)",
+    "correct_text": "To process a form whose action URL is an HTTP URL and whose method is\r\n`GET', the user agent adds the form data set to the [query of] action URI.",
+    "notes": "I think the original authors had in mind to \"add\" the form data set to the action URI, but as specified it \"replaces\" any existing query parameters.\r\nMaybe the authors focused on the syntax of specifying the query part more than on the aspect of how to add query parameters semantically.\r\nProbably 30 years ago nobody had in mind that the action URI could be a parameter-driven CGI script like http://server.domain.org/example/api?fn=10&um=1 where the \"fn\" parameter specifies the action to take (and other parameters specify further details).\r\nHaving to add hidden form fields just to carry parameters to the action URL seems ugly today.\r\nI'm aware that this change will cause incompatibilities also affecting https://www.w3.org/TR/html401/interact/forms.html#h-17.13.3.4, but if the form action is an URI it should be a complete URI. Section 8.1.1 also states \" ACTION specifies the action URI for the form.\". It does not specify that the query part might be ignored.\r\nAt least some clarification should be added.\r\nSee also https://stackoverflow.com/q/1116019/6607497",
+    "submit_date": "2025-09-12",
+    "submitter_name": "Ulrich Windl",
+    "verifier_id": "",
+    "verifier_name": "Andy Newton",
+    "update_date": "2025-11-01 19:07:15"
+  }
+]

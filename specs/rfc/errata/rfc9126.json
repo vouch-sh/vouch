@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "7410",
+    "doc-id": "RFC9126",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "1.1",
+    "orig_text": "Uses \"urn:example:bwc4JK-ESC0w8acc191e-Y1LTC2\" in two examples.",
+    "correct_text": "Use \"urn:ietf:params:oauth:request_uri:bwc4JK-ESC0w8acc191e-Y1LTC2\"\r\ninstead.",
+    "notes": "Some may find the use of \"urn:example:\" a bit misleading.",
+    "submit_date": "2023-03-31",
+    "submitter_name": "Andrii Deinega",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2023-04-26 00:42:58"
+  },
+  {
+    "errata_id": "7254",
+    "doc-id": "RFC9126",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "1.1",
+    "orig_text": "POST /as/par HTTP/1.1\r\nHost: as.example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n&response_type=code\r\n&client_id=CLIENT1234&state=duk681S8n00GsJpe7n9boxdzen\r\n<...>",
+    "correct_text": "POST /as/par HTTP/1.1\r\nHost: as.example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nresponse_type=code\r\n&client_id=CLIENT1234&state=duk681S8n00GsJpe7n9boxdzen\r\n<...>",
+    "notes": "In the 'Introductory Example', the POST body to the par endpoint contains an unnecessary '&' at the start. (It's perhaps technically valid, but could potentially confuse readers.)",
+    "submit_date": "2022-11-18",
+    "submitter_name": "Joseph Heenan",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2022-11-21 21:58:28"
+  },
+  {
+    "errata_id": "6711",
+    "doc-id": "RFC9126",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "3.",
+    "orig_text": "   Clients MAY use the \"request\" parameter as defined in JAR [RFC9101]\r\n   to push a Request Object JWT to the authorization server.  The rules\r\n   for processing, signing, and encryption of the Request Object as\r\n   defined in JAR [RFC9101] apply.  Request parameters required by a\r\n   given client authentication method are included in the \"application/\r\n   x-www-form-urlencoded\" request directly and are the only parameters\r\n   other than \"request\" in the form body (e.g., mutual TLS client\r\n   authentication [RFC8705] uses the \"client_id\" HTTP request parameter,\r\n   while JWT assertion-based client authentication [RFC7523] uses\r\n   \"client_assertion\" and \"client_assertion_type\").  All other request\r\n   parameters, i.e., those pertaining to the authorization request\r\n   itself, MUST appear as claims of the JWT representing the\r\n   authorization request.",
+    "correct_text": "  Clients MAY use the request and client_id parameters as defined in \r\n  JAR [RFC9101] to push a Request Object JWT to the authorization \r\n  server. The rules for processing, signing, and encryption of the \r\n  Request Object as defined in JAR [RFC9101] apply. Request parameters\r\n  required by a given client authentication method are included in the\r\n  application/x-www-form-urlencoded request directly and are the only \r\n  parameters other than request and client_id in the form body (e.g.,\r\n  JWT assertion-based client authentication [RFC7523] uses \r\n  \"client_assertion\" and \"client_assertion_type\") HTTP request\r\n  parameters). All authorization request parameters, i.e., those \r\n  pertaining to the authorization request itself, MUST appear as\r\n  claims of the JWT representing the authorization request.",
+    "notes": "That first paragraph of Sec 3 was not properly updated to come inline with JAR (now RFC9101) when it changed in draft -21 to require \"client_id\" in the authorization request in addition to in addition to \"request\" or \"request_uri\" - so is  somewhat ambiguous in maybe suggesting that \"client_id\" isn't required. But it is required based on how PAR works and RFC9101 requiring \"client_id\".",
+    "submit_date": "2021-10-15",
+    "submitter_name": "Brian Campbell",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  }
+]

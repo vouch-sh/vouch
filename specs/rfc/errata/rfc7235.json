@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "6307",
+    "doc-id": "RFC7235",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "2.1",
+    "orig_text": "2.1.  Challenge and Response\r\n\r\n   HTTP provides a simple challenge-response authentication framework\r\n   that can be used by a server to challenge a client request and by a\r\n   client to provide authentication information.  It uses a case-\r\n   insensitive token as a means to identify the authentication scheme,\r\n   followed by additional information necessary for achieving\r\n   authentication via that scheme.  The latter can be either a comma-\r\n   separated list of parameters or a single sequence of characters\r\n   capable of holding base64-encoded information.\r\n\r\n   Authentication parameters are name=value pairs, where the name token\r\n   is matched case-insensitively, and each parameter name MUST only\r\n   occur once per challenge.\r\n\r\n     auth-scheme    = token\r\n\r\n     auth-param     = token BWS \"=\" BWS ( token / quoted-string )\r\n",
+    "correct_text": "2.1.  Challenge and Response\r\n\r\n   HTTP provides a simple challenge-response authentication framework\r\n   that can be used by a server to challenge a client request and by a\r\n   client to provide authentication information.  It uses a case-\r\n   insensitive token as a means to identify the authentication scheme,\r\n   followed by additional information necessary for achieving\r\n   authentication via that scheme.  The latter can be either a comma-\r\n   separated list of parameters or a single sequence of characters\r\n   capable of holding base64-encoded information.\r\n\r\n   Authentication parameters are name=value pairs, where the name token\r\n   is matched case-insensitively, and each parameter name MUST only\r\n   occur once per challenge.\r\n\r\n     auth-scheme    = itoken\r\n\r\n     auth-param     = itoken BWS \"=\" BWS ( token / quoted-string )\r\n\r\nN.B. itoken is a restricted subset of token to ensure well defined case insensitivity.\r\n",
+    "notes": "The general token specification allows many characters (including VCHAR) which means that case insensitivity is tricky to define. A more limited subset of token would be sensible, and the distinction between itoken and token is important in understanding the BNF, and matching that to the specification. The section above is a good example of the confusion that can arise, with 3 instances of token in the ABNF, but two of them are to be interpreted in a different way than the third occurence..\r\nConfusion causes incompatibility with NEGOTIATE being rejected by a system that implements the ABNF, but wrongly expects Negotiate.\r\nP.S. My 'corrected text' and my understanding of ABNF are incomplete. I crave assistance in forming a properly written definition of itoken to 'well define' the safe subset.\n --VERIFIER NOTES-- \n   The RFC says exactly what was intended, and changing that is beyond the scope of errata reports, and likely beyond the scope of the document.  If there's an issue to discuss for a future revision of the RFC, an issue can be filed here:\r\n  https://github.com/httpwg/http-core/issues/",
+    "submit_date": "2020-10-15",
+    "submitter_name": "Nick Cullen",
+    "verifier_id": "",
+    "verifier_name": "Barry Leiba",
+    "update_date": "2020-10-19 04:06:55"
+  }
+]

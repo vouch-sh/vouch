@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "7782",
+    "doc-id": "RFC7591",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "3.2.1",
+    "orig_text": "client_id\r\n      REQUIRED.  OAuth 2.0 client identifier string.  It SHOULD NOT be\r\n      currently valid for any other registered client, though an\r\n      authorization server MAY issue the same client identifier to\r\n      multiple instances of a registered client at its discretion.",
+    "correct_text": "client_id\r\n      REQUIRED.  OAuth 2.0 client identifier string.  It MUST NOT be\r\n      currently valid for any other registered client, though an\r\n      authorization server MAY issue the same client identifier to\r\n      multiple instances of a registered client at its discretion.",
+    "notes": "Allowing the same client_id for multiple clients is a contradiction to:\r\n\r\n1. This document, Section 1.3, (D), 2nd bullet point: \"a client identifier that is unique at the server\"\r\n\r\n2. This document, Section 3.1: \"The authorization server assigns this client a unique client identifier\"\r\n\r\n3. (normative reference) RFC 6749, Section 2.2: \"The authorization server issues the registered client a client identifier -- a unique string representing the registration information provided by the client. [...] The client identifier is unique to the authorization server.\"\r\n\r\n4. (non-normative reference) OpenID Connect Dynamic Client Registration 1.0 incorporating errata set 2, Section 2: \"Clients have metadata associated with their unique Client Identifier at the Authorization Server.\"; Section 3.1: \"The Authorization Server assigns this Client a unique Client Identifier\"; Section 3.2: \"client_id REQUIRED. Unique Client Identifier. It MUST NOT be currently valid for any other registered Client. \"",
+    "submit_date": "2024-01-25",
+    "submitter_name": "Tim Würtele",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  },
+  {
+    "errata_id": "7969",
+    "doc-id": "RFC7591",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "2.3",
+    "orig_text": "   For example, a software statement could contain the following claims:\r\n\r\n     {\r\n      \"software_id\": \"4NRB1-0XZABZI9E6-5SM3R\",\r\n      \"client_name\": \"Example Statement-based Client\",\r\n      \"client_uri\": \"https://client.example.net/\"\r\n     }\r\n\r\n   The following non-normative example JWT includes these claims and has\r\n   been asymmetrically signed using \"RS256\" (with line breaks for\r\n   display purposes only):\r\n\r\n     eyJhbGciOiJSUzI1NiJ9.\r\n     eyJzb2Z0d2FyZV9pZCI6IjROUkIxLTBYWkFCWkk5RTYtNVNNM1IiLCJjbGll\r\n     bnRfbmFtZSI6IkV4YW1wbGUgU3RhdGVtZW50LWJhc2VkIENsaWVudCIsImNs\r\n     aWVudF91cmkiOiJodHRwczovL2NsaWVudC5leGFtcGxlLm5ldC8ifQ.\r\n     GHfL4QNIrQwL18BSRdE595T9jbzqa06R9BT8w409x9oIcKaZo_mt15riEXHa\r\n     zdISUvDIZhtiyNrSHQ8K4TvqWxH6uJgcmoodZdPwmWRIEYbQDLqPNxREtYn0\r\n     5X3AR7ia4FRjQ2ojZjk5fJqJdQ-JcfxyhK-P8BAWBd6I2LLA77IG32xtbhxY\r\n     fHX7VhuU5ProJO8uvu3Ayv4XRhLZJY4yKfmyjiiKiPNe-Ia4SMy_d_QSWxsk\r\n     U5XIQl5Sa2YRPMbDRXttm2TfnZM1xx70DoYi8g6czz-CPGRi4SW_S2RKHIJf\r\n     IjoI3zTJ0Y2oe0_EJAiXbL6OyF9S5tKxDXV8JIndSA",
+    "correct_text": "   For example, a software statement could contain the following claims:\r\n\r\n     {\r\n      \"iss\": \"https://example.com\",\r\n      \"software_id\": \"4NRB1-0XZABZI9E6-5SM3R\",\r\n      \"client_name\": \"Example Statement-based Client\",\r\n      \"client_uri\": \"https://client.example.net/\"\r\n     }\r\n\r\n   The following non-normative example JWT includes these claims and has\r\n   been asymmetrically signed using \"RS256\" (with line breaks for\r\n   display purposes only):\r\n\r\n     eyJhbGciOiJSUzI1NiJ9.<updatedPayloadWithIss>.<updatedSignature>",
+    "notes": "Section 2.3 Software Statement says, \"the software statement ... MUST contain an \"iss\" (issuer) claim denoting the party attesting to the claims in the software statement.\" It would be useful to readers if the sample software statement in the same section adheres to this condition. \r\n\r\nIf this change is reasonable, the signed JWT in section 3.1.1.  Client Registration Request Using a Software Statement should also be updated.",
+    "submit_date": "2024-06-03",
+    "submitter_name": "Ivan Mok",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  },
+  {
+    "errata_id": "8557",
+    "doc-id": "RFC7591",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Editorial",
+    "section": "2",
+    "orig_text": "As required by [Section 2](https://datatracker.ietf.org/doc/html/rfc7591#section-2) of OAuth 2.0 [[RFC6749](https://datatracker.ietf.org/doc/html/rfc6749)]",
+    "correct_text": "As required by [Section 2](https://datatracker.ietf.org/doc/html/rfc6749#section-2) of OAuth 2.0 [[RFC6749](https://datatracker.ietf.org/doc/html/rfc6749)]",
+    "notes": "In section 2 of RFC 7591, the links to sections 2, 2.1, 2.3.1, 4.1, 4.2, 4.3, 4.4, 4.5, and 6 are incorrectly pointing to sections within RFC7591. They should be pointing to the corresponding sections in RFC 6749. The link to sections 2.3.1, 4.3, and 4.4 are actually broken, because those sections do not exist in RFC 7591\n --VERIFIER NOTES-- \nThis is regarding the links generated in the rfc2html output, not the RFC itself (https://www.rfc-editor.org/rfc/rfc7591.txt). Please add an issue here: https://github.com/ietf-tools/rfc2html.   ",
+    "submit_date": "2025-08-27",
+    "submitter_name": "Atul Tulshibagwale",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2025-08-28 16:24:30"
+  }
+]

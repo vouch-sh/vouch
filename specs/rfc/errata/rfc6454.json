@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "3249",
+    "doc-id": "RFC6454",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "7.1. Syntax",
+    "orig_text": "origin              = \"Origin:\" OWS origin-list-or-null OWS\r\norigin-list-or-null = %x6E %x75 %x6C %x6C / origin-list\r\norigin-list         = serialized-origin *( SP serialized-origin )",
+    "correct_text": "origin              = \"Origin:\" OWS origin-or-null OWS\r\norigin-or-null      = %x6E %x75 %x6C %x6C / serialized-origin",
+    "notes": "Rationale: List of origins was added for CORS http://www.w3.org/TR/cors/ but CORS does not require it and we should leave this as a choice.\r\n\r\nThis syntax restriction also has limited impact on 7.2. and 7.3.\r\n\r\nSee also: http://lists.w3.org/Archives/Public/www-archive/2012Jun/thread.html#msg1\n --VERIFIER NOTES-- \nThis should be considered if/when the document is worked on again, but it is not an \"error\" in the original document -- rather, it's something that's come up since -- and so it's not appropriate for errata.",
+    "submit_date": "2012-06-08",
+    "submitter_name": "Anne van Kesteren",
+    "verifier_id": "",
+    "verifier_name": "Barry Leiba",
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "373",
+    "doc-id": "RFC2822",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Technical",
+    "section": "3.2.6",
+    "orig_text": "   unstructured    =       *([FWS] utext) [FWS]",
+    "correct_text": "   unstructured    =       *([FWS] utext) (*WSP / obs-FWS)",
+    "notes": "A prominent example is the <subject> defined in section 3.6.5:\r\n\r\n   subject         =       \"Subject:\" unstructured CRLF\r\n\r\nExpanding the [FWS] at the end (ignoring <obs-FWS>) results in:\r\n\r\n   subject = \"Subject:\" *([FWS] utext) [[*WSP CRLF] 1*WSP] CRLF\r\n\r\n\r\nAlexey: note that this was fixed in RFC 5322 (which obsoleted RFC 2821) in a slightly different way.\r\n",
+    "submit_date": "2006-01-10",
+    "submitter_name": "Frank Ellermann",
+    "verifier_id": "",
+    "verifier_name": "Alexey Melnikov",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "8155",
+    "doc-id": "RFC2822",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Editorial",
+    "section": "2.1.1",
+    "orig_text": "Again, even though this limitation is put on\r\n   messages, it is encumbant upon implementations which display messages\r\n   to handle an arbitrarily large number of characters in a line\r\n   (certainly at least up to the 998 character limit) for the sake of\r\n   robustness.",
+    "correct_text": "Again, even though this limitation is put on \r\n   messages, it is incumbent upon implementations which display messages\r\n   to handle an arbitrarily large number of characters in a line \r\n   (certainly at least up to the 998 character limit) for the sake of \r\n   robustness.",
+    "notes": "\"encumbant\" seems to be a typo of \"incumbent\".\n --VERIFIER NOTES-- \nRFC 2822 is obsoleted by RFC 5322, and this typo was corrected in RFC 5322. The RFC Editor is thus rejecting this erratum per #7 on the “IESG Processing of RFC Errata for the IETF Stream” (https://datatracker.ietf.org/doc/statement-iesg-iesg-processing-of-rfc-errata-for-the-ietf-stream-20210507/).   ",
+    "submit_date": "2024-10-23",
+    "submitter_name": "林博仁(Buo-ren Lin)",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2024-10-24 18:37:09"
+  }
+]

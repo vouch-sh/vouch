@@ -25,10 +25,33 @@ A claim about required behavior is only supported by all three:
 
 1. The document and section number — "OIDC Core 3.1.2.1", not "the OIDC spec".
 2. A **verbatim quote** of the sentence carrying the requirement.
-3. The URL it was fetched from, in this session.
+3. The URL it was fetched from in this session, **or** a path under `specs/`
+   whose `specs/manifest.tsv` row supplies the origin URL and sha256.
 
 Without the quote it is not a citation. `// per RFC 9449` on its own
 records that someone believed something, not what the RFC says.
+
+## Read the cache first
+
+`specs/` holds the text of every specification this repo implements, refreshed
+by `scripts/refresh-specs.sh`. Grep it before reaching for WebFetch — it is
+faster, and it does not paraphrase.
+
+Files under `specs/rfc/`, `specs/ietf-drafts/`, and the `.txt` entries in
+`specs/openid/` are **byte-identical** to their origins: `shasum -a 256` on the
+file equals the `origin_sha256` column in `specs/manifest.tsv`. Quoting from
+them satisfies requirement 3 above.
+
+Files carrying a `CACHED SPEC - CONVERTED, NOT AUTHORITATIVE` banner
+(`specs/w3c/`, `specs/fido/`, `specs/oasis/`, and the FAPI/JARM entries in
+`specs/openid/`) were converted from HTML or PDF because those bodies publish no
+plain text. Section structure and prose survive; exact formatting does not. Use
+them to *find* the passage, then confirm a load-bearing quote against the Source
+URL in the banner before citing it.
+
+`specs/rfc/errata/rfcNNNN.json` holds that RFC's errata. An RFC's text is frozen
+at publication, so a Verified erratum can change what the document actually
+requires — check the shard before treating a quote as final.
 
 ## Verify the fetch, not just the answer
 

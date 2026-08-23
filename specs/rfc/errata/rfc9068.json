@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "8802",
+    "doc-id": "RFC9068",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "2.2",
+    "orig_text": "iss  REQUIRED - as defined in Section 4.1.1 of [RFC7519].\r\n",
+    "correct_text": "iss  OPTIONAL - as defined in Section 4.1.1 of [RFC7519].\r\n",
+    "notes": "rfc7519:\r\n4.1.1.  \"iss\" (Issuer) Claim\r\n\r\n   The \"iss\" (issuer) claim identifies the principal that issued the\r\n   JWT.  The processing of this claim is generally application specific.\r\n   The \"iss\" value is a case-sensitive string containing a StringOrURI\r\n   value.  Use of this claim is OPTIONAL.",
+    "submit_date": "2026-03-04",
+    "submitter_name": "David Hermo Blanco",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  }
+]

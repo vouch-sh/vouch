@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "4970",
+    "doc-id": "RFC6761",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "6.1",
+    "orig_text": "168.192.in-addr.arpa.",
+    "correct_text": "192.168.in-addr.arpa.",
+    "notes": "The IP address ranges listed in this document as private do not align with those listed as private in the referenced RFC 1918.\n --VERIFIER NOTES-- \nNope, there are in \"reverse lookup\" format.  \r\n\r\n\r\nThe useful references are probably:\r\nhttps://tools.ietf.org/html/rfc1033 Section IN-ADDR.ARPA and\r\nhttps://tools.ietf.org/html/rfc6303 Section 4.1. RFC 1918 Zones.\r\n\r\nMore info (from rfc1033):\r\nIN-ADDR.ARPA\r\n\r\n   The structure of names in the domain system is set up in a\r\n   hierarchical way such that the address of a name can be found by\r\n   tracing down the domain tree contacting a server for each label of\r\n   the name.  Because of this 'indexing' based on name, there is no easy\r\n   way to translate a host address back into its host name.\r\n\r\n   In order to do the reverse translation easily, a domain was created\r\n   that uses hosts' addresses as part of a name that then points to the\r\n   data for that host.  In this way, there is now an 'index' to hosts'\r\n   RRs based on their address.  This address mapping domain is called\r\n   IN-ADDR.ARPA.  Within that domain are subdomains for each network,\r\n   based on network number.  Also, for consistency and natural\r\n   groupings, the 4 octets of a host number are reversed.\r\n\r\n   For example, the ARPANET is net 10.  That means there is a domain\r\n   called 10.IN-ADDR.ARPA.  Within this domain there is a PTR RR at\r\n   51.0.0.10.IN-ADDR that points to the RRs for the host SRI-NIC.ARPA\r\n   (who's address is 10.0.0.51).  Since the NIC is also on the MILNET\r\n   (Net 26, address 26.0.0.73), there is also a PTR RR at 73.0.0.26.IN-\r\n   ADDR.ARPA that points to the same RR's for SRI-NIC.ARPA.  The format\r\n   of these special pointers is defined below along with the examples\r\n   for the NIC.\r\n\r\nPTR\r\n\r\n           <special-name>   [<ttl>] [<class>]   PTR   <name>\r\n\r\n   The PTR record is used to let special names point to some other\r\n   location in the domain tree.  They are mainly used in the IN-\r\n   ADDR.ARPA records for translation of addresses to names.  PTR's\r\n   should use official names and not aliases.\r\n\r\n   For example, host SRI-NIC.ARPA with addresses 10.0.0.51 and 26.0.0.73\r\n   would have the following records in the respective zone files for net\r\n   10 and net 26:\r\n\r\n           51.0.0.10.IN-ADDR.ARPA.  PTR   SRI-NIC.ARPA.\r\n           73.0.0.26.IN-ADDR.ARPA.  PTR   SRI-NIC.ARPA.\r\n",
+    "submit_date": "2017-03-15",
+    "submitter_name": "Alexander Lay",
+    "verifier_id": "",
+    "verifier_name": "Warren Kumari",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "5025",
+    "doc-id": "RFC6761",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "6.1",
+    "orig_text": "   The private-address [RFC1918] reverse-mapping domains listed below,\r\n   and any names falling within those domains, are Special-Use Domain\r\n   Names:\r\n\r\n     10.in-addr.arpa.      21.172.in-addr.arpa.  26.172.in-addr.arpa.\r\n     16.172.in-addr.arpa.  22.172.in-addr.arpa.  27.172.in-addr.arpa.\r\n     17.172.in-addr.arpa.  30.172.in-addr.arpa.  28.172.in-addr.arpa.\r\n     18.172.in-addr.arpa.  23.172.in-addr.arpa.  29.172.in-addr.arpa.\r\n     19.172.in-addr.arpa.  24.172.in-addr.arpa.  31.172.in-addr.arpa.\r\n     20.172.in-addr.arpa.  25.172.in-addr.arpa.  168.192.in-addr.arpa.",
+    "correct_text": "   The private-address [RFC1918] reverse-mapping domains listed below,\r\n   and any names falling within those domains, are Special-Use Domain\r\n   Names:\r\n\r\n     10.in-addr.arpa.      21.172.in-addr.arpa.  26.172.in-addr.arpa.\r\n     16.172.in-addr.arpa.  22.172.in-addr.arpa.  27.172.in-addr.arpa.\r\n     17.172.in-addr.arpa.  30.172.in-addr.arpa.  28.172.in-addr.arpa.\r\n     18.172.in-addr.arpa.  23.172.in-addr.arpa.  29.172.in-addr.arpa.\r\n     19.172.in-addr.arpa.  24.172.in-addr.arpa.  30.172.in-addr.arpa.\r\n     20.172.in-addr.arpa.  25.172.in-addr.arpa.  31.172.in-addr.arpa.\r\n     168.192.in-addr.arpa",
+    "notes": "30.172.in-addr.arpa. is missing in the original list.\n --VERIFIER NOTES-- \nActually, as noted in Errata ID: 5039 it's not missing - it is between 22.172.in-addr.arpa and 23.172.in-addr.arpa. I've marked Errata 5039 as \"Held for update\" and am rejecting this one.\r\n",
+    "submit_date": "2017-05-25",
+    "submitter_name": "Michael Kohl",
+    "verifier_id": "",
+    "verifier_name": "Warren Kumari",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "5039",
+    "doc-id": "RFC6761",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Editorial",
+    "section": "6.1",
+    "orig_text": "   The private-address [RFC1918] reverse-mapping domains listed below,\r\n   and any names falling within those domains, are Special-Use Domain\r\n   Names:\r\n\r\n     10.in-addr.arpa.      21.172.in-addr.arpa.  26.172.in-addr.arpa.\r\n     16.172.in-addr.arpa.  22.172.in-addr.arpa.  27.172.in-addr.arpa.\r\n     17.172.in-addr.arpa.  30.172.in-addr.arpa.  28.172.in-addr.arpa.\r\n     18.172.in-addr.arpa.  23.172.in-addr.arpa.  29.172.in-addr.arpa.\r\n     19.172.in-addr.arpa.  24.172.in-addr.arpa.  31.172.in-addr.arpa.\r\n     20.172.in-addr.arpa.  25.172.in-addr.arpa.  168.192.in-addr.arpa.\r\n",
+    "correct_text": "   The private-address [RFC1918] reverse-mapping domains listed below,\r\n   and any names falling within those domains, are Special-Use Domain\r\n   Names:\r\n\r\n     10.in-addr.arpa.      21.172.in-addr.arpa.  27.172.in-addr.arpa.\r\n     16.172.in-addr.arpa.  22.172.in-addr.arpa.  28.172.in-addr.arpa.\r\n     17.172.in-addr.arpa.  23.172.in-addr.arpa.  29.172.in-addr.arpa.\r\n     18.172.in-addr.arpa.  24.172.in-addr.arpa.  30.172.in-addr.arpa.\r\n     19.172.in-addr.arpa.  25.172.in-addr.arpa.  31.172.in-addr.arpa.\r\n     20.172.in-addr.arpa.  26.172.in-addr.arpa.  168.192.in-addr.arpa.\r\n",
+    "notes": "the original list is not correctly ordered, therefore is Errata-ID 5025 obsolete: this said that 30.172.in-addr.arpa. were missing in the original list.",
+    "submit_date": "2017-06-12",
+    "submitter_name": "Walter H.",
+    "verifier_id": "",
+    "verifier_name": "Warren Kumari",
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

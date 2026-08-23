@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "7951",
+    "doc-id": "RFC9470",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "6.2",
+    "orig_text": "     \"exp\": 1639528912,\r\n     \"iat\": 1618354090,\r\n     \"auth_time\": 1646340198,",
+    "correct_text": "     \"exp\": 1639528912,\r\n     \"iat\": 1618354090,\r\n     \"auth_time\": 1618354090,",
+    "notes": "I noticed a small inconsistency in the example \"Figure 7: Introspection Response\". It seems that the time for the user-authentication event should be less than or equal to the time of token issuance to ensure logical coherence.",
+    "submit_date": "2024-05-22",
+    "submitter_name": "Tomasz Kuczyński",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  }
+]

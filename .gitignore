@@ -79,7 +79,13 @@ docs/book/
 .claude/worktrees
 .claude/plans/
 .mcp.json
+# Local helper scripts stay untracked by default; the ones below are checked in
+# because they are environment-independent (no local paths, no credentials) and
+# refresh committed data other people need to reproduce.
 scripts/*
+!scripts/refresh-specs.sh
+!scripts/update-geoip.sh
+!scripts/ykman-clear-fido-credentials.sh
 .local/
 fuzz/corpus/
 fuzz/artifacts/
