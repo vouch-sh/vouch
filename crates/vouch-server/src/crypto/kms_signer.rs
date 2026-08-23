@@ -21,20 +21,19 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use spki::SubjectPublicKeyInfoRef;
 
-/// OID for Ed25519: 1.3.101.112 (RFC 8410 Section 3).
-const OID_ED25519: spki::ObjectIdentifier = spki::ObjectIdentifier::new_unwrap("1.3.101.112");
+use super::oid;
 
-/// OID for EC public key: 1.2.840.10045.2.1 (RFC 5480 Section 2.1.1).
-const OID_EC_PUBLIC_KEY: spki::ObjectIdentifier =
-    spki::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+/// OID for Ed25519 (RFC 8410 Section 3).
+const OID_ED25519: spki::ObjectIdentifier = oid::public_key::ED25519;
 
-/// OID for P-256 (prime256v1): 1.2.840.10045.3.1.7 (RFC 5480 Section 2.1.1.1).
-const OID_PRIME256V1: spki::ObjectIdentifier =
-    spki::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+/// OID for EC public key (RFC 5480 Section 2.1.1).
+const OID_EC_PUBLIC_KEY: spki::ObjectIdentifier = oid::public_key::EC;
 
-/// OID for rsaEncryption: 1.2.840.113549.1.1.1 (RFC 3279 Section 2.3.1).
-const OID_RSA_ENCRYPTION: spki::ObjectIdentifier =
-    spki::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+/// OID for P-256 / prime256v1 (RFC 5480 Section 2.1.1.1).
+const OID_PRIME256V1: spki::ObjectIdentifier = oid::curve::PRIME256V1;
+
+/// OID for rsaEncryption (RFC 3279 Section 2.3.1).
+const OID_RSA_ENCRYPTION: spki::ObjectIdentifier = oid::public_key::RSA;
 
 // ---------------------------------------------------------------------------
 // SPKI parsing helpers
