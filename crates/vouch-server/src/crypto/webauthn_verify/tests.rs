@@ -195,6 +195,10 @@ fn test_cose_key_ec2_missing_x() {
             ciborium::Value::Integer((-7).into()),
         ),
         (
+            ciborium::Value::Integer((-1).into()), // crv = P-256
+            ciborium::Value::Integer(1.into()),
+        ),
+        (
             ciborium::Value::Integer((-3).into()), // y only
             ciborium::Value::Bytes(vec![0u8; 32]),
         ),
@@ -219,6 +223,10 @@ fn test_cose_key_ec2_missing_y() {
             ciborium::Value::Integer((-7).into()),
         ),
         (
+            ciborium::Value::Integer((-1).into()), // crv = P-256
+            ciborium::Value::Integer(1.into()),
+        ),
+        (
             ciborium::Value::Integer((-2).into()), // x only
             ciborium::Value::Bytes(vec![0u8; 32]),
         ),
@@ -241,6 +249,10 @@ fn test_cose_key_okp_missing_x() {
         (
             ciborium::Value::Integer(3.into()), // alg = EdDSA
             ciborium::Value::Integer((-8).into()),
+        ),
+        (
+            ciborium::Value::Integer((-1).into()), // crv = Ed25519
+            ciborium::Value::Integer(6.into()),
         ),
     ]);
     ciborium::into_writer(&key, &mut buf).unwrap();
@@ -1357,4 +1369,144 @@ fn test_es256_der_signature_over_wrong_message_is_rejected() {
         verify_cose_signature(&cose_key, b"different message", &der),
         Err(VerifyError::SignatureInvalid)
     ));
+}
+
+// =========================================================================
+// COSE (kty, alg, crv) triple validation (RFC 9053 Section 2.1)
+// =========================================================================
+
+/// Build an EC2 COSE key with an explicitly chosen `alg` and `crv`, so a
+/// mismatched pair can be constructed for testing.
+fn make_ec2_cose_key_with(alg: i64, crv: i64, x: &[u8], y: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let key = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Integer(1.into()),
+            ciborium::Value::Integer(2.into()), // kty = EC2
+        ),
+        (
+            ciborium::Value::Integer(3.into()),
+            ciborium::Value::Integer(alg.into()),
+        ),
+        (
+            ciborium::Value::Integer((-1).into()),
+            ciborium::Value::Integer(crv.into()),
+        ),
+        (
+            ciborium::Value::Integer((-2).into()),
+            ciborium::Value::Bytes(x.to_vec()),
+        ),
+        (
+            ciborium::Value::Integer((-3).into()),
+            ciborium::Value::Bytes(y.to_vec()),
+        ),
+    ]);
+    ciborium::into_writer(&key, &mut buf).unwrap();
+    buf
+}
+
+/// An EC2 key declaring ES256 but carrying P-384 must be rejected for the
+/// curve, not passed to a P-256 verifier that fails opaquely inside aws-lc.
+///
+/// RFC 9053 Section 2.1: "Implementations need to check that the key type and
+/// curve are correct when creating and verifying a signature."
+#[test]
+fn test_es256_with_p384_curve_is_rejected() {
+    let message = b"webauthn assertion signing input";
+    let (_, der, _) = es256_fixture(message);
+
+    // Real P-256 coordinates, but the key claims the P-384 curve.
+    let cose_key = make_ec2_cose_key_with(-7, 2, &[1u8; 32], &[2u8; 32]);
+
+    let err = verify_cose_signature(&cose_key, message, &der).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("crv")),
+        "error must name the curve mismatch, got: {err:?}"
+    );
+}
+
+/// The mismatch must be caught even when the signature itself is well-formed
+/// and the coordinates are a genuine P-256 point.
+#[test]
+fn test_es256_curve_mismatch_precedes_signature_check() {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+
+    let message = b"webauthn assertion signing input";
+    let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    let signature: Signature = signing_key.sign(message);
+
+    // Same key and a signature that would verify, but crv says P-521.
+    let cose_key = make_ec2_cose_key_with(-7, 3, point.x().unwrap(), point.y().unwrap());
+
+    assert!(matches!(
+        verify_cose_signature(&cose_key, message, signature.to_der().as_bytes()),
+        Err(VerifyError::InvalidCoseKey(_))
+    ));
+}
+
+/// An EdDSA key declaring the wrong key type must be rejected.
+#[test]
+fn test_eddsa_with_ec2_key_type_is_rejected() {
+    // kty = EC2 (2) but alg = EdDSA (-8), which requires OKP.
+    let cose_key = make_ec2_cose_key_with(-8, 6, &[1u8; 32], &[2u8; 32]);
+
+    let err = verify_cose_signature(&cose_key, b"message", &[0u8; 64]).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("kty")),
+        "error must name the key-type mismatch, got: {err:?}"
+    );
+}
+
+/// An unknown algorithm still reports `UnsupportedAlgorithm`, not a mismatch.
+#[test]
+fn test_unknown_algorithm_reports_unsupported() {
+    let cose_key = make_ec2_cose_key_with(-999, 1, &[1u8; 32], &[2u8; 32]);
+
+    assert!(matches!(
+        verify_cose_signature(&cose_key, b"message", &[0u8; 64]),
+        Err(VerifyError::UnsupportedAlgorithm(-999))
+    ));
+}
+
+/// The conformant triple still verifies, so the check is not simply refusing
+/// everything.
+#[test]
+fn test_conformant_es256_p256_triple_still_verifies() {
+    let message = b"webauthn assertion signing input";
+    let (cose_key, der, _raw) = es256_fixture(message);
+
+    assert!(verify_cose_signature(&cose_key, message, &der).is_ok());
+}
+
+/// An EC2 key carrying no `crv` label is malformed: RFC 9053 Section 2.1
+/// requires the curve be checked, which is impossible when it is absent.
+#[test]
+fn test_ec2_key_without_curve_is_rejected() {
+    let mut buf = Vec::new();
+    let key = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Integer(1.into()), // kty = EC2
+            ciborium::Value::Integer(2.into()),
+        ),
+        (
+            ciborium::Value::Integer(3.into()), // alg = ES256
+            ciborium::Value::Integer((-7).into()),
+        ),
+        (
+            ciborium::Value::Integer((-2).into()),
+            ciborium::Value::Bytes(vec![1u8; 32]),
+        ),
+        (
+            ciborium::Value::Integer((-3).into()),
+            ciborium::Value::Bytes(vec![2u8; 32]),
+        ),
+    ]);
+    ciborium::into_writer(&key, &mut buf).unwrap();
+
+    let err = verify_cose_signature(&buf, b"message", &[0u8; 70]).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("crv")),
+        "a curveless EC2 key must be rejected for the missing crv, got: {err:?}"
+    );
 }

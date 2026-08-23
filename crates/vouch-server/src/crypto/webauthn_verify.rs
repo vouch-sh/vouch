@@ -24,6 +24,8 @@
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
+
+use super::cose;
 use thiserror::Error;
 use vouch_common::protocol;
 
@@ -882,14 +884,26 @@ fn verify_cose_signature(
     // Extract algorithm (alg) - label 3
     let alg = get_cose_int(&map, 3)?;
 
-    match (kty, alg) {
-        // EC2 key with ES256 (-7)
-        (2, -7) => verify_es256(&map, message, signature),
-        // RSA key with RS256 (-257)
-        (3, -257) => verify_rs256(&map, message, signature),
-        // OKP key with EdDSA (-8)
-        (1, -8) => verify_eddsa(&map, message, signature),
-        _ => Err(VerifyError::UnsupportedAlgorithm(alg)),
+    // Curve (crv) - label -1. Read non-fatally: RSA has no curve (its -1 label
+    // holds the modulus), and an absent or non-integer label must not preempt
+    // the algorithm check below, which gives the more useful diagnosis.
+    let crv = match kty {
+        cose::kty::EC2 | cose::kty::OKP => get_cose_int(&map, -1).ok(),
+        _ => None,
+    };
+
+    // RFC 9053 Section 2.1 requires implementations to check the key type and
+    // curve, not just the algorithm. Resolving the whole triple here means a
+    // key whose labels disagree is rejected at the boundary with a message
+    // naming the mismatch, rather than reaching a verifier it does not fit.
+    match cose::VerifiableCoseKey::from_triple(kty, alg, crv) {
+        Ok(cose::VerifiableCoseKey::Es256) => verify_es256(&map, message, signature),
+        Ok(cose::VerifiableCoseKey::Rs256) => verify_rs256(&map, message, signature),
+        Ok(cose::VerifiableCoseKey::Ed25519) => verify_eddsa(&map, message, signature),
+        Err(cose::CoseKeyError::UnsupportedAlgorithm(alg)) => {
+            Err(VerifyError::UnsupportedAlgorithm(alg))
+        }
+        Err(e) => Err(VerifyError::InvalidCoseKey(e.to_string())),
     }
 }
 
