@@ -82,24 +82,29 @@ pub(crate) enum ClientAuthPresentation {
     AuthorizationHeader,
     /// Request-body parameters — `client_secret_post`, or a bare `client_id`.
     RequestBody,
+    /// The request carried no client credentials at all.
+    NoCredentials,
 }
 
 impl ClientAuthPresentation {
-    /// Classify how the client presented credentials on this request.
+    /// Classify how the client presented credentials on this request, by
+    /// inspecting both the `Authorization` header and the request body.
     ///
     /// A malformed `Authorization: Basic` header still counts as
     /// [`Self::AuthorizationHeader`]: RFC 6749 Section 5.2 binds on the
     /// client having *attempted* header authentication, not on the attempt
     /// having parsed.
-    pub(crate) fn of(headers: &HeaderMap) -> Self {
+    pub(crate) fn of<T: ClientAuthFields>(headers: &HeaderMap, params: &T) -> Self {
         let used_header = headers
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
             .is_some_and(|h| strip_basic_scheme(h).is_some());
         if used_header {
             Self::AuthorizationHeader
-        } else {
+        } else if params.client_id().is_some() || params.client_secret().is_some() {
             Self::RequestBody
+        } else {
+            Self::NoCredentials
         }
     }
 
@@ -108,7 +113,10 @@ impl ClientAuthPresentation {
     fn challenge(self) -> Option<HeaderValue> {
         match self {
             Self::AuthorizationHeader => Some(HeaderValue::from_static("Basic")),
-            Self::RequestBody => None,
+            // RFC 6749 Section 5.2 mandates a challenge only for header
+            // authentication. Advertising `Basic` to a client that used
+            // neither would name a scheme it did not attempt.
+            Self::RequestBody | Self::NoCredentials => None,
         }
     }
 }
@@ -145,12 +153,11 @@ pub(crate) fn with_client_auth_challenge(
 ///
 /// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
 /// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
-/// The returned [`ClientAuthPresentation`] records which of the two the
-/// client used, so a later failure can emit the matching challenge.
-pub(crate) fn extract_client_credentials(
+/// The returned [`ClientAuthPresentation`] records which the client used,
+/// so a later failure can emit the matching challenge.
+pub(crate) fn extract_client_credentials<T: ClientAuthFields>(
     headers: &HeaderMap,
-    client_id_param: Option<&str>,
-    client_secret_param: Option<SecretString>,
+    params: &T,
 ) -> Option<(ClientCredentials, ClientAuthPresentation)> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
@@ -177,17 +184,14 @@ pub(crate) fn extract_client_credentials(
         ));
     }
 
-    // Fall back to request body parameters (client_secret_post). The
-    // presentation is still classified from the headers: a client whose
-    // `Authorization: Basic` header failed to decode attempted header
-    // authentication and is owed the matching challenge.
-    client_id_param.map(|id| {
+    // Fall back to request body parameters (client_secret_post).
+    params.client_id().map(|id| {
         (
             ClientCredentials {
                 client_id: id.to_string(),
-                client_secret: client_secret_param,
+                client_secret: params.client_secret(),
             },
-            ClientAuthPresentation::of(headers),
+            ClientAuthPresentation::of(headers, params),
         )
     })
 }
@@ -240,9 +244,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     }
 
     // Secret-based auth (Basic header or body params)
-    if let Some((creds, presentation)) =
-        extract_client_credentials(headers, params.client_id(), params.client_secret())
-    {
+    if let Some((creds, presentation)) = extract_client_credentials(headers, params) {
         if creds.client_secret.is_some() || has_basic {
             return Ok(ExtractedClientAuth::Secret {
                 creds,
@@ -411,13 +413,35 @@ mod tests {
         headers
     }
 
+    /// Request body carrying whichever client credentials a test needs.
+    #[derive(Default)]
+    struct BodyParams {
+        client_id: Option<String>,
+        client_secret: Option<String>,
+    }
+
+    impl ClientAuthFields for BodyParams {
+        fn client_id(&self) -> Option<&str> {
+            self.client_id.as_deref()
+        }
+        fn client_secret(&self) -> Option<SecretString> {
+            self.client_secret.clone().map(SecretString::from)
+        }
+        fn client_assertion(&self) -> Option<&str> {
+            None
+        }
+        fn client_assertion_type(&self) -> Option<&str> {
+            None
+        }
+    }
+
     /// RFC 9110 Section 11.1 / RFC 7617 Section 2: the auth-scheme token is
     /// case-insensitive, so `basic` and `BASIC` must work like `Basic`.
     #[test]
     fn test_extract_client_credentials_scheme_case_insensitive() {
         for scheme in ["Basic", "basic", "BASIC", "bAsIc"] {
             let headers = basic_header(scheme);
-            let creds = extract_client_credentials(&headers, None, None);
+            let creds = extract_client_credentials(&headers, &BodyParams::default());
             assert!(creds.is_some(), "{scheme} scheme must be accepted");
             let (creds, presentation) = creds.expect("checked above");
             assert_eq!(creds.client_id, "client-1", "{scheme}");
@@ -430,24 +454,54 @@ mod tests {
         }
     }
 
-    /// RFC 6749 Section 5.2 binds on the client having *attempted* header
-    /// authentication, so an undecodable header still classifies as one.
+    /// Each variant must be a fact the classifier established, not an
+    /// assumption: `RequestBody` requires credentials actually in the body,
+    /// and a request with none at all is neither.
     #[test]
-    fn test_presentation_classifies_malformed_header_as_an_attempt() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
+    fn test_presentation_distinguishes_header_body_and_absent_credentials() {
+        let mut malformed = HeaderMap::new();
+        malformed.insert(
             header::AUTHORIZATION,
             "Basic !!!not-base64!!!".parse().expect("valid header"),
         );
+
+        let empty_body = BodyParams::default();
+        let id_only = BodyParams {
+            client_id: Some("client-1".to_string()),
+            client_secret: None,
+        };
+        let secret_only = BodyParams {
+            client_id: None,
+            client_secret: Some("s3cret".to_string()),
+        };
+
+        // RFC 6749 Section 5.2 binds on the client having *attempted* header
+        // authentication, so an undecodable header still classifies as one —
+        // and outranks body credentials.
         assert_eq!(
-            ClientAuthPresentation::of(&headers),
+            ClientAuthPresentation::of(&malformed, &empty_body),
+            ClientAuthPresentation::AuthorizationHeader
+        );
+        assert_eq!(
+            ClientAuthPresentation::of(&malformed, &id_only),
             ClientAuthPresentation::AuthorizationHeader
         );
 
-        // A body-authenticated request carries no challenge obligation.
+        // Either body credential alone is enough to be body authentication.
         assert_eq!(
-            ClientAuthPresentation::of(&HeaderMap::new()),
+            ClientAuthPresentation::of(&HeaderMap::new(), &id_only),
             ClientAuthPresentation::RequestBody
+        );
+        assert_eq!(
+            ClientAuthPresentation::of(&HeaderMap::new(), &secret_only),
+            ClientAuthPresentation::RequestBody
+        );
+
+        // No header, no body credentials: previously mislabelled as
+        // `RequestBody` on the strength of the header check alone.
+        assert_eq!(
+            ClientAuthPresentation::of(&HeaderMap::new(), &empty_body),
+            ClientAuthPresentation::NoCredentials
         );
     }
 

@@ -374,11 +374,7 @@ async fn resolve_non_jwt_auth(
     ),
     Response,
 > {
-    let creds = extract_client_credentials(
-        headers,
-        params.client_id.as_deref(),
-        params.client_secret.clone(),
-    );
+    let creds = extract_client_credentials(headers, params);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -561,7 +557,10 @@ async fn handle_authorization_code_grant(
             // client-authentication failure, so a client that used
             // `Authorization: Basic` is owed the matching challenge on the 401.
             Err(resp) => {
-                return with_client_auth_challenge(ClientAuthPresentation::of(&headers), resp);
+                return with_client_auth_challenge(
+                    ClientAuthPresentation::of(&headers, &params),
+                    resp,
+                );
             }
         }
     };
