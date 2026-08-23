@@ -952,22 +952,21 @@ fn verify_es256(
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
 
-    // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
-    // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
-    if signature.len() == 64 {
-        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256: FIXED verification failed: {e:?}");
-            VerifyError::SignatureInvalid
-        })
-    } else {
-        // DER-encoded signature from CTAP2
-        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256: ASN1 verification failed: {e:?}");
-            VerifyError::SignatureInvalid
-        })
-    }
+    // WebAuthn Level 2 Section 6.5.5: "For COSEAlgorithmIdentifier -7 (ES256),
+    // and other ECDSA-based algorithms, the sig value MUST be encoded as an
+    // ASN.1 DER Ecdsa-Sig-Value, as defined in [RFC3279] section 2.2.3."
+    //
+    // That covers both entry points. The adjacent Note records that CTAP2
+    // authenticators emit the same encoding as CTAP1/U2F "for consistency
+    // reasons", and browsers pass the authenticator's signature through
+    // unchanged. There is therefore no conformant client that sends a raw
+    // r||s pair, and accepting one on the strength of its length would admit
+    // an encoding the specification forbids.
+    let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
+    public_key.verify(message, signature).map_err(|e| {
+        tracing::warn!("verify_es256: ASN1 verification failed: {e:?}");
+        VerifyError::SignatureInvalid
+    })
 }
 
 /// Verify RS256 (RSA PKCS#1 v1.5 with SHA-256) signature.

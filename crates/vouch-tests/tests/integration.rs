@@ -1755,9 +1755,17 @@ mod es256_flow {
         );
     }
 
-    /// Test ES256 signature verification with raw/fixed format (like browser WebAuthn).
+    /// A raw r||s ES256 signature must be rejected.
+    ///
+    /// This test previously asserted the opposite, on the premise that
+    /// browsers emit the fixed format. WebAuthn Level 2 Section 6.5.5 says
+    /// otherwise: "For COSEAlgorithmIdentifier -7 (ES256), and other
+    /// ECDSA-based algorithms, the sig value MUST be encoded as an ASN.1 DER
+    /// Ecdsa-Sig-Value, as defined in [RFC3279] section 2.2.3." The adjacent
+    /// Note confirms CTAP2 authenticators use that same encoding, and
+    /// browsers relay the authenticator's signature unchanged.
     #[test]
-    fn test_es256_fixed_signature_verification() {
+    fn test_es256_fixed_signature_is_rejected() {
         let rng = SystemRandom::new();
 
         // Generate an ECDSA P-256 key pair (fixed/raw signatures - r||s format)
@@ -1794,10 +1802,10 @@ mod es256_flow {
         let signature = key_pair.sign(&rng, &message).expect("Failed to sign");
         let signature_bytes = signature.as_ref();
 
-        println!("ES256 FIXED test:");
-        println!(
-            "  signature: {} bytes (should be 64 for fixed)",
-            signature_bytes.len()
+        assert_eq!(
+            signature_bytes.len(),
+            64,
+            "the fixed signer produces a 64-byte r||s pair"
         );
 
         // Verify using the server's verification code
@@ -1805,8 +1813,9 @@ mod es256_flow {
         let result = verifier.verify(&cose_key, &message, signature_bytes);
 
         assert!(
-            result.is_ok(),
-            "ES256 FIXED signature verification should succeed: {:?}",
+            result.is_err(),
+            "a raw r||s ES256 signature is not a conformant WebAuthn encoding \
+             and must not verify: {:?}",
             result
         );
     }

@@ -1267,3 +1267,94 @@ fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
     );
     assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
 }
+
+// =========================================================================
+// ES256 signature encoding (WebAuthn Level 2 Section 6.5.5)
+// =========================================================================
+
+/// Build an EC2/P-256/ES256 COSE key from an uncompressed SEC1 point.
+fn make_es256_cose_key(x: &[u8], y: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let key = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Integer(1.into()), // kty = EC2
+            ciborium::Value::Integer(2.into()),
+        ),
+        (
+            ciborium::Value::Integer(3.into()), // alg = ES256 (-7)
+            ciborium::Value::Integer((-7).into()),
+        ),
+        (
+            ciborium::Value::Integer((-1).into()), // crv = P-256 (1)
+            ciborium::Value::Integer(1.into()),
+        ),
+        (
+            ciborium::Value::Integer((-2).into()), // x
+            ciborium::Value::Bytes(x.to_vec()),
+        ),
+        (
+            ciborium::Value::Integer((-3).into()), // y
+            ciborium::Value::Bytes(y.to_vec()),
+        ),
+    ]);
+    ciborium::into_writer(&key, &mut buf).unwrap();
+    buf
+}
+
+/// Sign `message` with a deterministic P-256 key, returning the COSE key
+/// alongside the signature in both encodings.
+fn es256_fixture(message: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+
+    let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    let cose_key = make_es256_cose_key(point.x().unwrap(), point.y().unwrap());
+
+    let signature: Signature = signing_key.sign(message);
+    (
+        cose_key,
+        signature.to_der().as_bytes().to_vec(),
+        signature.to_bytes().to_vec(),
+    )
+}
+
+/// WebAuthn Level 2 Section 6.5.5: "the sig value MUST be encoded as an
+/// ASN.1 DER Ecdsa-Sig-Value". Both browsers and CTAP2 authenticators emit
+/// this encoding, so it is the only one a conformant client produces.
+#[test]
+fn test_es256_der_signature_is_accepted() {
+    let message = b"webauthn assertion signing input";
+    let (cose_key, der, _raw) = es256_fixture(message);
+
+    assert!(verify_cose_signature(&cose_key, message, &der).is_ok());
+}
+
+/// A raw r||s pair is a valid signature over the same message, but not a
+/// conformant encoding. Accepting it on the strength of its 64-byte length
+/// was the heuristic this replaces, so rejection is the property under test.
+#[test]
+fn test_es256_raw_rs_signature_is_rejected() {
+    let message = b"webauthn assertion signing input";
+    let (cose_key, _der, raw) = es256_fixture(message);
+
+    assert_eq!(raw.len(), 64, "r||s for P-256 is 64 bytes");
+    assert!(
+        matches!(
+            verify_cose_signature(&cose_key, message, &raw),
+            Err(VerifyError::SignatureInvalid)
+        ),
+        "a non-conformant raw r||s signature must not verify"
+    );
+}
+
+/// A DER signature over a different message must still fail, so the test
+/// above is not passing merely because DER parsing succeeded.
+#[test]
+fn test_es256_der_signature_over_wrong_message_is_rejected() {
+    let (cose_key, der, _raw) = es256_fixture(b"original message");
+
+    assert!(matches!(
+        verify_cose_signature(&cose_key, b"different message", &der),
+        Err(VerifyError::SignatureInvalid)
+    ));
+}
