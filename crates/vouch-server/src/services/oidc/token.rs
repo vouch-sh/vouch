@@ -359,7 +359,6 @@ pub(crate) async fn exchange_authorization_code(
     // Build the chokepoint proof here: `GrantProof::AuthorizationCode` can
     // only be constructed by code that holds an AuthCodeClaim, which is
     // produced by `enforce_single_use_code` above.
-    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let proof = TokenIssuanceProof {
         grant: GrantProof::AuthorizationCode(auth_code_claim),
         client_auth,
@@ -373,7 +372,7 @@ pub(crate) async fn exchange_authorization_code(
             authenticator_id: Some(&auth_code.authenticator_id),
             client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
-            dpop_jkt,
+            dpop_proof: params.dpop_proof.as_ref(),
             mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: None,
             audience: grants.audience.as_deref(),
@@ -404,7 +403,7 @@ pub(crate) async fn exchange_authorization_code(
             email: &auth_code.email,
             nonce: auth_code.nonce.as_deref(),
             expires_in,
-            dpop_jkt,
+            dpop_proof: params.dpop_proof.as_ref(),
             scope: &auth_code.scope,
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
@@ -890,7 +889,9 @@ struct IdTokenParams<'a> {
     email: &'a str,
     nonce: Option<&'a str>,
     expires_in: u64,
-    dpop_jkt: Option<&'a str>,
+    /// RFC 9449 §6 / RFC 7800 §3.1: the validated DPoP proof supplying the
+    /// ID token's `cnf.jkt`.
+    dpop_proof: Option<&'a ValidatedDpopProof>,
     scope: &'a ScopeSet,
     /// Time when the user authenticated (FIDO2 session creation time).
     auth_time: Option<i64>,
@@ -916,8 +917,8 @@ async fn generate_id_token(
         .ok_or_else(|| ServiceError::Internal("Expiration time overflow".to_string()))?;
 
     // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
-    let cnf = params.dpop_jkt.map(|jkt| CnfClaim {
-        jkt: Some(jkt.to_string()),
+    let cnf = params.dpop_proof.map(|proof| CnfClaim {
+        jkt: Some(proof.jkt.clone()),
         x5t_s256: None,
     });
 

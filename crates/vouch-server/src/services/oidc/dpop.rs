@@ -207,12 +207,17 @@ impl std::error::Error for DpopError {}
 /// `jti` has been atomically committed to the replay-prevention table.
 ///
 /// Construction is private to this module — the only path to an instance is
-/// a successful return from [`validate_dpop_proof`] (or its userinfo-bound
-/// variant), both of which call [`validate_dpop_common`], which performs
-/// signature verification, claim validation (`htm`/`htu`/`exp`/`nonce`),
-/// and an atomic insert into the DPoP JTI table. Callers that hold a
-/// `ValidatedDpopProof` can rely on it as compile-time evidence that the
-/// proof was not a replay and is bound to the carried `jkt`.
+/// a successful return from [`validate_dpop_proof`] or [`validate_dpop_at_resource`],
+/// both of which call [`validate_dpop_common`], which performs signature
+/// verification, claim validation (`htm`/`htu`/`exp`/`nonce`), and an atomic
+/// insert into the DPoP JTI table. Callers that hold a `ValidatedDpopProof`
+/// can rely on it as compile-time evidence that the proof was not a replay
+/// and is bound to the carried `jkt`.
+///
+/// The replay half of that evidence is the [`db::DpopJtiClaim`] the witness
+/// owns, not a comment: the claim is only constructible by the atomic insert
+/// that won, and it is moved in here rather than dropped at the end of
+/// validation.
 ///
 /// The carried `jkt`/`jti`/`source` are the validation metadata downstream
 /// consumers need (e.g., binding the access token via `cnf.jkt`, recording
@@ -232,23 +237,29 @@ pub struct ValidatedDpopProof {
     pub(crate) jti: String,
     /// Credential source identifier from the DPoP proof (custom claim).
     pub(crate) source: Option<String>,
-    /// Seals construction to this module — without setting this field,
-    /// code outside `services::oidc::dpop` cannot build a
-    /// `ValidatedDpopProof` via struct literal. Stronger than
-    /// `#[non_exhaustive]`, which would still allow in-crate construction.
-    _private: (),
+    /// The replay guarantee itself: the witness [`db::check_and_store_dpop_jti`]
+    /// returns when its atomic insert wins. Holding it is what makes "this
+    /// `jti` was committed by this request" a property of the value rather
+    /// than a claim in prose.
+    ///
+    /// It doubles as the construction seal. `DpopJtiClaim`'s own field is
+    /// private to `db::dpop`, so no code outside that module can produce
+    /// one — and therefore no code outside it can struct-literal a
+    /// `ValidatedDpopProof`. Stronger than `#[non_exhaustive]`, which
+    /// would still allow in-crate construction.
+    _jti_claim: db::DpopJtiClaim,
 }
 
 impl ValidatedDpopProof {
     /// Test-only constructor. Production code must obtain a witness via
-    /// [`validate_dpop_proof`] / [`validate_userinfo_dpop_proof`].
-    #[cfg(test)]
+    /// [`validate_dpop_proof`] / [`validate_dpop_at_resource`].
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn for_testing(jkt: String, jti: String, source: Option<String>) -> Self {
         Self {
             jkt,
             jti,
             source,
-            _private: (),
+            _jti_claim: db::DpopJtiClaim::for_testing(),
         }
     }
 }
@@ -549,11 +560,10 @@ async fn validate_dpop_common(
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
     // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY.
-    // The returned `DpopJtiClaim` witness is bound to `_jti_claim` and
-    // dropped at function return; its compile-time guarantee that the JTI
-    // commit happened flows forward via the `ValidatedDpopProof` `_private:
-    // ()` marker constructed below.
-    let _jti_claim = match db::check_and_store_dpop_jti(store, &claims.jti, config_max_age).await {
+    // The returned `DpopJtiClaim` is moved into the `ValidatedDpopProof`
+    // below, so the "this JTI was committed by this request" guarantee is
+    // carried by the returned value for as long as it lives.
+    let jti_claim = match db::check_and_store_dpop_jti(store, &claims.jti, config_max_age).await {
         Ok(claim) => claim,
         Err(db::claim::ClaimError::AlreadyConsumed) => return Err(DpopError::ReplayDetected),
         Err(db::claim::ClaimError::InvalidInput(msg)) => return Err(DpopError::InvalidFormat(msg)),
@@ -591,7 +601,7 @@ async fn validate_dpop_common(
     // means a single DELETE statement decided the outcome — no TOCTOU
     // window between read and consume. The "this DPoP proof validated
     // successfully" guarantee is carried forward by the returned
-    // `ValidatedDpopProof` (`_private: ()` marker).
+    // `ValidatedDpopProof`.
     if let Some(nonce) = claims.nonce.as_deref() {
         match db::validate_and_consume_dpop_nonce(store, nonce).await {
             Ok(()) => {}
@@ -617,7 +627,7 @@ async fn validate_dpop_common(
         jkt,
         jti: claims.jti,
         source: claims.source,
-        _private: (),
+        _jti_claim: jti_claim,
     })
 }
 

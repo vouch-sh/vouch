@@ -99,7 +99,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             authenticator_id: Some(&auth_id),
             client_id: &state.config().base_url,
             scope: None,
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,

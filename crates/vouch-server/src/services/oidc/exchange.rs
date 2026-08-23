@@ -13,9 +13,9 @@ use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenIssuanceProof,
     create_oauth_access_token, decode_token,
 };
-use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
+use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
@@ -59,8 +59,11 @@ pub struct TokenExchangeParams<'a> {
     pub requested_token_type: Option<&'a str>,
     /// OAuth client_id of the requesting client.
     pub client_id: &'a str,
-    /// RFC 9449: DPoP JWK thumbprint for sender-constrained token binding.
-    pub dpop_jkt: Option<&'a str>,
+    /// RFC 9449 §6: the validated DPoP proof binding the issued token via
+    /// `cnf.jkt`. The witness travels instead of its thumbprint so an
+    /// exchanged token cannot be sender-constrained to a key that was never
+    /// proven.
+    pub dpop_proof: Option<&'a ValidatedDpopProof>,
     /// Client IP from the TCP peer socket, for temporal policy correlation
     /// (e.g. the exchange-IP-consistency policy).
     pub client_ip: Option<std::net::IpAddr>,
@@ -414,7 +417,7 @@ pub(crate) async fn exchange_token(
             authenticator_id,
             client_id: params.client_id,
             scope: granted_scope.clone(),
-            dpop_jkt: params.dpop_jkt,
+            dpop_proof: params.dpop_proof,
             mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: actor_claim,
             audience,
@@ -496,7 +499,7 @@ pub(crate) async fn exchange_token(
     );
 
     // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
-    let token_type = if params.dpop_jkt.is_some() {
+    let token_type = if params.dpop_proof.is_some() {
         protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
         protocol::ACCESS_TOKEN_TYPE_BEARER

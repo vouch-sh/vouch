@@ -345,7 +345,6 @@ pub(crate) async fn exchange_fido2_assertion(
     // 10. Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
-    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let now = jiff::Timestamp::now().as_second();
 
     // Snapshot org domain at session creation so federation claims reflect
@@ -374,7 +373,7 @@ pub(crate) async fn exchange_fido2_assertion(
             authenticator_id: Some(&authenticator.id),
             client_id: &params.client.client.client_id,
             scope: Some(scope.clone()),
-            dpop_jkt,
+            dpop_proof: params.dpop_proof.as_ref(),
             mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: None,
             audience: None,

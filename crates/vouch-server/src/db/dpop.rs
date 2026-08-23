@@ -96,15 +96,30 @@ pub async fn validate_and_consume_dpop_nonce(
 /// whose atomic INSERT on the deterministic PRIMARY KEY guarantees that
 /// at most one concurrent caller's insert commits.
 ///
-/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
-/// bound at the call site; today it is carried into `ValidatedDpopProof`
-/// by `validate_dpop_common` so the structural guarantee flows through
-/// to downstream code that requires a validated proof.
+/// Intentionally not `Clone`. `validate_dpop_common` moves the witness into
+/// the `ValidatedDpopProof` it returns, so holding a validated proof is
+/// itself evidence that this insert won — the replay guarantee travels with
+/// the value instead of being asserted alongside it.
 #[must_use = "the DPoP JTI was atomically committed; bind this witness so \
               it can be carried into ValidatedDpopProof"]
 #[derive(Debug)]
 pub struct DpopJtiClaim {
     _private: (),
+}
+
+impl DpopJtiClaim {
+    /// Test-only constructor. Production code must obtain a claim via
+    /// [`check_and_store_dpop_jti`].
+    ///
+    /// Gated on `test-utils` as well as `test` because
+    /// `ValidatedDpopProof::for_testing` needs it to build a witness for
+    /// integration-test fixtures, and `crate::test_utils` compiles under
+    /// the feature. `lib.rs` fails the build if the feature is on in a
+    /// release profile.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn for_testing() -> Self {
+        Self { _private: () }
+    }
 }
 
 /// Atomically commit a DPoP JTI to the replay-prevention table.

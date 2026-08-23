@@ -793,7 +793,7 @@ async fn handle_client_credentials_grant(
         &authenticated_client.client,
         params.scope.as_deref(),
         ClientCredentialsBindings {
-            dpop_jkt: dpop_proof.as_ref().map(|p| p.jkt.as_str()),
+            dpop_proof: dpop_proof.as_ref(),
             mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
         },
         proof,
@@ -913,8 +913,6 @@ async fn handle_token_exchange_grant(
             }
         };
 
-    let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
-
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
     let mtls_verification =
         match validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await {
@@ -968,7 +966,7 @@ async fn handle_token_exchange_grant(
         scope: params.scope.as_deref(),
         requested_token_type: params.requested_token_type.as_deref(),
         client_id: &authenticated_client.client.client_id,
-        dpop_jkt: dpop_jkt.as_deref(),
+        dpop_proof: dpop_proof.as_ref(),
         authorization_details: params.authorization_details.as_deref(),
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
         client_ip: client_info.client_ip,

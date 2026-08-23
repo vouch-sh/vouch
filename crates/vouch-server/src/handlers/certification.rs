@@ -169,7 +169,7 @@ pub(crate) async fn complete_login(
             authenticator_id: Some(&authenticator_id),
             client_id: &session_client_id,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
