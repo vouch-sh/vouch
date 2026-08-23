@@ -712,6 +712,7 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -758,6 +759,7 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await

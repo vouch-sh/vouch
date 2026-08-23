@@ -329,7 +329,7 @@ async fn check_session_and_authorize(
     validated: ValidatedAuthRequest,
     jar: &CookieJar,
     reauth_policy: ReauthPolicy,
-    par_to_consume: Option<(&str, &str)>,
+    par_to_consume: Option<db::ParRef<'_>>,
 ) -> Response {
     let session_token = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
@@ -373,7 +373,7 @@ async fn check_session_and_authorize(
                     response_mode: resolved.response_mode,
                 },
                 None,
-                par_to_consume.map(|(uri, _)| uri),
+                par_to_consume.map(|par| par.request_uri),
             )
             .await
         }
@@ -882,7 +882,11 @@ async fn handle_par_request(
         validated,
         &jar,
         ReauthPolicy::Always,
-        Some((ctx.request_uri, ctx.client_id)),
+        Some(db::ParRef {
+            request_uri: ctx.request_uri,
+            client_id: ctx.client_id,
+            mode: db::ParConsumptionMode::EnforceExpiry,
+        }),
     )
     .await
 }
@@ -1189,39 +1193,40 @@ async fn complete_pending_auth(
         }
     }
 
-    if let Some(ref request_uri) = pending.par_request_uri {
-        match db::consume_pushed_authorization_request(
-            &state.store,
-            request_uri,
-            &pending.client_id,
-            db::ParConsumptionMode::SkipExpiry,
-        )
-        .await
-        {
-            Ok(_claim) => {} // successfully consumed
-            Err(db::claim::ClaimError::AlreadyConsumed) => {
-                return resolved
-                    .error_redirect(
-                        state,
-                        OAuthErrorCode::InvalidRequest,
-                        "The request_uri has already been used",
-                        pending.state.as_deref(),
-                    )
-                    .await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to consume PAR at code issuance: {e}");
-                return resolved
-                    .error_redirect(
-                        state,
-                        OAuthErrorCode::ServerError,
-                        "Failed to process pushed authorization request",
-                        pending.state.as_deref(),
-                    )
-                    .await;
+    let par_proof = match pending.par_request_uri {
+        None => db::ParConsumptionProof::not_pushed(),
+        Some(ref request_uri) => {
+            let par = db::ParRef {
+                request_uri,
+                client_id: &pending.client_id,
+                mode: db::ParConsumptionMode::SkipExpiry,
+            };
+            match db::ParConsumptionProof::consume(&state.store, par).await {
+                Ok(proof) => proof,
+                Err(db::claim::ClaimError::AlreadyConsumed) => {
+                    return resolved
+                        .error_redirect(
+                            state,
+                            OAuthErrorCode::InvalidRequest,
+                            "The request_uri has already been used",
+                            pending.state.as_deref(),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to consume PAR at code issuance: {e}");
+                    return resolved
+                        .error_redirect(
+                            state,
+                            OAuthErrorCode::ServerError,
+                            "Failed to process pushed authorization request",
+                            pending.state.as_deref(),
+                        )
+                        .await;
+                }
             }
         }
-    }
+    };
 
     let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
     let code_params = AuthorizationCodeParams {
@@ -1244,6 +1249,7 @@ async fn complete_pending_auth(
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: pending.authorization_details.as_ref(),
         auth_time: Some(auth_session.created_at.as_second()),
+        par: par_proof,
     };
 
     issue_code_and_redirect(
@@ -1472,7 +1478,7 @@ async fn authorize_authenticated_user(
     auth_session: &Session,
     authenticator: &Authenticator,
     reauth_policy: ReauthPolicy,
-    par_to_consume: Option<(&str, &str)>,
+    par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
 ) -> Response {
     // Step 1: Check client access.
@@ -1544,7 +1550,7 @@ async fn authorize_authenticated_user(
                 response_mode,
             },
             Some(Prompt::Login),
-            par_to_consume.map(|(uri, _)| uri),
+            par_to_consume.map(|par| par.request_uri),
         )
         .await;
     }
@@ -1577,7 +1583,7 @@ async fn issue_code_after_reauth_check(
     user: &User,
     auth_session: &Session,
     authenticator: &Authenticator,
-    par_to_consume: Option<(&str, &str)>,
+    par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
 ) -> Response {
     // Step 5: Validate requested ACR (RFC 9470).
@@ -1616,16 +1622,10 @@ async fn issue_code_after_reauth_check(
     }
 
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
-    if let Some((request_uri, client_id)) = par_to_consume {
-        match db::consume_pushed_authorization_request(
-            &state.store,
-            request_uri,
-            client_id,
-            db::ParConsumptionMode::EnforceExpiry,
-        )
-        .await
-        {
-            Ok(_claim) => {} // Successfully consumed
+    let par_proof = match par_to_consume {
+        None => db::ParConsumptionProof::not_pushed(),
+        Some(par) => match db::ParConsumptionProof::consume(&state.store, par).await {
+            Ok(proof) => proof,
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return oauth_error_response(
                     state,
@@ -1651,8 +1651,8 @@ async fn issue_code_after_reauth_check(
                 )
                 .await;
             }
-        }
-    }
+        },
+    };
 
     // Step 8: Issue authorization code.
     let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(oauth_client);
@@ -1674,6 +1674,7 @@ async fn issue_code_after_reauth_check(
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: ad_value.as_ref(),
         auth_time: Some(auth_session.created_at.as_second()),
+        par: par_proof,
     };
 
     issue_code_and_redirect(

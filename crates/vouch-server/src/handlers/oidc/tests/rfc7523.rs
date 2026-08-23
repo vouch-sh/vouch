@@ -214,6 +214,7 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -280,6 +281,7 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -360,6 +362,7 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -428,6 +431,7 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -490,6 +494,7 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -544,6 +549,7 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -613,6 +619,7 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -908,6 +915,7 @@ async fn test_rfc7523_authorization_code_grant_accepts_non_fapi_jwt_without_jti(
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1148,6 +1156,7 @@ async fn test_jwt_assertion_jti_concurrent_replay_authorization_code() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1230,6 +1239,7 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1441,6 +1451,7 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -1547,6 +1558,7 @@ async fn pkjwt_issue_code(
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
             auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )
     .await

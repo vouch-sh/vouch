@@ -1526,6 +1526,7 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
             crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         authorization_details: None,
         auth_time: None,
+        par: crate::db::ParConsumptionProof::not_pushed(),
     };
 
     let code = issue_authorization_code(&state, code_params)

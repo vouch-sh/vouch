@@ -1087,11 +1087,13 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
     .unwrap();
 
     // First consumption should succeed.
-    let _claim = db::consume_pushed_authorization_request(
+    let _proof = db::ParConsumptionProof::consume(
         &state.store,
-        &request_uri,
-        &client.client_id,
-        db::ParConsumptionMode::EnforceExpiry,
+        db::ParRef {
+            request_uri: &request_uri,
+            client_id: &client.client_id,
+            mode: db::ParConsumptionMode::EnforceExpiry,
+        },
     )
     .await
     .expect("First consumption should succeed");
@@ -1109,11 +1111,13 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
     );
 
     // Second consumption should fail (already consumed — pre-check catches it).
-    let result = db::consume_pushed_authorization_request(
+    let result = db::ParConsumptionProof::consume(
         &state.store,
-        &request_uri,
-        &client.client_id,
-        db::ParConsumptionMode::EnforceExpiry,
+        db::ParRef {
+            request_uri: &request_uri,
+            client_id: &client.client_id,
+            mode: db::ParConsumptionMode::EnforceExpiry,
+        },
     )
     .await;
     assert!(
@@ -1170,20 +1174,24 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
     let client_id_b = client.client_id.clone();
     let (result_a, result_b) = tokio::join!(
         async move {
-            db::consume_pushed_authorization_request(
+            db::ParConsumptionProof::consume(
                 &store_a,
-                &request_uri_a,
-                &client_id_a,
-                db::ParConsumptionMode::EnforceExpiry,
+                db::ParRef {
+                    request_uri: &request_uri_a,
+                    client_id: &client_id_a,
+                    mode: db::ParConsumptionMode::EnforceExpiry,
+                },
             )
             .await
         },
         async move {
-            db::consume_pushed_authorization_request(
+            db::ParConsumptionProof::consume(
                 &store_b,
-                &request_uri_b,
-                &client_id_b,
-                db::ParConsumptionMode::EnforceExpiry,
+                db::ParRef {
+                    request_uri: &request_uri_b,
+                    client_id: &client_id_b,
+                    mode: db::ParConsumptionMode::EnforceExpiry,
+                },
             )
             .await
         },
@@ -1379,6 +1387,99 @@ async fn test_rfc9126_par_not_consumed_when_reauth_required() {
 }
 
 #[tokio::test]
+async fn test_rfc9126_par_consumed_when_code_issued_after_login() {
+    // RFC 9126 Section 7.3: "the authorization server SHOULD make the request
+    // URIs one-time use". The deferred path issues the code on the return trip
+    // from login, so that is where the PAR referenced by the pending record
+    // must be consumed — a replay of the request_uri afterwards fails.
+    use crate::db::documents::par::PushedAuthorizationRequestDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-deferred@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let request_uri = create_par_request(&app, &client).await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    // First visit: PAR flow always re-authenticates, so this parks the request
+    // in a pending record and redirects to login.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    let location = response.headers.get("location").expect("redirect location");
+    let pending_id = location
+        .to_str()
+        .unwrap()
+        .strip_prefix("/login?pending_auth=")
+        .expect("login redirect carries the pending auth id")
+        .to_string();
+
+    // Return trip from login: the code is issued here.
+    let completed = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    let completed_location = completed
+        .headers
+        .get("location")
+        .expect("code redirect location")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        completed_location.starts_with("https://example.com/callback?code="),
+        "Return from login should redirect with an authorization code, got: \
+         {completed_location} (status {})",
+        completed.status
+    );
+
+    // The PAR backing the issued code must now be consumed.
+    let doc = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .unwrap()
+        .expect("PAR doc should still exist");
+    assert!(
+        doc.data.consumed_at.is_some(),
+        "PAR must be consumed once the authorization code is issued"
+    );
+
+    // And the request_uri is no longer usable.
+    let replay = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        replay.status,
+        StatusCode::OK,
+        "Replaying a consumed request_uri should return the error page"
+    );
+    assert!(
+        !replay.body.contains("pending_auth"),
+        "Replaying a consumed request_uri must not start a new authorization"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc9126_par_reuse_succeeds_after_reauth_redirect() {
     // FAPI 2.0 Section 5.3.2.2 Note 3: request_uri can be reused before
     // authorization completes, even on the re-auth path.
@@ -1452,11 +1553,13 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
     let request_uri = create_par_request(&app, &client).await;
 
     // Consume the PAR directly via DB before the authorize request arrives.
-    let _claim = crate::db::consume_pushed_authorization_request(
+    let _proof = crate::db::ParConsumptionProof::consume(
         &state.store,
-        &request_uri,
-        &client.client_id,
-        crate::db::ParConsumptionMode::EnforceExpiry,
+        crate::db::ParRef {
+            request_uri: &request_uri,
+            client_id: &client.client_id,
+            mode: crate::db::ParConsumptionMode::EnforceExpiry,
+        },
     )
     .await
     .expect("Pre-consumption should succeed");
