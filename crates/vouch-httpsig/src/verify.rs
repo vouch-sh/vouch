@@ -30,7 +30,7 @@ pub fn verify_request_signature<T>(
     label: &str,
     verifier: &dyn VerifyingAlgorithm,
     max_age: Option<i64>,
-) -> Result<SignatureParams, HttpSigError> {
+) -> Result<CryptoVerified, HttpSigError> {
     let (params, params_str, signature_bytes) = extract_signature_parts(req.headers(), label)?;
     validate_algorithm(&params, verifier)?;
     validate_timestamps(&params, max_age)?;
@@ -38,7 +38,123 @@ pub fn verify_request_signature<T>(
     let base = build_request_base_with_params_str(req, &params, &params_str)?;
     verifier.verify(&base, &signature_bytes)?;
 
-    Ok(params)
+    Ok(CryptoVerified { params })
+}
+
+/// A signature whose cryptographic verification has succeeded.
+///
+/// First link in the verification chain. It proves the signature is authentic
+/// over whatever components it happens to cover — not that those components
+/// include anything meaningful, and not that a request body was bound. The
+/// only way forward is [`CryptoVerified::require_coverage`].
+#[derive(Debug)]
+pub struct CryptoVerified {
+    params: SignatureParams,
+}
+
+impl CryptoVerified {
+    /// The verified signature parameters.
+    #[must_use]
+    pub fn params(&self) -> &SignatureParams {
+        &self.params
+    }
+
+    /// Check that the signature covers every component in `required`
+    /// (RFC 9421 Section 7.2.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpSigError::InvalidSignature`] when a required component is
+    /// not among the signature's covered components.
+    pub fn require_coverage(self, required: &[&str]) -> Result<CoverageChecked, HttpSigError> {
+        validate_coverage(&self.params, required)?;
+        Ok(CoverageChecked {
+            params: self.params,
+        })
+    }
+}
+
+/// A verified signature that covers the caller's required components.
+///
+/// Still insufficient for a request carrying a body: an unsigned
+/// `Content-Digest` header could be swapped alongside the payload. The only
+/// way forward is [`CoverageChecked::enforce_body_digest`].
+#[derive(Debug)]
+pub struct CoverageChecked {
+    params: SignatureParams,
+}
+
+impl CoverageChecked {
+    /// The verified signature parameters.
+    #[must_use]
+    pub fn params(&self) -> &SignatureParams {
+        &self.params
+    }
+
+    /// Enforce RFC 9530 `Content-Digest` integrity for a signed request body.
+    ///
+    /// A signed request carrying a non-empty body must cover `content-digest`
+    /// in its signature *and* present a matching header. Coverage is required
+    /// because an unsigned digest header could be swapped alongside the body.
+    /// Empty bodies (GET, bodyless POST) are exempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpSigError::MissingDigest`] when the body is not bound by a
+    /// covered, present `Content-Digest`, or [`HttpSigError::DigestMismatch`]
+    /// when the digest does not match the body.
+    pub fn enforce_body_digest(
+        self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<DigestEnforced, HttpSigError> {
+        if body.is_empty() {
+            return Ok(DigestEnforced {
+                params: self.params,
+            });
+        }
+
+        validate_coverage(&self.params, &["content-digest"])
+            .map_err(|_| HttpSigError::MissingDigest)?;
+
+        let header = headers
+            .get("content-digest")
+            .ok_or(HttpSigError::MissingDigest)?
+            .to_str()
+            .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest: {e}")))?;
+
+        crate::digest::verify_content_digest(header, body)?;
+
+        Ok(DigestEnforced {
+            params: self.params,
+        })
+    }
+}
+
+/// A fully checked signature: verified, coverage-checked, and body-bound.
+///
+/// Reaching this state is the only way to build the `VerifiedSignature`
+/// request extension, so a downstream handler cannot observe a signature
+/// result that skipped a step. Producing one requires moving through
+/// [`CryptoVerified`] and [`CoverageChecked`] in order — the sequence is
+/// enforced by the types rather than by statement order in a caller.
+#[derive(Debug)]
+pub struct DigestEnforced {
+    params: SignatureParams,
+}
+
+impl DigestEnforced {
+    /// The verified signature parameters.
+    #[must_use]
+    pub fn params(&self) -> &SignatureParams {
+        &self.params
+    }
+
+    /// Consume the proof, yielding the verified parameters.
+    #[must_use]
+    pub fn into_params(self) -> SignatureParams {
+        self.params
+    }
 }
 
 /// Validate that a signature covers at least the required components (RFC 9421 §7.2.1).
@@ -47,11 +163,18 @@ pub fn verify_request_signature<T>(
 /// appropriate for the application context. An empty covered components list
 /// means the signature proves key possession but does not bind to any message content.
 ///
+/// Private on purpose: a coverage check that returns `Ok(())` and nothing else
+/// leaves no evidence it ran, which is the failure mode the verification chain
+/// exists to remove. Callers reach it through
+/// [`CryptoVerified::require_coverage`], which hands back a
+/// [`CoverageChecked`] proof. Shared here because both that transition and
+/// [`CoverageChecked::enforce_body_digest`] need the same comparison.
+///
 /// # Errors
 ///
 /// Returns [`HttpSigError::InvalidSignature`] if any required component is missing
 /// from the signature's covered components.
-pub fn validate_coverage(params: &SignatureParams, required: &[&str]) -> Result<(), HttpSigError> {
+fn validate_coverage(params: &SignatureParams, required: &[&str]) -> Result<(), HttpSigError> {
     for req_name in required {
         let found = params.components.iter().any(|c| {
             // Extract the bare component name without parameters
@@ -494,5 +617,87 @@ mod tests {
             tag: None,
         };
         validate_coverage(&params, &[]).unwrap();
+    }
+
+    fn params_covering(components: Vec<crate::ComponentIdentifier>) -> SignatureParams {
+        SignatureParams {
+            components,
+            alg: None,
+            keyid: None,
+            created: None,
+            expires: None,
+            nonce: None,
+            tag: None,
+        }
+    }
+
+    /// Enter the chain at the digest step. Only reachable here because the
+    /// tests are a child module of `verify` — outside the crate the sole
+    /// route to `CoverageChecked` is `CryptoVerified::require_coverage`.
+    fn coverage_checked(components: Vec<crate::ComponentIdentifier>) -> CoverageChecked {
+        CoverageChecked {
+            params: params_covering(components),
+        }
+    }
+
+    fn digest_header(body: &[u8]) -> http::HeaderValue {
+        crate::digest::content_digest(body, crate::digest::DigestAlgorithm::Sha256)
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_enforce_body_digest_empty_body_is_exempt() {
+        let headers = http::HeaderMap::new();
+        coverage_checked(vec![])
+            .enforce_body_digest(&headers, b"")
+            .unwrap();
+    }
+
+    #[test]
+    fn test_enforce_body_digest_valid() {
+        let body = b"{\"x\":1}";
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(body));
+        coverage_checked(vec![
+            crate::ComponentIdentifier::method(),
+            crate::ComponentIdentifier::field("content-digest"),
+        ])
+        .enforce_body_digest(&headers, body)
+        .unwrap();
+    }
+
+    #[test]
+    fn test_enforce_body_digest_missing_header() {
+        let body = b"body";
+        let headers = http::HeaderMap::new();
+        assert!(matches!(
+            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+                .enforce_body_digest(&headers, body),
+            Err(HttpSigError::MissingDigest)
+        ));
+    }
+
+    #[test]
+    fn test_enforce_body_digest_not_covered() {
+        let body = b"body";
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(body));
+        assert!(matches!(
+            coverage_checked(vec![crate::ComponentIdentifier::method()])
+                .enforce_body_digest(&headers, body),
+            Err(HttpSigError::MissingDigest)
+        ));
+    }
+
+    #[test]
+    fn test_enforce_body_digest_mismatch() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(b"other body"));
+        assert!(matches!(
+            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+                .enforce_body_digest(&headers, b"body"),
+            Err(HttpSigError::DigestMismatch(_))
+        ));
     }
 }

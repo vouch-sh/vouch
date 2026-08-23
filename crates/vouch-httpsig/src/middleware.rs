@@ -39,11 +39,10 @@ use axum::{
 
 use crate::algorithm::VerifyingAlgorithm;
 use crate::component::ComponentIdentifier;
-use crate::digest::verify_content_digest;
 use crate::error::HttpSigError;
 use crate::sig_policy::requires_signature;
 use crate::signature_params::SignatureParams;
-use crate::verify::{extract_signature_labels, validate_coverage, verify_request_signature};
+use crate::verify::{DigestEnforced, extract_signature_labels, verify_request_signature};
 
 /// Minimum components a signature must cover for the middleware to accept it.
 ///
@@ -112,12 +111,35 @@ fn build_accept_signature(has_body: bool) -> Option<http::HeaderValue> {
 /// Verified HTTP signature data stored as a request extension.
 ///
 /// Handlers can retrieve this via `req.extensions().get::<VerifiedSignature>()`.
+///
+/// Constructing one requires a [`DigestEnforced`] proof, which is only
+/// reachable by moving through signature verification, coverage checking, and
+/// body-digest enforcement in that order. A handler that reads this extension
+/// therefore knows every step ran — the guarantee comes from the type, not
+/// from statement order in the middleware.
 #[derive(Debug, Clone)]
 pub struct VerifiedSignature {
     /// The label of the verified signature (e.g., `"sig1"`).
     pub label: String,
-    /// The parsed and verified signature parameters.
-    pub params: SignatureParams,
+    /// The parsed and fully checked signature parameters.
+    params: SignatureParams,
+}
+
+impl VerifiedSignature {
+    /// Build from a completed verification chain.
+    #[must_use]
+    pub fn new(label: String, proof: DigestEnforced) -> Self {
+        Self {
+            label,
+            params: proof.into_params(),
+        }
+    }
+
+    /// The verified signature parameters.
+    #[must_use]
+    pub fn params(&self) -> &SignatureParams {
+        &self.params
+    }
 }
 
 /// Async key resolver trait for looking up verification keys by `keyid`.
@@ -221,11 +243,11 @@ pub const DEFAULT_MAX_AGE: i64 = 300;
 /// failure → 500), or `None` when there is no nonce or it was accepted.
 async fn enforce_nonce<R: KeyResolver>(
     resolver: &R,
-    params: &SignatureParams,
+    proof: &DigestEnforced,
     label: &str,
     keyid: &str,
 ) -> Option<Response> {
-    let nonce = params.nonce.as_deref()?;
+    let nonce = proof.params().nonce.as_deref()?;
     match resolver.validate_nonce(nonce).await {
         NonceValidation::Valid => None,
         NonceValidation::Invalid => {
@@ -361,27 +383,30 @@ pub async fn require_signature<R: KeyResolver>(
     };
 
     match verify_request_signature(&req, &label, verifier.as_ref(), Some(max_age)) {
-        Ok(params) => {
+        Ok(verified) => {
             // Reject signatures that don't cover minimum required components;
             // advertise the expected set so the client can fix and retry.
-            if let Err(e) = validate_coverage(&params, REQUIRED_COVERAGE) {
-                tracing::debug!(
-                    label = %label,
-                    keyid = %keyid,
-                    error = %e,
-                    "HTTP signature insufficient coverage"
-                );
-                let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
-                if let Some(accept_sig) = build_accept_signature(has_body) {
-                    resp.headers_mut().insert("accept-signature", accept_sig);
+            let covered = match verified.require_coverage(REQUIRED_COVERAGE) {
+                Ok(covered) => covered,
+                Err(e) => {
+                    tracing::debug!(
+                        label = %label,
+                        keyid = %keyid,
+                        error = %e,
+                        "HTTP signature insufficient coverage"
+                    );
+                    let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                    if let Some(accept_sig) = build_accept_signature(has_body) {
+                        resp.headers_mut().insert("accept-signature", accept_sig);
+                    }
+                    return resp;
                 }
-                return resp;
-            }
+            };
 
             tracing::debug!(
                 label = %label,
                 keyid = %keyid,
-                alg = ?params.alg,
+                alg = ?covered.params().alg,
                 "HTTP signature verified"
             );
             // Enforce RFC 9530 body integrity for signed requests that carry a
@@ -394,33 +419,37 @@ pub async fn require_signature<R: KeyResolver>(
                     return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
                 }
             };
-            if let Err(e) = enforce_body_digest(&params, &parts.headers, &bytes) {
-                tracing::debug!(
-                    label = %label,
-                    keyid = %keyid,
-                    error = %e,
-                    "signed request body integrity check failed"
-                );
-                let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
-                // A coverage failure (signature verified but content-digest not
-                // covered) gets the same Accept-Signature remediation hint as the
-                // base-component coverage failure above.
-                if matches!(e, HttpSigError::MissingDigest)
-                    && let Some(accept_sig) = build_accept_signature(has_body)
-                {
-                    resp.headers_mut().insert("accept-signature", accept_sig);
+            let enforced = match covered.enforce_body_digest(&parts.headers, &bytes) {
+                Ok(enforced) => enforced,
+                Err(e) => {
+                    tracing::debug!(
+                        label = %label,
+                        keyid = %keyid,
+                        error = %e,
+                        "signed request body integrity check failed"
+                    );
+                    let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                    // A coverage failure (signature verified but content-digest
+                    // not covered) gets the same Accept-Signature remediation
+                    // hint as the base-component coverage failure above.
+                    if matches!(e, HttpSigError::MissingDigest)
+                        && let Some(accept_sig) = build_accept_signature(has_body)
+                    {
+                        resp.headers_mut().insert("accept-signature", accept_sig);
+                    }
+                    return resp;
                 }
-                return resp;
-            }
+            };
             // Validate and consume the server-issued nonce when the signature
             // carries one (enforce-when-present; see KeyResolver::validate_nonce).
-            if let Some(resp) = enforce_nonce(resolver.as_ref(), &params, &label, &keyid).await {
+            // Taking `&DigestEnforced` is what keeps this after the digest check:
+            // the proof cannot exist until the full chain has run.
+            if let Some(resp) = enforce_nonce(resolver.as_ref(), &enforced, &label, &keyid).await {
                 return resp;
             }
-            parts.extensions.insert(VerifiedSignature {
-                label: label.clone(),
-                params,
-            });
+            parts
+                .extensions
+                .insert(VerifiedSignature::new(label.clone(), enforced));
             let req = Request::from_parts(parts, axum::body::Body::from(bytes));
             let mut response = next.run(req).await;
 
@@ -448,38 +477,6 @@ pub async fn require_signature<R: KeyResolver>(
             (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response()
         }
     }
-}
-
-/// Enforce RFC 9530 Content-Digest integrity for a signed request body.
-///
-/// A signed request that carries a non-empty body MUST cover `content-digest`
-/// in its signature and present a matching `Content-Digest` header. Coverage is
-/// required because an unsigned digest header could be swapped alongside the
-/// body. Empty bodies (GET and bodyless POST requests) are exempt.
-///
-/// # Errors
-///
-/// Returns [`HttpSigError::MissingDigest`] when the body is not bound by a
-/// covered, present `Content-Digest`, or [`HttpSigError::DigestMismatch`] when
-/// the digest does not match the body.
-fn enforce_body_digest(
-    params: &SignatureParams,
-    headers: &http::HeaderMap,
-    body: &[u8],
-) -> Result<(), HttpSigError> {
-    if body.is_empty() {
-        return Ok(());
-    }
-
-    validate_coverage(params, &["content-digest"]).map_err(|_| HttpSigError::MissingDigest)?;
-
-    let header = headers
-        .get("content-digest")
-        .ok_or(HttpSigError::MissingDigest)?
-        .to_str()
-        .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest: {e}")))?;
-
-    verify_content_digest(header, body)
 }
 
 /// Extract the `keyid` parameter from a Signature-Input header value for a given label.
@@ -599,24 +596,6 @@ mod tests {
                 resolver,
                 require_signature::<InMemoryKeyResolver>,
             ))
-    }
-
-    fn params_covering(components: Vec<crate::ComponentIdentifier>) -> SignatureParams {
-        SignatureParams {
-            components,
-            alg: None,
-            keyid: None,
-            created: None,
-            expires: None,
-            nonce: None,
-            tag: None,
-        }
-    }
-
-    fn digest_header(body: &[u8]) -> http::HeaderValue {
-        crate::digest::content_digest(body, crate::digest::DigestAlgorithm::Sha256)
-            .parse()
-            .unwrap()
     }
 
     #[tokio::test]
@@ -742,59 +721,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn test_enforce_body_digest_empty_body_is_exempt() {
-        let params = params_covering(vec![]);
-        let headers = http::HeaderMap::new();
-        enforce_body_digest(&params, &headers, b"").unwrap();
-    }
-
-    #[test]
-    fn test_enforce_body_digest_valid() {
-        let body = b"{\"x\":1}";
-        let params = params_covering(vec![
-            crate::ComponentIdentifier::method(),
-            crate::ComponentIdentifier::field("content-digest"),
-        ]);
-        let mut headers = http::HeaderMap::new();
-        headers.insert("content-digest", digest_header(body));
-        enforce_body_digest(&params, &headers, body).unwrap();
-    }
-
-    #[test]
-    fn test_enforce_body_digest_missing_header() {
-        let body = b"body";
-        let params = params_covering(vec![crate::ComponentIdentifier::field("content-digest")]);
-        let headers = http::HeaderMap::new();
-        assert!(matches!(
-            enforce_body_digest(&params, &headers, body),
-            Err(HttpSigError::MissingDigest)
-        ));
-    }
-
-    #[test]
-    fn test_enforce_body_digest_not_covered() {
-        let body = b"body";
-        let params = params_covering(vec![crate::ComponentIdentifier::method()]);
-        let mut headers = http::HeaderMap::new();
-        headers.insert("content-digest", digest_header(body));
-        assert!(matches!(
-            enforce_body_digest(&params, &headers, body),
-            Err(HttpSigError::MissingDigest)
-        ));
-    }
-
-    #[test]
-    fn test_enforce_body_digest_mismatch() {
-        let params = params_covering(vec![crate::ComponentIdentifier::field("content-digest")]);
-        let mut headers = http::HeaderMap::new();
-        headers.insert("content-digest", digest_header(b"other body"));
-        assert!(matches!(
-            enforce_body_digest(&params, &headers, b"body"),
-            Err(HttpSigError::DigestMismatch(_))
-        ));
     }
 
     #[tokio::test]
