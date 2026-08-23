@@ -8,7 +8,7 @@ use vouch_agent::{AgentClient, AgentError};
 
 use crate::config::Config;
 use vouch_cli::tr_println;
-use vouch_common::clear_cookie;
+use vouch_common::{clear_cookie, protocol};
 
 /// Run the logout command.
 pub(crate) async fn run(server: &str) -> Result<()> {
@@ -116,7 +116,7 @@ async fn revoke_on_server(config: &Config) {
             "POST",
             &revoke_url,
             Some(form_body.as_bytes()),
-            Some("application/x-www-form-urlencoded"),
+            Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
             None,
             None,
         )

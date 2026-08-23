@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
-use vouch_common::ApiError;
+use vouch_common::{ApiError, protocol};
 
 /// Total timeout for interactive CLI operations.
 const INTERACTIVE_TOTAL: Duration = Duration::from_secs(30);
@@ -151,7 +151,7 @@ fn extract_response_headers(
     };
 
     let dpop_nonce = headers
-        .get("dpop-nonce")
+        .get(protocol::HEADER_DPOP_NONCE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
@@ -378,7 +378,7 @@ pub trait HttpClientExt: HttpClient {
         Req: Serialize + Sync,
         Resp: DeserializeOwned,
     {
-        let auth = format!("Bearer {}", token.expose_secret());
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token.expose_secret());
         async move {
             let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
             let response = self
@@ -413,7 +413,7 @@ pub trait HttpClientExt: HttpClient {
                     "POST",
                     url,
                     Some(form.as_bytes()),
-                    Some("application/x-www-form-urlencoded"),
+                    Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
                     None,
                     None,
                 )
@@ -482,7 +482,10 @@ pub struct StepUpChallenge {
 /// Returns `None` for non-step-up Bearer challenges (e.g., `error="invalid_token"`).
 pub fn parse_www_authenticate(header: &str) -> Option<StepUpChallenge> {
     // Must be a Bearer challenge
-    if !header.starts_with("Bearer ") {
+    if header
+        .strip_prefix(protocol::AUTH_SCHEME_BEARER)
+        .is_none_or(|rest| !rest.starts_with(' '))
+    {
         return None;
     }
 
@@ -568,7 +571,7 @@ fn redact_request_headers(
 fn string_to_static(s: &str) -> &'static str {
     // For known header names, return static strings to avoid leaking
     match s {
-        "DPoP" => "dpop",
+        protocol::HEADER_DPOP => protocol::HEADER_DPOP,
         "Signature" => "signature",
         "Signature-Input" => "signature-input",
         "Content-Digest" => "content-digest",

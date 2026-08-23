@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use vouch_common::protocol;
 
 /// Clock skew tolerance in seconds.
 ///
@@ -318,7 +319,7 @@ pub fn decode_claims_unverified(assertion: &str) -> ServiceResult<JwtAssertionCl
 /// Map a JWT algorithm string to a `jsonwebtoken::Algorithm`.
 pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
     match alg {
-        "ES256" => Ok(jsonwebtoken::Algorithm::ES256),
+        protocol::JWS_ALG_ES256 => Ok(jsonwebtoken::Algorithm::ES256),
         "RS256" => Ok(jsonwebtoken::Algorithm::RS256),
         "PS256" => Ok(jsonwebtoken::Algorithm::PS256),
         "EdDSA" => Ok(jsonwebtoken::Algorithm::EdDSA),

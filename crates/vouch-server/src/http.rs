@@ -5,6 +5,8 @@
 //! every layer, so handlers and infra parse and build `Authorization` /
 //! `WWW-Authenticate` values through one implementation.
 
+use vouch_common::protocol;
+
 /// Extract the token from an `Authorization` header value when its
 /// auth-scheme matches `scheme`.
 ///
@@ -31,7 +33,7 @@ pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
-    strip_auth_scheme(value, "Bearer")
+    strip_auth_scheme(value, protocol::AUTH_SCHEME_BEARER)
 }
 
 /// Filter a challenge parameter value to RFC 6750 Section 3's permitted set
@@ -60,14 +62,14 @@ pub(crate) fn sanitize_challenge_value(value: &str) -> String {
 /// RFC 9110 Section 11.6.1's challenge grammar (auth-params are optional).
 pub(crate) fn bearer_challenge(params: &[(&str, &str)]) -> String {
     if params.is_empty() {
-        return "Bearer".to_string();
+        return protocol::AUTH_SCHEME_BEARER.to_string();
     }
     let mut rendered = Vec::with_capacity(params.len());
     for (name, value) in params {
         let value = sanitize_challenge_value(value);
         rendered.push(format!("{name}=\"{value}\""));
     }
-    format!("Bearer {}", rendered.join(", "))
+    format!("{} {}", protocol::AUTH_SCHEME_BEARER, rendered.join(", "))
 }
 
 #[cfg(test)]

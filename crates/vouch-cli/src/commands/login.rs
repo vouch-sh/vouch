@@ -142,7 +142,7 @@ async fn run_fapi_login(
     let response = client
         .raw_client()
         .post(&challenge_url)
-        .header("DPoP", dpop_proof)
+        .header(protocol::HEADER_DPOP, dpop_proof)
         .header(fapi_headers[0].0, fapi_headers[0].1)
         .header(fapi_headers[1].0, fapi_headers[1].1)
         .json(&serde_json::json!({}))
@@ -163,7 +163,7 @@ async fn run_fapi_login(
     // include it in the token request, avoiding a use_dpop_nonce rejection.
     let challenge_dpop_nonce = response
         .headers()
-        .get("dpop-nonce")
+        .get(protocol::HEADER_DPOP_NONCE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
@@ -273,8 +273,8 @@ async fn run_fapi_login(
     let token_resp = client
         .raw_client()
         .post(&token_endpoint_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("DPoP", dpop_proof)
+        .header("Content-Type", protocol::CONTENT_TYPE_FORM_URLENCODED)
+        .header(protocol::HEADER_DPOP, dpop_proof)
         .header(fapi_headers[0].0, fapi_headers[0].1)
         .header(fapi_headers[1].0, fapi_headers[1].1)
         .body(form_body)
@@ -287,7 +287,7 @@ async fn run_fapi_login(
     // Capture DPoP-Nonce for potential retry (RFC 9449 nonce flow).
     let dpop_nonce = token_resp
         .headers()
-        .get("dpop-nonce")
+        .get(protocol::HEADER_DPOP_NONCE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
@@ -385,8 +385,8 @@ async fn run_fapi_login_with_nonce(
     let token_resp = client
         .raw_client()
         .post(&token_endpoint_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("DPoP", dpop_proof)
+        .header("Content-Type", protocol::CONTENT_TYPE_FORM_URLENCODED)
+        .header(protocol::HEADER_DPOP, dpop_proof)
         .header(fapi_headers[0].0, fapi_headers[0].1)
         .header(fapi_headers[1].0, fapi_headers[1].1)
         .body(form_body)

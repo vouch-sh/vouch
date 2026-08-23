@@ -12,6 +12,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use time::Duration;
+use vouch_common::protocol;
 
 // ============================================================================
 // Authentication Context for Templates
@@ -129,7 +130,9 @@ async fn extract_resource_token(
         match auth_scheme {
             AuthScheme::DPoP => {
                 // Validate DPoP proof header against cnf.jkt
-                let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+                let dpop_header = headers
+                    .get(protocol::HEADER_DPOP)
+                    .and_then(|v| v.to_str().ok());
                 if let Some(proof) = dpop_header {
                     let full_uri = format!("{}{}", config.base_url, uri);
                     match crate::services::oidc::dpop::validate_dpop_at_resource(
@@ -175,7 +178,7 @@ async fn extract_resource_token(
                                 StatusCode::UNAUTHORIZED,
                                 crate::error::OAuthErrorCode::UseDpopNonce.as_str(),
                                 "Authorization server requires nonce in DPoP proof",
-                                ("DPoP-Nonce", nonce.as_str()),
+                                (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
                             ));
                         }
                         Err(e) => {
@@ -507,10 +510,13 @@ fn extract_token_from_request(
 
     // Check Authorization header
     if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(token) = crate::http::strip_auth_scheme(auth_value, "DPoP") {
+        if let Some(token) = crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_DPOP)
+        {
             return Ok((token.to_string(), AuthScheme::DPoP));
         }
-        if let Some(token) = crate::http::strip_auth_scheme(auth_value, "Bearer") {
+        if let Some(token) =
+            crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_BEARER)
+        {
             return Ok((token.to_string(), AuthScheme::Bearer));
         }
     }

@@ -29,6 +29,7 @@ use axum::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use vouch_common::protocol;
 
 /// Token response (RFC 6749 Section 5.1).
 #[derive(Serialize)]
@@ -36,7 +37,8 @@ pub(super) struct TokenResponse {
     /// The access token issued by the authorization server.
     #[serde(serialize_with = "vouch_common::serialize_secret_string")]
     pub access_token: SecretString,
-    /// The type of the token issued ("Bearer" or "DPoP").
+    /// The type of the token issued ([`protocol::ACCESS_TOKEN_TYPE_BEARER`]
+    /// or [`protocol::ACCESS_TOKEN_TYPE_DPOP`]).
     pub token_type: String,
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
@@ -181,7 +183,7 @@ pub(super) struct TokenExchangeResponse {
     pub access_token: SecretString,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
-    /// The type of the token issued (e.g., "Bearer").
+    /// The type of the token issued (e.g. [`protocol::ACCESS_TOKEN_TYPE_BEARER`]).
     pub token_type: String,
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
@@ -525,7 +527,9 @@ async fn handle_authorization_code_grant(
     // BEFORE client-auth resolution so the `use_dpop_nonce` recovery
     // path (nonce header in the response) fires regardless of whether
     // the request also has invalid client auth.
-    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
@@ -703,7 +707,9 @@ async fn handle_client_credentials_grant(
 
     // RFC 9449 Section 5: Validate the DPoP proof if present so the issued
     // token carries a `cnf.jkt` binding.
-    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
@@ -886,7 +892,9 @@ async fn handle_token_exchange_grant(
     let secret_verification = any_auth.secret_verification;
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
-    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
@@ -1093,7 +1101,9 @@ async fn handle_fido2_assertion_grant(
     };
 
     // Validate DPoP proof if present
-    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
@@ -1276,7 +1286,7 @@ pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         [(
-            axum::http::header::HeaderName::from_static("dpop-nonce"),
+            axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
             nonce.to_string(),
         )],
         Json(OAuthErrorResponse {

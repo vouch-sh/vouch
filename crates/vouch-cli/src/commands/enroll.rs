@@ -383,7 +383,7 @@ async fn poll_once(
         }
         match dpop_builder.build(key) {
             Ok(proof) => {
-                builder = builder.header("DPoP", proof);
+                builder = builder.header(protocol::HEADER_DPOP, proof);
             }
             Err(e) => {
                 tracing::debug!("Failed to build DPoP proof: {e}");
@@ -413,7 +413,7 @@ async fn poll_once(
     // Capture DPoP-Nonce header for use_dpop_nonce flow (RFC 9449)
     let response_dpop_nonce = response
         .headers()
-        .get("dpop-nonce")
+        .get(protocol::HEADER_DPOP_NONCE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 

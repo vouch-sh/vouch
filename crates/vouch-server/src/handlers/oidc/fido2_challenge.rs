@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::Challenge;
+use vouch_common::protocol;
 
 /// State embedded in the challenge JWT.
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,7 +125,9 @@ pub(crate) async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Respo
     if let Ok(ref nonce) = dpop_nonce
         && let Ok(value) = axum::http::HeaderValue::from_str(nonce)
     {
-        response.headers_mut().insert("dpop-nonce", value);
+        response
+            .headers_mut()
+            .insert(protocol::HEADER_DPOP_NONCE, value);
     }
 
     response

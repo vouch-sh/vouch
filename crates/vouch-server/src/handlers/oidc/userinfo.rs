@@ -27,6 +27,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use vouch_common::protocol;
 
 /// User info response (OIDC Core Section 5.3.2).
 ///
@@ -94,9 +95,11 @@ pub(crate) async fn userinfo(
     };
 
     let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
-        if let Some(tok) = crate::http::strip_auth_scheme(auth_header, "DPoP") {
+        if let Some(tok) = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP) {
             (tok.to_string(), true)
-        } else if let Some(tok) = crate::http::strip_auth_scheme(auth_header, "Bearer") {
+        } else if let Some(tok) =
+            crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
+        {
             (tok.to_string(), false)
         } else {
             return oauth_error(
@@ -122,14 +125,17 @@ pub(crate) async fn userinfo(
     // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
     if is_dpop_scheme {
         // RFC 9449 Section 7.1: There MUST NOT be more than one DPoP header.
-        if headers.get_all("DPoP").iter().count() > 1 {
+        if headers.get_all(protocol::HEADER_DPOP).iter().count() > 1 {
             return oauth_error(
                 StatusCode::BAD_REQUEST,
                 OAuthErrorCode::InvalidDpopProof,
                 "Request must contain exactly one DPoP header",
             );
         }
-        let dpop_header = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+        let dpop_header = match headers
+            .get(protocol::HEADER_DPOP)
+            .and_then(|v| v.to_str().ok())
+        {
             Some(h) => h,
             None => {
                 return oauth_error(
@@ -202,7 +208,7 @@ pub(crate) async fn userinfo(
             Err(DpopError::UseNonce(nonce)) => {
                 return (
                     StatusCode::UNAUTHORIZED,
-                    [("DPoP-Nonce", nonce.as_str())],
+                    [(protocol::HEADER_DPOP_NONCE, nonce.as_str())],
                     Json(OAuthErrorResponse {
                         error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
                         error_description: Some(

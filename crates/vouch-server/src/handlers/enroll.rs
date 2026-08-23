@@ -22,7 +22,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
+use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse, protocol};
 
 use super::session::AuthContext;
 use super::{
@@ -1428,7 +1428,7 @@ pub(crate) async fn browser_register_complete(
         )
     })?;
 
-    if client_data.typ != "webauthn.create" {
+    if client_data.typ != protocol::CLIENT_DATA_TYPE_CREATE {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",

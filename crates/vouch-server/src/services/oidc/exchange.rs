@@ -19,6 +19,7 @@ use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
+use vouch_common::protocol;
 
 /// Token type URNs for RFC 8693 §3, re-exported under the names this module
 /// uses. The values live in [`vouch_common::protocol`] so the CLI's exchange
@@ -76,7 +77,8 @@ pub struct TokenExchangeResult {
     pub access_token: secrecy::SecretString,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
-    /// RFC 6749 Section 7.1: The type of the token issued (e.g., "Bearer").
+    /// RFC 6749 Section 7.1: The type of the token issued (e.g.
+    /// [`protocol::ACCESS_TOKEN_TYPE_BEARER`]).
     pub token_type: String,
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
@@ -493,11 +495,11 @@ pub(crate) async fn exchange_token(
         params.audience
     );
 
-    // RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
+    // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
     let token_type = if params.dpop_jkt.is_some() {
-        "DPoP"
+        protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
-        "Bearer"
+        protocol::ACCESS_TOKEN_TYPE_BEARER
     };
 
     Ok(TokenExchangeResult {
@@ -642,7 +644,7 @@ async fn issue_id_token(
     Ok(TokenExchangeResult {
         access_token: id_token.into(),
         issued_token_type: token_types::ID_TOKEN.to_string(),
-        token_type: "Bearer".to_string(),
+        token_type: protocol::ACCESS_TOKEN_TYPE_BEARER.to_string(),
         expires_in,
         scope: None,
         authorization_details: None,

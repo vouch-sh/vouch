@@ -32,6 +32,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::Challenge;
+use vouch_common::protocol;
 
 /// State embedded in the challenge JWT (must match the challenge endpoint).
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,7 +83,8 @@ pub struct Fido2AssertionParams<'a> {
 pub struct Fido2AssertionResult {
     /// The OAuth access token.
     pub access_token: secrecy::SecretString,
-    /// Token type ("DPoP" or "Bearer").
+    /// Token type ([`protocol::ACCESS_TOKEN_TYPE_DPOP`] or
+    /// [`protocol::ACCESS_TOKEN_TYPE_BEARER`]).
     pub token_type: String,
     /// Expires in seconds.
     pub expires_in: u64,
@@ -403,9 +405,9 @@ pub(crate) async fn exchange_fido2_assertion(
     .await;
 
     let token_type = if params.dpop_proof.is_some() {
-        "DPoP"
+        protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
-        "Bearer"
+        protocol::ACCESS_TOKEN_TYPE_BEARER
     };
 
     Ok(Fido2AssertionResult {

@@ -35,7 +35,8 @@ use crate::session::resolve_token;
 use vouch_cli::fapi::key_store::load_client_key;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder};
 use vouch_common::protocol::{
-    ERROR_USE_DPOP_NONCE, GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN,
+    CONTENT_TYPE_FORM_URLENCODED, ERROR_USE_DPOP_NONCE, GRANT_TYPE_TOKEN_EXCHANGE, HEADER_DPOP,
+    HEADER_DPOP_NONCE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN,
 };
 
 /// Number of seconds shaved off the provider's stated `expires_in` when
@@ -181,8 +182,8 @@ async fn send_exchange(
 
     let response = http
         .post(endpoint)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header("DPoP", dpop_proof)
+        .header("content-type", CONTENT_TYPE_FORM_URLENCODED)
+        .header(HEADER_DPOP, dpop_proof)
         .body(body)
         .send()
         .await
@@ -191,7 +192,7 @@ async fn send_exchange(
     let status = response.status();
     let nonce = response
         .headers()
-        .get("dpop-nonce")
+        .get(HEADER_DPOP_NONCE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let text = response

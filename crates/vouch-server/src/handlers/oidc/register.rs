@@ -26,6 +26,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+use vouch_common::protocol;
 
 /// POST /oauth/register — RFC 7591 Dynamic Client Registration.
 ///
@@ -206,8 +207,9 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
             status,
             [(
                 axum::http::header::WWW_AUTHENTICATE,
-                axum::http::HeaderValue::from_str(&www_auth)
-                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("Bearer")),
+                axum::http::HeaderValue::from_str(&www_auth).unwrap_or_else(|_| {
+                    axum::http::HeaderValue::from_static(protocol::AUTH_SCHEME_BEARER)
+                }),
             )],
             json,
         )

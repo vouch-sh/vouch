@@ -27,6 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use vouch_common::protocol;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
@@ -87,7 +88,8 @@ pub struct ClientCredentials {
 pub struct AuthCodeExchangeResult {
     /// The access token.
     pub access_token: SecretString,
-    /// Token type ("Bearer" or "DPoP").
+    /// Token type ([`protocol::ACCESS_TOKEN_TYPE_BEARER`] or
+    /// [`protocol::ACCESS_TOKEN_TYPE_DPOP`]).
     pub token_type: String,
     /// Expiration in seconds.
     pub expires_in: u64,
@@ -433,11 +435,11 @@ pub(crate) async fn exchange_authorization_code(
         .await;
     }
 
-    // RFC 9449 Section 5: Token type is "DPoP" if proof was provided, otherwise "Bearer"
+    // RFC 9449 Section 5: Token type is DPoP if proof was provided, otherwise Bearer
     let token_type = if params.dpop_proof.is_some() {
-        "DPoP"
+        protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
-        "Bearer"
+        protocol::ACCESS_TOKEN_TYPE_BEARER
     };
 
     if let Some(ref proof) = params.dpop_proof {

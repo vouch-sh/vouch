@@ -24,6 +24,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use vouch_common::protocol;
 
 /// PAR response (RFC 9126 Section 2.2).
 #[derive(Serialize)]
@@ -300,7 +301,9 @@ pub(crate) async fn par(
     // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
     // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
     // that the same key must be used at the token endpoint.
-    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
     let dpop_proof = match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par").await
     {
         Ok(proof) => proof,
@@ -308,7 +311,7 @@ pub(crate) async fn par(
             return (
                 StatusCode::BAD_REQUEST,
                 [(
-                    axum::http::header::HeaderName::from_static("dpop-nonce"),
+                    axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
                     nonce.to_string(),
                 )],
                 Json(OAuthErrorResponse {
