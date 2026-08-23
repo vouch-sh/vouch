@@ -12,7 +12,7 @@ use crate::services::oidc::{
 };
 use axum::{
     Json,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::Engine;
@@ -33,7 +33,10 @@ const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str = protocol::CLIENT_ASSERTION_TYPE_J
 /// can use at OAuth endpoints (RFC 7521 Section 4.2).
 pub(crate) enum ExtractedClientAuth {
     /// Client secret via Basic header or body params.
-    Secret(ClientCredentials),
+    Secret {
+        creds: ClientCredentials,
+        presentation: ClientAuthPresentation,
+    },
     /// JWT assertion (RFC 7523).
     JwtAssertion {
         client_assertion: String,
@@ -66,15 +69,89 @@ fn strip_basic_scheme(header: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("Basic").then_some(rest)
 }
 
+/// Where the client presented its credentials (RFC 6749 Section 2.3.1).
+///
+/// Recorded because RFC 6749 Section 5.2 makes the `WWW-Authenticate`
+/// response header mandatory on a 401 only when the client authenticated
+/// via the `Authorization` request header field. That condition is a
+/// property of the request, not of the error code, so it has to travel
+/// with the credentials rather than be re-derived at each failure site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClientAuthPresentation {
+    /// `Authorization: Basic` header — `client_secret_basic`.
+    AuthorizationHeader,
+    /// Request-body parameters — `client_secret_post`, or a bare `client_id`.
+    RequestBody,
+}
+
+impl ClientAuthPresentation {
+    /// Classify how the client presented credentials on this request.
+    ///
+    /// A malformed `Authorization: Basic` header still counts as
+    /// [`Self::AuthorizationHeader`]: RFC 6749 Section 5.2 binds on the
+    /// client having *attempted* header authentication, not on the attempt
+    /// having parsed.
+    pub(crate) fn of(headers: &HeaderMap) -> Self {
+        let used_header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|h| strip_basic_scheme(h).is_some());
+        if used_header {
+            Self::AuthorizationHeader
+        } else {
+            Self::RequestBody
+        }
+    }
+
+    /// The `WWW-Authenticate` challenge matching the scheme the client used,
+    /// or `None` when the client did not use the `Authorization` header.
+    fn challenge(self) -> Option<HeaderValue> {
+        match self {
+            Self::AuthorizationHeader => Some(HeaderValue::from_static("Basic")),
+            Self::RequestBody => None,
+        }
+    }
+}
+
+/// Attach the RFC 6749 Section 5.2 `WWW-Authenticate` challenge to a
+/// client-authentication failure.
+///
+/// RFC 6749 Section 5.2, `specs/rfc/rfc6749.txt:2493-2498`: "If the client
+/// attempted to authenticate via the "Authorization" request header field,
+/// the authorization server MUST respond with an HTTP 401 (Unauthorized)
+/// status code and include the "WWW-Authenticate" response header field
+/// matching the authentication scheme used by the client."
+///
+/// Only 401s are touched. `OAuthErrorCode::status_code` already maps
+/// `invalid_client` to 401, so every failure this MUST binds arrives here
+/// with that status; a non-401 response means the failure was something
+/// other than client authentication and carries no challenge.
+pub(crate) fn with_client_auth_challenge(
+    presentation: ClientAuthPresentation,
+    mut response: Response,
+) -> Response {
+    if response.status() == StatusCode::UNAUTHORIZED
+        && let Some(challenge) = presentation.challenge()
+        && !response.headers().contains_key(header::WWW_AUTHENTICATE)
+    {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, challenge);
+    }
+    response
+}
+
 /// Extract client credentials from Authorization header or request body.
 ///
 /// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
 /// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
+/// The returned [`ClientAuthPresentation`] records which of the two the
+/// client used, so a later failure can emit the matching challenge.
 pub(crate) fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
     client_secret_param: Option<SecretString>,
-) -> Option<ClientCredentials> {
+) -> Option<(ClientCredentials, ClientAuthPresentation)> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
@@ -91,16 +168,27 @@ pub(crate) fn extract_client_credentials(
             urlencoding::decode(id).map_or_else(|_| id.to_string(), |d| d.into_owned());
         let decoded_secret =
             urlencoding::decode(secret).map_or_else(|_| secret.to_string(), |d| d.into_owned());
-        return Some(ClientCredentials {
-            client_id: decoded_id,
-            client_secret: Some(SecretString::from(decoded_secret)),
-        });
+        return Some((
+            ClientCredentials {
+                client_id: decoded_id,
+                client_secret: Some(SecretString::from(decoded_secret)),
+            },
+            ClientAuthPresentation::AuthorizationHeader,
+        ));
     }
 
-    // Fall back to request body parameters (client_secret_post)
-    client_id_param.map(|id| ClientCredentials {
-        client_id: id.to_string(),
-        client_secret: client_secret_param,
+    // Fall back to request body parameters (client_secret_post). The
+    // presentation is still classified from the headers: a client whose
+    // `Authorization: Basic` header failed to decode attempted header
+    // authentication and is owed the matching challenge.
+    client_id_param.map(|id| {
+        (
+            ClientCredentials {
+                client_id: id.to_string(),
+                client_secret: client_secret_param,
+            },
+            ClientAuthPresentation::of(headers),
+        )
     })
 }
 
@@ -152,11 +240,14 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     }
 
     // Secret-based auth (Basic header or body params)
-    if let Some(creds) =
+    if let Some((creds, presentation)) =
         extract_client_credentials(headers, params.client_id(), params.client_secret())
     {
         if creds.client_secret.is_some() || has_basic {
-            return Ok(ExtractedClientAuth::Secret(creds));
+            return Ok(ExtractedClientAuth::Secret {
+                creds,
+                presentation,
+            });
         }
         // client_id only, no secret
         return Ok(ExtractedClientAuth::PublicClient {
@@ -194,7 +285,10 @@ pub(crate) async fn complete_client_auth(
     auth: ExtractedClientAuth,
 ) -> Result<Option<ClientAuthOutcome>, Response> {
     match auth {
-        ExtractedClientAuth::Secret(creds) => {
+        ExtractedClientAuth::Secret {
+            creds,
+            presentation,
+        } => {
             let client_id = creds.client_id.clone();
             match authenticate_client(state, &creds).await {
                 Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
@@ -204,7 +298,10 @@ pub(crate) async fn complete_client_auth(
                     jwt_auth: None,
                     secret_verification,
                 })),
-                Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
+                Err(e) => Err(with_client_auth_challenge(
+                    presentation,
+                    e.into_service_error().into_oauth_response().into_response(),
+                )),
             }
         }
         ExtractedClientAuth::JwtAssertion {
@@ -322,10 +419,36 @@ mod tests {
             let headers = basic_header(scheme);
             let creds = extract_client_credentials(&headers, None, None);
             assert!(creds.is_some(), "{scheme} scheme must be accepted");
-            let creds = creds.expect("checked above");
+            let (creds, presentation) = creds.expect("checked above");
             assert_eq!(creds.client_id, "client-1", "{scheme}");
             assert!(creds.client_secret.is_some(), "{scheme}");
+            assert_eq!(
+                presentation,
+                ClientAuthPresentation::AuthorizationHeader,
+                "{scheme} is header authentication regardless of casing"
+            );
         }
+    }
+
+    /// RFC 6749 Section 5.2 binds on the client having *attempted* header
+    /// authentication, so an undecodable header still classifies as one.
+    #[test]
+    fn test_presentation_classifies_malformed_header_as_an_attempt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Basic !!!not-base64!!!".parse().expect("valid header"),
+        );
+        assert_eq!(
+            ClientAuthPresentation::of(&headers),
+            ClientAuthPresentation::AuthorizationHeader
+        );
+
+        // A body-authenticated request carries no challenge obligation.
+        assert_eq!(
+            ClientAuthPresentation::of(&HeaderMap::new()),
+            ClientAuthPresentation::RequestBody
+        );
     }
 
     #[test]

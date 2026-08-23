@@ -631,3 +631,152 @@ fn test_token_request_debug_never_prints_credential_material() {
         "non-secrets stay visible: {debug}"
     );
 }
+
+// ========================================================================
+// RFC 6749 Section 5.2 — `invalid_client` challenge on header auth
+// ========================================================================
+//
+// `specs/rfc/rfc6749.txt:2493-2498`:
+//
+// > If the client attempted to authenticate via the "Authorization"
+// > request header field, the authorization server MUST respond with an
+// > HTTP 401 (Unauthorized) status code and include the "WWW-Authenticate"
+// > response header field matching the authentication scheme used by the
+// > client.
+//
+// The MUST has two conjuncts. The status half was already satisfied by
+// `OAuthErrorCode::status_code`; these cover the header half, and pin the
+// condition so the challenge does not leak onto body-authenticated
+// clients (for whom the RFC requires nothing).
+
+#[tokio::test]
+async fn test_token_basic_auth_failure_challenges_with_basic() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "tok-basic-challenge@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:wrong-secret", client.client_id).as_bytes());
+    let auth = format!("Basic {encoded}");
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=irrelevant\
+         &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "bad client_secret_basic must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "a 401 for a client that used the Authorization header MUST carry a \
+         matching WWW-Authenticate challenge"
+    );
+}
+
+#[tokio::test]
+async fn test_token_body_auth_failure_has_no_challenge() {
+    // The client authenticated via `client_secret_post`, not the
+    // Authorization header, so RFC 6749 Section 5.2 requires no challenge.
+    // Emitting one would advertise a scheme the client did not use.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "tok-post-challenge@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "grant_type=authorization_code&code=irrelevant\
+         &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
+         &client_id={}&client_secret=wrong-secret",
+        client.client_id
+    );
+
+    let response = http_post_form_full(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "bad client_secret_post must still be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "",
+        "client_secret_post failure must not advertise a Basic challenge"
+    );
+}
+
+#[tokio::test]
+async fn test_token_malformed_basic_header_challenges_with_basic() {
+    // RFC 6749 Section 5.2 binds on the client having *attempted* header
+    // authentication. A header that fails to base64-decode is still an
+    // attempt, so the challenge is owed.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=irrelevant\
+         &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+        &[("Authorization", "Basic !!!not-base64!!!")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "malformed Basic credentials must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "an unparseable Authorization header is still an authentication attempt"
+    );
+}
+
+#[tokio::test]
+async fn test_par_basic_auth_failure_challenges_with_basic() {
+    // PAR reaches the failure through `complete_client_auth` rather than the
+    // token endpoint's own path, so it needs its own coverage.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-basic-challenge@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:wrong-secret", client.client_id).as_bytes());
+    let auth = format!("Basic {encoded}");
+
+    let body = format!(
+        "response_type=code&client_id={}\
+         &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256",
+        client.client_id
+    );
+
+    let response =
+        http_post_form_full(&app, "/oauth/par", &body, &[("Authorization", &auth)]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "bad client_secret_basic at PAR must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "PAR must carry the same challenge as the token endpoint"
+    );
+}
