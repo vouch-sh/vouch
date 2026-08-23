@@ -691,6 +691,15 @@ pub async fn validate_dpop_at_resource(
     .await
 }
 
+/// Published RFC 9449 vectors, kept apart from the hand-built proofs below so
+/// the external-reference checks stay easy to find.
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod rfc9449_vectors;
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
