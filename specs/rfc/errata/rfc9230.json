@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "7142",
+    "doc-id": "RFC9230",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Editorial",
+    "section": "Acknowledgements",
+    "orig_text": "Paul Schmitt, Brian Swander, ",
+    "correct_text": "Paul Schmitt, Sudheesh Singanamalla, Brian Swander, ",
+    "notes": "Unintentional omission from list of acknowledgements.\n --VERIFIER NOTES-- \nThe authors are free to buy Sudheesh Singanamalla flowers or chocolate if they so wish, but this is not an appropriate use of errata.",
+    "submit_date": "2022-09-30",
+    "submitter_name": "Marwan Fayed",
+    "verifier_id": "",
+    "verifier_name": "Eliot Lear",
+    "update_date": "2024-11-01 12:50:55"
+  }
+]

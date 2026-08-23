@@ -1,0 +1,62 @@
+[
+  {
+    "errata_id": "6612",
+    "doc-id": "RFC7518",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": ".4",
+    "orig_text": "   2.  Turn R and S into octet sequences in big-endian order, with each\r\n       array being be 32 octets long.  The octet sequence\r\n       representations MUST NOT be shortened to omit any leading zero\r\n       octets contained in the values.\r\n",
+    "correct_text": "   2.  Turn R and S into octet sequences in big-endian order, with each\r\n       array being 32 octets long.  The octet sequence\r\n       representations MUST NOT be shortened to omit any leading zero\r\n       octets contained in the values.\r\n",
+    "notes": "\"being be\" should be changed to \"being\"",
+    "submit_date": "2021-06-16",
+    "submitter_name": "Sebastián Ramírez",
+    "verifier_id": "",
+    "verifier_name": "Benjamin Kaduk",
+    "update_date": "2021-06-25 02:40:20"
+  },
+  {
+    "errata_id": "8526",
+    "doc-id": "RFC7518",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Technical",
+    "section": "3.4.5",
+    "orig_text": "|  Compression of RTCP: No IETF-defined header compression method\r\n      compress RTCP; however, if such methods are developed in the\r\n|     future, these methods must take Reduced-Size RTCP in account.\r\n",
+    "correct_text": "|Compression of RTCP: No IETF-defined header compression methods\r\n      compress RTCP; however, if such methods are developed in the\r\n|     future, these methods must take Reduced-Size RTCP into account.\r\n",
+    "notes": "Note: this also applies to any changes to files in [RFC2119]",
+    "submit_date": "2025-08-05",
+    "submitter_name": "Benjamin Hurst",
+    "verifier_id": "",
+    "verifier_name": "Deb Cooley",
+    "update_date": "2026-05-07 19:05:35"
+  },
+  {
+    "errata_id": "8568",
+    "doc-id": "RFC7518",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "3.2",
+    "orig_text": "(This requirement is based on Section 5.3.4 (Security Effect of the HMAC Key) of \r\nNIST SP 800-117 [NIST.800-107], which states that the effective security \r\nstrength is the minimum of the security strength of the key and two times the \r\nsize of the internal hash value.)",
+    "correct_text": "(This requirement is based on Section 5.3.4 (Security Effect of the HMAC Key) of \r\nNIST SP 800-107 [NIST.800-107], which states that the effective security \r\nstrength is the minimum of the security strength of the key and two times the \r\nsize of the internal hash value.)",
+    "notes": "NIST SP 800-117 was SCAP, 800-107 is the correct one (as linked).",
+    "submit_date": "2025-09-08",
+    "submitter_name": "Sören Sprößig",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2025-09-12 15:46:11"
+  },
+  {
+    "errata_id": "8747",
+    "doc-id": "RFC7518",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "7.1.1",
+    "orig_text": "Algorithm Analysis Documents(s):",
+    "correct_text": "Algorithm Analysis Document(s):",
+    "notes": "This is a typo in the registration template. The template is shared between JWS and JWE and the JWS document does not have this typo. The IANA registry itself does not contain this typo either.",
+    "submit_date": "2026-02-08",
+    "submitter_name": "Filip Skokan",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2026-03-02 20:39:05"
+  }
+]

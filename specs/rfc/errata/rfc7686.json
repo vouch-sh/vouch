@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "6761",
+    "doc-id": "RFC7686",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Technical",
+    "section": "2",
+    "orig_text": "   5.  Authoritative DNS Servers: Authoritative servers MUST respond to\r\n       queries for .onion with NXDOMAIN.\r\n\r\n   6.  DNS Server Operators: Operators MUST NOT configure an\r\n       authoritative DNS server to answer queries for .onion.  If they\r\n       do so, client software is likely to ignore any results (see\r\n       above).",
+    "correct_text": "   5.  Authoritative DNS Servers: Authoritative servers SHOULD NOT\r\n       recognize .onion names as special and MUST NOT treat queries for\r\n       .onion names differently from other queries.\r\n\r\n   6.  DNS Server Operators: Operators MUST NOT configure an\r\n       authoritative DNS server to answer authoritatively to queries for names in .onion.  If they\r\n       do so, client software is likely to ignore any results (see\r\n       above).",
+    "notes": "The original text for 5 and 6 is conflicting. A name server cannot respond with NXDOMAIN (which is an authoritative answer) without having a zone configured to serve that NXDOMAIN from. Clearly the intent of the text is that clients will not find authoritative answers to .onion queries anywhere in the DNS.\r\n\r\n===Verifier note\r\n\r\nsee https://mailarchive.ietf.org/arch/msg/dnsop/S2mQZ83THHjV0z8A2iXAtG8Vrpc/",
+    "submit_date": "2021-11-29",
+    "submitter_name": "Peter van Dijk",
+    "verifier_id": "",
+    "verifier_name": "Mohamed Boucadair",
+    "update_date": "2025-06-11 04:24:54"
+  }
+]

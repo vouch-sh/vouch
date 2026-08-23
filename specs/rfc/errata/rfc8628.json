@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "5840",
+    "doc-id": "RFC8628",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "5.2",
+    "orig_text": "An attacker who guesses the device code would be able to potentially\r\n   obtain the authorization code once the user completes the flow.",
+    "correct_text": "An attacker who guesses the device code would be able to potentially\r\n   obtain the access token once the user completes the flow.\r\n",
+    "notes": "The \"authorization code\" term is associated with Authorization Code Grant (defined in RFC 6749) and has the meaning of a temporary credential used by an OAuth 2.0 client to obtain the access token. Section 5.2 of RFC 8628 seems to refer to the steps of the device authorization flow during which the device code and the client identifier are exchanged for the access token (and the optional refresh token). \r\n\r\nAlternative correction:\r\n\r\n\"An attacker who guesses the device code would be able to potentially obtain the access token and the optional refresh token once the user completes the flow.\"",
+    "submit_date": "2019-08-19",
+    "submitter_name": "Konstantin Lapine",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

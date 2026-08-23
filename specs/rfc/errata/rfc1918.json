@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "1419",
+    "doc-id": "RFC1918",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Editorial",
+    "section": "3",
+    "orig_text": "   An enterprise that decides to use IP addresses out of the address\r\n   space defined in this document can do so without any coordination\r\n   with IANA or an Internet registry.",
+    "correct_text": "An enterprise that decides to use IP addresses within the address \r\nspace defined in this document can do so without any coordination \r\nwith IANA or an Internet registry.",
+    "notes": "There appears to be a slight difference in interpretation with the existing phrase, \"out of the address space.\"  This 'could' be interpreted to mean \"outside of the address space,\" hence changing the meaning of the entire statement, if the section's context is not considered.  In the interest of clarification, would it be possible to rephrase this particular section to \"within the address space?\"  I'm aware of one case in particular where attorneys argued over this issue ad nauseum, regardless of the network architects attempting to intervene.",
+    "submit_date": "2008-05-07",
+    "submitter_name": "Jack Parker",
+    "verifier_id": "",
+    "verifier_name": "Pete Resnick",
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

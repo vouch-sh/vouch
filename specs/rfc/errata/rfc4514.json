@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "73",
+    "doc-id": "RFC4514",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Editorial",
+    "section": "4",
+    "orig_text": "   This example shows the method of escaping of a special characters\r\n   appearing in a common name:",
+    "correct_text": "   This example shows the method of escaping of special characters\r\n   appearing in a common name:",
+    "notes": "Source: apps",
+    "submit_date": "2006-07-07",
+    "submitter_name": "Alfred Hoenes",
+    "verifier_id": "",
+    "verifier_name": "Alexey Melnikov",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "7229",
+    "doc-id": "RFC4514",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "2.4",
+    "orig_text": "   AttributeValue is represented by an number sign ('#' U+0023)",
+    "correct_text": "   AttributeValue is represented by a number sign ('#' U+0023)",
+    "notes": "Wrong form of the indefinite article.",
+    "submit_date": "2022-11-01",
+    "submitter_name": "Ivan Panchenko",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2022-11-01 23:11:14"
+  }
+]

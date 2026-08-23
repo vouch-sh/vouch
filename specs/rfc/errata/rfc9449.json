@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "7646",
+    "doc-id": "RFC9449",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "4.2",
+    "orig_text": "When the authentication server or resource server provides a DPoP-Nonce",
+    "correct_text": "When the authorization server or resource server provides a DPoP-Nonce",
+    "notes": "authentication server must be authorization server",
+    "submit_date": "2023-09-18",
+    "submitter_name": "Michiel Albracht",
+    "verifier_id": "",
+    "verifier_name": "RFC Editor",
+    "update_date": "2023-09-18 23:13:33"
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "5329",
+    "doc-id": "RFC8037",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "4",
+    "orig_text": "The JSON Web Algorithm (JWA) ECDH-ES KDF construction does not mix\r\nkeys into the final shared secret.  In key exchange, such mixing\r\ncould be a bad mistake; whereas here either the receiver public key\r\nhas to be chosen maliciously or the sender has to be malicious in\r\norder to cause problems.  In either case, all security evaporates.",
+    "correct_text": "The JSON Web Algorithm (JWA) ECDH-ES KDF construction does not mix\r\nkeys into the final shared secret unless they are included in the \r\n\"apu\" or \"apv\" claims. It is recommended to include the public keys \r\nof both parties in the key derivation. ",
+    "notes": "There are two technical errors here. \r\n\r\nFirstly, the JWA ECDH-ES KDF does allow for mixing keys into the final shared secret via the \"apu\" and \"apv\" claims. RFC 7518 (JWA) normatively references NIST SP.800-56A, which explicitly recommends doing this.\r\n\r\nSecondly, it is not clear what the security issue is here, as there are known security issues in some cases from *not* mixing in public keys and other identifiers, as described in SP.800-56Ar3 Appendix B, and in the Security Considerations of RFC 7748 (another normative reference), which states:\r\n\r\n\"Thus\r\n   using a public key as an identifier and knowledge of a shared secret\r\n   as proof of ownership (without including the public keys in the key\r\n   derivation) might lead to subtle vulnerabilities.\"",
+    "submit_date": "2018-04-17",
+    "submitter_name": "Neil Madden",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

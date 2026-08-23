@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "8102",
+    "doc-id": "RFC9421",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Editorial",
+    "section": "7.2.8",
+    "orig_text": "\"@status\": 200\r\n\"content-digest\": \\\r\n  sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:\r\n\"@signature-input\": (\"@status\" \"content-digest\")",
+    "correct_text": "\"@status\": 200\r\n\"content-digest\": \\\r\n  sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:\r\n\"@signature-params\": (\"@status\" \"content-digest\")",
+    "notes": "\"@signature-input\" should be changed to \"@signature-params\".",
+    "submit_date": "2024-09-15",
+    "submitter_name": "Takahiko Kawasaki",
+    "verifier_id": "",
+    "verifier_name": "Francesca Palombini",
+    "update_date": "2024-10-29 14:46:28"
+  },
+  {
+    "errata_id": "8103",
+    "doc-id": "RFC9421",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Technical",
+    "section": "7.5.3",
+    "orig_text": "Several parts of this specification rely on the parsing of Structured\r\nField values [STRUCTURED-FIELDS] -- in particular, strict\r\nserialization of HTTP Structured Field values (Section 2.1.1),\r\nreferencing members of a Dictionary Structured Field (Section 2.1.2),\r\nand processing the @signature-input value when verifying a signature\r\n(Section 3.2).  While Structured Field values are designed to be\r\nrelatively simple to parse, a naive or broken implementation of such\r\na parser could lead to subtle attack surfaces being exposed in the\r\nimplementation.\r\n\r\nFor example, if a buggy parser of the @signature-input value does not\r\nenforce proper closing of quotes around string values within the list\r\nof component identifiers, an attacker could take advantage of this\r\nand inject additional content into the signature base through\r\nmanipulating the Signature-Input field value on a message.",
+    "correct_text": "Several parts of this specification rely on the parsing of Structured\r\nField values [STRUCTURED-FIELDS] -- in particular, strict\r\nserialization of HTTP Structured Field values (Section 2.1.1),\r\nreferencing members of a Dictionary Structured Field (Section 2.1.2),\r\nand processing the @signature-params value when verifying a signature\r\n(Section 3.2).  While Structured Field values are designed to be\r\nrelatively simple to parse, a naive or broken implementation of such\r\na parser could lead to subtle attack surfaces being exposed in the\r\nimplementation.\r\n\r\nFor example, if a buggy parser of the @signature-params value does not\r\nenforce proper closing of quotes around string values within the list\r\nof component identifiers, an attacker could take advantage of this\r\nand inject additional content into the signature base through\r\nmanipulating the Signature-Input field value on a message.",
+    "notes": "\"@signature-input\" should be changed to \"@signature-params\". There is one such error in both the first and second paragraphs of Section 7.5.3.",
+    "submit_date": "2024-09-15",
+    "submitter_name": "Takahiko Kawasaki",
+    "verifier_id": "",
+    "verifier_name": "Francesca Palombini",
+    "update_date": "2024-10-29 14:40:21"
+  }
+]

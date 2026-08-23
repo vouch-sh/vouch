@@ -1,0 +1,62 @@
+[
+  {
+    "errata_id": "7767",
+    "doc-id": "RFC7515",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "6",
+    "orig_text": "These Header Parameters MUST\r\n   be integrity protected if the information that they convey is to be\r\n   utilized in a trust decision; however, if the only information used\r\n   in the trust decision is a key, these parameters need not be\r\n   integrity protected, since changing them in a way that causes a\r\n   different key to be used will cause the validation to fail.",
+    "correct_text": "These Header Parameters MUST\r\n   be integrity protected if the information that they convey is to be\r\n   utilized in a trust decision.",
+    "notes": "See the discussion for https://www.rfc-editor.org/errata/eid7719 at https://mailarchive.ietf.org/arch/msg/jose/I3_IuEfFSyiHWap7Pyn1BFAb4QM/. The deleted text is incorrect for both signature schemes and encryption schemes.\r\n\r\nYou could consider adding text like \"Note that some algorithms allow multiple keys to validate or decrypt the same signature or encrypted data.\" to prevent readers from making the same bad assumption as the original RFC authors, but it doesn't seem necessary if doing so is contentious. Similarly, it's probably ok to simply delete the whole \"Original Text\" if that seems better to the reviewers.",
+    "submit_date": "2024-01-17",
+    "submitter_name": "Jeffrey Yasskin",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  },
+  {
+    "errata_id": "6118",
+    "doc-id": "RFC7515",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Editorial",
+    "section": "2",
+    "orig_text": "(as permitted by Section 3.2)",
+    "correct_text": "",
+    "notes": "This appears to be a reference to section 3.2 of RFC 4648, but because it is somewhat ambiguous the HTML and PDF versions of the RFC link to section 3.2 of this RFC instead.\n --VERIFIER NOTES-- \n   Errata reports are for the authoritative versions hosted on rfc-editor.org, which for this document is the plain text version.  As such, issues introduced by the \"htmlization\" process do not qualify.",
+    "submit_date": "2020-04-22",
+    "submitter_name": "Jason Heiss",
+    "verifier_id": "",
+    "verifier_name": "Benjamin Kaduk",
+    "update_date": "2020-04-25 21:36:53"
+  },
+  {
+    "errata_id": "8430",
+    "doc-id": "RFC7515",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "A.1.1",
+    "orig_text": "Encoding this JWS Signature as BASE64URL(JWS Signature) gives this value:\r\n     dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    "correct_text": "[ I don't know what the signature is. dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk is not base64url. ]",
+    "notes": "Maybe it was the signature in ascii and needed to be converted to base4url?\n --VERIFIER NOTES-- \n   This does not appear to be broken (or incorrect).  Add == to the end for padding to allow proper decoding.",
+    "submit_date": "2025-05-26",
+    "submitter_name": "Panos Kampanakis",
+    "verifier_id": "",
+    "verifier_name": "Deb Cooley",
+    "update_date": "2025-06-27 17:05:59"
+  },
+  {
+    "errata_id": "8508",
+    "doc-id": "RFC7515",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "Sec 2, Appendix C",
+    "orig_text": "2.  Terminology\r\n\r\n   These terms are defined by this specification:\r\n\r\n   Base64url Encoding\r\n      Base64 encoding using the URL- and filename-safe character set\r\n      defined in Section 5 of RFC 4648 [RFC4648], with all trailing '='\r\n      characters omitted (as permitted by Section 3.2) and without the\r\n      inclusion of any line breaks, whitespace, or other additional\r\n      characters.  Note that the base64url encoding of the empty octet\r\n      sequence is the empty string.  (See Appendix C for notes on\r\n      implementing base64url encoding without padding.)\r\n\r\n\r\nAppendix C.  Notes on Implementing base64url Encoding without Padding\r\n\r\n   This appendix describes how to implement base64url encoding and\r\n   decoding functions without padding based upon standard base64\r\n   encoding and decoding functions that do use padding.\r\n\r\n   To be concrete, example C# code implementing these functions is shown\r\n   below.  Similar code could be used in other languages.\r\n\r\n   ...\r\n\r\n     static byte [] base64urldecode(string arg)\r\n     {\r\n       string s = arg;\r\n       s = s.Replace('-', '+'); // 62nd char of encoding\r\n       s = s.Replace('_', '/'); // 63rd char of encoding\r\n       switch (s.Length % 4) // Pad with trailing '='s\r\n       {\r\n         case 0: break; // No pad chars in this case\r\n         case 2: s += \"==\"; break; // Two pad chars\r\n         case 3: s += \"=\"; break; // One pad char\r\n         default: throw new System.Exception(\r\n           \"Illegal base64url string!\");\r\n       }\r\n       return Convert.FromBase64String(s); // Standard base64 decoder\r\n     }\r\n\r\n   As per the example code above, the number of '=' padding characters\r\n   that needs to be added to the end of a base64url-encoded string\r\n   without padding to turn it into one with padding is a deterministic\r\n   function of the length of the encoded string.  Specifically, if the\r\n   length mod 4 is 0, no padding is added; if the length mod 4 is 2, two\r\n   '=' padding characters are added; if the length mod 4 is 3, one '='\r\n   padding character is added; if the length mod 4 is 1, the input is\r\n   malformed.",
+    "correct_text": "2.  Terminology\r\n\r\n   These terms are defined by this specification:\r\n\r\n   Base64url Encoding\r\n      Base64 encoding using the URL- and filename-safe character set\r\n      defined in Section 5 of RFC 4648 [RFC4648], all trailing '='\r\n      characters SHOULD be omitted (as permitted by Section 3.2) and\r\n      any line breaks, whitespace, or other additional characters SHALL\r\n      be excluded.  Note that the base64url encoding of the empty octet\r\n      sequence is the empty string.  (See Appendix C for notes on\r\n      implementing base64url encoding without padding.)\r\n\r\n\r\nAppendix C.  Notes on Implementing base64url Encoding without Padding\r\n\r\n      ...\r\n\r\n      NOTE: The decoding function allows padded input, which is not recommended.",
+    "notes": "The definition for Base64url is more strict than RFC4648, but doesn't qualify that with keyword from RFC 2119.  The corrected text uses RFC 2119 keywords to be more specific and consistent.  I do propose allowing but discouraging extraneous padding, which is currently ambiguous.  An alternate solution would be using SHALL be omitted in the definition and either adding a note in appendix C or a conditional to throw an exception for non-compliant input.\n --VERIFIER NOTES-- \nThe term definition clearly says what “Base64url Encoding” means in this specification.\r\nAmong other things, it meaning of that term includes the detail \"with all trailing '=' characters omitted” — unconditionally so.\r\n\r\nThe proposed replacement text would replace this clear definition with a “SHOULD”, which is incorrect — there is no circumstance in which a “=“ is permitted in RFC 7515 “Base64url Encoding”.\r\n\r\nThe proposed change would be a deviation from the WG intent.",
+    "submit_date": "2025-07-11",
+    "submitter_name": "Ryan Desmond",
+    "verifier_id": "",
+    "verifier_name": "Deb Cooley",
+    "update_date": "2025-10-28 11:17:16"
+  }
+]

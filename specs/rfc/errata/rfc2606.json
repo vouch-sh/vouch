@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "7304",
+    "doc-id": "RFC2606",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "GLOBAL",
+    "orig_text": "example.org, ...",
+    "correct_text": "example.org, example.edu, ...",
+    "notes": "Should mention `example.edu` as one of the reserved names as well, since IANA is doing that according to Kim Davies.  The 6125bis draft uses it in some examples.\n --VERIFIER NOTES-- \nWhile 'example.edu' is indeed operated by IANA, it does appear neither in the \"special-use domain names\" registry of IANA nor in RFC 6761.",
+    "submit_date": "2023-01-13",
+    "submitter_name": "Rich Salz",
+    "verifier_id": "",
+    "verifier_name": "Eric Vyncke",
+    "update_date": "2023-08-03 12:41:05"
+  },
+  {
+    "errata_id": "7741",
+    "doc-id": "RFC2606",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Editorial",
+    "section": "GLOBAL",
+    "orig_text": "Reserved Top Level DNS Names\r\ninvalid DNS names",
+    "correct_text": "Reserved Top Level domain Names\r\ninvalid domain names",
+    "notes": "There is no such concept as a DNS name, nor is it found in any RFC. The correct concept is a domain name.\r\n\r\n\r\n--RFC Editor Note:-- \r\nThe term “DNS name” does appear in a number of RFCs, including recent ones (e.g., RFCs 9498, 9476, and 9178). It also appears in 6761, which updates 2606. \r\n\r\n-- Verifier note --\r\n\r\nThe shortcut \"DNS name\" is indeed not in RFC 8499 (DNS terminology) but is also often used as a short cut.\r\n",
+    "submit_date": "2023-12-25",
+    "submitter_name": "Tromler",
+    "verifier_id": "",
+    "verifier_name": "Éric Vyncke",
+    "update_date": "2024-01-12 07:18:23"
+  }
+]

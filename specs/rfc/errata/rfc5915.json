@@ -1,0 +1,47 @@
+[
+  {
+    "errata_id": "2698",
+    "doc-id": "RFC5915",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Technical",
+    "section": "4",
+    "orig_text": "PEM encoding the DER-encoded ECPrivateKey is\r\ncommon; \"Proc-Type:\" and \"DEK-INFO:\" fields [RFC1421] followed by the\r\nDER-encoded ECPrivateKey are sandwiched between:",
+    "correct_text": "PEM encoding the DER-encoded ECPrivateKey is\r\ncommon; \"Proc-Type:\" and \"DEK-Info:\" fields [RFC1421] (each on a new line),\r\nfollowed by a blank line, and then followed by the Base64 encoding (see\r\nSection 4 of [RFC4648]) of the DER-encoded ECPrivateKey are sandwiched\r\nbetween:\r\n",
+    "notes": "Needed to indicate that the Proc-Type and DEK-Info are on separate lines and that there is a blank line between the DEK-Info and the ECPrivateKey.  Also it's not clear that the ECPrivateKey structure is PEM encoded during this process - it is.  And finally, \"DEK-INFO\" should really have been \"DEK-Info\". This aligns with current industry practice.",
+    "submit_date": "2011-01-31",
+    "submitter_name": "Sean Turner",
+    "verifier_id": "",
+    "verifier_name": "Stephen Farrell",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "3962",
+    "doc-id": "RFC5915",
+    "errata_status_code": "Verified",
+    "errata_type_code": "Technical",
+    "section": "3 and A",
+    "orig_text": "   ECPrivateKey ::= SEQUENCE {\r\n     version        INTEGER { ecPrivkeyVer1(1) } (ecPrivkeyVer1),\r\n     privateKey     OCTET STRING,\r\n     parameters [0] ECParameters {{ NamedCurve }} OPTIONAL,\r\n     publicKey  [1] BIT STRING OPTIONAL\r\n   }",
+    "correct_text": "   ECPrivateKey ::= SEQUENCE {\r\n     version        INTEGER { ecPrivkeyVer1(1) } (ecPrivkeyVer1),\r\n     privateKey     OCTET STRING,\r\n     parameters [0] ECParameters  OPTIONAL,\r\n     publicKey  [1] BIT STRING OPTIONAL\r\n   }",
+    "notes": "ECParameters is not a parametrized type.  This means that it cannot be used as a parameterized type by passing in the NamedCurve set as a parameter.",
+    "submit_date": "2014-04-14",
+    "submitter_name": "Jim Schaad",
+    "verifier_id": "",
+    "verifier_name": "Kathleen Moriarty",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "5008",
+    "doc-id": "RFC5915",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "3",
+    "orig_text": "Though the ASN.1 indicates that the parameters field is OPTIONAL,\r\nimplementations that conform to this document MUST always include\r\nthe parameters field.",
+    "correct_text": "Though the ASN.1 indicates that the parameters field is OPTIONAL,\r\nwhether the parameters field is optional, required, or forbidden\r\ndepends on the context. When serializing an ECPrivateKey into a PKCS#8\r\nfile, the parameters field MUST NOT be included in the serialization.\r\n(This is required to interoperate with PKCS#11.)\r\n\r\nWhen parsing an ECPrivateKey within a PKCS#8 file, when the parser\r\nencounters an ECPrivateKey without a parameters field, the parser MUST\r\nuse the parameters from the PKCS#8 privateKeyAlgorithm field, and MUST\r\nNOT reject the key solely due to the missing parameters field.\r\n\r\nWhen parsing an ECPrivateKey within a PKCS#8 file, when the parser \r\nencounters an ECPrivateKey with a parameters field present, the parser\r\nSHOULD reject the key if the ECPrivateKey parameters do not exactly\r\nmatch the the PKCS#8 privateKeyAlgorithm parameters.\r\n\r\nMore generally, these rules should be followed whenever parsing an\r\nECPrivateKey within a larger structure that contains the parameters.\r\n",
+    "notes": "Section 1 notes that we must put \"id-ecPublicKey, id-ecDH, or id-ecMQV (from [RFC5480]) with the namedCurve as the parameters in the privateKeyAlgorithm field;\"\r\n\r\nThus, in a PKCS#8 file containing an ECC private key, there's no need to include the parameters in the ECPrivateKey field, because they are already in the privateKeyAlgorithm field.\r\n\r\nPKCS#11 says \"Since the EC domain parameters are placed in the PKCS #8’s privateKeyAlgorithm field, the optional parameters field in an ECPrivateKey must be omitted.\" - http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/pkcs11-curr-v2.40.pdf\r\n\r\nFurther, with OpenSSL 1.0.2h and the OpenSSL trunk, the `openssl genpkey` command only encode the parameters in the PKCS#8 privateKeyAlgorithm, not in the parameters field of the ECPrivateKey:\r\n\r\n    openssl genpkey -algorithm EC \\\r\n        -pkeyopt ec_paramgen_curve:P-256 \\\r\n        -pkeyopt ec_param_enc:named_curve | \\\r\n      openssl pkcs8 -topk8 -nocrypt -outform der > p256-private-key.pk8\r\n\r\nThus, a parser that wishes to interoperate with OpenSSL cannot enforce the MUST requirement here.",
+    "submit_date": "2017-04-30",
+    "submitter_name": "Brian Smith",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2019-09-10 16:09:03"
+  }
+]

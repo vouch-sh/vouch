@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "5848",
+    "doc-id": "RFC8252",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "Appendix B.1",
+    "orig_text": "Apps can initiate an authorization request in the browser, without\r\nthe user leaving the app, through the \"SFSafariViewController\" class\r\nor its successor \"SFAuthenticationSession\", which implement the in-\r\napp browser tab pattern.  Safari can be used to handle requests on\r\nold versions of iOS without in-app browser tab functionality.",
+    "correct_text": "Apps can initiate an authorization request in the browser, without\r\nthe user leaving the app, through the \"ASWebAuthenticationSession\"\r\nclass or its successors \"SFAuthenticationSession\" and\r\n\"SFSafariViewController\", which implement the in-app browser tab\r\npattern.  The first of these allows calls to a handler registered\r\nfor the AS URL, consistent with Section 7.2. The latter two classes,\r\nnow deprecated, can use Safari to handle requests on old versions of\r\niOS without in-app browser tab functionality.",
+    "notes": "SFAuthenticationSession documentation reflects deprecated status:\r\n\r\nhttps://developer.apple.com/documentation/safariservices/sfauthenticationsession\r\n\r\nHere's the documentation for ASWebAuthenticationSession:\r\n\r\nhttps://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession\n --VERIFIER NOTES-- \nThis sort of change to update for events since the time of publication is not appropriate for an erratum; errata are intended solely to indicate errors in a document that were errors at the time of publication.  A revision of the document or a new document with an \"Updates:\" relationship would be more appropriate ways to indicate that the situation has changed.",
+    "submit_date": "2019-08-26",
+    "submitter_name": "Bayard Bell",
+    "verifier_id": "",
+    "verifier_name": "Benjamin Kaduk",
+    "update_date": "2019-09-10 16:09:03"
+  },
+  {
+    "errata_id": "8080",
+    "doc-id": "RFC8252",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "6 and 7.1",
+    "orig_text": "   Any redirect URI that allows\r\n   the app to receive the URI and inspect its parameters is viable.\r\n\r\nand\r\n\r\n   When choosing a URI scheme to associate with the app, apps MUST use a\r\n   URI scheme based on a domain name under their control, expressed in\r\n   reverse order, as recommended by Section 3.8 of [RFC7595] for\r\n   private-use URI schemes.",
+    "correct_text": "   Any redirect URI that allows\r\n   the app to receive the URI and inspect its parameters is viable.\r\n\r\nand\r\n\r\n   When choosing a URI scheme to associate with the app, apps SHOULD use a\r\n   URI scheme based on a domain name under their control, expressed in\r\n   reverse order, as recommended by Section 3.8 of [RFC7595] for",
+    "notes": "These two statements appear to conflict. Suggest downgrading the section 7.1 text from MUST to SHOULD to resolve the conflict.",
+    "submit_date": "2024-08-16",
+    "submitter_name": "Bryce Thomas",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2024-08-19 15:49:26"
+  }
+]

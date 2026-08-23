@@ -8,10 +8,17 @@ default_stages: [pre-commit]
 # `make css-build`; the MaxMind GeoLite2 *.mmdb files are large binaries refreshed
 # by scripts/update-geoip.sh (excluded from all formatting + the large-file check).
 # Fonts/images are binary and auto-skipped by the hooks themselves.
+#
+# specs/ holds upstream specification text refreshed by scripts/refresh-specs.sh.
+# The RFC and OpenID .txt files are byte-identical to their origins so a cached
+# quote can be verified with sha256 — trailing-whitespace, end-of-file-fixer, and
+# mixed-line-ending would auto-fix that fidelity away. Spec text also carries
+# example PEM private-key blocks that trip detect-private-key.
 exclude: |
   (?x)^(
     crates/vouch-server/static/css/output\.css|
-    crates/vouch-server/data/.*\.mmdb
+    crates/vouch-server/data/.*\.mmdb|
+    specs/.*
   )$
 
 repos:

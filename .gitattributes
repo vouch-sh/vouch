@@ -1,1 +1,10 @@
 crates/vouch-server/data/*.mmdb binary
+
+# Cached upstream specification text (see specs/README.md). Suppress diffs and
+# mark as generated so ~6 MB of RFC and spec prose stays out of code review.
+specs/** -diff linguist-generated=true
+
+# The roster and its README are hand-maintained and reviewable — a changed
+# manifest row is the signal that a cached spec moved.
+specs/manifest.tsv diff linguist-generated=false
+specs/README.md diff linguist-generated=false

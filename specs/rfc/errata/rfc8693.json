@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "7511",
+    "doc-id": "RFC8693",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "2.1",
+    "orig_text": "Client authentication to the authorization server is done using the \r\nnormal mechanisms provided by OAuth 2.0. Section 2.3.1 of [RFC6749] \r\ndefines password-based authentication of the client, however, client \r\nauthentication is extensible and other mechanisms are possible. For \r\nexample, [RFC7523] defines client authentication using bearer JSON Web \r\nTokens (JWTs) [JWT]. The supported methods of client authentication and \r\nwhether or not to allow unauthenticated or unidentified clients are \r\ndeployment decisions that are at the discretion of the authorization \r\nserver.",
+    "correct_text": "Client authentication to the authorization server is done using the \r\nnormal mechanisms provided by OAuth 2.0. Section 2.3.1 of [RFC6749] \r\ndefines password-based authentication of the client, however, client \r\nauthentication is extensible and other mechanisms are possible. The \r\nsupported methods of client authentication and whether or not to allow \r\nunauthenticated or unidentified clients are deployment decisions that \r\nare at the discretion of the authorization server. ",
+    "notes": "The specific example of authentication with RFC7523 would require \"grant_type\" value of \"urn:ietf:params:oauth:grant-type:jwt-bearer\", however this directly conflicts with RFC8693 as it requires \"grant_type\" value of \"urn:ietf:params:oauth:grant-type:token-exchange\".",
+    "submit_date": "2023-05-08",
+    "submitter_name": "Jesse Estum",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": null
+  }
+]

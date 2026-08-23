@@ -1,0 +1,17 @@
+[
+  {
+    "errata_id": "6314",
+    "doc-id": "RFC8176",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Editorial",
+    "section": "1.",
+    "orig_text": "For context, the \"amr\" (Authentication Methods References) claim is\r\n   defined by Section 2 of the OpenID Connect Core 1.0 specification\r\n   [OpenID.Core] as follows:",
+    "correct_text": "For context, the \"amr\" (Authentication Methods References) claim is\r\n   defined by Section 2 of the OpenID Connect Core 1.0 specification\r\n   [OpenID.Core] as follows:",
+    "notes": "There is no text change but the link on \"Section 2\" points to section 2 in the same RFC rather than section 2 in the OpenID Connect Core 1.0 specification.\n --VERIFIER NOTES-- \nErrata reports are for reporting issues with the authoritative RFC version(s) as published by the RFC Editor.  RFC 8176 predates the usage of the \"v3 XML\" format, so the plain text version is the authoritative one, and thus questions of HTML links are irrelevant for it.",
+    "submit_date": "2020-10-20",
+    "submitter_name": "David Brossaard",
+    "verifier_id": "",
+    "verifier_name": "Benjamin Kaduk",
+    "update_date": "2020-10-20 16:21:44"
+  }
+]

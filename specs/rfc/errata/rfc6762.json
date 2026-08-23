@@ -1,0 +1,32 @@
+[
+  {
+    "errata_id": "4977",
+    "doc-id": "RFC6762",
+    "errata_status_code": "Held for Document Update",
+    "errata_type_code": "Technical",
+    "section": "6.1",
+    "orig_text": "The 'Next Domain Name' field contains the record's own name. When\r\nused with name compression, this means that the 'Next Domain Name'\r\nfield always takes exactly two bytes in the message.",
+    "correct_text": "The 'Next Domain Name' field contains the record's own name.",
+    "notes": "Section 4.1.1 of RFC 4034 states:\r\n\r\n\"A sender MUST NOT use DNS name compression on the Next Domain Name\r\nfield when transmitting an NSEC RR.\"\r\n\r\n--- Verifier note ---\r\nWhile errata submitter's concern is valid, this is not a stricto sensu \"errata\" as the existing RFC reflects the WG consensus at the publication time.\r\n\r\n\r\nIn order to comply with the existing RFC, name compression should not\r\nbe suggested.",
+    "submit_date": "2017-03-23",
+    "submitter_name": "Nathan Osman",
+    "verifier_id": "",
+    "verifier_name": "Éric Vyncke",
+    "update_date": "2024-01-12 06:27:11"
+  },
+  {
+    "errata_id": "4529",
+    "doc-id": "RFC6762",
+    "errata_status_code": "Rejected",
+    "errata_type_code": "Technical",
+    "section": "Appendix G",
+    "orig_text": "We do not recommend use of unregistered top-level\r\n   domains at all, but should network operators decide to do this, the\r\n   following top-level domains have been used on private internal\r\n   networks without the problems caused by trying to reuse \".local.\" for\r\n   this purpose:\r\n\r\n      .intranet.\r\n      .internal.\r\n      .private.\r\n      .corp.\r\n      .home.\r\n      .lan.",
+    "correct_text": "We do not recommend use of unregistered top-level domains.",
+    "notes": "Since TLDs like .private are currently available for register. Appendix G is outdated and I would strongly advise the IETF to remove the suggested TLDs since they are no longer problem free. I believe that it is wise to make a harder statement in the RFC.\n --VERIFIER NOTES-- \n   During the development of this RFC, the text is consistent with the consensus of the community. Later developments by ICANN superseded the appendix, but that is not applicable for an erratum. Updates to the text should be proposed via the draft publication process.",
+    "submit_date": "2015-11-11",
+    "submitter_name": "Willem Bermon",
+    "verifier_id": "",
+    "verifier_name": "Brian Haberman",
+    "update_date": "2019-09-10 16:09:03"
+  }
+]
