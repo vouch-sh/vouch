@@ -2,8 +2,8 @@
 //! Token endpoint handler.
 
 use super::client_auth::{
-    ClientAuthFields, ExtractedClientAuth, complete_client_auth, extract_client_auth,
-    extract_client_credentials,
+    ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, complete_client_auth,
+    extract_client_auth, extract_client_credentials, with_client_auth_challenge,
 };
 use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
@@ -374,12 +374,8 @@ async fn resolve_non_jwt_auth(
     ),
     Response,
 > {
-    let creds = extract_client_credentials(
-        headers,
-        params.client_id.as_deref(),
-        params.client_secret.clone(),
-    );
-    let Some(c) = creds else {
+    let creds = extract_client_credentials(headers, params);
+    let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "Client authentication or client_id required",
@@ -557,7 +553,15 @@ async fn handle_authorization_code_grant(
     } else {
         match resolve_non_jwt_auth(&state, &headers, &params, &client_cert).await {
             Ok(pair) => Some(pair),
-            Err(resp) => return resp,
+            // RFC 6749 §5.2: every failure inside `resolve_non_jwt_auth` is a
+            // client-authentication failure, so a client that used
+            // `Authorization: Basic` is owed the matching challenge on the 401.
+            Err(resp) => {
+                return with_client_auth_challenge(
+                    ClientAuthPresentation::of(&headers, &params),
+                    resp,
+                );
+            }
         }
     };
 
