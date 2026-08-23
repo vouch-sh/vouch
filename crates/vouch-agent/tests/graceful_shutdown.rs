@@ -206,11 +206,27 @@ async fn inflight_request_completes_on_sigterm() {
     let mut agent = spawn_agent();
     let socket = wait_for_socket(&agent).await;
 
-    // Connect and send a ping, but do NOT read the response yet.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
-    client.write_all(&encode_ping()).await.expect("write ping");
 
-    // Send SIGTERM immediately — the request is in-flight.
+    // Complete one request first. `connect` + `write_all` only place bytes in
+    // the kernel buffer; they do not mean the agent has accepted the
+    // connection. Reading a response proves the accept loop took it and
+    // spawned its handler task — the state `drain_connections` waits on. Test
+    // the drain guarantee only once the connection is in that state; SIGTERM
+    // before the accept breaks the listener loop, and the queued connection is
+    // dropped unaccepted.
+    client.write_all(&encode_ping()).await.expect("write ping");
+    let resp = read_response(&mut client).await;
+    assert_eq!(resp["result"], "pong");
+
+    // Now the request that must survive: written to a connection the agent is
+    // already servicing, so the biased read in `handle_connection` serves it
+    // even when shutdown fires in the same tick.
+    client
+        .write_all(&encode_ping())
+        .await
+        .expect("write in-flight ping");
+
     send_sigterm(&agent.child);
 
     // The response should still arrive (drain lets the handler finish).
