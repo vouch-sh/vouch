@@ -155,7 +155,9 @@ pub struct DeviceTokenResponse {
     /// JWT access token.
     #[serde(serialize_with = "serialize_secret_string")]
     pub access_token: secrecy::SecretString,
-    /// Token type ("Bearer" or "DPoP" for sender-constrained tokens).
+    /// Token type ([`crate::protocol::ACCESS_TOKEN_TYPE_BEARER`], or
+    /// [`crate::protocol::ACCESS_TOKEN_TYPE_DPOP`] for sender-constrained
+    /// tokens).
     pub token_type: String,
     /// Seconds until token expires.
     pub expires_in: u64,

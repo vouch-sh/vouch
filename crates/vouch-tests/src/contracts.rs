@@ -26,6 +26,7 @@
 //! ```
 
 use thiserror::Error;
+use vouch_common::protocol;
 
 /// Errors from contract validation.
 #[derive(Debug, Error)]
@@ -452,8 +453,8 @@ pub fn validate_client_data_json(data: &[u8]) -> ContractResult<()> {
     // Validate type field value
     if let Some(type_val) = obj.get("type")
         && let Some(type_str) = type_val.as_str()
-        && type_str != "webauthn.create"
-        && type_str != "webauthn.get"
+        && type_str != protocol::CLIENT_DATA_TYPE_CREATE
+        && type_str != protocol::CLIENT_DATA_TYPE_GET
     {
         return Err(ContractError::InvalidClientDataJson(format!(
             "invalid type: expected 'webauthn.create' or 'webauthn.get', got '{type_str}'"

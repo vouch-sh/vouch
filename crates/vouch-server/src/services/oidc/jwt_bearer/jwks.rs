@@ -9,6 +9,7 @@ use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
 use crate::db::{JwkEntry, JwkSet, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use vouch_common::protocol;
 
 /// Resolve the JWKS for a client — from inline `jwks` or fetched `jwks_uri`.
 ///
@@ -121,7 +122,7 @@ pub fn find_matching_key(
 
     // Fall back to matching by algorithm/key type
     let expected_kty = match header.alg.as_str() {
-        "ES256" => KeyType::Ec,
+        protocol::JWS_ALG_ES256 => KeyType::Ec,
         "RS256" | "PS256" => KeyType::Rsa,
         "EdDSA" => KeyType::Okp,
         _ => {
@@ -228,7 +229,7 @@ fn build_decoding_key_from_jwk(
     alg: &str,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
     match (&key.kty, alg) {
-        (KeyType::Ec, "ES256") => {
+        (KeyType::Ec, protocol::JWS_ALG_ES256) => {
             let x = key.x.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing x component")
             })?;

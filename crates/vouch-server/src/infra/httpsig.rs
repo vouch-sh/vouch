@@ -12,6 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 
+use vouch_common::protocol;
 use vouch_httpsig::algorithm::VerifyingAlgorithm;
 use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier;
 use vouch_httpsig::middleware::KeyResolver;
@@ -179,8 +180,8 @@ fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<Str
 
     // Accepts the same schemes as `extract_token_from_request` — both go
     // through the shared matcher, so they cannot drift.
-    let token = crate::http::strip_auth_scheme(auth_header, "DPoP")
-        .or_else(|| crate::http::strip_auth_scheme(auth_header, "Bearer"))?;
+    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
+        .or_else(|| crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
 
     // Parse JWT payload (second segment) without verification
     let parts: Vec<&str> = token.split('.').collect();

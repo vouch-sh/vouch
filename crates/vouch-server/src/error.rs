@@ -313,10 +313,11 @@ impl ServiceError {
     /// Create a structured API error that carries an additional response header.
     ///
     /// Produces the same `{"code": "...", "message": "..."}` body as
-    /// [`Self::api`] but attaches a header such as `DPoP-Nonce` (RFC 9449) to
-    /// the response so the client can retry. The header name is parsed with
-    /// case-insensitive matching (`"DPoP-Nonce"` → `dpop-nonce`); the value is
-    /// stored verbatim and must be a valid HTTP header value.
+    /// [`Self::api`] but attaches a header such as
+    /// [`protocol::HEADER_DPOP_NONCE`] (RFC 9449) to the response so the
+    /// client can retry. The header name is parsed with case-insensitive
+    /// matching (`"DPoP-Nonce"` → `dpop-nonce`); the value is stored verbatim
+    /// and must be a valid HTTP header value.
     #[must_use]
     pub fn api_with_header(
         status: StatusCode,

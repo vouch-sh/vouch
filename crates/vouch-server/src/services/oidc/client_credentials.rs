@@ -16,12 +16,13 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use std::sync::Arc;
+use vouch_common::protocol;
 
 /// Result of a client credentials grant exchange.
 pub struct ClientCredentialsResult {
     /// The issued access token.
     pub access_token: secrecy::SecretString,
-    /// Token type ("Bearer").
+    /// Token type ([`protocol::ACCESS_TOKEN_TYPE_BEARER`]).
     pub token_type: String,
     /// Expiration in seconds.
     pub expires_in: u64,
@@ -106,11 +107,11 @@ pub(crate) async fn exchange_client_credentials(
         client.client_id
     );
 
-    // RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
+    // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
     let token_type = if bindings.dpop_jkt.is_some() {
-        "DPoP"
+        protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
-        "Bearer"
+        protocol::ACCESS_TOKEN_TYPE_BEARER
     };
 
     Ok(ClientCredentialsResult {

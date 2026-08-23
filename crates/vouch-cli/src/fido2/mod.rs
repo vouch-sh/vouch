@@ -42,6 +42,7 @@ use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::{
     AttestationObject, AuthData, ClientDataJson, CoseKey, CredentialId, Signature, UserHandle,
 };
+use vouch_common::protocol;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) mod unix;
@@ -190,7 +191,7 @@ pub(crate) struct ClientData {
 impl ClientData {
     pub(crate) fn new_create(challenge: &[u8], rp_id: &str) -> Self {
         Self {
-            typ: "webauthn.create",
+            typ: protocol::CLIENT_DATA_TYPE_CREATE,
             challenge: URL_SAFE_NO_PAD.encode(challenge),
             origin: format!("https://{rp_id}"),
             cross_origin: false,
@@ -199,7 +200,7 @@ impl ClientData {
 
     pub(crate) fn new_get(challenge: &[u8], rp_id: &str) -> Self {
         Self {
-            typ: "webauthn.get",
+            typ: protocol::CLIENT_DATA_TYPE_GET,
             challenge: URL_SAFE_NO_PAD.encode(challenge),
             origin: format!("https://{rp_id}"),
             cross_origin: false,

@@ -50,7 +50,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{
     BrowserLoginCompleteRequest, BrowserLoginCompleteResponse, BrowserLoginStartRequest,
-    BrowserLoginStartResponse,
+    BrowserLoginStartResponse, protocol,
 };
 
 /// Compute an HMAC-SHA256 tag over `message` using `secret`, returning the
@@ -596,7 +596,7 @@ pub(crate) async fn browser_login_complete(
         )
     })?;
 
-    if client_data.typ != "webauthn.get" {
+    if client_data.typ != protocol::CLIENT_DATA_TYPE_GET {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",

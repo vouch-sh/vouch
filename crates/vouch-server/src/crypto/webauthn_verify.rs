@@ -25,6 +25,7 @@ use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
 use thiserror::Error;
+use vouch_common::protocol;
 
 /// Trait for COSE signature verification.
 ///
@@ -353,9 +354,10 @@ fn verify_assertion_inner<V: CoseVerifier>(
         .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
 
     // Verify type
-    if client_data.type_ != "webauthn.get" {
+    if client_data.type_ != protocol::CLIENT_DATA_TYPE_GET {
         return Err(VerifyError::InvalidClientData(format!(
-            "Expected type 'webauthn.get', got '{}'",
+            "Expected type '{}', got '{}'",
+            protocol::CLIENT_DATA_TYPE_GET,
             client_data.type_
         )));
     }
@@ -571,9 +573,10 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     let client_data: ClientData = serde_json::from_slice(client_data_json)
         .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
 
-    if client_data.type_ != "webauthn.create" {
+    if client_data.type_ != protocol::CLIENT_DATA_TYPE_CREATE {
         return Err(VerifyError::InvalidClientData(format!(
-            "Expected type 'webauthn.create', got '{}'",
+            "Expected type '{}', got '{}'",
+            protocol::CLIENT_DATA_TYPE_CREATE,
             client_data.type_
         )));
     }

@@ -12,6 +12,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Serialize;
+use vouch_common::protocol;
 
 use super::error::FapiError;
 use super::key::{ClientKey, PublicEcJwk};
@@ -21,7 +22,7 @@ use super::key::{ClientKey, PublicEcJwk};
 struct DpopHeader<'a> {
     /// Token type — must be "dpop+jwt" per RFC 9449.
     typ: &'a str,
-    /// Algorithm — "ES256" for P-256 ECDSA with SHA-256.
+    /// Algorithm — [`protocol::JWS_ALG_ES256`] for P-256 ECDSA with SHA-256.
     alg: &'a str,
     /// Public key confirming possession of the corresponding private key.
     jwk: PublicEcJwk,
@@ -132,7 +133,7 @@ impl DpopProofBuilder {
 
         let header = DpopHeader {
             typ: "dpop+jwt",
-            alg: "ES256",
+            alg: protocol::JWS_ALG_ES256,
             jwk,
         };
 

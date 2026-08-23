@@ -12,6 +12,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
+use vouch_common::protocol;
 
 use crate::{AppState, config, services::idp};
 
@@ -35,9 +36,12 @@ pub fn build_api_cors_layer() -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::ACCEPT,
-            HeaderName::from_static("dpop"),
+            HeaderName::from_static(protocol::HEADER_DPOP),
         ])
-        .expose_headers([HeaderName::from_static("dpop-nonce"), header::LINK])
+        .expose_headers([
+            HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+            header::LINK,
+        ])
         .max_age(std::time::Duration::from_hours(1))
 }
 

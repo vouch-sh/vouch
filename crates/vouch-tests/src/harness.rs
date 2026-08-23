@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use vouch_cli::{HttpClient, TestHttpClient};
+use vouch_common::protocol;
 use vouch_server::{AppState, db, test_utils};
 
 /// Unified test harness for integration tests.
@@ -256,7 +257,7 @@ impl TestHarness {
         token: &str,
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         let sig = self.v1_sig_headers("GET", &url, None);
         let sig_refs: Vec<(&str, &str)> =
             sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -275,7 +276,7 @@ impl TestHarness {
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         let sig = self.v1_sig_headers("POST", &url, Some(&json));
         let sig_refs: Vec<(&str, &str)> =
             sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -299,7 +300,7 @@ impl TestHarness {
         token: &str,
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         let sig = self.v1_sig_headers("DELETE", &url, None);
         let sig_refs: Vec<(&str, &str)> =
             sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -318,7 +319,7 @@ impl TestHarness {
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         let sig = self.v1_sig_headers("PATCH", &url, Some(&json));
         let sig_refs: Vec<(&str, &str)> =
             sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -344,7 +345,7 @@ impl TestHarness {
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         let sig = self.v1_sig_headers("PUT", &url, Some(&json));
         let sig_refs: Vec<(&str, &str)> =
             sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -369,7 +370,7 @@ impl TestHarness {
                 "POST",
                 &url,
                 Some(body.as_bytes()),
-                Some("application/x-www-form-urlencoded"),
+                Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
                 None,
                 None,
             )
@@ -384,13 +385,13 @@ impl TestHarness {
         token: &str,
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
-        let auth = format!("Bearer {}", token);
+        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token);
         self.http_client
             .request(
                 "POST",
                 &url,
                 Some(body.as_bytes()),
-                Some("application/x-www-form-urlencoded"),
+                Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
                 Some(&auth),
                 None,
             )
@@ -410,7 +411,7 @@ impl TestHarness {
                 "POST",
                 &url,
                 Some(body.as_bytes()),
-                Some("application/x-www-form-urlencoded"),
+                Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
                 Some(auth_header),
                 None,
             )

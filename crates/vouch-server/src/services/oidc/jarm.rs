@@ -11,6 +11,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use serde::Serialize;
 use std::sync::Arc;
+use vouch_common::protocol;
 
 use crate::AppState;
 use crate::db::OAuthClient;
@@ -52,9 +53,9 @@ struct JarmErrorClaims {
 fn select_alg(_state: &AppState, client: &OAuthClient) -> &'static str {
     match client.authorization_signed_response_alg {
         Some(crate::db::JwsAlgorithm::Rs256) => "RS256",
-        Some(crate::db::JwsAlgorithm::Es256) | None => "ES256",
+        Some(crate::db::JwsAlgorithm::Es256) | None => protocol::JWS_ALG_ES256,
         // Validated at registration; only RS256 and ES256 are accepted for JARM.
-        Some(_) => "ES256",
+        Some(_) => protocol::JWS_ALG_ES256,
     }
 }
 

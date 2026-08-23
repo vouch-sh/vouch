@@ -21,6 +21,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use serde::Serialize;
+use vouch_common::protocol;
 use zeroize::Zeroizing;
 
 use crate::crypto::kms_signer::{KmsSignerP256, KmsSignerRsa3072, parse_spki_rsa};
@@ -222,7 +223,7 @@ impl OidcSigningKey {
                 Ok(EcJwk {
                     kty: "EC".to_string(),
                     crv: "P-256".to_string(),
-                    alg: "ES256".to_string(),
+                    alg: protocol::JWS_ALG_ES256.to_string(),
                     kid: key_id.clone(),
                     key_use: "sig".to_string(),
                     x,
@@ -232,7 +233,7 @@ impl OidcSigningKey {
             Self::Kms { signer, key_id, .. } => Ok(EcJwk {
                 kty: "EC".to_string(),
                 crv: "P-256".to_string(),
-                alg: "ES256".to_string(),
+                alg: protocol::JWS_ALG_ES256.to_string(),
                 kid: key_id.clone(),
                 key_use: "sig".to_string(),
                 x: signer.x_b64(),
@@ -341,7 +342,7 @@ struct KmsJwtHeader<'a> {
 /// Manually construct and sign a JWT using KMS.
 ///
 /// Steps:
-/// 1. Build header JSON with `alg: "ES256"`, `typ`, and `kid`
+/// 1. Build header JSON with [`protocol::JWS_ALG_ES256`], `typ`, and `kid`
 /// 2. Serialize claims to JSON
 /// 3. Base64url-encode header and payload, join with "."
 /// 4. Call `signer.sign_raw(signing_input)` → DER signature
@@ -356,7 +357,7 @@ async fn sign_jwt_with_kms<T: Serialize>(
     use crate::crypto::kms_signer::der_ecdsa_to_jwt;
 
     let header = KmsJwtHeader {
-        alg: "ES256",
+        alg: protocol::JWS_ALG_ES256,
         typ: typ.unwrap_or("JWT"),
         kid: key_id,
     };
@@ -412,7 +413,7 @@ pub struct EcJwk {
     pub kty: String,
     /// RFC 7518 Section 6.2.1.1: Curve — "P-256" for NIST P-256.
     pub crv: String,
-    /// RFC 7517 Section 4.4: Algorithm — "ES256" (ECDSA using P-256 and SHA-256).
+    /// RFC 7517 Section 4.4: Algorithm — [`protocol::JWS_ALG_ES256`].
     pub alg: String,
     /// RFC 7517 Section 4.5: Key ID.
     pub kid: String,

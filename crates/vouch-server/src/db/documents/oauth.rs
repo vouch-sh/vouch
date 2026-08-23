@@ -237,6 +237,11 @@ impl std::fmt::Display for TokenEndpointAuthMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum JwsAlgorithm {
     /// ECDSA using P-256 and SHA-256.
+    ///
+    /// A `serde(rename)` takes a literal, so this is the one spelling of
+    /// `ES256` that cannot reference [`vouch_common::protocol::JWS_ALG_ES256`]
+    /// directly; `jws_algorithm_serde_matches_protocol_constant` pins the two
+    /// together instead.
     #[default]
     #[serde(rename = "ES256")]
     Es256,
@@ -256,7 +261,7 @@ impl JwsAlgorithm {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Es256 => "ES256",
+            Self::Es256 => vouch_common::protocol::JWS_ALG_ES256,
             Self::Rs256 => "RS256",
             Self::Ps256 => "PS256",
             Self::EdDsa => "EdDSA",
@@ -294,7 +299,7 @@ impl std::str::FromStr for JwsAlgorithm {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ES256" => Ok(Self::Es256),
+            vouch_common::protocol::JWS_ALG_ES256 => Ok(Self::Es256),
             "RS256" => Ok(Self::Rs256),
             "PS256" => Ok(Self::Ps256),
             "EdDSA" => Ok(Self::EdDsa),
@@ -662,6 +667,25 @@ mod tests {
         TokenEndpointAuthMethod,
     };
     use std::str::FromStr;
+
+    /// `Es256`'s `serde(rename)` is a literal and its `as_str`/`FromStr` arms
+    /// are the shared constant. Serialize, deserialize, and parse all have to
+    /// agree with `JWS_ALG_ES256`, or a stored client's signing algorithm
+    /// stops round-tripping.
+    #[test]
+    fn jws_algorithm_serde_matches_protocol_constant() {
+        let alg = vouch_common::protocol::JWS_ALG_ES256;
+        assert_eq!(
+            serde_json::to_string(&JwsAlgorithm::Es256).unwrap(),
+            format!("\"{alg}\"")
+        );
+        assert_eq!(
+            serde_json::from_str::<JwsAlgorithm>(&format!("\"{alg}\"")).unwrap(),
+            JwsAlgorithm::Es256
+        );
+        assert_eq!(JwsAlgorithm::Es256.as_str(), alg);
+        assert_eq!(JwsAlgorithm::from_str(alg).unwrap(), JwsAlgorithm::Es256);
+    }
 
     #[test]
     fn test_access_scope_from_str_case_insensitive() {

@@ -14,6 +14,7 @@ use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
 use vouch_cli::{tr, tr_args};
+use vouch_common::protocol;
 
 /// Parameters for building RFC 9421 HTTP signature headers.
 struct SignRequestParams<'a> {
@@ -164,7 +165,7 @@ impl<H: HttpClient> VouchClient<H> {
     ///
     /// When a FAPI key is present, generates a DPoP proof bound to the access
     /// token hash and returns `("DPoP <token>", Some("<proof>"))`.
-    /// If proof generation fails, falls back to `("Bearer <token>", None)`.
+    /// If proof generation fails, falls back to the Bearer scheme.
     ///
     /// When no FAPI key is present, returns `("Bearer <token>", None)`.
     fn build_auth(&self, method: &str, url: &str) -> Result<(String, Option<String>)> {
@@ -179,7 +180,10 @@ impl<H: HttpClient> VouchClient<H> {
             match builder.build(key) {
                 Ok(proof) => {
                     tracing::debug!("Using DPoP auth for {method} {url} (kid={})", key.kid());
-                    return Ok((format!("DPoP {token_str}"), Some(proof)));
+                    return Ok((
+                        format!("{} {token_str}", protocol::AUTH_SCHEME_DPOP),
+                        Some(proof),
+                    ));
                 }
                 Err(e) => {
                     // Non-fatal: fall through to Bearer auth.
@@ -200,7 +204,10 @@ impl<H: HttpClient> VouchClient<H> {
             tracing::debug!("Using Bearer auth for {method} {url} (no FAPI key)");
         }
 
-        Ok((format!("Bearer {token_str}"), None))
+        Ok((
+            format!("{} {token_str}", protocol::AUTH_SCHEME_BEARER),
+            None,
+        ))
     }
 
     /// Build the full URL for a path.
@@ -360,7 +367,7 @@ impl<H: HttpClient> VouchClient<H> {
                     // Collect all extra headers (DPoP proof + HTTP signature)
                     let mut extra_headers: Vec<(String, String)> = Vec::new();
                     if let Some(ref proof) = dpop_proof {
-                        extra_headers.push(("DPoP".to_string(), proof.clone()));
+                        extra_headers.push((protocol::HEADER_DPOP.to_string(), proof.clone()));
                     }
 
                     // Sign with RFC 9421 HTTP message signatures when FAPI key is present
@@ -443,7 +450,7 @@ impl<H: HttpClient> VouchClient<H> {
             "POST",
             path,
             Some(form.as_bytes()),
-            Some("application/x-www-form-urlencoded"),
+            Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
             Auth::None,
         )
         .await

@@ -14,7 +14,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
 use std::sync::Arc;
-use vouch_common::SessionStatus;
+use vouch_common::{SessionStatus, protocol};
 
 use super::{clear_session_cookie, hash_token};
 use crate::db::ClientInfo;
@@ -39,8 +39,8 @@ pub(crate) async fn status(
     // `starts_with`. An unrecognized scheme (or no header at all) yields
     // `authenticated: false` — this endpoint never 401s.
     let token = match auth_header.and_then(|h| {
-        crate::http::strip_auth_scheme(h, "Bearer")
-            .or_else(|| crate::http::strip_auth_scheme(h, "DPoP"))
+        crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
+            .or_else(|| crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
     }) {
         Some(tok) => tok,
         None => {

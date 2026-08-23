@@ -36,6 +36,7 @@ use vouch_cli::{tr, tr_args};
 use vouch_common::fixtures::{
     AuthenticationFixture, Fido2Fixture, FixtureMetadata, RegistrationFixture,
 };
+use vouch_common::protocol;
 
 /// Test relying party ID used for the local diagnostic flow.
 const RP_ID: &str = "diag.test.local";
@@ -186,7 +187,7 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
 
     // Build client data for registration
     let client_data = serde_json::json!({
-        "type": "webauthn.create",
+        "type": protocol::CLIENT_DATA_TYPE_CREATE,
         "challenge": URL_SAFE_NO_PAD.encode(&challenge),
         "origin": format!("https://{}", RP_ID),
         "crossOrigin": false
@@ -344,7 +345,7 @@ fn run_authentication(
 
     // Build client data for authentication
     let client_data = serde_json::json!({
-        "type": "webauthn.get",
+        "type": protocol::CLIENT_DATA_TYPE_GET,
         "challenge": URL_SAFE_NO_PAD.encode(&challenge),
         "origin": format!("https://{}", RP_ID),
         "crossOrigin": false

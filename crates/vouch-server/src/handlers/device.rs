@@ -24,6 +24,7 @@ use jiff::{Span, Timestamp};
 use std::sync::Arc;
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
+    protocol,
 };
 
 use crate::error::{OAuthErrorCode, ServiceError};
@@ -84,7 +85,7 @@ fn hash_device_code(code: &str) -> String {
 /// POST /oauth/device
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
-/// "application/x-www-form-urlencoded" format.
+/// [`protocol::CONTENT_TYPE_FORM_URLENCODED`] format.
 pub(crate) async fn device_code(
     State(state): State<Arc<AppState>>,
     axum::Form(req): axum::Form<DeviceCodeRequest>,
@@ -323,7 +324,9 @@ pub(crate) async fn device_token(
             // burn the single-use code — the client can retry with a
             // corrected proof. Consistent with the authorization code
             // grant, which validates DPoP before exchanging the code.
-            let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+            let dpop_header = headers
+                .get(protocol::HEADER_DPOP)
+                .and_then(|v| v.to_str().ok());
             let dpop_proof =
                 match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
                     Ok(proof) => proof,
@@ -595,11 +598,15 @@ pub(crate) async fn device_token(
                 redact_email(&user_email)
             );
 
-            // RFC 9449 Section 5: token_type is "DPoP" when the token is
+            // RFC 9449 Section 5: token_type is DPoP when the token is
             // sender-constrained (bound to a DPoP proof key), otherwise
-            // "Bearer". RFC-compliant clients that require DPoP protection
+            // Bearer. RFC-compliant clients that require DPoP protection
             // MUST discard a response advertising a different token_type.
-            let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
+            let token_type = if dpop_jkt.is_some() {
+                protocol::ACCESS_TOKEN_TYPE_DPOP
+            } else {
+                protocol::ACCESS_TOKEN_TYPE_BEARER
+            };
 
             Ok(Json(DeviceTokenResponse {
                 // Clone the SecretString rather than rebuilding it via

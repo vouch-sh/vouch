@@ -26,6 +26,7 @@ use axum::{
 use crate::AppState;
 use crate::db;
 use crate::db::{ScimScope, ScimScopeSet};
+use vouch_common::protocol;
 
 // Re-export types for convenience (used by tests via `use super::*`)
 pub(crate) use types::*;
@@ -159,12 +160,13 @@ pub(crate) async fn authenticate_scim(
             )
         })?;
 
-    let token = crate::http::strip_auth_scheme(auth_header, "Bearer").ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ScimError::new(401, "Invalid Authorization header format")),
-        )
-    })?;
+    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ScimError::new(401, "Invalid Authorization header format")),
+            )
+        })?;
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Verify token exists and is valid
