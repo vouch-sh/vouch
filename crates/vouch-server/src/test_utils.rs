@@ -907,7 +907,7 @@ pub async fn create_test_session(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -968,7 +968,7 @@ pub async fn create_test_session_with_audience(
             authenticator_id: Some(auth_id),
             client_id,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: Some(audience),
@@ -1017,7 +1017,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             authenticator_id: None,
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -1074,7 +1074,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -1128,7 +1128,7 @@ pub async fn create_test_session_with_iat(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -1182,7 +1182,7 @@ pub async fn create_test_session_for_client(
             authenticator_id: Some(auth_id),
             client_id,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -1222,11 +1222,17 @@ pub async fn create_test_session_with_dpop(
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
         TokenIssuanceProof, create_oauth_access_token,
     };
-    use crate::services::oidc::ScopeSet;
+    use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
     use secrecy::ExposeSecret;
 
     let (hardware_aaguid, org_domain) =
         resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
+    // Fixtures name the binding by thumbprint, so stand up the witness the
+    // issuance path now requires. Only reachable under `cfg(test)` /
+    // `feature = "test-utils"`.
+    let dpop_proof =
+        ValidatedDpopProof::for_testing(dpop_jkt.to_string(), format!("test-jti-{dpop_jkt}"), None);
 
     let result = create_oauth_access_token(
         state,
@@ -1236,7 +1242,7 @@ pub async fn create_test_session_with_dpop(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: Some(dpop_jkt),
+            dpop_proof: Some(&dpop_proof),
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
@@ -1290,7 +1296,7 @@ pub async fn create_test_session_with_mtls(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: Some(mtls_cert_thumbprint),
             act: None,
             audience: None,

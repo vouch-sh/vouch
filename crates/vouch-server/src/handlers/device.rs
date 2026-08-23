@@ -352,7 +352,6 @@ pub(crate) async fn device_token(
                         ));
                     }
                 };
-            let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
             let has_mtls_cert = client_cert.0.is_some();
 
             // Look up the registered OAuth client to enforce FAPI 2.0
@@ -527,7 +526,7 @@ pub(crate) async fn device_token(
                     authenticator_id: Some(&authenticator_id),
                     client_id: &client_id,
                     scope: Some(ScopeSet::all()),
-                    dpop_jkt: dpop_jkt.as_deref(),
+                    dpop_proof: dpop_proof.as_ref(),
                     mtls_cert_thumbprint: mtls_cert_thumbprint.as_deref(),
                     act: None,
                     audience: None,
@@ -602,7 +601,7 @@ pub(crate) async fn device_token(
             // sender-constrained (bound to a DPoP proof key), otherwise
             // Bearer. RFC-compliant clients that require DPoP protection
             // MUST discard a response advertising a different token_type.
-            let token_type = if dpop_jkt.is_some() {
+            let token_type = if dpop_proof.is_some() {
                 protocol::ACCESS_TOKEN_TYPE_DPOP
             } else {
                 protocol::ACCESS_TOKEN_TYPE_BEARER

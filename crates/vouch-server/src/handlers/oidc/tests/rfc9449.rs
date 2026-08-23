@@ -65,6 +65,140 @@ async fn test_dpop_token_exchange_with_proof() {
     );
 }
 
+/// RFC 9449 Section 6.1: an exchanged token must carry `cnf.jkt` equal to the
+/// thumbprint of the key that signed the proof.
+///
+/// `token_type` alone does not cover this. It is derived from "a proof was
+/// present", so it still reads `DPoP` if the thumbprint is dropped or belongs
+/// to a different key — the binding, not just its advertisement, needs its own
+/// assertion.
+#[tokio::test]
+async fn test_rfc9449_exchanged_token_cnf_jkt_matches_proof_key() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "dpop-exchange-cnf@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let dpop_proof =
+        create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+    let auth_header = client.basic_auth_header();
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={access_token}&subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &dpop_proof)],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "DPoP token exchange should succeed: {}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    let issued = body["access_token"]
+        .as_str()
+        .expect("exchange must return an access_token");
+
+    let claims = decode_jwt_payload(issued);
+    let jkt = claims
+        .get("cnf")
+        .expect("RFC 9449 Section 6: DPoP-bound token must contain cnf")
+        .get("jkt")
+        .expect("RFC 9449 Section 6.1: cnf must contain jkt")
+        .as_str()
+        .expect("jkt must be a string");
+
+    assert_eq!(
+        jkt,
+        dpop_jkt(&dpop_jwk),
+        "RFC 9449 Section 6.1: cnf.jkt must be the thumbprint of the proof's key"
+    );
+}
+
+/// RFC 9449 Section 6.1: the client_credentials grant binds `cnf.jkt` to the
+/// proof's key, same as the user-facing grants.
+///
+/// The negative case (a `dpop_bound_access_tokens` client presenting no proof
+/// is refused) is covered in the FAPI 2.0 tests; this is the positive half —
+/// that a proof which is presented actually reaches the issued token.
+#[tokio::test]
+async fn test_rfc9449_client_credentials_cnf_jkt_matches_proof_key() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "cc-dpop-cnf@example.com").await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            dpop_bound_access_tokens: true,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let dpop_proof =
+        create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &dpop_proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials with a DPoP proof should succeed: {resp_body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    let issued = response["access_token"]
+        .as_str()
+        .expect("client_credentials must return an access_token");
+
+    let claims = decode_jwt_payload(issued);
+    let jkt = claims
+        .get("cnf")
+        .expect("RFC 9449 Section 6: DPoP-bound token must contain cnf")
+        .get("jkt")
+        .expect("RFC 9449 Section 6.1: cnf must contain jkt")
+        .as_str()
+        .expect("jkt must be a string");
+
+    assert_eq!(
+        jkt,
+        dpop_jkt(&dpop_jwk),
+        "RFC 9449 Section 6.1: cnf.jkt must be the thumbprint of the proof's key"
+    );
+}
+
 #[tokio::test]
 async fn test_dpop_userinfo_with_dpop_scheme() {
     // RFC 9449 Section 7.1: UserInfo with DPoP-bound token and DPoP authorization scheme

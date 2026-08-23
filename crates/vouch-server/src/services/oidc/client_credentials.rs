@@ -14,7 +14,7 @@ use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token,
 };
-use crate::services::oidc::ScopeSet;
+use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use std::sync::Arc;
 use vouch_common::protocol;
 
@@ -46,7 +46,8 @@ pub struct ClientCredentialsResult {
 /// RFC 9449 (`cnf.jkt`) and RFC 8705 (`cnf.x5t#S256`) — DPoP takes priority
 /// over mTLS in `create_oauth_access_token`.
 pub(crate) struct ClientCredentialsBindings<'a> {
-    pub(crate) dpop_jkt: Option<&'a str>,
+    /// RFC 9449 §6: the validated DPoP proof supplying `cnf.jkt`.
+    pub(crate) dpop_proof: Option<&'a ValidatedDpopProof>,
     pub(crate) mtls_cert_thumbprint: Option<&'a str>,
 }
 
@@ -87,7 +88,7 @@ pub(crate) async fn exchange_client_credentials(
             authenticator_id: None,
             client_id: &client.client_id,
             scope: scope.clone(),
-            dpop_jkt: bindings.dpop_jkt,
+            dpop_proof: bindings.dpop_proof,
             mtls_cert_thumbprint: bindings.mtls_cert_thumbprint,
             act: None,
             audience: None,
@@ -108,7 +109,7 @@ pub(crate) async fn exchange_client_credentials(
     );
 
     // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
-    let token_type = if bindings.dpop_jkt.is_some() {
+    let token_type = if bindings.dpop_proof.is_some() {
         protocol::ACCESS_TOKEN_TYPE_DPOP
     } else {
         protocol::ACCESS_TOKEN_TYPE_BEARER
@@ -209,7 +210,7 @@ mod tests {
             &client,
             None,
             ClientCredentialsBindings {
-                dpop_jkt: None,
+                dpop_proof: None,
                 mtls_cert_thumbprint: Some(thumbprint),
             },
             TokenIssuanceProof {

@@ -20,7 +20,7 @@ use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, Authenticator, SessionPurpose, User};
-use crate::services::oidc::{CnfClaim, ScopeSet};
+use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -685,8 +685,11 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub client_id: &'a str,
     /// Granted OAuth scope.
     pub scope: Option<ScopeSet>,
-    /// DPoP JWK thumbprint for sender-constrained binding.
-    pub dpop_jkt: Option<&'a str>,
+    /// RFC 9449 §6: the validated DPoP proof whose `jkt` binds this token
+    /// via `cnf.jkt`. Taking the witness rather than a bare thumbprint means
+    /// a sender-constrained token cannot be minted from a string that never
+    /// passed signature, `htm`/`htu`, nonce, and replay validation.
+    pub dpop_proof: Option<&'a ValidatedDpopProof>,
     /// mTLS certificate thumbprint for sender-constrained binding (RFC 8705).
     pub mtls_cert_thumbprint: Option<&'a str>,
     /// Actor claim for delegation chains (token exchange).
@@ -779,9 +782,9 @@ pub(crate) async fn create_oauth_access_token(
 
     // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
     // DPoP (jkt) takes priority over mTLS (x5t#S256).
-    let cnf = match (params.dpop_jkt, params.mtls_cert_thumbprint) {
-        (Some(jkt), _) => Some(CnfClaim {
-            jkt: Some(jkt.to_string()),
+    let cnf = match (params.dpop_proof, params.mtls_cert_thumbprint) {
+        (Some(proof), _) => Some(CnfClaim {
+            jkt: Some(proof.jkt.clone()),
             x5t_s256: None,
         }),
         (None, Some(x5t)) => Some(CnfClaim {

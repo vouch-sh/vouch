@@ -797,7 +797,7 @@ pub(crate) async fn browser_login_complete(
             authenticator_id: Some(&authenticator.id),
             client_id: &client_id,
             scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
+            dpop_proof: None,
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
