@@ -24,6 +24,8 @@
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
+
+use super::cose;
 use thiserror::Error;
 use vouch_common::protocol;
 
@@ -882,14 +884,26 @@ fn verify_cose_signature(
     // Extract algorithm (alg) - label 3
     let alg = get_cose_int(&map, 3)?;
 
-    match (kty, alg) {
-        // EC2 key with ES256 (-7)
-        (2, -7) => verify_es256(&map, message, signature),
-        // RSA key with RS256 (-257)
-        (3, -257) => verify_rs256(&map, message, signature),
-        // OKP key with EdDSA (-8)
-        (1, -8) => verify_eddsa(&map, message, signature),
-        _ => Err(VerifyError::UnsupportedAlgorithm(alg)),
+    // Curve (crv) - label -1. Read non-fatally: RSA has no curve (its -1 label
+    // holds the modulus), and an absent or non-integer label must not preempt
+    // the algorithm check below, which gives the more useful diagnosis.
+    let crv = match kty {
+        cose::kty::EC2 | cose::kty::OKP => get_cose_int(&map, -1).ok(),
+        _ => None,
+    };
+
+    // RFC 9053 Section 2.1 requires implementations to check the key type and
+    // curve, not just the algorithm. Resolving the whole triple here means a
+    // key whose labels disagree is rejected at the boundary with a message
+    // naming the mismatch, rather than reaching a verifier it does not fit.
+    match cose::VerifiableCoseKey::from_triple(kty, alg, crv) {
+        Ok(cose::VerifiableCoseKey::Es256) => verify_es256(&map, message, signature),
+        Ok(cose::VerifiableCoseKey::Rs256) => verify_rs256(&map, message, signature),
+        Ok(cose::VerifiableCoseKey::Ed25519) => verify_eddsa(&map, message, signature),
+        Err(cose::CoseKeyError::UnsupportedAlgorithm(alg)) => {
+            Err(VerifyError::UnsupportedAlgorithm(alg))
+        }
+        Err(e) => Err(VerifyError::InvalidCoseKey(e.to_string())),
     }
 }
 
@@ -952,22 +966,21 @@ fn verify_es256(
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
 
-    // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
-    // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
-    if signature.len() == 64 {
-        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256: FIXED verification failed: {e:?}");
-            VerifyError::SignatureInvalid
-        })
-    } else {
-        // DER-encoded signature from CTAP2
-        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256: ASN1 verification failed: {e:?}");
-            VerifyError::SignatureInvalid
-        })
-    }
+    // WebAuthn Level 2 Section 6.5.5: "For COSEAlgorithmIdentifier -7 (ES256),
+    // and other ECDSA-based algorithms, the sig value MUST be encoded as an
+    // ASN.1 DER Ecdsa-Sig-Value, as defined in [RFC3279] section 2.2.3."
+    //
+    // That covers both entry points. The adjacent Note records that CTAP2
+    // authenticators emit the same encoding as CTAP1/U2F "for consistency
+    // reasons", and browsers pass the authenticator's signature through
+    // unchanged. There is therefore no conformant client that sends a raw
+    // r||s pair, and accepting one on the strength of its length would admit
+    // an encoding the specification forbids.
+    let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
+    public_key.verify(message, signature).map_err(|e| {
+        tracing::warn!("verify_es256: ASN1 verification failed: {e:?}");
+        VerifyError::SignatureInvalid
+    })
 }
 
 /// Verify RS256 (RSA PKCS#1 v1.5 with SHA-256) signature.
