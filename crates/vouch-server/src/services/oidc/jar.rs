@@ -375,7 +375,7 @@ pub async fn validate_request_object(
     };
 
     // Loopback JWKS destinations are permitted only in local development
-    // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
+    // (no TLS configured), matching the WebAuthn `OriginPolicy`
     // relaxation; private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
 

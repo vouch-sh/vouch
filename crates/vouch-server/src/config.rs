@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server configuration.
 
+use crate::crypto::webauthn_verify::OriginPolicy;
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
 use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
@@ -1289,6 +1290,20 @@ impl ServerConfig {
         }
 
         Ok(())
+    }
+}
+
+impl From<&ServerConfig> for OriginPolicy {
+    /// A TLS-configured server is a real deployment, where an origin mismatch
+    /// is always an error. Without TLS the server is a local development
+    /// instance reached over loopback, where the browser's origin may differ
+    /// from the configured one by host spelling or port.
+    fn from(config: &ServerConfig) -> Self {
+        if config.tls_configured() {
+            Self::Strict
+        } else {
+            Self::AllowLoopbackVariations
+        }
     }
 }
 

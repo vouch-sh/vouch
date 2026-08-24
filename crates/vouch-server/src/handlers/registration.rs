@@ -12,7 +12,7 @@ pub(crate) struct ValidatedAttestation {
     /// The device name determined from the AAGUID.
     pub device_name: String,
     /// Whether the attestation was cryptographically verified via x5c chain.
-    pub attestation_verified: bool,
+    pub attestation: Option<crate::crypto::attestation_chain::AttestationProof>,
 }
 
 /// Validate a WebAuthn registration attestation.
@@ -120,7 +120,7 @@ pub(crate) fn validate_registration_attestation(
     Ok(ValidatedAttestation {
         aaguid,
         device_name,
-        attestation_verified: false,
+        attestation: None,
     })
 }
 
@@ -239,7 +239,7 @@ mod tests {
             validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
         let validated = result.expect("should succeed");
         assert!(validated.aaguid.is_some());
-        assert!(!validated.attestation_verified);
+        assert!(validated.attestation.is_none());
     }
 
     #[test]

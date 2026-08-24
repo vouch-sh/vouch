@@ -18,7 +18,7 @@
 use crate::AppState;
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
-use crate::crypto::webauthn_verify;
+use crate::crypto::webauthn_verify::{self, OriginPolicy};
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
 use base64::Engine;
@@ -222,7 +222,7 @@ pub(crate) struct LoginAssertionParams {
     /// Whether to tolerate loopback origin variations (development only).
     /// Set to `false` whenever TLS is configured so a production deployment
     /// never weakens origin binding, even with a loopback `rp_id`.
-    pub allow_localhost_origin: bool,
+    pub origin_policy: OriginPolicy,
 }
 
 /// Result of WebAuthn assertion verification.
@@ -261,7 +261,7 @@ pub(crate) async fn verify_login_assertion(
             expected_origin: &params.expected_origin,
             stored_counter: params.stored_counter,
             require_user_verification: true,
-            allow_localhost_origin: params.allow_localhost_origin,
+            origin_policy: params.origin_policy,
         })
         .map_err(|e| {
             ServiceError::oauth(
@@ -1308,7 +1308,7 @@ mod tests {
             challenge,
             stored_counter: 0,
             // Exact-match origins here; relaxation is irrelevant to this test.
-            allow_localhost_origin: false,
+            origin_policy: OriginPolicy::Strict,
         };
 
         let err = verify_login_assertion(params)

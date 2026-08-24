@@ -28,6 +28,7 @@ use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
 
+use super::attestation_chain::AttestationProof;
 use super::{cose, oid};
 use thiserror::Error;
 use vouch_common::protocol;
@@ -123,6 +124,29 @@ impl CoseVerifier for TestCoseVerifier {
     }
 }
 
+/// Whether loopback origin variations are tolerated when comparing the
+/// client-data origin against the expected one.
+///
+/// Lives here because the crypto layer consumes it and may not import
+/// `ServerConfig`; the conversion from configuration is in `config.rs`, which
+/// is a composition root rather than a layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginPolicy {
+    /// An origin mismatch is always rejected.
+    Strict,
+    /// Tolerate loopback variations (`localhost` vs `127.0.0.1`, port
+    /// differences). Development only.
+    AllowLoopbackVariations,
+}
+
+impl OriginPolicy {
+    /// Whether loopback variations are tolerated.
+    #[must_use]
+    pub fn allows_loopback_variation(self) -> bool {
+        matches!(self, Self::AllowLoopbackVariations)
+    }
+}
+
 /// Errors during WebAuthn assertion verification.
 #[derive(Debug, Error)]
 pub enum VerifyError {
@@ -208,9 +232,8 @@ pub struct AssertionParams<'a> {
     pub stored_counter: u32,
     /// Whether to require the UV flag.
     pub require_user_verification: bool,
-    /// Whether to tolerate loopback origin variations. Development only; pass
-    /// `false` in production so an origin mismatch is always rejected.
-    pub allow_localhost_origin: bool,
+    /// Whether loopback origin variations are tolerated.
+    pub origin_policy: OriginPolicy,
 }
 
 /// Verify a WebAuthn assertion using the default COSE verifier.
@@ -234,7 +257,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 
 /// Verify the client-data origin for both assertion and registration flows.
 ///
-/// `allow_localhost_origin` gates the loopback origin-variation relaxation
+/// `origin_policy` gates the loopback origin-variation relaxation
 /// (e.g. `localhost` ↔ `127.0.0.1`): it must be `true` only in development
 /// (no TLS). Production threads `false` so an origin mismatch is always
 /// rejected even on a misconfigured loopback `rp_id`.
@@ -245,7 +268,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 fn verify_origin(
     presented_origin: &str,
     expected_origin: &str,
-    allow_localhost_origin: bool,
+    origin_policy: OriginPolicy,
     flow: &str,
 ) -> Result<(), VerifyError> {
     if presented_origin == expected_origin {
@@ -261,7 +284,7 @@ fn verify_origin(
         .and_then(|u| u.host_str().map(String::from))
         .is_some_and(|h| vouch_common::is_loopback_host(&h));
 
-    if allow_localhost_origin && expected_is_local && origin_is_local {
+    if origin_policy.allows_loopback_variation() && expected_is_local && origin_is_local {
         tracing::warn!(
             target: "security",
             flow,
@@ -278,7 +301,7 @@ fn verify_origin(
 
 /// Core WebAuthn assertion verification.
 ///
-/// `params.allow_localhost_origin` gates the loopback origin-variation
+/// `params.origin_policy` gates the loopback origin-variation
 /// relaxation: it must be `true` only in development (no TLS). Production
 /// threads `false` so an origin mismatch is always rejected even on a
 /// misconfigured loopback `rp_id`.
@@ -296,7 +319,7 @@ fn verify_assertion_inner<V: CoseVerifier>(
         expected_origin,
         stored_counter,
         require_user_verification,
-        allow_localhost_origin,
+        origin_policy,
     } = params;
 
     // 1. Verify authenticator data structure
@@ -389,7 +412,7 @@ fn verify_assertion_inner<V: CoseVerifier>(
     verify_origin(
         &client_data.origin,
         expected_origin,
-        allow_localhost_origin,
+        origin_policy,
         "assertion",
     )?;
 
@@ -423,8 +446,11 @@ pub struct RegistrationVerificationResult {
     pub aaguid: Option<String>,
     /// The counter value from registration (usually 0).
     pub counter: u32,
-    /// Whether the attestation was cryptographically verified via x5c chain.
-    pub attestation_verified: bool,
+    /// The verified attestation chain, when one was validated.
+    ///
+    /// `Some` is only obtainable from `validate_attestation_chain`, so its
+    /// presence is itself the evidence that a chain was checked.
+    pub attestation: Option<AttestationProof>,
 }
 
 /// Parameters for WebAuthn registration (attestation) verification
@@ -446,9 +472,8 @@ pub struct RegistrationParams<'a> {
     pub expected_origin: &'a str,
     /// Whether to require the UV flag.
     pub require_user_verification: bool,
-    /// Whether to tolerate loopback origin variations. Development only; pass
-    /// `false` in production so an origin mismatch is always rejected.
-    pub allow_localhost_origin: bool,
+    /// Whether loopback origin variations are tolerated.
+    pub origin_policy: OriginPolicy,
 }
 
 /// Verify a WebAuthn registration (attestation) response.
@@ -481,7 +506,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         expected_challenge,
         expected_origin,
         require_user_verification,
-        allow_localhost_origin,
+        origin_policy,
     } = params;
 
     // 1. Parse attestation_object CBOR
@@ -607,12 +632,12 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     verify_origin(
         &client_data.origin,
         expected_origin,
-        allow_localhost_origin,
+        origin_policy,
         "registration",
     )?;
 
     // 4. Verify attestation statement based on format
-    let mut attestation_verified = false;
+    let mut attestation = None;
 
     match fmt.as_str() {
         "none" => {
@@ -630,11 +655,11 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
                     verifier,
                 )?;
                 if let Some(result) = packed_result {
-                    attestation_verified = result.attestation_verified;
                     // If the chain provided a cert AAGUID, prefer it
                     if aaguid.is_none() {
-                        aaguid = result.cert_aaguid;
+                        aaguid = result.cert_aaguid().map(str::to_owned);
                     }
+                    attestation = Some(result);
                 }
             }
             // No attStmt with packed format is invalid, but we're lenient
@@ -652,17 +677,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         public_key_cose: cose_key_bytes,
         aaguid,
         counter,
-        attestation_verified,
+        attestation,
     })
-}
-
-/// Result of packed attestation verification with x5c chain.
-#[derive(Debug)]
-pub struct PackedAttestationResult {
-    /// Whether the attestation chain was cryptographically verified.
-    pub attestation_verified: bool,
-    /// AAGUID extracted from the x5c leaf certificate.
-    pub cert_aaguid: Option<String>,
 }
 
 /// Verify a packed attestation statement.
@@ -683,7 +699,7 @@ fn verify_packed_attestation<V: CoseVerifier>(
     cose_key_bytes: &[u8],
     auth_data_aaguid: Option<&str>,
     verifier: &V,
-) -> Result<Option<PackedAttestationResult>, VerifyError> {
+) -> Result<Option<AttestationProof>, VerifyError> {
     // Extract x5c certificate chain if present
     let x5c_certs = extract_x5c_certs(stmt_map);
 
@@ -713,14 +729,11 @@ fn verify_packed_attestation<V: CoseVerifier>(
 
         tracing::info!(
             attestation_verified = true,
-            cert_aaguid = ?chain_result.cert_aaguid,
+            cert_aaguid = ?chain_result.cert_aaguid(),
             "x5c attestation chain validated"
         );
 
-        return Ok(Some(PackedAttestationResult {
-            attestation_verified: true,
-            cert_aaguid: chain_result.cert_aaguid,
-        }));
+        return Ok(Some(chain_result));
     }
 
     // Self-attestation: extract sig from attStmt
