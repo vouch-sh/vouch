@@ -303,20 +303,9 @@ fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::
 /// RFC 7638 JWK thumbprint for a DPoP public JWK (canonical JSON of
 /// crv, kty, x, y → base64url SHA-256).
 fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    let canonical = serde_json::json!({
-        "crv": jwk.get("crv"),
-        "kty": jwk.get("kty"),
-        "x": jwk.get("x"),
-        "y": jwk.get("y")
-    });
-    let bytes = serde_json::to_vec(&canonical).expect("serialize JWK");
-    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(
-        &aws_lc_rs::digest::SHA256,
-        &bytes,
-    ))
+    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+        .expect("test JWK carries the required members")
+        .thumbprint()
 }
 
 /// Build and sign a DPoP proof JWT (RFC 9449 §4.2) for the given method,

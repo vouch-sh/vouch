@@ -369,15 +369,9 @@ pub(super) fn generate_dpop_key_pair() -> (EcdsaKeyPair, serde_json::Value) {
 /// Compute the RFC 7638 JWK thumbprint for a DPoP JWK (lexicographic JSON
 /// of the required members: crv, kty, x, y).
 pub(super) fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    let canonical = serde_json::json!({
-        "crv": jwk["crv"],
-        "kty": jwk["kty"],
-        "x": jwk["x"],
-        "y": jwk["y"]
-    });
-    let bytes = serde_json::to_vec(&canonical).expect("serialize JWK");
-    let digest = aws_lc_rs::digest::digest(&SHA256, &bytes);
-    URL_SAFE_NO_PAD.encode(digest.as_ref())
+    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+        .expect("test JWK carries the required members")
+        .thumbprint()
 }
 
 /// Create and sign a DPoP proof JWT for the given method and URI.

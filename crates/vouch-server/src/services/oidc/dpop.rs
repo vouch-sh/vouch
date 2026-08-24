@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::db::{self, JwsAlgorithm, store::DocumentStore};
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// Nonce validity in seconds (5 minutes).
 const NONCE_VALIDITY_SECONDS: i64 = 300;
@@ -98,49 +99,29 @@ pub struct OkpJwk {
 }
 
 impl DpopJwk {
-    /// Compute the JWK thumbprint (RFC 7638).
+    /// Compute the JWK thumbprint (RFC 7638) of this key.
     ///
-    /// The thumbprint is a base64url-encoded SHA-256 hash of the canonical
-    /// JSON representation of the required JWK members.
-    ///
-    /// Uses `BTreeMap` to guarantee lexicographic key ordering per RFC 7638 Section 3.2,
-    /// and `serde_json` for proper escaping of values.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DpopError::InvalidFormat` if canonical JSON serialization fails.
-    pub fn thumbprint(&self) -> Result<String, DpopError> {
-        use std::collections::BTreeMap;
-
-        let mut members = BTreeMap::new();
-        match self {
-            DpopJwk::Ec(ec) => {
-                // RFC 7638 Section 3.2: Required EC members in lexicographic order
-                members.insert("crv", ec.crv.as_str());
-                members.insert("kty", ec.kty.as_str());
-                members.insert("x", ec.x.as_str());
-                members.insert("y", ec.y.as_str());
-            }
-            DpopJwk::Rsa(rsa) => {
-                // RFC 7638 Section 3.2: Required RSA members in lexicographic order
-                members.insert("e", rsa.e.as_str());
-                members.insert("kty", rsa.kty.as_str());
-                members.insert("n", rsa.n.as_str());
-            }
-            DpopJwk::Okp(okp) => {
-                // RFC 7638 Section 3.2: Required OKP members in lexicographic order
-                members.insert("crv", okp.crv.as_str());
-                members.insert("kty", okp.kty.as_str());
-                members.insert("x", okp.x.as_str());
-            }
+    /// `kty` is taken from the variant rather than the declared member;
+    /// `build_decoding_key` rejects a key whose declared `kty` disagrees, and
+    /// runs before any caller reaches this.
+    #[must_use]
+    pub fn thumbprint(&self) -> String {
+        let key = match self {
+            DpopJwk::Ec(ec) => JwkThumbprintKey::Ec {
+                crv: &ec.crv,
+                x: &ec.x,
+                y: &ec.y,
+            },
+            DpopJwk::Rsa(rsa) => JwkThumbprintKey::Rsa {
+                e: &rsa.e,
+                n: &rsa.n,
+            },
+            DpopJwk::Okp(okp) => JwkThumbprintKey::Okp {
+                crv: &okp.crv,
+                x: &okp.x,
+            },
         };
-
-        // BTreeMap iteration is lexicographic, serde_json handles escaping
-        let canonical = serde_json::to_string(&members).map_err(|e| {
-            DpopError::InvalidFormat(format!("JWK thumbprint serialization failed: {e}"))
-        })?;
-        let hash = digest::digest(&SHA256, canonical.as_bytes());
-        Ok(URL_SAFE_NO_PAD.encode(hash.as_ref()))
+        key.thumbprint()
     }
 }
 
@@ -622,7 +603,7 @@ async fn validate_dpop_common(
         }
     }
 
-    let jkt = header.jwk.thumbprint()?;
+    let jkt = header.jwk.thumbprint();
     Ok(ValidatedDpopProof {
         jkt,
         jti: claims.jti,
@@ -719,7 +700,7 @@ mod tests {
             y: "test_y".to_string(),
         });
 
-        let thumbprint = jwk.thumbprint().expect("thumbprint");
+        let thumbprint = jwk.thumbprint();
         assert!(!thumbprint.is_empty());
         // Thumbprint should be base64url encoded SHA-256 (43 chars)
         assert_eq!(thumbprint.len(), 43);

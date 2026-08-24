@@ -7636,6 +7636,7 @@ name = "vouch-common"
 version = "2026.8.5"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "base64 0.23.1",
  "dirs",
  "hex",
