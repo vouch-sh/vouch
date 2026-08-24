@@ -88,6 +88,10 @@ fn generated_range(doc: &str) -> (usize, usize) {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "under VOUCH_REGEN this acts as a generator and reports what it rewrote"
+)]
 fn audit_events_docs_are_current() {
     let doc = std::fs::read_to_string(AUDIT_MD_PATH).expect("read audit.md");
     let (start, end) = generated_range(&doc);

@@ -291,6 +291,10 @@ pub fn migrate_legacy_layout() {
 }
 
 /// Migrate the legacy flat `~/.vouch/` directory (case 1 above).
+#[expect(
+    clippy::print_stderr,
+    reason = "runs from the CLI and agent entrypoints before tracing is initialized"
+)]
 fn migrate_legacy_vouch_dir() {
     let Some(home) = dirs::home_dir() else {
         return;

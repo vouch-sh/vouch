@@ -2,10 +2,10 @@
 //! Tests for JARM (JWT Secured Authorization Response Mode) JWT construction
 //! in `services/oidc/jarm.rs`.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use serde_json::Value;

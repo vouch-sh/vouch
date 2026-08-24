@@ -96,6 +96,11 @@ uninit_vec = "deny"
 # Code hygiene
 dbg_macro = "deny"
 
+# Diagnostics belong in `tracing`. The two user-facing binaries opt out at their
+# crate roots; every library and the server keep the boundary.
+print_stdout = "deny"
+print_stderr = "deny"
+
 # Safety
 await_holding_lock = "deny"
 large_futures = "deny"

@@ -18,6 +18,11 @@
 //! `/login` instead of returning an auth status code, so they are out of
 //! scope here.
 
+#![expect(
+    clippy::panic,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use vouch_tests::TestHarness;
 
 /// Protected API routes: each must reject an unauthenticated request with

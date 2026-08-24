@@ -5,6 +5,12 @@
 //! enumerate, modify, or delete resources owned by org B. Together
 //! they are the negative-path evidence the IDOR is closed.
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use serde_json::json;
 use vouch_tests::TestHarness;
 

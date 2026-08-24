@@ -9,6 +9,12 @@
 //! classical X25519, which unit tests would never notice. These tests pin
 //! the negotiated group so that regression is loud.
 
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use std::sync::Arc;
 
 use rustls::pki_types::pem::PemObject;

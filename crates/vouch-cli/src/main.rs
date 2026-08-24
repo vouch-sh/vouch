@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI - Hardware-backed identity for developers.
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "stdout and stderr are this binary's user interface"
+)]
+
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]

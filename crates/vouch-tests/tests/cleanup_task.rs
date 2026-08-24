@@ -6,10 +6,9 @@
 //! minutes between ticks, so the test exercises `run_cleanup` directly to
 //! confirm expired rows go and fresh rows stay.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use jiff::{Span, Timestamp};

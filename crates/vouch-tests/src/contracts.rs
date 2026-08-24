@@ -30,7 +30,10 @@ use vouch_common::protocol;
 
 /// Errors from contract validation.
 #[derive(Debug, Error)]
-#[allow(clippy::enum_variant_names)] // All variants are "Invalid*" which is intentional
+#[expect(
+    clippy::enum_variant_names,
+    reason = "every variant names the artifact that failed validation"
+)]
 pub enum ContractError {
     /// COSE key validation failed.
     #[error("Invalid COSE key: {0}")]
@@ -531,11 +534,10 @@ pub fn validate_attestation_object(data: &[u8]) -> ContractResult<()> {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 mod tests {
     use super::*;

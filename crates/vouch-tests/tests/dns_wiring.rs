@@ -7,6 +7,11 @@
 //! lookup path is exercised separately by `vouch doctor` against a live
 //! provider.
 
+#![expect(
+    clippy::expect_used,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use vouch_common::dns::{DohConfig, DohResolver, install_process_resolver, process_resolver};
 use vouch_common::http::{agent_client, credential_client, server_client};
 

@@ -4,6 +4,12 @@
 //! These tests exercise the agent state, protocol types, and IPC message
 //! serialization without requiring a running agent or Unix sockets.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use vouch_agent::protocol::{
     NOT_AUTHENTICATED, Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
 };
@@ -14,12 +20,12 @@ use secrecy::{ExposeSecret, SecretString};
 
 /// Helper: create a timestamp N seconds from now.
 fn future_timestamp(seconds: i64) -> Timestamp {
-    Timestamp::from_second(Timestamp::now().as_second() + seconds).unwrap()
+    Timestamp::from_second(Timestamp::now().as_second().saturating_add(seconds)).unwrap()
 }
 
 /// Helper: create a timestamp N seconds in the past.
 fn past_timestamp(seconds: i64) -> Timestamp {
-    Timestamp::from_second(Timestamp::now().as_second() - seconds).unwrap()
+    Timestamp::from_second(Timestamp::now().as_second().saturating_sub(seconds)).unwrap()
 }
 
 /// Helper: create a valid session.

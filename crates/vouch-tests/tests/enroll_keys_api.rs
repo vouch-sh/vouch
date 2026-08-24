@@ -2,10 +2,9 @@
 //! Tests for the cookie-authenticated key management API used during enrollment
 //! (`handlers/enroll_keys.rs`): list, rename, and delete with freshness check.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use axum::http::StatusCode;

@@ -11,6 +11,12 @@
 //! `enroll_user_with_org` function the OIDC callback handler invokes —
 //! closing the gap between the two protocols at the integration level.
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use serde_json::json;
 use vouch_server::db::{enroll_user_with_org, get_user_by_email};
 use vouch_tests::TestHarness;

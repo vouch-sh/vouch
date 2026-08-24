@@ -19,6 +19,13 @@
 //! 6. **No legacy socket path** — `~/.vouch/ssh-agent.sock` must not appear in
 //!    CLI source files.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 use vouch_httpsig::sfv::parse::parse_dictionary;
@@ -475,10 +482,9 @@ fn test_router_v1_literals_all_in_route_table() {
         // Find string literals starting with "/v1/".
         let mut rest = trimmed;
         while let Some(pos) = rest.find("\"/v1/") {
-            rest = &rest[pos.saturating_add(1)..]; // skip the leading quote
-            let end = rest.find('"').unwrap_or(rest.len());
-            let literal = &rest[..end];
-            rest = &rest[end..];
+            let after_quote = rest.get(pos.saturating_add(1)..).unwrap_or_default();
+            let (literal, tail) = after_quote.split_once('"').unwrap_or((after_quote, ""));
+            rest = tail;
             if !known.contains(literal) {
                 missing.push(literal.to_string());
             }

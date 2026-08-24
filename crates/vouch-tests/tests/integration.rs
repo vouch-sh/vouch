@@ -5,6 +5,18 @@
 //! traits and dependency injection to substitute external dependencies
 //! (hardware, network, filesystem) while testing real logic.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+#![expect(
+    clippy::print_stdout,
+    reason = "the signature-verification tests print intermediate values for diagnosis"
+)]
+
 use vouch_tests::{HttpClient, IntegrationMockDevice, TestHarness, TestTransportPair};
 
 mod flows {
@@ -80,11 +92,15 @@ mod flows {
         assert_eq!(device.counter(), 0);
 
         // After first authentication, counter should be 1
-        let _ = device.authenticate("test.example.com", &challenge);
+        device
+            .authenticate("test.example.com", &challenge)
+            .expect("authenticate");
         assert_eq!(device.counter(), 1);
 
         // After second authentication, counter should be 2
-        let _ = device.authenticate("test.example.com", &challenge);
+        device
+            .authenticate("test.example.com", &challenge)
+            .expect("authenticate");
         assert_eq!(device.counter(), 2);
     }
 }
@@ -219,7 +235,9 @@ mod agent {
 
         // Send a length-prefixed message (like JSON-RPC)
         let message = b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}";
-        let len = (message.len() as u32).to_be_bytes();
+        let len = u32::try_from(message.len())
+            .expect("message fits u32")
+            .to_be_bytes();
 
         client
             .write_all(&len)
@@ -2226,7 +2244,11 @@ mod es256_flow {
         println!("Point created (will validate during verify)");
 
         // Build message
-        let mut message = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
+        let mut message = Vec::with_capacity(
+            authenticator_data
+                .len()
+                .saturating_add(client_data_hash.len()),
+        );
         message.extend_from_slice(&authenticator_data);
         message.extend_from_slice(&client_data_hash);
         println!(
@@ -2257,16 +2279,16 @@ mod es256_flow {
             println!("SEQUENCE length: {}", seq_len);
             if signature.len() > 4 && signature[2] == 0x02 {
                 let r_len = signature[3] as usize;
-                let r_start = 4;
-                let r_end = r_start + r_len;
+                let r_start: usize = 4;
+                let r_end = r_start.saturating_add(r_len);
                 if signature.len() >= r_end {
                     let r = &signature[r_start..r_end];
                     println!("r ({} bytes): {}", r_len, hex::encode(r));
 
-                    if signature.len() > r_end + 1 && signature[r_end] == 0x02 {
-                        let s_len = signature[r_end + 1] as usize;
-                        let s_start = r_end + 2;
-                        let s_end = s_start + s_len;
+                    if signature.len() > r_end.saturating_add(1) && signature[r_end] == 0x02 {
+                        let s_len = signature[r_end.saturating_add(1)] as usize;
+                        let s_start = r_end.saturating_add(2);
+                        let s_end = s_start.saturating_add(s_len);
                         if signature.len() >= s_end {
                             let s = &signature[s_start..s_end];
                             println!("s ({} bytes): {}", s_len, hex::encode(s));
@@ -2341,7 +2363,11 @@ mod es256_flow {
         // Build the message that should have been signed
         // WebAuthn assertion signature is over: authenticator_data || SHA256(client_data_json)
         // But we have the hash already, so: authenticator_data || client_data_hash
-        let mut message = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
+        let mut message = Vec::with_capacity(
+            authenticator_data
+                .len()
+                .saturating_add(client_data_hash.len()),
+        );
         message.extend_from_slice(&authenticator_data);
         message.extend_from_slice(&client_data_hash);
         println!(

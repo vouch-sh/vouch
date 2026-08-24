@@ -9,11 +9,12 @@
 //! cargo run -p vouch-cli -- diag --export-fixture ./crates/vouch-tests/fixtures/yubikey.json
 //! ```
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use std::path::Path;

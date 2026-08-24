@@ -738,6 +738,10 @@ async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
 ///     cargo test -p vouch-server --all-features --lib -- \
 ///     test_create_scim_user_concurrent_same_email_produces_one_user_postgres --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::print_stderr,
+    reason = "skip notice when no Postgres is configured"
+)]
 async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres() {
     use crate::db::documents::user::UserDoc;
     use crate::db::pool::{Pool, PoolConfig};
