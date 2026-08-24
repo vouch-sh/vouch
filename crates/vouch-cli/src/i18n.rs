@@ -24,7 +24,6 @@
 use std::ffi::OsStr;
 use std::sync::OnceLock;
 
-use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
 
@@ -56,26 +55,17 @@ const REQUIRED_IDS: &[&str] = &[
     "cli-color-help",
 ];
 
-/// CLI translation context. Wraps a selected [`FluentLanguageLoader`] and
-/// caches the negotiated BCP-47 tag.
+/// CLI translation context. Wraps a selected [`FluentLanguageLoader`].
 #[derive(Clone)]
 pub struct I18nContext {
     loader: std::sync::Arc<FluentLanguageLoader>,
-    lang: String,
 }
 
 impl I18nContext {
     fn from_loader(loader: FluentLanguageLoader) -> Self {
-        let lang = loader.current_language().to_string();
         Self {
             loader: std::sync::Arc::new(loader),
-            lang,
         }
-    }
-
-    /// BCP-47 tag of the negotiated language.
-    pub fn lang(&self) -> &str {
-        &self.lang
     }
 
     /// Borrow the underlying loader. Used by the [`crate::tr!`] /
