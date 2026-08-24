@@ -64,11 +64,31 @@ pub enum AttestationChainError {
     UnsupportedAlgorithm(String),
 }
 
-/// Successful result of attestation chain validation.
-#[derive(Debug, Clone)]
-pub struct AttestationChainResult {
+/// Evidence that an attestation certificate chain was validated.
+///
+/// Returned only by [`validate_attestation_chain`], and its field is private,
+/// so a value of this type cannot be produced without having run the
+/// validation. Callers therefore record attestation status as
+/// `Option<AttestationProof>` and derive the stored boolean with `is_some`,
+/// rather than carrying a boolean anyone can set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationProof {
     /// AAGUID extracted from the leaf certificate's FIDO extension.
-    pub cert_aaguid: Option<String>,
+    cert_aaguid: Option<String>,
+}
+
+impl AttestationProof {
+    /// The AAGUID from the leaf certificate's FIDO extension, if present.
+    #[must_use]
+    pub fn cert_aaguid(&self) -> Option<&str> {
+        self.cert_aaguid.as_deref()
+    }
+
+    /// Consume the proof, yielding the certificate AAGUID.
+    #[must_use]
+    pub fn into_cert_aaguid(self) -> Option<String> {
+        self.cert_aaguid
+    }
 }
 
 // ============================================================================
@@ -89,7 +109,7 @@ pub struct AttestationChainResult {
 pub fn validate_attestation_chain(
     x5c_certs: &[Vec<u8>],
     auth_data_aaguid: Option<&str>,
-) -> Result<AttestationChainResult, AttestationChainError> {
+) -> Result<AttestationProof, AttestationChainError> {
     if x5c_certs.is_empty() {
         return Err(AttestationChainError::EmptyChain);
     }
@@ -163,7 +183,7 @@ pub fn validate_attestation_chain(
         });
     }
 
-    Ok(AttestationChainResult { cert_aaguid })
+    Ok(AttestationProof { cert_aaguid })
 }
 
 // ============================================================================

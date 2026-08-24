@@ -28,6 +28,7 @@ use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
 
+use super::attestation_chain::AttestationProof;
 use super::{cose, oid};
 use thiserror::Error;
 use vouch_common::protocol;
@@ -423,8 +424,11 @@ pub struct RegistrationVerificationResult {
     pub aaguid: Option<String>,
     /// The counter value from registration (usually 0).
     pub counter: u32,
-    /// Whether the attestation was cryptographically verified via x5c chain.
-    pub attestation_verified: bool,
+    /// The verified attestation chain, when one was validated.
+    ///
+    /// `Some` is only obtainable from `validate_attestation_chain`, so its
+    /// presence is itself the evidence that a chain was checked.
+    pub attestation: Option<AttestationProof>,
 }
 
 /// Parameters for WebAuthn registration (attestation) verification
@@ -612,7 +616,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     )?;
 
     // 4. Verify attestation statement based on format
-    let mut attestation_verified = false;
+    let mut attestation = None;
 
     match fmt.as_str() {
         "none" => {
@@ -630,11 +634,11 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
                     verifier,
                 )?;
                 if let Some(result) = packed_result {
-                    attestation_verified = result.attestation_verified;
                     // If the chain provided a cert AAGUID, prefer it
                     if aaguid.is_none() {
-                        aaguid = result.cert_aaguid;
+                        aaguid = result.cert_aaguid().map(str::to_owned);
                     }
+                    attestation = Some(result);
                 }
             }
             // No attStmt with packed format is invalid, but we're lenient
@@ -652,17 +656,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         public_key_cose: cose_key_bytes,
         aaguid,
         counter,
-        attestation_verified,
+        attestation,
     })
-}
-
-/// Result of packed attestation verification with x5c chain.
-#[derive(Debug)]
-pub struct PackedAttestationResult {
-    /// Whether the attestation chain was cryptographically verified.
-    pub attestation_verified: bool,
-    /// AAGUID extracted from the x5c leaf certificate.
-    pub cert_aaguid: Option<String>,
 }
 
 /// Verify a packed attestation statement.
@@ -683,7 +678,7 @@ fn verify_packed_attestation<V: CoseVerifier>(
     cose_key_bytes: &[u8],
     auth_data_aaguid: Option<&str>,
     verifier: &V,
-) -> Result<Option<PackedAttestationResult>, VerifyError> {
+) -> Result<Option<AttestationProof>, VerifyError> {
     // Extract x5c certificate chain if present
     let x5c_certs = extract_x5c_certs(stmt_map);
 
@@ -713,14 +708,11 @@ fn verify_packed_attestation<V: CoseVerifier>(
 
         tracing::info!(
             attestation_verified = true,
-            cert_aaguid = ?chain_result.cert_aaguid,
+            cert_aaguid = ?chain_result.cert_aaguid(),
             "x5c attestation chain validated"
         );
 
-        return Ok(Some(PackedAttestationResult {
-            attestation_verified: true,
-            cert_aaguid: chain_result.cert_aaguid,
-        }));
+        return Ok(Some(chain_result));
     }
 
     // Self-attestation: extract sig from attStmt

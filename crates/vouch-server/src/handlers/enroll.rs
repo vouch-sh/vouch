@@ -1530,8 +1530,8 @@ pub(crate) async fn browser_register_complete(
             &x5c_certs,
             validated.aaguid.as_deref(),
         ) {
-            Ok(_chain_result) => {
-                validated.attestation_verified = true;
+            Ok(chain_result) => {
+                validated.attestation = Some(chain_result);
                 tracing::info!(
                     attestation_verified = true,
                     "Browser enrollment: x5c chain validated"
@@ -1573,7 +1573,7 @@ pub(crate) async fn browser_register_complete(
             public_key: &public_key_cbor,
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation_verified,
+            attestation_verified: validated.attestation.is_some(),
         },
     )
     .await?;

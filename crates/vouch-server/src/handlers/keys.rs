@@ -280,8 +280,8 @@ pub(crate) async fn register_complete(
     )?;
 
     // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation_verified {
-        validated.attestation_verified = true;
+    if verified.attestation.is_some() {
+        validated.attestation = verified.attestation;
     }
 
     // Use server-verified AAGUID if available, fall back to client-provided
@@ -304,7 +304,7 @@ pub(crate) async fn register_complete(
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation_verified,
+            attestation_verified: validated.attestation.is_some(),
         },
     )
     .await?;
