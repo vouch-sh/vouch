@@ -503,14 +503,7 @@ mod tests {
         builder.valid_principal("tester").unwrap();
         let cert = builder.sign(&key).unwrap();
 
-        SshCredentials::new(
-            key,
-            &cert,
-            "tester".to_string(),
-            std::path::PathBuf::from("/dev/null"),
-            std::path::PathBuf::from("/dev/null"),
-        )
-        .unwrap()
+        SshCredentials::new(key, &cert, "tester".to_string()).unwrap()
     }
 
     /// A live session, so credential stores are accepted.
