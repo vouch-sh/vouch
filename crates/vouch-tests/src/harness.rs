@@ -481,20 +481,20 @@ impl TestHarness {
     /// Returns a valid JWT that will be rejected by the status endpoint because
     /// the corresponding session does not exist in the database.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns an error if token creation fails.
+    /// Panics if the session cannot be deleted — the returned token would then
+    /// still be live, and callers asserting rejection would pass or fail for
+    /// the wrong reason.
     pub async fn create_expired_token(&self, user_id: &str, email: &str, auth_id: &str) -> String {
-        // Create a real session, then immediately delete it from the database.
-        // This simulates an expired/revoked session — the token is valid JWT
-        // but has no matching session record, so status returns authenticated: false.
         use vouch_server::crypto::hash_token;
 
         let token = test_utils::create_test_session(&self.state, user_id, email, auth_id).await;
 
-        // Delete the session from the database to make it appear revoked
         let token_hash = hash_token(&token);
-        let _ = db::delete_session_by_token_hash(&self.state.store, &token_hash).await;
+        db::delete_session_by_token_hash(&self.state.store, &token_hash)
+            .await
+            .expect("delete session to simulate revocation");
 
         token
     }

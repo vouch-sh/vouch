@@ -1,4 +1,4 @@
-# Clippy configuration for valkey-operator
+# Clippy configuration for the vouch workspace.
 # See: https://doc.rust-lang.org/clippy/configuration.html
 
 # Allow breaking the exported API (we're pre-1.0)
@@ -13,4 +13,5 @@ too-many-lines-threshold = 150
 # Allow certain common names for single-char variables
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "s", "e"]
 
-# Note: MSRV is read automatically from Cargo.toml rust-version field
+# MSRV comes from each package's `rust-version`, inherited via
+# `rust-version.workspace = true`. Clippy skips MSRV-gated lints without it.

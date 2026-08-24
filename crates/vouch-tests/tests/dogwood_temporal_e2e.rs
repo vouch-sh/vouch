@@ -13,6 +13,12 @@
 //! tests. FIDO2 helper plumbing is duplicated from `fido2_posture_e2e.rs`
 //! (test files are separate binaries).
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_server::db::{self, AuditEventKind, CreateAuthenticatorParams};

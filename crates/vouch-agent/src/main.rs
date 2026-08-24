@@ -49,6 +49,10 @@ struct Args {
     status: bool,
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "an i18n init failure has to report itself without i18n or tracing"
+)]
 fn main() -> ExitCode {
     let args = Args::parse();
 

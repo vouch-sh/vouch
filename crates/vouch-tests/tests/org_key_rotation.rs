@@ -16,10 +16,12 @@
 //! covered by the explicit `tokio::spawn` test, and `proptest` has no tokio
 //! integration worth the harness cost.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use std::sync::Arc;
@@ -639,7 +641,7 @@ enum Op {
 
 impl KeySetModel {
     fn fresh_id(&mut self) -> u32 {
-        self.counter += 1;
+        self.counter = self.counter.saturating_add(1);
         self.counter
     }
 

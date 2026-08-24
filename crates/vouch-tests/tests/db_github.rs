@@ -6,10 +6,10 @@
 //! unsuspend / repository updates / delta updates / delete / global
 //! installation-id listing, plus the credential audit log helpers.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use std::collections::HashMap;

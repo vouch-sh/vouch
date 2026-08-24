@@ -3,8 +3,8 @@
 //!
 //! Tests cover the challenge endpoint and the token endpoint error paths for the
 //! `urn:ietf:params:oauth:grant-type:fido2-assertion` grant type. Full happy-path
-//! assertion verification requires a physical YubiKey and is covered by the
-//! `yubikey-tests` feature flag.
+//! assertion verification requires a physical YubiKey and has no automated
+//! coverage; it is exercised by running `vouch login` against a real device.
 
 use super::helpers::*;
 

@@ -8,10 +8,11 @@
 //! org host looks like `acme-com.test.example.com` and is exercised by setting
 //! the `Host` header on router-level requests.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use axum::http::StatusCode;

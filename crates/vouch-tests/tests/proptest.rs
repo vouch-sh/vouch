@@ -7,11 +7,40 @@
 //! Phase 0: Tests existing Vec<u8> behavior
 //! Phase 1+: Will test Encoded<T, E> types (see TODOs below)
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "a no-panic property calls the function and discards the result"
+)]
+
 use proptest::prelude::*;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::{Challenge, CoseKey, CredentialId, Signature};
 use vouch_common::{RegisterCompleteRequest, RegisterStartResponse};
 use vouch_server::crypto::ber::{DerParser, MAX_BER_DEPTH};
+
+/// Append a DER definite-length field, short form or one/two-byte long form.
+///
+/// # Panics
+///
+/// Panics for lengths at or above 2^16, which no generator below produces.
+fn push_der_len(buf: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        buf.push(u8::try_from(len).expect("short-form length is under 0x80"));
+    } else if len < 0x100 {
+        buf.push(0x81);
+        buf.push(u8::try_from(len).expect("one-byte length is under 0x100"));
+    } else {
+        let len = u16::try_from(len).expect("generated DER bodies stay under 64 KiB");
+        buf.push(0x82);
+        buf.extend_from_slice(&len.to_be_bytes());
+    }
+}
 
 proptest! {
     // =========================================================================
@@ -867,7 +896,7 @@ proptest! {
     fn prop_der_parser_nested_depth_no_panic(
         extra_depth in 0usize..10,
     ) {
-        let depth = MAX_BER_DEPTH + extra_depth;
+        let depth = MAX_BER_DEPTH.saturating_add(extra_depth);
         let mut data = Vec::new();
 
         for _ in 0..depth {
@@ -923,13 +952,7 @@ proptest! {
         // Build a TLV with context-specific tag
         let tag = 0xa0 | (n & 0x0f);
         let mut buf = vec![tag];
-        let len = data.len();
-        if len < 0x80 {
-            buf.push(len as u8);
-        } else {
-            buf.push(0x81);
-            buf.push(len as u8);
-        }
+        push_der_len(&mut buf, data.len());
         buf.extend_from_slice(&data);
 
         let mut parser = DerParser::new(&buf);
@@ -962,28 +985,12 @@ proptest! {
         for chunk in &chunks {
             // Each chunk: OCTET STRING (0x04) + length + data
             inner.push(0x04);
-            let clen = chunk.len();
-            if clen < 0x80 {
-                inner.push(clen as u8);
-            } else {
-                inner.push(0x81);
-                inner.push(clen as u8);
-            }
+            push_der_len(&mut inner, chunk.len());
             inner.extend_from_slice(chunk);
         }
 
         let mut buf = vec![constructed_tag];
-        let ilen = inner.len();
-        if ilen < 0x80 {
-            buf.push(ilen as u8);
-        } else if ilen < 0x100 {
-            buf.push(0x81);
-            buf.push(ilen as u8);
-        } else {
-            buf.push(0x82);
-            buf.push((ilen >> 8) as u8);
-            buf.push((ilen & 0xff) as u8);
-        }
+        push_der_len(&mut buf, inner.len());
         buf.extend_from_slice(&inner);
 
         let mut parser = DerParser::new(&buf);
@@ -1054,7 +1061,7 @@ proptest! {
         offset_add in 0usize..20,
     ) {
         let mut offset = data.len().saturating_add(offset_add);
-        if offset + 4 > data.len() {
+        if offset.saturating_add(4) > data.len() {
             let result = vouch_agent::wire::read_u32(&data, &mut offset);
             prop_assert!(result.is_err());
         }

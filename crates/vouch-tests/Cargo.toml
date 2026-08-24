@@ -3,18 +3,14 @@ name = "vouch-tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 description = "Integration tests for Vouch"
-publish = false
+publish.workspace = true
 
-# Allow panics in tests
-[lints.clippy]
-expect_used = "allow"
-unwrap_used = "allow"
-panic = "allow"
-indexing_slicing = "allow"
-
-[lints.rust]
-unsafe_code = "deny"
+# Panic lints are relaxed per crate root; Cargo rejects local overrides here.
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }

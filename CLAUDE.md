@@ -255,10 +255,13 @@ let result = key.authenticate(&rp_id, &challenge, &pin)?;
 make test                  # Unit tests
 make test-integration      # Integration + property-based tests (vouch-tests crate)
 cargo test test_session_expiration -- --nocapture  # Single test with output
-
-# With YubiKey (requires physical device)
-cargo test --features yubikey-tests -- --ignored
 ```
+
+There is no automated harness for physical-YubiKey paths — CTAP2 `getAssertion` /
+`makeCredential` against real hardware are exercised by running the CLI by hand
+(`vouch enroll`, `vouch login`, `vouch register`). Server-side verification is
+covered without hardware through the `CoseVerifier` seam
+(`crypto/webauthn_verify.rs`) and `MockFidoDevice` (`vouch-tests/src/mock_fido.rs`).
 
 **Test placement convention** (no lint enforces this — convention + review):
 

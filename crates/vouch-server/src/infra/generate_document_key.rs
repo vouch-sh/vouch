@@ -45,6 +45,10 @@ pub struct GenerateDocumentKeyArgs {
 }
 
 /// Run the generate-document-key subcommand.
+#[expect(
+    clippy::print_stdout,
+    reason = "the generated key is this subcommand's output, meant to be piped"
+)]
 pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
     // 1. Build AWS SDK config and create KMS client. This subcommand runs as
     // an operator CLI tool, not on EC2, so there is no resolved FIPS setting

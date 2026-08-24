@@ -4,6 +4,11 @@
 //! This crate provides test harnesses and utilities for integration testing
 //! across the Vouch workspace.
 
+#![expect(
+    clippy::expect_used,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 pub mod contracts;
 pub mod harness;
 pub mod mock_fido;

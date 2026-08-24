@@ -2,10 +2,11 @@
 //! Round-trip tests for AWS credential audit events
 //! (`AuditStore::log_credential_event` with [`AwsCredentialDetails`]).
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use vouch_server::db::{self, AuditEventFilter, AwsCredentialDetails, CredentialAuditEnvelope};

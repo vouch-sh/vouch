@@ -7,10 +7,9 @@
 //! here — only the auth gate, Origin-CSRF check, and the "not pending"
 //! / "not found" branches reachable without network calls.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use axum::http::StatusCode;

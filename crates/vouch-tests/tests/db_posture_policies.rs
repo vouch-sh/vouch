@@ -5,10 +5,10 @@
 //! Covers preconfigured-policy activation, custom policy create/list/get
 //! /update/delete, and org-scoped isolation.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use vouch_server::db::{self, CreateCustomPolicyParams, FieldUpdate, UpdateCustomPolicyParams};

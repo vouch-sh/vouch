@@ -8,6 +8,12 @@
 //! that address to org A instead — see the issue for the full attack
 //! description this closes.
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use serde_json::json;
 use vouch_server::db::{RecheckOutcome, UNVERIFY_FAILURE_THRESHOLD, record_recheck_result};
 use vouch_tests::TestHarness;

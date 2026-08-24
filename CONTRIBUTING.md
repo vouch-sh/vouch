@@ -101,8 +101,8 @@ For FIDO2 testing, you'll need a physical YubiKey:
 # Check system and YubiKey status
 cargo run --bin vouch -- doctor
 
-# Run FIDO2 integration tests (requires YubiKey)
-cargo test --features yubikey-tests -- --ignored
+# Exercise the FIDO2 paths against real hardware (no automated harness)
+cargo run --bin vouch -- login
 
 # Reset YubiKey FIDO2 app (warning: destructive)
 ykman fido reset
@@ -223,7 +223,7 @@ Closes #42
 3. **Test thoroughly**
    ```bash
    cargo test
-   cargo test --features yubikey-tests -- --ignored  # if touching FIDO2
+   cargo run --bin vouch -- login  # if touching FIDO2: live-test with a real key
    ```
 
 4. **Push and open PR**
@@ -255,8 +255,8 @@ make test-integration      # Integration + property-based tests
 # Specific test with output
 cargo test test_session_expiration -- --nocapture
 
-# FIDO2 tests (requires physical YubiKey)
-cargo test --features yubikey-tests -- --ignored
+# FIDO2 hardware paths have no automated harness — live-test them instead
+cargo run --bin vouch -- login
 ```
 
 Integration tests live in `crates/vouch-tests/tests/` and include property-based tests via `proptest`.

@@ -3,6 +3,8 @@ name = "vouch-httpsig"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "RFC 9421 HTTP Message Signatures and RFC 9530 Digest Fields"
 

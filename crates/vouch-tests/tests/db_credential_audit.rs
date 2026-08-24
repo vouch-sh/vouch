@@ -2,10 +2,11 @@
 //! Round-trip tests for SSH certificate and RFC 8693 token exchange audit
 //! events (`AuditStore::log_credential_event` with the per-kind details).
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use vouch_server::db::{

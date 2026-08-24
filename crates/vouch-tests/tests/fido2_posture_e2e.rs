@@ -7,6 +7,14 @@
 //! (comparing `os_build` instead of `os_version` for Windows) works
 //! end-to-end through the policy gate in `fido2_grant.rs`.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_server::db::{self, CreateAuthenticatorParams};

@@ -7,6 +7,13 @@
 //! them by asserting that every term defined in more than one catalog
 //! expands to the same value across all catalogs that define it.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code: panicking on an assertion failure is the point"
+)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

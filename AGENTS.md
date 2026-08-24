@@ -58,6 +58,6 @@ All standard commands are in the `Makefile`. Noteworthy:
 ### Gotchas
 
 - The first `cargo build` / `cargo test` is slow (~2-3 min) due to `aws-lc-fips-sys` compilation. Subsequent incremental builds are fast.
-- `cargo test` runs all workspace tests except FIDO2 hardware tests (those require `--features yubikey-tests -- --ignored` and a physical YubiKey).
+- `cargo test` needs no hardware. Paths that talk to a physical YubiKey have no automated coverage and are live-tested by running the CLI; server-side verification is tested through the `CoseVerifier` seam and `MockFidoDevice`.
 - The `vouch-tests` crate overrides the strict no-panic clippy lints to allow `unwrap()`/`expect()` in test code.
 - Static assets (CSS, fonts, images) are embedded at compile time via `rust-embed`. After changing CSS, you must rebuild the binary for changes to take effect.
