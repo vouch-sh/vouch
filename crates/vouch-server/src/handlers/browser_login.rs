@@ -686,7 +686,7 @@ pub(crate) async fn browser_login_complete(
         challenge: auth_state.challenge.clone(),
         stored_counter,
         // Tolerate loopback origin variations only in development (no TLS).
-        allow_localhost_origin: !state.config().tls_configured(),
+        origin_policy: state.config().as_ref().into(),
     })
     .await
     .map_err(|e| {

@@ -124,6 +124,29 @@ impl CoseVerifier for TestCoseVerifier {
     }
 }
 
+/// Whether loopback origin variations are tolerated when comparing the
+/// client-data origin against the expected one.
+///
+/// Lives here because the crypto layer consumes it and may not import
+/// `ServerConfig`; the conversion from configuration is in `config.rs`, which
+/// is a composition root rather than a layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginPolicy {
+    /// An origin mismatch is always rejected.
+    Strict,
+    /// Tolerate loopback variations (`localhost` vs `127.0.0.1`, port
+    /// differences). Development only.
+    AllowLoopbackVariations,
+}
+
+impl OriginPolicy {
+    /// Whether loopback variations are tolerated.
+    #[must_use]
+    pub fn allows_loopback_variation(self) -> bool {
+        matches!(self, Self::AllowLoopbackVariations)
+    }
+}
+
 /// Errors during WebAuthn assertion verification.
 #[derive(Debug, Error)]
 pub enum VerifyError {
@@ -209,9 +232,8 @@ pub struct AssertionParams<'a> {
     pub stored_counter: u32,
     /// Whether to require the UV flag.
     pub require_user_verification: bool,
-    /// Whether to tolerate loopback origin variations. Development only; pass
-    /// `false` in production so an origin mismatch is always rejected.
-    pub allow_localhost_origin: bool,
+    /// Whether loopback origin variations are tolerated.
+    pub origin_policy: OriginPolicy,
 }
 
 /// Verify a WebAuthn assertion using the default COSE verifier.
@@ -235,7 +257,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 
 /// Verify the client-data origin for both assertion and registration flows.
 ///
-/// `allow_localhost_origin` gates the loopback origin-variation relaxation
+/// `origin_policy` gates the loopback origin-variation relaxation
 /// (e.g. `localhost` ↔ `127.0.0.1`): it must be `true` only in development
 /// (no TLS). Production threads `false` so an origin mismatch is always
 /// rejected even on a misconfigured loopback `rp_id`.
@@ -246,7 +268,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 fn verify_origin(
     presented_origin: &str,
     expected_origin: &str,
-    allow_localhost_origin: bool,
+    origin_policy: OriginPolicy,
     flow: &str,
 ) -> Result<(), VerifyError> {
     if presented_origin == expected_origin {
@@ -262,7 +284,7 @@ fn verify_origin(
         .and_then(|u| u.host_str().map(String::from))
         .is_some_and(|h| vouch_common::is_loopback_host(&h));
 
-    if allow_localhost_origin && expected_is_local && origin_is_local {
+    if origin_policy.allows_loopback_variation() && expected_is_local && origin_is_local {
         tracing::warn!(
             target: "security",
             flow,
@@ -279,7 +301,7 @@ fn verify_origin(
 
 /// Core WebAuthn assertion verification.
 ///
-/// `params.allow_localhost_origin` gates the loopback origin-variation
+/// `params.origin_policy` gates the loopback origin-variation
 /// relaxation: it must be `true` only in development (no TLS). Production
 /// threads `false` so an origin mismatch is always rejected even on a
 /// misconfigured loopback `rp_id`.
@@ -297,7 +319,7 @@ fn verify_assertion_inner<V: CoseVerifier>(
         expected_origin,
         stored_counter,
         require_user_verification,
-        allow_localhost_origin,
+        origin_policy,
     } = params;
 
     // 1. Verify authenticator data structure
@@ -390,7 +412,7 @@ fn verify_assertion_inner<V: CoseVerifier>(
     verify_origin(
         &client_data.origin,
         expected_origin,
-        allow_localhost_origin,
+        origin_policy,
         "assertion",
     )?;
 
@@ -450,9 +472,8 @@ pub struct RegistrationParams<'a> {
     pub expected_origin: &'a str,
     /// Whether to require the UV flag.
     pub require_user_verification: bool,
-    /// Whether to tolerate loopback origin variations. Development only; pass
-    /// `false` in production so an origin mismatch is always rejected.
-    pub allow_localhost_origin: bool,
+    /// Whether loopback origin variations are tolerated.
+    pub origin_policy: OriginPolicy,
 }
 
 /// Verify a WebAuthn registration (attestation) response.
@@ -485,7 +506,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         expected_challenge,
         expected_origin,
         require_user_verification,
-        allow_localhost_origin,
+        origin_policy,
     } = params;
 
     // 1. Parse attestation_object CBOR
@@ -611,7 +632,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     verify_origin(
         &client_data.origin,
         expected_origin,
-        allow_localhost_origin,
+        origin_policy,
         "registration",
     )?;
 

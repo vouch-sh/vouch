@@ -88,7 +88,7 @@ pub(crate) fn is_non_global(ip: &IpAddr) -> bool {
 /// `allow_loopback` permits loopback destinations (`127.0.0.0/8`, `::1`,
 /// `localhost`) for local development and testing — wired from
 /// `!ServerConfig::tls_configured()`, matching the WebAuthn
-/// `allow_localhost_origin` relaxation. It only relaxes **loopback**: private,
+/// `OriginPolicy` loopback relaxation. It only relaxes **loopback**: private,
 /// link-local, CGNAT and other internal ranges (e.g. the `169.254.169.254`
 /// cloud metadata endpoint) stay blocked even in development.
 ///

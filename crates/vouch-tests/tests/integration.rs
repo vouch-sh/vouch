@@ -2619,7 +2619,8 @@ mod encoding_verification {
                 expected_origin: "https://test.local",
                 stored_counter: 0,
                 require_user_verification: true,
-                allow_localhost_origin: true,
+                origin_policy:
+                    vouch_server::crypto::webauthn_verify::OriginPolicy::AllowLoopbackVariations,
             },
             &verifier,
         );

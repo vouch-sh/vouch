@@ -247,7 +247,7 @@ pub(crate) async fn exchange_fido2_assertion(
         challenge: challenge_state.challenge.as_bytes().to_vec(),
         stored_counter,
         // Tolerate loopback origin variations only in development (no TLS).
-        allow_localhost_origin: !state.config().tls_configured(),
+        origin_policy: state.config().as_ref().into(),
     })
     .await
     .map_err(|e| {

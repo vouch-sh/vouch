@@ -383,7 +383,7 @@ fn test_auth_data_minimum_length() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -410,7 +410,7 @@ fn test_auth_data_exactly_minimum_length() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -436,7 +436,7 @@ fn test_auth_data_rp_id_mismatch() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -463,7 +463,7 @@ fn test_auth_data_user_presence_required() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -490,7 +490,7 @@ fn test_auth_data_user_verification_required() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: true, // Require UV
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -517,7 +517,7 @@ fn test_auth_data_user_verification_not_required() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false, // Don't require UV
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -549,7 +549,7 @@ fn test_counter_must_increase() {
             expected_origin: "https://example.com",
             stored_counter: 4, // stored counter
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -578,7 +578,7 @@ fn test_counter_exact_match_rejected() {
             expected_origin: "https://example.com",
             stored_counter: 5, // Same as auth_data counter
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -606,7 +606,7 @@ fn test_counter_decrease_rejected() {
             expected_origin: "https://example.com",
             stored_counter: 5, // stored counter is higher
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -635,7 +635,7 @@ fn test_counter_zero_special_case() {
             expected_origin: "https://example.com",
             stored_counter: 0, // stored counter also 0
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -663,7 +663,7 @@ fn test_counter_zero_to_nonzero() {
             expected_origin: "https://example.com",
             stored_counter: 0, // Initial stored counter
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -691,7 +691,7 @@ fn test_counter_u32_max_boundary() {
             expected_origin: "https://example.com",
             stored_counter: u32::MAX - 1, // stored counter just below max
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -723,7 +723,7 @@ fn test_counter_regression_to_zero_rejected() {
             expected_origin: "https://example.com",
             stored_counter: 5, // stored counter was nonzero
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -756,7 +756,7 @@ fn test_localhost_origin_relaxation_allowed_when_enabled() {
             expected_origin: "http://localhost:8080",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -786,7 +786,7 @@ fn test_localhost_origin_relaxation_rejected_when_disabled() {
             expected_origin: "http://localhost:8080",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: false,
+            origin_policy: OriginPolicy::Strict,
         },
         &verifier,
     );
@@ -816,7 +816,7 @@ fn test_client_data_invalid_json() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -844,7 +844,7 @@ fn test_client_data_wrong_type() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -873,7 +873,7 @@ fn test_client_data_challenge_mismatch() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -899,7 +899,7 @@ fn test_client_data_origin_mismatch() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -927,7 +927,7 @@ fn test_client_data_localhost_variations_allowed() {
             expected_origin: "https://localhost:8080",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -955,7 +955,7 @@ fn test_client_data_docker_internal_to_localhost_allowed() {
             expected_origin: "http://host.docker.internal:3000",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -982,7 +982,7 @@ fn test_client_data_ipv6_loopback_to_localhost_allowed() {
             expected_origin: "http://localhost:3000",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1010,7 +1010,7 @@ fn test_client_data_loopback_vs_remote_rejected() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1037,7 +1037,7 @@ fn test_client_data_remote_vs_loopback_rejected() {
             expected_origin: "http://localhost:3000",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1070,7 +1070,7 @@ fn test_client_data_localhost_in_path_not_matched() {
             expected_origin: "http://localhost:3000",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1101,7 +1101,7 @@ fn test_verify_assertion_success() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1132,7 +1132,7 @@ fn test_verify_assertion_signature_invalid() {
             expected_origin: "https://example.com",
             stored_counter: 0,
             require_user_verification: false,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &verifier,
     );
@@ -1185,7 +1185,7 @@ fn test_verify_registration_empty_cose_key_returns_invalid_cose_key() {
             expected_challenge: challenge,
             expected_origin: origin,
             require_user_verification: true,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &TestCoseVerifier::always_succeed(),
     )
@@ -1215,7 +1215,7 @@ fn test_verify_registration_truncated_attested_data_returns_invalid_auth_data_le
             expected_challenge: challenge,
             expected_origin: origin,
             require_user_verification: true,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &TestCoseVerifier::always_succeed(),
     )
@@ -1246,7 +1246,7 @@ fn test_registration_localhost_origin_relaxation_allowed_when_enabled() {
             expected_challenge: challenge,
             expected_origin: "http://localhost:8080",
             require_user_verification: true,
-            allow_localhost_origin: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
         },
         &TestCoseVerifier::always_succeed(),
     );
@@ -1273,7 +1273,7 @@ fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
             expected_challenge: challenge,
             expected_origin: "http://localhost:8080",
             require_user_verification: true,
-            allow_localhost_origin: false,
+            origin_policy: OriginPolicy::Strict,
         },
         &TestCoseVerifier::always_succeed(),
     );

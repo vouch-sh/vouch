@@ -242,7 +242,7 @@ pub(crate) async fn register_complete(
         require_user_verification: true,
         // Loopback origin relaxation is development-only: disabled as soon
         // as TLS is configured, matching assertion verification.
-        allow_localhost_origin: !config.tls_configured(),
+        origin_policy: config.as_ref().into(),
     })
     .map_err(|e| {
         tracing::warn!("Registration attestation verification failed: {e}");
