@@ -79,7 +79,7 @@ const FIGURE_14_ATH: &str = "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo";
 fn thumbprint_matches_published_jkt() {
     let jwk: DpopJwk = serde_json::from_str(FIGURE_4_JWK).expect("Figure 4 JWK parses");
     assert_eq!(
-        jwk.thumbprint().expect("thumbprint computes"),
+        jwk.thumbprint(),
         FIGURE_9_JKT,
         "RFC 7638 thumbprint must match the jkt published in RFC 9449 Figure 9"
     );
@@ -112,10 +112,7 @@ fn figure_2_proof_signature_verifies() {
 fn figure_2_embedded_key_has_published_thumbprint() {
     let (header, _) =
         parse_and_verify_dpop_proof(FIGURE_2_PROOF).expect("Figure 2 proof must verify");
-    assert_eq!(
-        header.jwk.thumbprint().expect("thumbprint computes"),
-        FIGURE_9_JKT
-    );
+    assert_eq!(header.jwk.thumbprint(), FIGURE_9_JKT);
 }
 
 /// The protected-resource proof verifies and carries the published `ath`.

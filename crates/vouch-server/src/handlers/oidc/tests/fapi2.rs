@@ -209,14 +209,9 @@ async fn acquire_dpop_nonce(
 ///
 /// The canonical form for EC keys is `{"crv":"...","kty":"...","x":"...","y":"..."}`.
 fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> String {
-    let canonical = format!(
-        r#"{{"crv":"{}","kty":"{}","x":"{}","y":"{}"}}"#,
-        jwk["crv"].as_str().unwrap(),
-        jwk["kty"].as_str().unwrap(),
-        jwk["x"].as_str().unwrap(),
-        jwk["y"].as_str().unwrap(),
-    );
-    sha256_base64url(&canonical)
+    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+        .expect("test JWK carries the required members")
+        .thumbprint()
 }
 
 /// Create a FAPI 2.0-compliant test OAuth client.

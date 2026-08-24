@@ -13,6 +13,7 @@ pub mod fido2_types;
 pub mod fixtures;
 pub mod fs;
 pub mod http;
+pub mod jwk;
 pub mod paths;
 pub mod posture;
 pub mod protocol;

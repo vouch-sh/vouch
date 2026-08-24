@@ -22,7 +22,6 @@
 //! 2. Binding `client_id` to FIDO2 `credential_id` at first registration
 //! 3. Using Secure Enclave / TPM for client key generation
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use aws_lc_rs::{
@@ -33,6 +32,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::EncodingKey;
 use serde::{Deserialize, Serialize};
+use vouch_common::jwk::JwkThumbprintKey;
 use zeroize::Zeroizing;
 
 use super::error::FapiError;
@@ -132,7 +132,7 @@ impl ClientKey {
         let der_bytes = Zeroizing::new(pkcs8_bytes.as_ref().to_vec());
 
         let (x, y) = extract_ec_coordinates(&key_pair)?;
-        let kid = compute_thumbprint(&x, &y)?;
+        let kid = compute_thumbprint(&x, &y);
 
         Ok(Self {
             key_pair,
@@ -161,7 +161,7 @@ impl ClientKey {
             .map_err(|e| FapiError::InvalidKeyFormat(format!("PKCS#8 parse error: {e}")))?;
 
         let (x, y) = extract_ec_coordinates(&key_pair)?;
-        let computed_kid = compute_thumbprint(&x, &y)?;
+        let computed_kid = compute_thumbprint(&x, &y);
 
         if computed_kid != key_file.kid {
             return Err(FapiError::InvalidKeyFormat(format!(
@@ -325,22 +325,8 @@ fn extract_ec_coordinates(key_pair: &EcdsaKeyPair) -> Result<(String, String), F
 }
 
 /// Compute the RFC 7638 JWK thumbprint for a P-256 public key.
-///
-/// The canonical JSON is: `{"crv":"P-256","kty":"EC","x":"...","y":"..."}`
-/// (lexicographically ordered keys). The thumbprint is `base64url(SHA-256(canonical_json))`.
-fn compute_thumbprint(x: &str, y: &str) -> Result<String, FapiError> {
-    // RFC 7638 requires lexicographic key ordering — use BTreeMap to guarantee this.
-    let mut map = BTreeMap::new();
-    map.insert("crv", "P-256");
-    map.insert("kty", "EC");
-    map.insert("x", x);
-    map.insert("y", y);
-
-    let canonical_json = serde_json::to_vec(&map)
-        .map_err(|e| FapiError::ThumbprintComputation(format!("JSON serialization: {e}")))?;
-
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &canonical_json);
-    Ok(URL_SAFE_NO_PAD.encode(digest.as_ref()))
+fn compute_thumbprint(x: &str, y: &str) -> String {
+    JwkThumbprintKey::Ec { crv: "P-256", x, y }.thumbprint()
 }
 
 #[cfg(test)]
@@ -445,8 +431,8 @@ mod tests {
     fn test_thumbprint_is_deterministic() {
         let key = ClientKey::generate().unwrap();
         let jwk = key.public_jwk().unwrap();
-        let t1 = compute_thumbprint(&jwk.x, &jwk.y).unwrap();
-        let t2 = compute_thumbprint(&jwk.x, &jwk.y).unwrap();
+        let t1 = compute_thumbprint(&jwk.x, &jwk.y);
+        let t2 = compute_thumbprint(&jwk.x, &jwk.y);
         assert_eq!(t1, t2);
     }
 }
