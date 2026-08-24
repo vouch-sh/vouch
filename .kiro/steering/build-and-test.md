@@ -47,11 +47,15 @@ cargo test --all-features                  # All unit tests (includes feature-ga
 cargo test --package vouch-tests           # Integration tests only
 ```
 
-## FIDO2 Tests (require physical YubiKey)
+## FIDO2 Hardware Paths
+
+No automated harness covers CTAP2 paths against real hardware — live-test them by running the CLI:
 
 ```bash
-cargo test --features yubikey-tests -- --ignored
+cargo run --bin vouch -- login
 ```
+
+`cargo test` needs no hardware; server-side FIDO2 verification is covered through the `CoseVerifier` seam and `MockFidoDevice`.
 
 ## Server Environment (Minimum Viable)
 
