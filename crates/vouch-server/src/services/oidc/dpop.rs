@@ -527,6 +527,27 @@ fn build_decoding_key(
 /// claims validation, nonce validation, and thumbprint extraction.
 ///
 /// All state (nonces and JTIs) is persisted in the database for
+/// Whether a DPoP proof must carry a server-issued nonce.
+///
+/// The two endpoints differ, and the difference is not a preference: it is
+/// which mechanism binds the proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoncePolicy {
+    /// Required. RFC 9449 Section 8 has the token endpoint issue nonces so a
+    /// client cannot precompute proofs ahead of time.
+    Required,
+    /// Optional. At a resource endpoint the `ath` claim binds the proof to a
+    /// specific access token, which is what a nonce would otherwise provide.
+    Optional,
+}
+
+impl NoncePolicy {
+    /// Whether a proof lacking a `nonce` claim must be rejected.
+    const fn requires_nonce(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
 /// multi-instance consistency.
 async fn validate_dpop_common(
     proof: &str,
@@ -535,7 +556,7 @@ async fn validate_dpop_common(
     store: &DocumentStore,
     config_max_age: i64,
     expected_ath: Option<&str>,
-    require_nonce: bool,
+    nonce_policy: NoncePolicy,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
@@ -553,10 +574,7 @@ async fn validate_dpop_common(
         }
     };
 
-    // Nonce requirement: enforced at token endpoint (RFC 9449 Section 8)
-    // where precomputation attacks are a concern. Resource endpoints use
-    // `ath` (access token hash) for binding, so nonces are optional there.
-    if require_nonce && claims.nonce.is_none() {
+    if nonce_policy.requires_nonce() && claims.nonce.is_none() {
         let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
             .await
             .map_err(|e| DpopError::Database(format!("nonce generation failed: {e}")))?;
@@ -632,7 +650,7 @@ pub async fn validate_dpop_proof(
         store,
         config_max_age,
         None, // No access token hash for token endpoint
-        true, // Require nonce at token endpoint
+        NoncePolicy::Required,
     )
     .await
 }
@@ -667,7 +685,7 @@ pub async fn validate_dpop_at_resource(
         store,
         config_max_age,
         Some(&expected_ath),
-        false, // Nonces optional at resource endpoints (ath provides binding)
+        NoncePolicy::Optional,
     )
     .await
 }
