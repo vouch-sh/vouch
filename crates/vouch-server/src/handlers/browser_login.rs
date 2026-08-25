@@ -25,6 +25,7 @@ use crate::crypto::hash_token;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
+use crate::handlers::extractors::ValidJson;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
@@ -48,6 +49,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
+use vouch_common::encoding::ConvertEncoding;
+use vouch_common::fido2_types::Challenge;
 use vouch_common::{
     BrowserLoginCompleteRequest, BrowserLoginCompleteResponse, BrowserLoginStartRequest,
     BrowserLoginStartResponse, protocol,
@@ -99,27 +102,23 @@ impl_template_response!(LoginTemplate);
 // Validation Constants
 // ============================================================================
 
-/// Maximum encoded length for `credential_id` (base64url).
-/// WebAuthn spec allows up to 1023 bytes raw ≈ 1364 chars encoded.
-const MAX_CREDENTIAL_ID_LEN: usize = 1400;
-
-/// Maximum encoded length for `authenticator_data` (base64url).
+/// Maximum decoded byte length for `authenticator_data`.
 /// Authenticator data is typically 37+ bytes; with extensions it can be larger.
-const MAX_AUTHENTICATOR_DATA_LEN: usize = 4 * 1024;
+const MAX_AUTHENTICATOR_DATA_BYTES: usize = 3 * 1024;
 
-/// Maximum encoded length for `client_data_json` (base64url).
+/// Maximum decoded byte length for `client_data_json`.
 /// Client data JSON is a small JSON object (origin, type, challenge).
-const MAX_CLIENT_DATA_JSON_LEN: usize = 4 * 1024;
+const MAX_CLIENT_DATA_JSON_BYTES: usize = 3 * 1024;
 
-/// Maximum encoded length for `signature` (base64url).
+/// Maximum decoded byte length for `signature`.
 /// ECDSA/EdDSA signatures are typically under 100 bytes.
-const MAX_SIGNATURE_LEN: usize = 1024;
+const MAX_SIGNATURE_BYTES: usize = 768;
 
-/// Maximum encoded length for `user_handle` (base64url).
-/// User handles are 16-byte UUIDs ≈ 22 chars encoded.
-const MAX_USER_HANDLE_LEN: usize = 256;
+/// Maximum decoded byte length for `user_handle`.
+/// User handles are 16-byte UUIDs.
+const MAX_USER_HANDLE_BYTES: usize = 192;
 
-/// Maximum encoded length for the authentication `state` JWT.
+/// Maximum length for the authentication `state` JWT.
 const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
 
 /// Minimum decoded byte length for a valid credential ID.
@@ -394,7 +393,7 @@ pub(crate) async fn browser_login_start(
     })?;
 
     Ok(Json(BrowserLoginStartResponse {
-        challenge: URL_SAFE_NO_PAD.encode(&challenge),
+        challenge: Challenge::from_slice(&challenge).to_base64url(),
         rp_id: state.config().rp_id.clone(),
         state: state_token,
         timeout: 300_000, // 5 minutes in milliseconds
@@ -406,14 +405,17 @@ pub(crate) async fn browser_login_start(
 ///
 /// Verify WebAuthn assertion and create session.
 ///
+/// The binary fields arrive decoded: [`BrowserLoginCompleteRequest`] types
+/// them as `Encoded<_, Base64Url>`, so a malformed base64url value is rejected
+/// by [`ValidJson`] before the handler runs.
+///
 /// Validation is ordered to fail fast before any database access:
 /// 1. Origin header validation (CSRF protection)
 /// 2. Field length bounds (reject obviously oversized/empty fields)
 /// 3. State JWT decode + expiration check
-/// 4. Base64url decode all fields
-/// 5. Credential ID byte length validation
-/// 6. Client data JSON structure validation (type, origin)
-/// 7. Database operations (authenticator lookup, signature verification)
+/// 4. Credential ID byte length validation
+/// 5. Client data JSON structure validation (type, origin)
+/// 6. Database operations (authenticator lookup, signature verification)
 #[expect(
     clippy::too_many_lines,
     reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
@@ -423,7 +425,7 @@ pub(crate) async fn browser_login_complete(
     client_info: ClientInfo,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(req): Json<BrowserLoginCompleteRequest>,
+    ValidJson(req): ValidJson<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
     // ── Phase 1: Origin header validation ────────────────────────────────
     validate_origin(&headers, &state.config().base_url)?;
@@ -439,15 +441,8 @@ pub(crate) async fn browser_login_complete(
             "State token exceeds maximum length",
         ));
     }
-    if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Credential ID is empty or exceeds maximum length",
-        ));
-    }
     if req.authenticator_data.is_empty()
-        || req.authenticator_data.len() > MAX_AUTHENTICATOR_DATA_LEN
+        || req.authenticator_data.len() > MAX_AUTHENTICATOR_DATA_BYTES
     {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -455,21 +450,21 @@ pub(crate) async fn browser_login_complete(
             "Authenticator data is empty or exceeds maximum length",
         ));
     }
-    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
+    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_BYTES {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Client data JSON is empty or exceeds maximum length",
         ));
     }
-    if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_LEN {
+    if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_BYTES {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Signature is empty or exceeds maximum length",
         ));
     }
-    if req.user_handle.is_empty() || req.user_handle.len() > MAX_USER_HANDLE_LEN {
+    if req.user_handle.is_empty() || req.user_handle.len() > MAX_USER_HANDLE_BYTES {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -516,52 +511,9 @@ pub(crate) async fn browser_login_complete(
             }
         };
 
-    // ── Phase 4: Base64url decode all fields ─────────────────────────────
-    let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Invalid credential_id",
-        )
-    })?;
-
-    let authenticator_data = URL_SAFE_NO_PAD
-        .decode(&req.authenticator_data)
-        .map_err(|_| {
-            ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_input",
-                "Invalid authenticator_data",
-            )
-        })?;
-
-    let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Invalid client_data_json",
-        )
-    })?;
-
-    let signature = URL_SAFE_NO_PAD.decode(&req.signature).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Invalid signature",
-        )
-    })?;
-
-    let user_handle = URL_SAFE_NO_PAD.decode(&req.user_handle).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Invalid user_handle",
-        )
-    })?;
-
-    // ── Phase 5: Credential ID byte length validation ────────────────────
-    if credential_id.len() < MIN_CREDENTIAL_ID_BYTES
-        || credential_id.len() > MAX_CREDENTIAL_ID_BYTES
+    // ── Phase 4: Credential ID byte length validation ────────────────────
+    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
+        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
     {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -570,9 +522,9 @@ pub(crate) async fn browser_login_complete(
         ));
     }
 
-    // ── Phase 6: Client data JSON structure validation ───────────────────
+    // ── Phase 5: Client data JSON structure validation ───────────────────
     // Parse and validate client data before any DB or crypto operations.
-    let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
+    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
         ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -613,7 +565,7 @@ pub(crate) async fn browser_login_complete(
     }
 
     // Parse user_handle as UUID to identify the user
-    let user_id = Uuid::from_slice(&user_handle).map_err(|_| {
+    let user_id = Uuid::from_slice(&req.user_handle).map_err(|_| {
         ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_user_handle",
@@ -643,7 +595,7 @@ pub(crate) async fn browser_login_complete(
     let lookup_result = lookup_and_verify_authenticator(
         &state,
         AuthenticatorLookupParams {
-            credential_id: &credential_id,
+            credential_id: req.credential_id.as_bytes(),
             user_id,
         },
     )
@@ -675,9 +627,9 @@ pub(crate) async fn browser_login_complete(
 
     use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
     let verification_result = verify_login_assertion(LoginAssertionParams {
-        authenticator_data,
-        client_data_json,
-        signature,
+        authenticator_data: req.authenticator_data.into_bytes(),
+        client_data_json: req.client_data_json.into_bytes(),
+        signature: req.signature.into_bytes(),
         public_key: authenticator.public_key.clone(),
         rp_id: auth_state.rp_id.clone(),
         // Browser sets clientDataJSON.origin to the calling page's origin
@@ -1162,6 +1114,76 @@ mod tests {
     // Browser Auth State Tests
     // ========================================================================
 
+    /// `credential_id` and friends are `Encoded<_, Base64Url>`, so a malformed
+    /// value is a deserialization failure. `ValidJson` reports it in the JSON
+    /// envelope `login.js` reads out of `errResp.message`.
+    #[tokio::test]
+    async fn test_browser_login_complete_rejects_malformed_base64url() {
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
+        let body = serde_json::json!({
+            "state": "state-token",
+            "credential_id": "!!not-base64url!!",
+            "authenticator_data": dummy,
+            "client_data_json": dummy,
+            "signature": dummy,
+            "user_handle": dummy,
+        })
+        .to_string();
+
+        let (status, resp_body) = crate::test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+        assert!(
+            resp_body.contains("invalid_request"),
+            "expected 'invalid_request' in body, got: {resp_body}"
+        );
+        assert!(
+            resp_body.contains("credential_id"),
+            "the rejection must name the offending field, got: {resp_body}"
+        );
+    }
+
+    /// The rejection body must be JSON — the browser calls `.json()` on it and
+    /// shows `errResp.message`. Axum's own rejection answers `text/plain`.
+    #[tokio::test]
+    async fn test_browser_login_complete_rejection_is_json() {
+        let (app, state) = crate::test_utils::test_app().await;
+
+        // Omit every field but `state`.
+        let body = serde_json::json!({ "state": "state-token" }).to_string();
+
+        let (status, resp_body) = crate::test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&resp_body).expect("rejection body must be JSON");
+        assert_eq!(
+            parsed.get("code").and_then(serde_json::Value::as_str),
+            Some("invalid_request"),
+            "{resp_body}"
+        );
+        assert!(
+            parsed
+                .get("message")
+                .is_some_and(serde_json::Value::is_string),
+            "browser reads errResp.message: {resp_body}"
+        );
+    }
+
     #[tokio::test]
     async fn test_browser_auth_state_decode_wrong_secret() {
         let signer = crate::crypto::jwt::StateTokenSigner::local(b"correct-secret".to_vec());
@@ -1214,9 +1236,9 @@ mod tests {
             .expect("pre-consume must succeed");
 
         // POST to `/login/webauthn/complete` with the already-consumed state
-        // and length-bounded dummy fields. The replay check runs in Phase
-        // 3b (after state decode, before base64 decode), so plain
-        // base64url-of-zero-bytes fields are sufficient to reach it.
+        // and length-bounded dummy fields. The replay check runs in Phase 3b,
+        // before any of these values is used, so base64url-of-zero-bytes
+        // fields are sufficient to reach it.
         let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
         let body = serde_json::json!({
             "state": state_jwt,

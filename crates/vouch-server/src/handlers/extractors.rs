@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::extract::rejection::PathRejection;
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::{FromRequest, FromRequestParts, Path};
 use axum::http::{HeaderMap, StatusCode};
 use http::request::Parts;
 use serde::Deserialize;
@@ -77,6 +77,36 @@ where
                     message,
                 ))
             }
+        }
+    }
+}
+
+/// JSON body extractor that converts `JsonRejection` into `ServiceError`.
+/// Use instead of [`axum::Json`] when the handler returns `ServiceError` and
+/// the caller reads the error out of the JSON envelope.
+///
+/// Axum's own rejection answers with a `text/plain` body, which the browser
+/// WebAuthn flows cannot read — they surface `errResp.message` from the JSON.
+/// Body-typed validation (a `credential_id` that is not base64url, a field of
+/// the wrong JSON type) lands here rather than in the handler, so this keeps
+/// the shape of the response the same either way.
+pub(crate) struct ValidJson<T>(pub T);
+
+impl<T, S> FromRequest<S> for ValidJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ServiceError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                rejection.body_text(),
+            )),
         }
     }
 }

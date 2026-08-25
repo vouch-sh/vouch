@@ -13,6 +13,9 @@
 )]
 mod tests {
     use crate::api::*;
+    use crate::encoding::ConvertEncoding;
+    use crate::fido2_types::{Challenge, CredentialId, UserHandle};
+    use serde_json::Value;
     use uuid::Uuid;
 
     // =========================================================================
@@ -285,6 +288,127 @@ mod tests {
     // =========================================================================
     // Unicode and Special Character Tests
     // =========================================================================
+
+    // =========================================================================
+    // Browser WebAuthn Wire Format
+    //
+    // The browser flows are the one place where a wire change is invisible to
+    // the compiler: the JSON is produced by hand in JS, not by these types. A
+    // base64url field must stay a base64url string in both directions.
+    // =========================================================================
+
+    #[test]
+    fn test_browser_register_start_response_emits_base64url_strings() {
+        let response = BrowserRegisterStartResponse {
+            challenge: Challenge::from_raw(vec![1, 2, 3]).to_base64url(),
+            rp_id: "test.com".to_string(),
+            rp_name: "Test".to_string(),
+            user_id: UserHandle::from_raw(vec![4, 5, 6]).to_base64url(),
+            user_email: "user@example.com".to_string(),
+            user_display_name: "user@example.com".to_string(),
+            algorithms: vec![-7],
+            state: "state".to_string(),
+            exclude_credential_ids: vec![CredentialId::from_raw(vec![7, 8, 9]).to_base64url()],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json.get("challenge").and_then(Value::as_str), Some("AQID"));
+        assert_eq!(json.get("user_id").and_then(Value::as_str), Some("BAUG"));
+        assert_eq!(
+            json.get("exclude_credential_ids")
+                .and_then(|ids| ids.get(0))
+                .and_then(Value::as_str),
+            Some("BwgJ")
+        );
+    }
+
+    #[test]
+    fn test_browser_login_start_response_emits_base64url_challenge() {
+        let response = BrowserLoginStartResponse {
+            challenge: Challenge::from_raw(vec![1, 2, 3]).to_base64url(),
+            rp_id: "test.com".to_string(),
+            state: "state".to_string(),
+            timeout: 300_000,
+            user_verification: "required".to_string(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json.get("challenge").and_then(Value::as_str), Some("AQID"));
+    }
+
+    #[test]
+    fn test_browser_register_complete_request_accepts_browser_json() {
+        // Exactly the body keys.js builds via bufferToBase64url().
+        let body = r#"{
+            "state": "state-token",
+            "credential_id": "AQID",
+            "attestation_object": "BAUG",
+            "client_data_json": "BwgJ"
+        }"#;
+        let request: BrowserRegisterCompleteRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(request.credential_id.as_bytes(), &[1, 2, 3]);
+        assert_eq!(request.attestation_object.as_bytes(), &[4, 5, 6]);
+        assert_eq!(request.client_data_json.as_bytes(), &[7, 8, 9]);
+    }
+
+    #[test]
+    fn test_browser_login_complete_request_accepts_browser_json() {
+        // Exactly the body login.js builds via bufferToBase64url().
+        let body = r#"{
+            "state": "state-token",
+            "credential_id": "AQID",
+            "authenticator_data": "BAUG",
+            "client_data_json": "BwgJ",
+            "signature": "CgsM",
+            "user_handle": "DQ4P",
+            "pending_auth": null
+        }"#;
+        let request: BrowserLoginCompleteRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(request.credential_id.as_bytes(), &[1, 2, 3]);
+        assert_eq!(request.authenticator_data.as_bytes(), &[4, 5, 6]);
+        assert_eq!(request.client_data_json.as_bytes(), &[7, 8, 9]);
+        assert_eq!(request.signature.as_bytes(), &[10, 11, 12]);
+        assert_eq!(request.user_handle.as_bytes(), &[13, 14, 15]);
+        assert!(request.pending_auth.is_none());
+    }
+
+    /// The decode that used to live in the handler now happens in serde, so a
+    /// malformed field fails the whole body rather than one branch. Naming the
+    /// offending field is `serde_path_to_error`'s job inside axum's `Json`, so
+    /// that half is asserted in the handler tests, not here.
+    #[test]
+    fn test_browser_complete_requests_reject_malformed_base64url() {
+        let body = r#"{
+            "state": "state-token",
+            "credential_id": "!!not-base64url!!",
+            "attestation_object": "BAUG",
+            "client_data_json": "BwgJ"
+        }"#;
+        assert!(serde_json::from_str::<BrowserRegisterCompleteRequest>(body).is_err());
+
+        let body = r#"{
+            "state": "state-token",
+            "credential_id": "AQID",
+            "authenticator_data": "BAUG",
+            "client_data_json": "BwgJ",
+            "signature": "not base64!",
+            "user_handle": "DQ4P"
+        }"#;
+        assert!(serde_json::from_str::<BrowserLoginCompleteRequest>(body).is_err());
+    }
+
+    /// A base64url field must reject a JSON value of the wrong type outright,
+    /// not coerce it.
+    #[test]
+    fn test_browser_complete_request_rejects_wrong_json_type() {
+        let body = r#"{
+            "state": "state-token",
+            "credential_id": 42,
+            "attestation_object": "BAUG",
+            "client_data_json": "BwgJ"
+        }"#;
+        assert!(serde_json::from_str::<BrowserRegisterCompleteRequest>(body).is_err());
+    }
 
     #[test]
     fn test_register_start_response_unicode_names() {
