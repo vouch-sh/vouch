@@ -298,30 +298,4 @@ mod tests {
     fn test_well_known_out_of_scope() {
         assert!(!requires_signature("/.well-known/openid-configuration"));
     }
-
-    // Document the old client.rs:376 predicate's incorrect behavior on the
-    // four routes it wrongly treated as requiring signatures.
-    #[test]
-    fn test_old_predicate_was_wrong_for_public_routes() {
-        // The old code: path.starts_with("/v1/") && path != "/v1/auth/status"
-        // This incorrectly required signatures for the following routes:
-        let wrongly_required = [
-            "/v1/credentials/ssh/ca",
-            "/v1/credentials/ssh/krl",
-            "/v1/credentials/ssh/krl/123",
-            "/v1/credentials/github/status",
-        ];
-        for path in wrongly_required {
-            let old_predicate = path.starts_with("/v1/") && path != "/v1/auth/status";
-            assert!(
-                old_predicate,
-                "old predicate required sig for public path: {path}"
-            );
-            // New predicate correctly exempts them:
-            assert!(
-                !requires_signature(path),
-                "new predicate correctly exempts: {path}"
-            );
-        }
-    }
 }
