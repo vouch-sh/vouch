@@ -235,9 +235,13 @@ async fn test_rfc8693_missing_subject_token() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert!(
-        error["error"] == "invalid_request" || error["error"] == "invalid_grant",
-        "Missing subject_token should be rejected, got: {}",
+    // RFC 6749 §5.2: invalid_request covers a request "missing a required
+    // parameter". Pairing subject_token with subject_token_type is what makes
+    // this reachable — an absent token used to reach the decoder as an empty
+    // string and come back as invalid_grant.
+    assert_eq!(
+        error["error"], "invalid_request",
+        "Missing subject_token should be rejected as invalid_request, got: {}",
         error["error"]
     );
 }
@@ -691,6 +695,70 @@ async fn test_rfc8693_invalid_actor_token_type() {
         status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED,
         "Invalid actor_token_type should be rejected, got {status}: {body}"
     );
+}
+
+#[tokio::test]
+async fn test_rfc8693_actor_token_type_without_actor_token_rejected() {
+    // RFC 8693 §2.1: actor_token_type "is REQUIRED when the `actor_token`
+    // parameter is present in the request but MUST NOT be included otherwise."
+    // That MUST NOT binds the client, so rejecting is our choice — taken so a
+    // client that mislabels its request learns about it instead of receiving a
+    // token with the parameter silently dropped.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-lone-actor-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "{body}");
+}
+
+#[tokio::test]
+async fn test_rfc8693_actor_token_without_actor_token_type_rejected() {
+    // RFC 8693 §2.1: actor_token_type is REQUIRED when actor_token is present.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-untyped-actor@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token=some-token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "{body}");
 }
 
 #[tokio::test]

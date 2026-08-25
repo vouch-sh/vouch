@@ -15,15 +15,16 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
+use vouch_common::encoding::{Base64Url, ConvertEncoding};
+use vouch_common::fido2_types::{Challenge, CredentialId, UserHandle};
 use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse, protocol};
 
+use super::extractors::ValidJson;
 use super::session::AuthContext;
 use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
@@ -1149,14 +1150,13 @@ pub(crate) async fn browser_register_start(
         .map(|a| webauthn_rs::prelude::CredentialID::from(a.credential_id.clone()))
         .collect();
 
-    // Build exclude_credential_ids for browser (base64url encoded)
-    let exclude_credential_ids: Vec<String> = existing_auths
+    let exclude_credential_ids: Vec<CredentialId<Base64Url>> = existing_auths
         .iter()
         .map(|a| {
-            let encoded = URL_SAFE_NO_PAD.encode(&a.credential_id);
+            let encoded = CredentialId::from_slice(&a.credential_id).to_base64url();
             tracing::debug!(
                 "Excluding credential: {} (len={})",
-                encoded,
+                encoded.as_base64url(),
                 a.credential_id.len()
             );
             encoded
@@ -1224,13 +1224,12 @@ pub(crate) async fn browser_register_start(
     // Extract challenge from webauthn-rs generated options
     // The challenge is exposed via the public_key.challenge field
     let challenge_bytes: &[u8] = ccr.public_key.challenge.as_ref();
-    let challenge = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     Ok(Json(BrowserRegisterStartResponse {
-        challenge,
+        challenge: Challenge::from_slice(challenge_bytes).to_base64url(),
         rp_id: state.config().rp_id.clone(),
         rp_name: state.config().rp_name.clone(),
-        user_id: URL_SAFE_NO_PAD.encode(user_id.as_bytes()),
+        user_id: UserHandle::from_slice(user_id.as_bytes()).to_base64url(),
         user_email: user_email.clone(),
         user_display_name: user_email,
         algorithms: vec![-7, -257], // ES256, RS256
@@ -1239,20 +1238,16 @@ pub(crate) async fn browser_register_start(
     }))
 }
 
-/// Maximum encoded length for `credential_id` (base64url).
-/// WebAuthn spec allows up to 1023 bytes raw ≈ 1364 chars encoded.
-const MAX_CREDENTIAL_ID_LEN: usize = 1400;
-
-/// Maximum encoded length for `attestation_object` (base64url).
-/// Hardware key attestations with certificate chains are typically under 4 KB.
-const MAX_ATTESTATION_OBJECT_LEN: usize = 16 * 1024;
-
-/// Maximum encoded length for `client_data_json` (base64url).
-/// Client data JSON is a small JSON object (origin, type, challenge).
-const MAX_CLIENT_DATA_JSON_LEN: usize = 4 * 1024;
-
-/// Maximum encoded length for the registration `state` JWT.
+/// Maximum length for the registration `state` JWT.
 const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
+
+/// Maximum decoded byte length for `attestation_object`.
+/// Hardware key attestations with certificate chains are typically under 4 KB.
+const MAX_ATTESTATION_OBJECT_BYTES: usize = 12 * 1024;
+
+/// Maximum decoded byte length for `client_data_json`.
+/// Client data JSON is a small JSON object (origin, type, challenge).
+const MAX_CLIENT_DATA_JSON_BYTES: usize = 3 * 1024;
 
 /// Minimum decoded byte length for a valid credential ID.
 const MIN_CREDENTIAL_ID_BYTES: usize = 16;
@@ -1263,15 +1258,18 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 /// Complete browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/complete
 ///
+/// The binary fields arrive decoded: [`BrowserRegisterCompleteRequest`] types
+/// them as `Encoded<_, Base64Url>`, so a malformed base64url value is rejected
+/// by [`ValidJson`] before the handler runs.
+///
 /// Validation is ordered to fail fast before any database access:
 /// 1. Field length bounds (reject obviously oversized/empty fields)
 /// 2. State JWT decode + expiration check
-/// 3. Base64url decode all fields
-/// 4. Credential ID byte length validation
-/// 5. Client data JSON structure validation (type, origin)
-/// 6. Hardware attestation validation (reject software passkeys)
-/// 7. WebAuthn cryptographic verification
-/// 8. Database operations (duplicate check, store, authorize)
+/// 3. Credential ID byte length validation
+/// 4. Client data JSON structure validation (type, origin)
+/// 5. Hardware attestation validation (reject software passkeys)
+/// 6. WebAuthn cryptographic verification
+/// 7. Database operations (duplicate check, store, authorize)
 #[expect(
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
@@ -1279,7 +1277,7 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 pub(crate) async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
-    Json(req): Json<BrowserRegisterCompleteRequest>,
+    ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
     // ── Phase 1: Field length bounds ────────────────────────────────────
     // Reject obviously oversized or empty fields before any processing.
@@ -1290,15 +1288,8 @@ pub(crate) async fn browser_register_complete(
             "State token exceeds maximum length",
         ));
     }
-    if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "Credential ID is empty or exceeds maximum length",
-        ));
-    }
     if req.attestation_object.is_empty()
-        || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_LEN
+        || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_BYTES
     {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -1306,7 +1297,7 @@ pub(crate) async fn browser_register_complete(
             "Attestation object is empty or exceeds maximum length",
         ));
     }
-    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
+    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_BYTES {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
@@ -1376,32 +1367,9 @@ pub(crate) async fn browser_register_complete(
         }
     };
 
-    // ── Phase 3: Base64url decode all fields ────────────────────────────
-    let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
-        ServiceError::api(StatusCode::BAD_REQUEST, "invalid_credential", e.to_string())
-    })?;
-
-    let attestation_object = URL_SAFE_NO_PAD
-        .decode(&req.attestation_object)
-        .map_err(|e| {
-            ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_attestation",
-                e.to_string(),
-            )
-        })?;
-
-    let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|e| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            e.to_string(),
-        )
-    })?;
-
-    // ── Phase 4: Credential ID byte length validation ───────────────────
-    if credential_id_bytes.len() < MIN_CREDENTIAL_ID_BYTES
-        || credential_id_bytes.len() > MAX_CREDENTIAL_ID_BYTES
+    // ── Phase 3: Credential ID byte length validation ───────────────────
+    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
+        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
     {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -1410,9 +1378,9 @@ pub(crate) async fn browser_register_complete(
         ));
     }
 
-    // ── Phase 5: Client data JSON structure validation ──────────────────
+    // ── Phase 4: Client data JSON structure validation ──────────────────
     // Parse and validate the client data before any DB or crypto operations.
-    let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
+    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
         ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
@@ -1451,25 +1419,25 @@ pub(crate) async fn browser_register_complete(
         ));
     }
 
-    // ── Phase 6: Hardware attestation validation ────────────────────────
+    // ── Phase 5: Hardware attestation validation ────────────────────────
     // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
     let validated = validate_registration_attestation(
-        &attestation_object,
+        &req.attestation_object,
         &state.config().allowed_aaguids,
         state.config().require_attestation_cert,
     )?;
 
-    // ── Phase 6b: Extract x5c certs before attestation_object is moved ─
-    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&attestation_object);
+    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
 
-    // ── Phase 7: WebAuthn cryptographic verification ────────────────────
+    // ── Phase 6: WebAuthn cryptographic verification ────────────────────
     use webauthn_rs::prelude::Base64UrlSafeData;
+    let credential_id_bytes = req.credential_id.as_bytes().to_vec();
     let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
-        id: req.credential_id.clone(),
+        id: req.credential_id.as_base64url(),
         raw_id: Base64UrlSafeData::from(credential_id_bytes.clone()),
         response: webauthn_rs_proto::AuthenticatorAttestationResponseRaw {
-            attestation_object: Base64UrlSafeData::from(attestation_object),
-            client_data_json: Base64UrlSafeData::from(client_data_json),
+            attestation_object: Base64UrlSafeData::from(req.attestation_object.into_bytes()),
+            client_data_json: Base64UrlSafeData::from(req.client_data_json.into_bytes()),
             transports: None,
         },
         extensions: webauthn_rs_proto::RegistrationExtensionsClientOutputs::default(),
@@ -1488,7 +1456,7 @@ pub(crate) async fn browser_register_complete(
             )
         })?;
 
-    // ── Phase 8: Database operations ────────────────────────────────────
+    // ── Phase 7: Database operations ────────────────────────────────────
     // All cheap validation passed — now check for duplicate credentials.
     if let Some(_existing) =
         db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes).await?
@@ -1521,7 +1489,7 @@ pub(crate) async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
-    // ── Phase 8b: x5c attestation chain validation (browser enrollment) ──
+    // ── Phase 7b: x5c attestation chain validation (browser enrollment) ──
     // The browser enrollment path uses webauthn-rs for verification, so we
     // additionally validate the x5c chain here for attestation_verified status.
     let mut validated = validated;

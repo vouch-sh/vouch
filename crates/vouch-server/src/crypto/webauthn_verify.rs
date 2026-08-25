@@ -17,12 +17,12 @@
 //!
 //! # Inputs are untyped byte slices
 //!
-//! Verification takes `&[u8]`. Callers hold
-//! [`vouch_common::encoding::Encoded<T, E>`], whose compile-time markers keep
-//! a credential ID from being passed where a signature belongs, but they decode
-//! before calling in — this module never sees the marker. Extending the typed
-//! representation inward would only pay off alongside the browser WebAuthn
-//! request types, which are still `String`; that migration is tracked in #1037.
+//! Verification takes `&[u8]`. Every caller now holds
+//! [`vouch_common::encoding::Encoded<T, E>`], whose compile-time markers keep a
+//! credential ID from being passed where a signature belongs, but they unwrap
+//! to bytes before calling in — this module never sees the marker. Extending
+//! the typed representation inward would mean threading the markers through
+//! `CoseVerifier` and the assertion structs as well.
 
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};

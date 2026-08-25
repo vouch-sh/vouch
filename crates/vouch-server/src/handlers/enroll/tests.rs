@@ -75,10 +75,15 @@ async fn test_enrollment_complete_missing_state() {
     })
     .to_string();
 
-    let (status, _body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
 
-    // Missing required JSON field → 422 Unprocessable Entity (axum extractor error)
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // `ValidJson` reports every body rejection in the JSON envelope the
+    // browser reads, so a missing field is a 400 like any other bad body.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        resp_body.contains("invalid_request"),
+        "expected 'invalid_request' in body, got: {resp_body}"
+    );
 }
 
 // ── test_enrollment_complete_invalid_state_token ─────────────────────────
@@ -120,9 +125,13 @@ async fn test_enrollment_complete_missing_credential_id() {
     })
     .to_string();
 
-    let (status, _body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        resp_body.contains("credential_id"),
+        "the rejection must name the missing field, got: {resp_body}"
+    );
 }
 
 // ── test_enrollment_complete_oversized_credential_id ─────────────────────
@@ -133,8 +142,8 @@ async fn test_enrollment_complete_oversized_credential_id() {
 
     let valid_state = make_valid_state_token(&state).await;
 
-    // Build a credential_id that exceeds MAX_CREDENTIAL_ID_LEN (1400 chars).
-    let oversized = "A".repeat(MAX_CREDENTIAL_ID_LEN + 1);
+    // A credential ID one byte past the WebAuthn ceiling, encoded.
+    let oversized = URL_SAFE_NO_PAD.encode(vec![0u8; MAX_CREDENTIAL_ID_BYTES + 1]);
 
     let body = serde_json::json!({
         "state": valid_state,
@@ -188,8 +197,8 @@ async fn test_browser_register_complete_rejects_replayed_state() {
         .expect("pre-consume must succeed");
 
     // POST to the complete endpoint with the already-consumed state.
-    // The replay check runs before any base64 decoding, so non-empty base64
-    // strings are sufficient for the request to reach the replay check.
+    // The fields must be well-formed base64url to get past deserialization,
+    // but their contents never matter — the replay check precedes every use.
     let body = serde_json::json!({
         "state": state_jwt,
         "credential_id": valid_credential_id(),
@@ -215,7 +224,9 @@ async fn test_enrollment_complete_invalid_base64_credential_id() {
 
     let valid_state = make_valid_state_token(&state).await;
 
-    // "!!" is not valid base64url.
+    // "!!" is not valid base64url. `credential_id` is typed
+    // `CredentialId<Base64Url>`, so this fails in serde and `ValidJson` reports
+    // it in the JSON envelope the browser reads.
     let body = serde_json::json!({
         "state": valid_state,
         "credential_id": "!!not-base64url!!",
@@ -228,8 +239,39 @@ async fn test_enrollment_complete_invalid_base64_credential_id() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        resp_body.contains("invalid_credential"),
-        "expected 'invalid_credential' in body, got: {resp_body}"
+        resp_body.contains("invalid_request"),
+        "expected 'invalid_request' in body, got: {resp_body}"
+    );
+    assert!(
+        resp_body.contains("credential_id"),
+        "the rejection must name the offending field, got: {resp_body}"
+    );
+}
+
+// ── test_enrollment_complete_rejects_non_string_field ────────────────────
+
+#[tokio::test]
+async fn test_enrollment_complete_rejects_wrong_json_type() {
+    let (app, state) = test_app().await;
+
+    let valid_state = make_valid_state_token(&state).await;
+
+    // A JSON number where a base64url string belongs. Typing the field is what
+    // turns this into a boundary rejection rather than a handler branch.
+    let body = serde_json::json!({
+        "state": valid_state,
+        "credential_id": 42,
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        resp_body.contains("invalid_request"),
+        "expected 'invalid_request' in body, got: {resp_body}"
     );
 }
 

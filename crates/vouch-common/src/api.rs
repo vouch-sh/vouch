@@ -5,8 +5,11 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::encoding::Raw;
-use crate::fido2_types::{AttestationObject, Challenge, ClientDataJson, CoseKey, CredentialId};
+use crate::encoding::{Base64Url, Raw};
+use crate::fido2_types::{
+    AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
+    UserHandle,
+};
 
 // ============================================================================
 // Registration
@@ -252,16 +255,20 @@ impl OAuthError {
 // ============================================================================
 
 /// Response containing `WebAuthn` options for browser registration.
+///
+/// The binary fields carry [`Base64Url`], the encoding the browser
+/// `credentials.create()` API expects, so they serialize as base64url strings
+/// without the handler encoding them by hand.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserRegisterStartResponse {
-    /// Random challenge bytes (base64url encoded for browser).
-    pub challenge: String,
+    /// Random challenge bytes.
+    pub challenge: Challenge<Base64Url>,
     /// Relying Party ID.
     pub rp_id: String,
     /// Relying Party name.
     pub rp_name: String,
-    /// User ID (base64url encoded).
-    pub user_id: String,
+    /// User ID, sent as the `WebAuthn` user handle.
+    pub user_id: UserHandle<Base64Url>,
     /// User's email address.
     pub user_email: String,
     /// User's display name.
@@ -270,23 +277,27 @@ pub struct BrowserRegisterStartResponse {
     pub algorithms: Vec<i32>,
     /// Registration state token.
     pub state: String,
-    /// Credential IDs to exclude (base64url encoded).
+    /// Credential IDs to exclude.
     /// Used to prevent duplicate registrations of the same key.
     #[serde(default)]
-    pub exclude_credential_ids: Vec<String>,
+    pub exclude_credential_ids: Vec<CredentialId<Base64Url>>,
 }
 
 /// Request to complete browser-based `WebAuthn` registration.
+///
+/// The binary fields decode during deserialization, so a malformed base64url
+/// value is rejected at the request boundary rather than partway through the
+/// handler.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserRegisterCompleteRequest {
     /// Registration state token.
     pub state: String,
-    /// Credential ID (base64url encoded).
-    pub credential_id: String,
-    /// Attestation object (base64url encoded).
-    pub attestation_object: String,
-    /// Client data JSON (base64url encoded).
-    pub client_data_json: String,
+    /// Credential ID from the authenticator.
+    pub credential_id: CredentialId<Base64Url>,
+    /// Attestation object from the authenticator.
+    pub attestation_object: AttestationObject<Base64Url>,
+    /// Client data JSON, as built by the browser.
+    pub client_data_json: ClientDataJson<Base64Url>,
 }
 
 // ============================================================================
@@ -308,8 +319,8 @@ pub struct BrowserLoginStartRequest {
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserLoginStartResponse {
-    /// Random challenge bytes (base64url encoded for browser).
-    pub challenge: String,
+    /// Random challenge bytes.
+    pub challenge: Challenge<Base64Url>,
     /// Relying Party ID.
     pub rp_id: String,
     /// Authentication state token.
@@ -321,20 +332,24 @@ pub struct BrowserLoginStartResponse {
 }
 
 /// Request to complete browser-based `WebAuthn` login.
+///
+/// The binary fields decode during deserialization, so a malformed base64url
+/// value is rejected at the request boundary rather than partway through the
+/// handler.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserLoginCompleteRequest {
     /// Authentication state token from start response.
     pub state: String,
-    /// Credential ID (base64url encoded).
-    pub credential_id: String,
-    /// Authenticator data (base64url encoded).
-    pub authenticator_data: String,
-    /// Client data JSON (base64url encoded).
-    pub client_data_json: String,
-    /// Signature (base64url encoded).
-    pub signature: String,
-    /// User handle (base64url encoded) - identifies the user from discoverable credential.
-    pub user_handle: String,
+    /// Credential ID from the authenticator.
+    pub credential_id: CredentialId<Base64Url>,
+    /// Authenticator data from the assertion.
+    pub authenticator_data: AuthData<Base64Url>,
+    /// Client data JSON, as built by the browser.
+    pub client_data_json: ClientDataJson<Base64Url>,
+    /// Assertion signature.
+    pub signature: Signature<Base64Url>,
+    /// User handle - identifies the user from the discoverable credential.
+    pub user_handle: UserHandle<Base64Url>,
     /// Pending OAuth authorization ID (to resume OAuth flow after login).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_auth: Option<String>,
