@@ -1262,14 +1262,17 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 /// them as `Encoded<_, Base64Url>`, so a malformed base64url value is rejected
 /// by [`ValidJson`] before the handler runs.
 ///
-/// Validation is ordered to fail fast before any database access:
+/// Every check on the request body runs before the single-use registration
+/// state is consumed, so a malformed request cannot invalidate the state token
+/// it carries and send the user back through enrollment:
 /// 1. Field length bounds (reject obviously oversized/empty fields)
-/// 2. State JWT decode + expiration check
-/// 3. Credential ID byte length validation
-/// 4. Client data JSON structure validation (type, origin)
-/// 5. Hardware attestation validation (reject software passkeys)
-/// 6. WebAuthn cryptographic verification
-/// 7. Database operations (duplicate check, store, authorize)
+/// 2. Client data JSON structure validation (type, origin)
+/// 3. State JWT decode + expiration check
+/// 4. Account must be active
+/// 5. Single-use registration state consume
+/// 6. Hardware attestation validation (reject software passkeys)
+/// 7. WebAuthn cryptographic verification
+/// 8. Database operations (duplicate check, store, authorize)
 #[expect(
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
@@ -1304,13 +1307,67 @@ pub(crate) async fn browser_register_complete(
             "Client data JSON is empty or exceeds maximum length",
         ));
     }
+    // An empty string is valid base64url that decodes to `vec![]`, so the
+    // credential ID needs a byte-length bound of its own rather than the
+    // `is_empty` check the other binary fields carry.
+    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
+        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "Credential ID length is outside the valid range (16-1023 bytes)",
+        ));
+    }
 
-    // ── Phase 2: State JWT decode + expiration ──────────────────────────
+    // ── Phase 2: Client data JSON structure validation ──────────────────
+    // Parsing the client data needs nothing but the request body, so it runs
+    // while the state token is still spendable.
+    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data JSON is not valid UTF-8",
+        )
+    })?;
+
+    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            format!("Client data JSON is malformed: {e}"),
+        )
+    })?;
+
+    if client_data.typ != protocol::CLIENT_DATA_TYPE_CREATE {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data type must be 'webauthn.create'",
+        ));
+    }
+
+    // Verify the origin matches the server's base URL.
+    let expected_origin = &state.config().base_url;
+    if client_data.origin != *expected_origin {
+        tracing::warn!(
+            "Origin mismatch: got '{}', expected '{}'",
+            client_data.origin,
+            expected_origin
+        );
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data origin does not match the server",
+        ));
+    }
+
+    // ── Phase 3: State JWT decode + expiration ──────────────────────────
     let reg_state = BrowserRegistrationState::decode(&req.state, &state.state_signer)
         .await
         .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
-    // ── Phase 2a: Account must be active ────────────────────────────────
+    // ── Phase 4: Account must be active ─────────────────────────────────
     // A user deactivated after obtaining the registration state (valid for
     // five minutes) must not register a new hardware key.
     let account = db::get_user_by_id(&state.store, &reg_state.user_id.to_string())
@@ -1324,7 +1381,7 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::Forbidden("user_deactivated"));
     }
 
-    // ── Phase 2b: Single-use enforcement ───────────────────────────────
+    // ── Phase 5: Single-use enforcement ─────────────────────────────────
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
     // The witness is threaded into TokenIssuanceProof below — the only
@@ -1367,59 +1424,7 @@ pub(crate) async fn browser_register_complete(
         }
     };
 
-    // ── Phase 3: Credential ID byte length validation ───────────────────
-    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
-        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "Credential ID length is outside the valid range (16-1023 bytes)",
-        ));
-    }
-
-    // ── Phase 4: Client data JSON structure validation ──────────────────
-    // Parse and validate the client data before any DB or crypto operations.
-    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data JSON is not valid UTF-8",
-        )
-    })?;
-
-    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            format!("Client data JSON is malformed: {e}"),
-        )
-    })?;
-
-    if client_data.typ != protocol::CLIENT_DATA_TYPE_CREATE {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data type must be 'webauthn.create'",
-        ));
-    }
-
-    // Verify the origin matches the server's base URL.
-    let expected_origin = &state.config().base_url;
-    if client_data.origin != *expected_origin {
-        tracing::warn!(
-            "Origin mismatch: got '{}', expected '{}'",
-            client_data.origin,
-            expected_origin
-        );
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data origin does not match the server",
-        ));
-    }
-
-    // ── Phase 5: Hardware attestation validation ────────────────────────
+    // ── Phase 6: Hardware attestation validation ────────────────────────
     // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
     let validated = validate_registration_attestation(
         &req.attestation_object,
@@ -1429,7 +1434,7 @@ pub(crate) async fn browser_register_complete(
 
     let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
 
-    // ── Phase 6: WebAuthn cryptographic verification ────────────────────
+    // ── Phase 7: WebAuthn cryptographic verification ────────────────────
     use webauthn_rs::prelude::Base64UrlSafeData;
     let credential_id_bytes = req.credential_id.as_bytes().to_vec();
     let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
@@ -1456,7 +1461,7 @@ pub(crate) async fn browser_register_complete(
             )
         })?;
 
-    // ── Phase 7: Database operations ────────────────────────────────────
+    // ── Phase 8: Database operations ────────────────────────────────────
     // All cheap validation passed — now check for duplicate credentials.
     if let Some(_existing) =
         db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes).await?
@@ -1489,7 +1494,7 @@ pub(crate) async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
-    // ── Phase 7b: x5c attestation chain validation (browser enrollment) ──
+    // ── Phase 8b: x5c attestation chain validation (browser enrollment) ──
     // The browser enrollment path uses webauthn-rs for verification, so we
     // additionally validate the x5c chain here for attestation_verified status.
     let mut validated = validated;
