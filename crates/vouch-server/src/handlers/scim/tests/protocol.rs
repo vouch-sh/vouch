@@ -427,3 +427,98 @@ async fn member_op_error_unique_string_still_maps_to_500() {
         "no uniqueness scimType for infrastructure errors: {body}"
     );
 }
+
+// =========================================================================
+// Advertised-vs-emitted schema guard
+// =========================================================================
+
+/// A resource the handlers actually emit must carry a schema that
+/// `/ResourceTypes` advertises.
+///
+/// Creating a real user and reading back its `schemas` is the point: an
+/// assertion that compares discovery output against the constant discovery
+/// is derived from would agree with itself no matter what either side said.
+#[tokio::test]
+async fn emitted_user_schema_is_advertised_by_resource_types() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "advertised-vs-emitted", "test-org").await;
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "drift@test-org.example.com", "active": true}"#,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let emitted: Vec<&str> = user["schemas"]
+        .as_array()
+        .expect("created user carries a schemas array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+
+    let (status, body) = http_get(&app, "/scim/v2/ResourceTypes", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let types: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let advertised: Vec<&str> = types["Resources"]
+        .as_array()
+        .expect("Resources array")
+        .iter()
+        .filter_map(|r| r["schema"].as_str())
+        .collect();
+
+    for schema in &emitted {
+        assert!(
+            advertised.contains(schema),
+            "the User handler emits {schema}, which /ResourceTypes does not \
+             advertise; advertised: {advertised:?}"
+        );
+    }
+}
+
+/// Each advertised resource type's endpoint must be a live route, so a
+/// resource cannot be advertised without somewhere to serve it.
+#[tokio::test]
+async fn advertised_resource_type_endpoints_are_routed() {
+    let (app, _state) = test_app().await;
+
+    // Unauthenticated: a 401 proves the route exists just as well as a 200,
+    // and avoids minting a token to answer a routing question.
+    for (_, endpoint) in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+        let path = format!("/scim/v2{endpoint}");
+        let (status, _) = http_get(&app, &path, &[]).await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "advertised resource endpoint {path} is not routed"
+        );
+    }
+}
+
+/// A resource the handlers emit must appear in `/Schemas` as well, so the two
+/// discovery endpoints cannot disagree with each other.
+#[tokio::test]
+async fn schemas_endpoint_lists_every_emitted_resource_schema() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/scim/v2/Schemas", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let ids: Vec<&str> = listed["Resources"]
+        .as_array()
+        .expect("Resources array")
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+
+    for (schema, _) in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+        assert!(
+            ids.contains(schema),
+            "/Schemas does not list {schema}, which the handlers emit; listed: {ids:?}"
+        );
+    }
+}

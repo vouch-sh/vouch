@@ -15,6 +15,7 @@ pub(crate) mod discovery;
 pub(crate) mod groups;
 pub(crate) mod patch;
 pub(crate) mod types;
+pub(crate) mod urn;
 pub(crate) mod users;
 
 use aws_lc_rs::digest::{self, SHA256};

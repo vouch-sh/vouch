@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SCIM 2.0 types (RFC 7643).
 
+use super::urn;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +18,7 @@ pub(crate) struct ScimError {
 impl ScimError {
     pub(crate) fn new(status: u16, detail: impl Into<String>) -> Self {
         Self {
-            schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
+            schemas: vec![urn::ERROR.to_string()],
             status: status.to_string(),
             scim_type: None,
             detail: detail.into(),

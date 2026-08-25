@@ -15,6 +15,7 @@ use super::types::{
     ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchRequest,
     ScimUser,
 };
+use super::urn;
 use crate::AppState;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
@@ -109,7 +110,7 @@ pub(crate) async fn list_users(
     }
 
     Json(ScimListResponse {
-        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        schemas: vec![urn::LIST_RESPONSE.to_string()],
         total_results: total,
         items_per_page: resources.len(),
         start_index,
@@ -645,7 +646,7 @@ pub(crate) async fn delete_user(
 /// Convert database user to SCIM user.
 pub(crate) fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimUser {
     ScimUser {
-        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+        schemas: vec![urn::USER.to_string()],
         id: Some(user.id.clone()),
         external_id: user.external_id,
         user_name: user.email.clone(),
