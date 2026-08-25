@@ -47,119 +47,71 @@ pub(crate) async fn service_provider_config(
 
 /// GET /scim/v2/Schemas (RFC 7644 Section 4).
 ///
-/// Returns the schema definitions for supported resource types (RFC 7643 Section 7).
+/// Returns the schema definitions for supported resource types (RFC 7643
+/// Section 7). Both the `Resources` array and the list counts are derived
+/// from `urn::RESOURCE_SCHEMAS`, so `totalResults` cannot disagree with the
+/// number of returned schemas and adding a resource is one edit.
 pub(crate) async fn schemas() -> impl IntoResponse {
-    let user_schema = ScimSchema {
-        id: urn::USER.to_string(),
-        name: "User".to_string(),
-        description: "User Account".to_string(),
-        attributes: vec![
-            ScimAttribute {
-                name: "userName".to_string(),
-                attr_type: "string".to_string(),
-                multi_valued: false,
-                required: true,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "server".to_string(),
-            },
-            ScimAttribute {
-                name: "name".to_string(),
-                attr_type: "complex".to_string(),
-                multi_valued: false,
-                required: false,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "none".to_string(),
-            },
-            ScimAttribute {
-                name: "emails".to_string(),
-                attr_type: "complex".to_string(),
-                multi_valued: true,
-                required: false,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "none".to_string(),
-            },
-            ScimAttribute {
-                name: "active".to_string(),
-                attr_type: "boolean".to_string(),
-                multi_valued: false,
-                required: false,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "none".to_string(),
-            },
-        ],
-    };
-
-    let group_schema = ScimSchema {
-        id: urn::GROUP.to_string(),
-        name: "Group".to_string(),
-        description: "Group".to_string(),
-        attributes: vec![
-            ScimAttribute {
-                name: "displayName".to_string(),
-                attr_type: "string".to_string(),
-                multi_valued: false,
-                required: true,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "server".to_string(),
-            },
-            ScimAttribute {
-                name: "members".to_string(),
-                attr_type: "complex".to_string(),
-                multi_valued: true,
-                required: false,
-                case_exact: false,
-                mutability: "readWrite".to_string(),
-                returned: "default".to_string(),
-                uniqueness: "none".to_string(),
-            },
-        ],
-    };
+    let resources: Vec<ScimSchema> = urn::RESOURCE_SCHEMAS
+        .iter()
+        .map(|r| ScimSchema {
+            id: r.id.to_string(),
+            name: r.name.to_string(),
+            description: r.description.to_string(),
+            attributes: r
+                .attributes
+                .iter()
+                .map(|a| ScimAttribute {
+                    name: a.name.to_string(),
+                    attr_type: a.attr_type.to_string(),
+                    multi_valued: a.multi_valued,
+                    required: a.required,
+                    case_exact: a.case_exact,
+                    mutability: a.mutability.to_string(),
+                    returned: a.returned.to_string(),
+                    uniqueness: a.uniqueness.to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+    let count = resources.len();
 
     Json(ScimListResponse {
         schemas: vec![urn::LIST_RESPONSE.to_string()],
-        total_results: urn::RESOURCE_SCHEMAS.len(),
-        items_per_page: urn::RESOURCE_SCHEMAS.len(),
+        total_results: count,
+        items_per_page: count,
         start_index: 1,
-        resources: vec![user_schema, group_schema],
+        resources,
     })
 }
 
 /// GET /scim/v2/ResourceTypes (RFC 7644 Section 4).
 ///
-/// Returns the Resource Type definitions (RFC 7643 Section 6).
+/// Returns the Resource Type definitions (RFC 7643 Section 6). Both the
+/// `Resources` array and the list counts are derived from
+/// `urn::RESOURCE_SCHEMAS`, so `totalResults` cannot disagree with the
+/// number of returned resource types and adding a resource is one edit.
 pub(crate) async fn resource_types(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base_url = &state.config().base_url;
 
+    let resources: Vec<ScimResourceType> = urn::RESOURCE_SCHEMAS
+        .iter()
+        .map(|r| ScimResourceType {
+            schemas: vec![urn::RESOURCE_TYPE.to_string()],
+            id: r.name.to_string(),
+            name: r.name.to_string(),
+            endpoint: format!("{base_url}/scim/v2{}", r.endpoint),
+            description: r.description.to_string(),
+            schema: r.id.to_string(),
+        })
+        .collect();
+    let count = resources.len();
+
     Json(ScimListResponse {
         schemas: vec![urn::LIST_RESPONSE.to_string()],
-        total_results: 2,
-        items_per_page: 2,
+        total_results: count,
+        items_per_page: count,
         start_index: 1,
-        // Derived from `urn::RESOURCE_SCHEMAS` so an advertised resource type
-        // and the schema its handler emits cannot be edited apart.
-        resources: urn::RESOURCE_SCHEMAS
-            .iter()
-            .map(|(schema, endpoint)| {
-                let name = endpoint.trim_start_matches('/').trim_end_matches('s');
-                ScimResourceType {
-                    schemas: vec![urn::RESOURCE_TYPE.to_string()],
-                    id: name.to_string(),
-                    name: name.to_string(),
-                    endpoint: format!("{base_url}/scim/v2{endpoint}"),
-                    description: name.to_string(),
-                    schema: (*schema).to_string(),
-                }
-            })
-            .collect(),
+        resources,
     })
 }
