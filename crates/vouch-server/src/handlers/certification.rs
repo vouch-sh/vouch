@@ -34,7 +34,7 @@ use crate::{
     handlers::browser_login::hmac_sha256_base64url,
     handlers::session::create_session_cookie,
     services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     },
     services::oidc::ScopeSet,
@@ -169,8 +169,7 @@ pub(crate) async fn complete_login(
             authenticator_id: Some(&authenticator_id),
             client_id: &session_client_id,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(Timestamp::now().as_second()),

@@ -13,6 +13,7 @@ use crate::error::ServiceError;
 use crate::error::ServiceResult;
 use crate::redact_email;
 use crate::services::auth::{DecodedToken, decode_token};
+use crate::services::oidc::CnfClaim;
 use crate::services::oidc::ScopeSet;
 use serde::Serialize;
 use std::sync::Arc;
@@ -216,14 +217,12 @@ pub async fn introspect_token(
     // RFC 9396: authorization_details from session (already a Value).
     let authorization_details = session.authorization_details;
 
-    // RFC 9449 §7: DPoP-bound tokens report token_type DPoP.
-    // mTLS-bound tokens (x5t#S256 only, no jkt) report Bearer.
-    let is_dpop = claims.cnf.as_ref().is_some_and(|c| c.jkt.is_some());
-    let token_type = if is_dpop {
-        protocol::ACCESS_TOKEN_TYPE_DPOP
-    } else {
-        protocol::ACCESS_TOKEN_TYPE_BEARER
-    };
+    // RFC 7662 §2.2 `token_type`: derived from the confirmation claim the
+    // token actually carries, by the same rule issuance used to advertise it.
+    let token_type = claims
+        .cnf
+        .as_ref()
+        .map_or(protocol::ACCESS_TOKEN_TYPE_BEARER, CnfClaim::token_type);
 
     // RFC 9068 access token — populate client_id from the JWT
     Ok(IntrospectionResult {

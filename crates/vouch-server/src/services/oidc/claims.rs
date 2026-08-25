@@ -2,6 +2,7 @@
 //! OIDC token claims for cloud provider identity federation.
 
 use serde::{Deserialize, Serialize};
+use vouch_common::protocol;
 
 /// Confirmation claim for sender-constrained token binding.
 ///
@@ -16,6 +17,29 @@ pub struct CnfClaim {
     /// Certificate thumbprint (mTLS).
     #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
     pub x5t_s256: Option<String>,
+}
+
+impl CnfClaim {
+    /// The `token_type` a token carrying this confirmation is advertised with.
+    ///
+    /// RFC 9449 §5: "A token_type of DPoP MUST be included in the access token
+    /// response to signal to the client that the access token was bound to its
+    /// DPoP key". A certificate-bound token has no such signal — RFC 8705 §3.1
+    /// defines the `x5t#S256` confirmation without changing the token type — so
+    /// it stays `Bearer`.
+    ///
+    /// Issuance derives the advertised type from the binding it is about to
+    /// stamp in, and introspection derives it from the claim it reads back
+    /// (RFC 7662 §2.2 `token_type`). Both go through here, so the two answers
+    /// cannot disagree about the same token.
+    #[must_use]
+    pub fn token_type(&self) -> &'static str {
+        if self.jkt.is_some() {
+            protocol::ACCESS_TOKEN_TYPE_DPOP
+        } else {
+            protocol::ACCESS_TOKEN_TYPE_BEARER
+        }
+    }
 }
 
 /// Standard OIDC ID token claims with Vouch extensions.

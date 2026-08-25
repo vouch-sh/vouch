@@ -82,7 +82,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
     // "full access" — it must return only `sub`, never the user's email.
     use crate::services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification, NoClientAuth,
-        SenderConstraintProof, TokenIssuanceProof, create_oauth_access_token,
+        SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
     };
     use secrecy::ExposeSecret;
 
@@ -99,8 +99,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             authenticator_id: Some(&auth_id),
             client_id: &state.config().base_url,
             scope: None,
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),

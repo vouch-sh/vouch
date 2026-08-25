@@ -12,11 +12,10 @@ use crate::AppState;
 use crate::db::{OAuthClient, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
-    CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token,
+    CreateOAuthTokenParams, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
-use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
+use crate::services::oidc::ScopeSet;
 use std::sync::Arc;
-use vouch_common::protocol;
 
 /// Result of a client credentials grant exchange.
 pub struct ClientCredentialsResult {
@@ -41,21 +40,11 @@ pub struct ClientCredentialsResult {
 /// # Errors
 /// Returns `unauthorized_client` if the client does not have the
 /// `client_credentials` grant type registered.
-/// Sender-constraint bindings to stamp into the issued access token.
-///
-/// RFC 9449 (`cnf.jkt`) and RFC 8705 (`cnf.x5t#S256`) — DPoP takes priority
-/// over mTLS in `create_oauth_access_token`.
-pub(crate) struct ClientCredentialsBindings<'a> {
-    /// RFC 9449 §6: the validated DPoP proof supplying `cnf.jkt`.
-    pub(crate) dpop_proof: Option<&'a ValidatedDpopProof>,
-    pub(crate) mtls_cert_thumbprint: Option<&'a str>,
-}
-
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &OAuthClient,
     requested_scope: Option<&str>,
-    bindings: ClientCredentialsBindings<'_>,
+    binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
 ) -> ServiceResult<ClientCredentialsResult> {
     // Verify client has client_credentials in its registered grant_types
@@ -88,8 +77,7 @@ pub(crate) async fn exchange_client_credentials(
             authenticator_id: None,
             client_id: &client.client_id,
             scope: scope.clone(),
-            dpop_proof: bindings.dpop_proof,
-            mtls_cert_thumbprint: bindings.mtls_cert_thumbprint,
+            binding,
             act: None,
             audience: None,
             auth_time: None,
@@ -108,16 +96,9 @@ pub(crate) async fn exchange_client_credentials(
         client.client_id
     );
 
-    // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
-    let token_type = if bindings.dpop_proof.is_some() {
-        protocol::ACCESS_TOKEN_TYPE_DPOP
-    } else {
-        protocol::ACCESS_TOKEN_TYPE_BEARER
-    };
-
     Ok(ClientCredentialsResult {
         access_token: session_result.token.clone(),
-        token_type: token_type.to_string(),
+        token_type: session_result.token_type.to_string(),
         expires_in: session_result.expires_in,
         scope,
     })
@@ -204,15 +185,12 @@ mod tests {
 
         let client = client_record;
 
-        let thumbprint = "test-mtls-thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(b"test-cert-der");
         let result = exchange_client_credentials(
             &state,
             &client,
             None,
-            ClientCredentialsBindings {
-                dpop_proof: None,
-                mtls_cert_thumbprint: Some(thumbprint),
-            },
+            TokenBinding::MutualTls(&thumbprint),
             TokenIssuanceProof {
                 grant: GrantProof::ClientCredentials,
                 client_auth: ClientAuthProof::MutualTls(
@@ -240,7 +218,7 @@ mod tests {
         };
         assert_eq!(
             cnf.x5t_s256.as_deref(),
-            Some(thumbprint),
+            Some(thumbprint.as_str()),
             "cnf.x5t#S256 must match the supplied thumbprint"
         );
         assert!(

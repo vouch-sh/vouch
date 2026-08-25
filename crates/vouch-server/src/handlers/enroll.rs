@@ -33,8 +33,8 @@ use super::{
 use crate::error::ServiceError;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
-    create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
@@ -834,8 +834,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             authenticator_id: authenticator_id.as_deref(),
             client_id: &client_id_for_token,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(now.as_second()),
@@ -1666,8 +1665,7 @@ pub(crate) async fn browser_register_complete(
             authenticator_id: Some(&authenticator_id),
             client_id: &enroll_client_id,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(auth_now.as_second()),

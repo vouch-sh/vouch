@@ -17,12 +17,35 @@ use x509_cert::ext::pkix::name::GeneralName;
 /// Subject Alternative Name extension OID (2.5.29.17).
 const SAN_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
 
+/// RFC 8705 §3.1 `x5t#S256`: the base64url-encoded SHA-256 of a certificate's
+/// DER encoding.
+///
+/// Only [`compute_cert_thumbprint`] builds one, so a `cnf.x5t#S256` cannot be
+/// minted from a string that never came from a presented certificate — the
+/// same guarantee `ValidatedDpopProof` gives the `jkt` half of the binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertThumbprint(String);
+
+impl CertThumbprint {
+    /// The wire value, for the `cnf` claim and for comparisons.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CertThumbprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Parsed client certificate with extracted identity fields.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientCertificate {
     /// `x5t#S256`: base64url-encoded SHA-256 of the DER certificate.
     /// RFC 8705 Section 3.1 / RFC 7515 Section 4.1.8.
-    pub thumbprint: String,
+    pub thumbprint: CertThumbprint,
     /// RFC 4514 subject distinguished name string.
     pub subject_dn: Option<String>,
     /// Subject Alternative Name — DNS names.
@@ -52,9 +75,9 @@ pub(crate) enum MtlsError {
 /// Compute the `x5t#S256` thumbprint of a DER-encoded certificate.
 ///
 /// RFC 8705 Section 3.1: base64url(SHA-256(DER(cert))).
-pub(crate) fn compute_cert_thumbprint(der: &[u8]) -> String {
+pub(crate) fn compute_cert_thumbprint(der: &[u8]) -> CertThumbprint {
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, der);
-    URL_SAFE_NO_PAD.encode(digest.as_ref())
+    CertThumbprint(URL_SAFE_NO_PAD.encode(digest.as_ref()))
 }
 
 /// Parse a DER-encoded X.509 certificate into a [`ClientCertificate`].
@@ -218,8 +241,9 @@ pub(crate) fn verify_self_signed_tls_client_auth(
                     if let Ok(x5c_der) = STANDARD.decode(x5c_b64) {
                         let x5c_thumbprint = compute_cert_thumbprint(&x5c_der);
                         let is_match: bool = x5c_thumbprint
+                            .as_str()
                             .as_bytes()
-                            .ct_eq(cert.thumbprint.as_bytes())
+                            .ct_eq(cert.thumbprint.as_str().as_bytes())
                             .into();
                         if is_match {
                             return Ok(());
@@ -251,9 +275,9 @@ mod tests {
     fn test_compute_cert_thumbprint() {
         let cert_der = make_test_cert("test-thumbprint");
         let thumbprint = compute_cert_thumbprint(&cert_der);
-        assert!(!thumbprint.is_empty());
+        assert!(!thumbprint.as_str().is_empty());
         // base64url encoded SHA-256 should be 43 chars (256 bits)
-        assert_eq!(thumbprint.len(), 43);
+        assert_eq!(thumbprint.as_str().len(), 43);
     }
 
     #[test]
@@ -268,7 +292,7 @@ mod tests {
             "subject_dn should contain CN, got: {:?}",
             cert.subject_dn
         );
-        assert!(!cert.thumbprint.is_empty());
+        assert!(!cert.thumbprint.as_str().is_empty());
     }
 
     #[test]

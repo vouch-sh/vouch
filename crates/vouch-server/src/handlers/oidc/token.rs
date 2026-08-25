@@ -11,11 +11,12 @@ use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{
-    ClientAuthProof, GrantProof, SenderConstraintProof, TokenIssuanceProof,
+    ClientAuthProof, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
 };
+use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{
     ScopeSet,
-    client_credentials::{ClientCredentialsBindings, exchange_client_credentials},
+    client_credentials::exchange_client_credentials,
     exchange::{ActorToken, SubjectToken, TokenExchangeParams, TokenType, exchange_token},
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
@@ -790,11 +791,10 @@ async fn handle_authorization_code_grant(
         redirect_uri: params.redirect_uri.as_deref(),
         authenticated_client: Some(&authenticated_client),
         code_verifier: params.code_verifier.as_deref(),
-        dpop_proof,
+        binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         client_id: &authenticated_client.client.client_id,
         resource: params.resource.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
-        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
     match exchange_authorization_code(&state, exchange_params, client_auth, sender_constraint).await
@@ -959,10 +959,7 @@ async fn handle_client_credentials_grant(
         &state,
         &authenticated_client.client,
         params.scope.as_deref(),
-        ClientCredentialsBindings {
-            dpop_proof: dpop_proof.as_ref(),
-            mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
-        },
+        TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         proof,
     )
     .await
@@ -1171,9 +1168,8 @@ async fn handle_token_exchange_grant(
         scope: params.scope.as_deref(),
         requested_token_type: tokens.requested_token_type,
         client_id: &authenticated_client.client.client_id,
-        dpop_proof: dpop_proof.as_ref(),
+        binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         authorization_details: params.authorization_details.as_deref(),
-        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
         client_ip: client_info.client_ip,
     };
 
@@ -1341,11 +1337,10 @@ async fn handle_fido2_assertion_grant(
             client: jwt_authenticated.client,
             is_public: false,
         },
-        dpop_proof,
+        binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         scope: params.scope.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
         client_info,
-        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
     // FIDO2 assertion grant requires `private_key_jwt` client auth (the
@@ -1432,7 +1427,7 @@ async fn validate_mtls_client_auth(
 fn extract_mtls_thumbprint(
     client: &crate::services::oidc::token::AuthenticatedClient,
     client_cert: &OptionalClientCert,
-) -> Option<String> {
+) -> Option<CertThumbprint> {
     if client.client.tls_client_certificate_bound_access_tokens {
         client_cert.0.as_ref().map(|c| c.thumbprint.clone())
     } else {
