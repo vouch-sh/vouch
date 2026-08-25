@@ -30,8 +30,8 @@ use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
-    create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use askama::Template;
@@ -753,8 +753,7 @@ pub(crate) async fn browser_login_complete(
             authenticator_id: Some(&authenticator.id),
             client_id: &client_id,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(auth_now.as_second()),

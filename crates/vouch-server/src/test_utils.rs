@@ -890,7 +890,7 @@ pub async fn create_test_session(
     auth_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -907,8 +907,7 @@ pub async fn create_test_session(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -951,7 +950,7 @@ pub async fn create_test_session_with_audience(
     audience: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -968,8 +967,7 @@ pub async fn create_test_session_with_audience(
             authenticator_id: Some(auth_id),
             client_id,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: Some(audience),
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -1001,7 +999,7 @@ pub async fn create_test_session_with_audience(
 /// sessions (e.g., the RFC 8693 ID-token fork).
 pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -1017,8 +1015,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             authenticator_id: None,
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -1057,7 +1054,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
     auth_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -1074,8 +1071,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -1111,7 +1107,7 @@ pub async fn create_test_session_with_iat(
     iat: i64,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -1128,8 +1124,7 @@ pub async fn create_test_session_with_iat(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(iat),
@@ -1165,7 +1160,7 @@ pub async fn create_test_session_for_client(
     client_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -1182,8 +1177,7 @@ pub async fn create_test_session_for_client(
             authenticator_id: Some(auth_id),
             client_id,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::Bearer,
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -1219,7 +1213,7 @@ pub async fn create_test_session_with_dpop(
     dpop_jkt: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
@@ -1242,8 +1236,7 @@ pub async fn create_test_session_with_dpop(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: Some(&dpop_proof),
-            mtls_cert_thumbprint: None,
+            binding: TokenBinding::new(Some(&dpop_proof), None),
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),
@@ -1276,10 +1269,10 @@ pub async fn create_test_session_with_mtls(
     user_id: &str,
     email: &str,
     auth_id: &str,
-    mtls_cert_thumbprint: &str,
+    mtls_cert_thumbprint: &crate::services::oidc::mtls::CertThumbprint,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
@@ -1296,8 +1289,7 @@ pub async fn create_test_session_with_mtls(
             authenticator_id: Some(auth_id),
             client_id: &state.config().base_url,
             scope: Some(ScopeSet::all()),
-            dpop_proof: None,
-            mtls_cert_thumbprint: Some(mtls_cert_thumbprint),
+            binding: TokenBinding::new(None, Some(mtls_cert_thumbprint)),
             act: None,
             audience: None,
             auth_time: Some(jiff::Timestamp::now().as_second()),

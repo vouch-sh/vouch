@@ -842,9 +842,14 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
         response["issued_token_type"], ID_TOKEN_TYPE,
         "issued_token_type must report id_token"
     );
+    // RFC 8693 §2.2.1: "If the issued token is not an access token or usable
+    // as an access token, then the "token_type" value "N_A" is used to
+    // indicate that an OAuth 2.0 "token_type" identifier is not applicable in
+    // that context." The exchanged ID token is a federation assertion, not a
+    // credential the client presents to this server.
     assert_eq!(
-        response["token_type"], "Bearer",
-        "ID tokens are not sender-constrained"
+        response["token_type"], "N_A",
+        "an exchanged ID token is not usable as an access token"
     );
 
     let id_token = response["access_token"]

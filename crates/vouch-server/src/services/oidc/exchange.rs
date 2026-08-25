@@ -10,12 +10,12 @@ use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::redact_email;
 use crate::services::auth::{
-    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenIssuanceProof,
+    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
     create_oauth_access_token, decode_token,
 };
+use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
-use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
@@ -187,19 +187,15 @@ pub struct TokenExchangeParams<'a> {
     pub requested_token_type: Option<TokenType>,
     /// OAuth client_id of the requesting client.
     pub client_id: &'a str,
-    /// RFC 9449 §6: the validated DPoP proof binding the issued token via
-    /// `cnf.jkt`. The witness travels instead of its thumbprint so an
-    /// exchanged token cannot be sender-constrained to a key that was never
-    /// proven.
-    pub dpop_proof: Option<&'a ValidatedDpopProof>,
+    /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound. The DPoP
+    /// witness travels instead of its thumbprint so an exchanged token cannot
+    /// be sender-constrained to a key that was never proven.
+    pub binding: TokenBinding<'a>,
     /// Client IP from the TCP peer socket, for temporal policy correlation
     /// (e.g. the exchange-IP-consistency policy).
     pub client_ip: Option<std::net::IpAddr>,
     /// RFC 9396 Section 6: Authorization details for narrowing.
     pub authorization_details: Option<&'a str>,
-    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
-    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
-    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
@@ -515,8 +511,7 @@ pub(crate) async fn exchange_token(
             authenticator_id,
             client_id: params.client_id,
             scope: granted_scope.clone(),
-            dpop_proof: params.dpop_proof,
-            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
+            binding: params.binding,
             act: actor_claim,
             audience,
             // Token exchange does not carry auth_time from the subject token
@@ -596,17 +591,10 @@ pub(crate) async fn exchange_token(
         params.audience
     );
 
-    // RFC 9449 Section 5: token_type is DPoP when the token is sender-constrained
-    let token_type = if params.dpop_proof.is_some() {
-        protocol::ACCESS_TOKEN_TYPE_DPOP
-    } else {
-        protocol::ACCESS_TOKEN_TYPE_BEARER
-    };
-
     Ok(TokenExchangeResult {
         access_token: session_result.token.clone(),
         issued_token_type: TokenType::AccessToken.as_urn().to_string(),
-        token_type: token_type.to_string(),
+        token_type: session_result.token_type.to_string(),
         expires_in,
         scope: granted_scope,
         authorization_details: effective_ad,
@@ -639,6 +627,15 @@ struct IdTokenContext<'a> {
 /// The token carries only the standard OIDC claim set (no AWS tags, no
 /// `authorization_details`) and is never persisted as a session — it is
 /// meant to be presented immediately to an external relying party.
+///
+/// [`IdTokenContext`] carries no [`TokenBinding`], which is the rule rather
+/// than an omission: an ID token is bound when it goes to the party that
+/// proved the key, and this one is minted as an assertion for a third party
+/// (Kubernetes, Vault, AWS/GCP/Azure workload identity) that cannot check a
+/// confirmation — there is no DPoP proof in this exchange for a consumer to
+/// verify a thumbprint against. What protects it is its TTL, its audience,
+/// and TLS. Having no binding to pass is what keeps that decision from
+/// drifting.
 async fn issue_id_token(
     state: &Arc<AppState>,
     ctx: IdTokenContext<'_>,
@@ -745,7 +742,11 @@ async fn issue_id_token(
     Ok(TokenExchangeResult {
         access_token: id_token.into(),
         issued_token_type: TokenType::IdToken.as_urn().to_string(),
-        token_type: protocol::ACCESS_TOKEN_TYPE_BEARER.to_string(),
+        // RFC 8693 §2.2.1: "If the issued token is not an access token or
+        // usable as an access token, then the "token_type" value "N_A" is
+        // used". This token is a federation assertion presented to an external
+        // relying party, not a credential the client presents here.
+        token_type: protocol::TOKEN_TYPE_NOT_APPLICABLE.to_string(),
         expires_in,
         scope: None,
         authorization_details: None,

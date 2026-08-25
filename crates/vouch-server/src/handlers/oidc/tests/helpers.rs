@@ -334,8 +334,8 @@ pub(super) fn make_test_cert_der(cn: &str) -> Vec<u8> {
 }
 
 /// Compute the base64url SHA-256 thumbprint of DER bytes.
-pub(super) fn cert_thumbprint(der: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&SHA256, der).as_ref())
+pub(super) fn cert_thumbprint(der: &[u8]) -> crate::services::oidc::mtls::CertThumbprint {
+    crate::services::oidc::mtls::compute_cert_thumbprint(der)
 }
 
 // ========================================================================

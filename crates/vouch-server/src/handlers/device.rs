@@ -5,8 +5,8 @@ use crate::AppState;
 use crate::db::{self, DeviceAuthState};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
-    create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
@@ -504,8 +504,7 @@ pub(crate) async fn device_token(
                     authenticator_id: Some(&authenticator_id),
                     client_id: &client_id,
                     scope: Some(ScopeSet::all()),
-                    dpop_proof: dpop_proof.as_ref(),
-                    mtls_cert_thumbprint: mtls_cert_thumbprint.as_deref(),
+                    binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),
@@ -545,6 +544,7 @@ pub(crate) async fn device_token(
 
             let token = session_result.token;
             let expires_in = session_result.expires_in;
+            let token_type = session_result.token_type;
 
             // Record issuance like the other token-endpoint grants; the
             // device-code grant otherwise leaves no oauth_token_issued trail.
@@ -574,16 +574,6 @@ pub(crate) async fn device_token(
                 "Device authorization complete for: {}",
                 redact_email(&user_email)
             );
-
-            // RFC 9449 Section 5: token_type is DPoP when the token is
-            // sender-constrained (bound to a DPoP proof key), otherwise
-            // Bearer. RFC-compliant clients that require DPoP protection
-            // MUST discard a response advertising a different token_type.
-            let token_type = if dpop_proof.is_some() {
-                protocol::ACCESS_TOKEN_TYPE_DPOP
-            } else {
-                protocol::ACCESS_TOKEN_TYPE_BEARER
-            };
 
             Ok(Json(DeviceTokenResponse {
                 // Clone the SecretString rather than rebuilding it via

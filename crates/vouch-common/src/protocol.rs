@@ -287,6 +287,20 @@ pub const ACCESS_TOKEN_TYPE_BEARER: &str = "Bearer";
 /// <https://www.rfc-editor.org/rfc/rfc9449#section-5>
 pub const ACCESS_TOKEN_TYPE_DPOP: &str = "DPoP";
 
+/// RFC 8693 §2.2.1 (Successful Response) — `token_type` when the issued token
+/// is not an access token.
+///
+/// > If the issued token is not an access token or usable as an access token,
+/// > then the "token_type" value "N_A" is used to indicate that an OAuth 2.0
+/// > "token_type" identifier is not applicable in that context.
+///
+/// Registered in the IANA "OAuth Access Token Types" subregistry by RFC 8693
+/// §5.1. An exchanged OIDC ID token is a federation assertion, not something
+/// the client presents as an access token, so it carries this value.
+///
+/// <https://www.rfc-editor.org/rfc/rfc8693#section-2.2.1>
+pub const TOKEN_TYPE_NOT_APPLICABLE: &str = "N_A";
+
 /// WebAuthn Level 2 §5.1.3 (Create a New Credential) — registration.
 ///
 /// The client sets `CollectedClientData.type` when building the credential:

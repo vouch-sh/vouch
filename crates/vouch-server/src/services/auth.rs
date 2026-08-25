@@ -20,6 +20,7 @@ use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::webauthn_verify::{self, OriginPolicy};
 use crate::db::{self, Authenticator, SessionPurpose, User};
+use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -30,6 +31,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use vouch_common::protocol;
 
 // ============================================================================
 // Authentication Method References (RFC 8176)
@@ -685,13 +687,11 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub client_id: &'a str,
     /// Granted OAuth scope.
     pub scope: Option<ScopeSet>,
-    /// RFC 9449 §6: the validated DPoP proof whose `jkt` binds this token
-    /// via `cnf.jkt`. Taking the witness rather than a bare thumbprint means
-    /// a sender-constrained token cannot be minted from a string that never
+    /// How this token is bound to its holder (RFC 9449 §6 / RFC 8705 §3).
+    /// Taking the DPoP witness rather than a bare thumbprint means a
+    /// sender-constrained token cannot be minted from a string that never
     /// passed signature, `htm`/`htu`, nonce, and replay validation.
-    pub dpop_proof: Option<&'a ValidatedDpopProof>,
-    /// mTLS certificate thumbprint for sender-constrained binding (RFC 8705).
-    pub mtls_cert_thumbprint: Option<&'a str>,
+    pub binding: TokenBinding<'a>,
     /// Actor claim for delegation chains (token exchange).
     pub act: Option<ActorClaim>,
     /// Optional audience override (for token exchange with explicit audience).
@@ -714,12 +714,89 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub org_domain: Option<&'a str>,
 }
 
+/// How an issued token is bound to the party that may present it.
+///
+/// One value decides both halves of sender-constraining: the `cnf` claim
+/// stamped into the token and the `token_type` advertised for it. Deriving
+/// them separately is what let the two disagree — six call sites each spelled
+/// `if dpop.is_some() { DPoP } else { Bearer }` while `cnf` was built from a
+/// different pair of options a layer away.
+///
+/// DPoP wins when a request carries both: the proof is per-request evidence of
+/// possession, so it is the stronger statement about who holds this token, and
+/// `cnf` has room for only one confirmation method (RFC 7800 §3.1).
+#[derive(Debug, Clone, Copy)]
+pub enum TokenBinding<'a> {
+    /// RFC 9449 §6: bound to the DPoP proof's key, confirmed by `cnf.jkt`.
+    Dpop(&'a ValidatedDpopProof),
+    /// RFC 8705 §3: bound to the client certificate, confirmed by
+    /// `cnf.x5t#S256`.
+    MutualTls(&'a CertThumbprint),
+    /// A bearer token: whoever holds it may present it.
+    Bearer,
+}
+
+impl<'a> TokenBinding<'a> {
+    /// Resolve the binding from the two things a request can carry. Both
+    /// absent is a bearer token; both present is DPoP.
+    #[must_use]
+    pub fn new(
+        dpop_proof: Option<&'a ValidatedDpopProof>,
+        mtls_cert_thumbprint: Option<&'a CertThumbprint>,
+    ) -> Self {
+        match (dpop_proof, mtls_cert_thumbprint) {
+            (Some(proof), _) => Self::Dpop(proof),
+            (None, Some(thumbprint)) => Self::MutualTls(thumbprint),
+            (None, None) => Self::Bearer,
+        }
+    }
+
+    /// The confirmation claim this binding stamps into the token.
+    #[must_use]
+    pub fn cnf(self) -> Option<CnfClaim> {
+        match self {
+            Self::Dpop(proof) => Some(CnfClaim {
+                jkt: Some(proof.jkt.clone()),
+                x5t_s256: None,
+            }),
+            Self::MutualTls(thumbprint) => Some(CnfClaim {
+                jkt: None,
+                x5t_s256: Some(thumbprint.as_str().to_string()),
+            }),
+            Self::Bearer => None,
+        }
+    }
+
+    /// The `token_type` advertised for a token carrying this binding, derived
+    /// from the same `cnf` the token will carry.
+    #[must_use]
+    pub fn token_type(self) -> &'static str {
+        self.cnf()
+            .as_ref()
+            .map_or(protocol::ACCESS_TOKEN_TYPE_BEARER, CnfClaim::token_type)
+    }
+
+    /// The DPoP proof, when this binding is one. Callers that record the
+    /// binding server-side (session rows, introspection) need the thumbprint
+    /// rather than the claim.
+    #[must_use]
+    pub fn dpop_proof(self) -> Option<&'a ValidatedDpopProof> {
+        match self {
+            Self::Dpop(proof) => Some(proof),
+            Self::MutualTls(_) | Self::Bearer => None,
+        }
+    }
+}
+
 /// Result of creating a session token.
 pub(crate) struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
     /// Token lifetime in seconds.
     pub expires_in: u64,
+    /// RFC 6749 §5.1 `token_type`, derived from the binding stamped into the
+    /// token so the advertisement cannot contradict the `cnf` claim.
+    pub token_type: &'static str,
 }
 
 /// Create an OAuth 2.0 access token per RFC 9068.
@@ -780,19 +857,9 @@ pub(crate) async fn create_oauth_access_token(
         .as_ref()
         .is_some_and(|s| s.contains(crate::services::oidc::OAuthScope::Email));
 
-    // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
-    // DPoP (jkt) takes priority over mTLS (x5t#S256).
-    let cnf = match (params.dpop_proof, params.mtls_cert_thumbprint) {
-        (Some(proof), _) => Some(CnfClaim {
-            jkt: Some(proof.jkt.clone()),
-            x5t_s256: None,
-        }),
-        (None, Some(x5t)) => Some(CnfClaim {
-            jkt: None,
-            x5t_s256: Some(x5t.to_string()),
-        }),
-        (None, None) => None,
-    };
+    // RFC 9449 / RFC 8705: the binding decides the confirmation claim and the
+    // advertised token type together.
+    let cnf = params.binding.cnf();
 
     let claims = AccessTokenClaims {
         iss: state.config().base_url.to_string(),
@@ -846,6 +913,7 @@ pub(crate) async fn create_oauth_access_token(
     let expires_in = state.config().session_hours.saturating_mul(3600);
 
     Ok(CreateSessionResult {
+        token_type: params.binding.token_type(),
         token: SecretString::from(token),
         expires_in,
     })

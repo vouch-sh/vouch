@@ -173,7 +173,8 @@ async fn test_rfc8705_cnf_claim_present_in_mtls_bound_token() {
         .expect("x5t#S256 must be a string");
 
     assert_eq!(
-        x5t, thumbprint,
+        x5t,
+        thumbprint.as_str(),
         "RFC 8705: x5t#S256 in cnf must match the certificate thumbprint"
     );
 }
@@ -297,7 +298,7 @@ async fn test_rfc8705_token_mtls_authorization_code_succeeds() {
     let x5t = claims["cnf"]["x5t#S256"]
         .as_str()
         .expect("cnf.x5t#S256 must be present in mTLS-bound token");
-    assert_eq!(x5t, thumbprint);
+    assert_eq!(x5t, thumbprint.as_str());
 }
 
 /// RFC 8705 §2.1: An already-consumed authorization code must be rejected
@@ -702,5 +703,67 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
             .unwrap_or("")
             .contains("DPoP scheme requires DPoP proof header"),
         "error_description must mention DPoP proof requirement: {body}"
+    );
+}
+
+/// One response, one binding. A certificate-bound client used to receive
+/// `cnf.x5t#S256` in its access token and no `cnf` at all in the ID token
+/// issued beside it, because the ID token's confirmation was built from the
+/// DPoP proof alone. Both tokens now carry the binding the client actually
+/// proved.
+///
+/// RFC 8705 §3.1 defines `x5t#S256` for certificate-bound tokens; RFC 7800
+/// §3.1 permits `cnf` in any JWT ("The 'cnf' claim is used in the JWT to
+/// contain members used to identify the proof-of-possession key"). Neither
+/// requires it on an ID token — binding the token that goes to the party that
+/// proved the key is this server's rule, and this test is what keeps the two
+/// token kinds from drifting apart again.
+#[tokio::test]
+async fn test_rfc8705_id_token_carries_the_same_binding_as_the_access_token() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "mtls-id-token-cnf@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (client, pkcs8_bytes) =
+        create_private_key_jwt_client_with_cert_binding(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("mtls-id-token-cnf");
+    let thumbprint = cert_thumbprint(&cert_der);
+
+    let code =
+        issue_test_authorization_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback"),
+        client.client_id,
+    );
+
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/token", &body, &[], Some(cert_der)).await;
+    assert_eq!(status, StatusCode::OK, "{response_body}");
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    let access_claims = decode_jwt_payload(json["access_token"].as_str().expect("access_token"));
+    let id_claims = decode_jwt_payload(json["id_token"].as_str().expect("id_token"));
+
+    assert_eq!(
+        access_claims["cnf"]["x5t#S256"].as_str(),
+        Some(thumbprint.as_str()),
+        "the access token must be certificate-bound"
+    );
+    assert_eq!(
+        id_claims["cnf"]["x5t#S256"].as_str(),
+        Some(thumbprint.as_str()),
+        "the ID token must carry the same confirmation as the access token"
+    );
+    assert!(
+        id_claims["cnf"]["jkt"].is_null(),
+        "no DPoP proof was presented, so there is no jkt to confirm"
     );
 }

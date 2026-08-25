@@ -19,12 +19,12 @@ use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, SenderConstraintProof, TokenIssuanceProof, create_oauth_access_token,
-    lookup_and_verify_authenticator, verify_login_assertion,
+    LoginAssertionParams, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
+use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::token::AuthenticatedClient;
-use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::Challenge;
-use vouch_common::protocol;
 
 /// State embedded in the challenge JWT (must match the challenge endpoint).
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,17 +65,14 @@ pub struct Fido2AssertionParams<'a> {
     pub assertion: &'a str,
     /// Authenticated client (via `private_key_jwt`).
     pub client: &'a AuthenticatedClient,
-    /// Validated DPoP proof (if present).
-    pub dpop_proof: Option<ValidatedDpopProof>,
+    /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
+    pub binding: TokenBinding<'a>,
     /// Requested scope.
     pub scope: Option<&'a str>,
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
     pub client_info: crate::db::ClientInfo,
-    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
-    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
-    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -373,8 +369,7 @@ pub(crate) async fn exchange_fido2_assertion(
             authenticator_id: Some(&authenticator.id),
             client_id: &params.client.client.client_id,
             scope: Some(scope.clone()),
-            dpop_proof: params.dpop_proof.as_ref(),
-            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
+            binding: params.binding,
             act: None,
             audience: None,
             auth_time: Some(now),
@@ -403,15 +398,9 @@ pub(crate) async fn exchange_fido2_assertion(
     )
     .await;
 
-    let token_type = if params.dpop_proof.is_some() {
-        protocol::ACCESS_TOKEN_TYPE_DPOP
-    } else {
-        protocol::ACCESS_TOKEN_TYPE_BEARER
-    };
-
     Ok(Fido2AssertionResult {
         access_token: session_result.token.clone(),
-        token_type: token_type.to_string(),
+        token_type: session_result.token_type.to_string(),
         expires_in: session_result.expires_in,
         scope: Some(scope),
         email: user.email,

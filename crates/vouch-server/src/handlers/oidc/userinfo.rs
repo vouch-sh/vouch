@@ -435,7 +435,12 @@ fn verify_mtls_binding(
     };
 
     // Constant-time comparison prevents timing-based thumbprint enumeration.
-    let is_valid: bool = cert.thumbprint.as_bytes().ct_eq(expected.as_bytes()).into();
+    let is_valid: bool = cert
+        .thumbprint
+        .as_str()
+        .as_bytes()
+        .ct_eq(expected.as_bytes())
+        .into();
     if !is_valid {
         return Err(Box::new(oauth_error(
             StatusCode::UNAUTHORIZED,

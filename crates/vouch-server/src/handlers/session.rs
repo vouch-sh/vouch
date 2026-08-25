@@ -236,6 +236,7 @@ async fn extract_resource_token(
             Some(cert) => {
                 let is_match: bool = cert
                     .thumbprint
+                    .as_str()
                     .as_bytes()
                     .ct_eq(expected_thumbprint.as_bytes())
                     .into();

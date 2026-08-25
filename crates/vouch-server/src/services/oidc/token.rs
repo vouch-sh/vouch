@@ -17,7 +17,7 @@ use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
 use crate::services::auth::{
     AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
-    TokenIssuanceProof, create_oauth_access_token, decode_token,
+    TokenBinding, TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
@@ -27,7 +27,6 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
-use vouch_common::protocol;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
@@ -56,17 +55,14 @@ pub struct AuthCodeExchangeParams<'a> {
     pub authenticated_client: Option<&'a AuthenticatedClient>,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
-    /// RFC 9449 Section 5: Validated DPoP proof (if present).
-    pub dpop_proof: Option<ValidatedDpopProof>,
+    /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
+    pub binding: TokenBinding<'a>,
     /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
     pub client_id: &'a str,
     /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
     pub authorization_details: Option<&'a str>,
-    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
-    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
-    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -332,7 +328,7 @@ pub(crate) async fn exchange_authorization_code(
         &auth_code,
         params.redirect_uri,
         params.code_verifier,
-        params.dpop_proof.as_ref(),
+        params.binding.dpop_proof(),
     )?;
 
     // RFC 9396 + RFC 8707: Resolve authorization details and resource audience
@@ -372,8 +368,7 @@ pub(crate) async fn exchange_authorization_code(
             authenticator_id: Some(&auth_code.authenticator_id),
             client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
-            dpop_proof: params.dpop_proof.as_ref(),
-            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
+            binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
@@ -403,7 +398,7 @@ pub(crate) async fn exchange_authorization_code(
             email: &auth_code.email,
             nonce: auth_code.nonce.as_deref(),
             expires_in,
-            dpop_proof: params.dpop_proof.as_ref(),
+            binding: params.binding,
             scope: &auth_code.scope,
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
@@ -425,8 +420,8 @@ pub(crate) async fn exchange_authorization_code(
                 ip_address: None,
                 user_agent: None,
                 details: params
-                    .dpop_proof
-                    .as_ref()
+                    .binding
+                    .dpop_proof()
                     .map(|p| format!("dpop_jkt={}", p.jkt))
                     .as_deref(),
             },
@@ -434,14 +429,7 @@ pub(crate) async fn exchange_authorization_code(
         .await;
     }
 
-    // RFC 9449 Section 5: Token type is DPoP if proof was provided, otherwise Bearer
-    let token_type = if params.dpop_proof.is_some() {
-        protocol::ACCESS_TOKEN_TYPE_DPOP
-    } else {
-        protocol::ACCESS_TOKEN_TYPE_BEARER
-    };
-
-    if let Some(ref proof) = params.dpop_proof {
+    if let Some(proof) = params.binding.dpop_proof() {
         tracing::info!(
             "Issued DPoP-bound token for user {} with jkt={}",
             redact_email(&auth_code.email),
@@ -451,7 +439,7 @@ pub(crate) async fn exchange_authorization_code(
 
     Ok(AuthCodeExchangeResult {
         access_token,
-        token_type: token_type.to_string(),
+        token_type: session_result.token_type.to_string(),
         expires_in,
         id_token: id_token.into(),
         scope: auth_code.scope,
@@ -889,9 +877,10 @@ struct IdTokenParams<'a> {
     email: &'a str,
     nonce: Option<&'a str>,
     expires_in: u64,
-    /// RFC 9449 §6 / RFC 7800 §3.1: the validated DPoP proof supplying the
-    /// ID token's `cnf.jkt`.
-    dpop_proof: Option<&'a ValidatedDpopProof>,
+    /// RFC 9449 §6 / RFC 8705 §3 / RFC 7800 §3.1: how this ID token is bound.
+    /// The same binding the access token carries, so a client that proved a
+    /// key receives the same confirmation on both tokens of one response.
+    binding: TokenBinding<'a>,
     scope: &'a ScopeSet,
     /// Time when the user authenticated (FIDO2 session creation time).
     auth_time: Option<i64>,
@@ -916,11 +905,10 @@ async fn generate_id_token(
         .checked_add(expires_seconds)
         .ok_or_else(|| ServiceError::Internal("Expiration time overflow".to_string()))?;
 
-    // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
-    let cnf = params.dpop_proof.map(|proof| CnfClaim {
-        jkt: Some(proof.jkt.clone()),
-        x5t_s256: None,
-    });
+    // RFC 9449 / RFC 8705 / RFC 7800 §3.1: the ID token goes to the client
+    // that proved the key, so it carries the same confirmation as the access
+    // token issued beside it — `jkt` for DPoP, `x5t#S256` for mTLS.
+    let cnf = params.binding.cnf();
 
     let has_email = params.scope.contains(OAuthScope::Email);
 

@@ -133,7 +133,7 @@ async fn test_mtls_bound_token_without_cert_rejected() {
         &user.id,
         &user.email,
         &auth_id,
-        "fake-cert-thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        &crate::services::oidc::mtls::compute_cert_thumbprint(b"fake-cert-der"),
     )
     .await;
 
