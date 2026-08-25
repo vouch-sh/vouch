@@ -35,6 +35,62 @@ use anyhow::{Context, Result};
 /// while preventing stack overflow from pathological input.
 pub const MAX_BER_DEPTH: usize = 32;
 
+/// Identifier octets, per ITU-T X.690 Section 8.1.2.
+///
+/// An identifier octet packs three things: the class in bits 8-7, the
+/// primitive/constructed flag in bit 6, and the tag number in bits 5-1. The
+/// universal constants below are those bits already combined, which is why
+/// `SEQUENCE` is `0x30` rather than the tag number 16 — bit 6 is set because
+/// SEQUENCE is always constructed.
+pub(crate) mod tag {
+    /// Context-specific class, bits 8-7 = `10` (X.690 Section 8.1.2.2).
+    const CONTEXT_SPECIFIC: u8 = 0x80;
+
+    /// Constructed encoding, bit 6 (X.690 Section 8.1.2.5).
+    const CONSTRUCTED: u8 = 0x20;
+
+    /// Universal 4, primitive: `OCTET STRING`.
+    pub(crate) const OCTET_STRING: u8 = 0x04;
+
+    /// Universal 16, constructed: `SEQUENCE`.
+    pub(crate) const SEQUENCE: u8 = 0x30;
+
+    /// Universal 17, constructed: `SET`.
+    pub(crate) const SET: u8 = 0x31;
+
+    /// `[n]` context-specific, primitive.
+    ///
+    /// An IMPLICIT tag over a primitive type keeps the primitive bit clear
+    /// (X.690 Section 8.1.2.2).
+    pub(crate) const fn context_primitive(n: u8) -> u8 {
+        CONTEXT_SPECIFIC | n
+    }
+
+    /// `[n]` context-specific, constructed.
+    ///
+    /// Produced by EXPLICIT tagging, and by IMPLICIT tagging over a type that
+    /// is itself constructed — including an OCTET STRING split into chunks
+    /// for indefinite-length encoding.
+    pub(crate) const fn context_constructed(n: u8) -> u8 {
+        CONTEXT_SPECIFIC | CONSTRUCTED | n
+    }
+}
+
+/// Length octets, per ITU-T X.690 Section 8.1.3.
+///
+/// Separate from [`tag`] because the same byte value means different things
+/// in the two positions: `0x80` as a length octet marks indefinite length,
+/// while as an identifier octet it is the context-specific class bit.
+pub(crate) mod length {
+    /// Indefinite length (X.690 Section 8.1.3.6). The value runs until an
+    /// end-of-contents marker.
+    pub(crate) const INDEFINITE: u8 = 0x80;
+
+    /// Values below this are short-form lengths encoded in the octet itself
+    /// (X.690 Section 8.1.3.4).
+    pub(crate) const SHORT_FORM_MAX: u8 = 0x80;
+}
+
 /// Lightweight ASN.1 BER/DER parser for extracting fields from CMS structures.
 ///
 /// This is intentionally minimal -- it only handles the subset of BER/DER needed
@@ -101,9 +157,9 @@ impl<'a> DerParser<'a> {
             .get(self.pos)
             .context("BER: missing length byte")?;
 
-        if first == 0x80 {
+        if first == length::INDEFINITE {
             // Indefinite length: scan for end-of-contents (0x00 0x00)
-            self.pos = self.pos.saturating_add(1); // consume the 0x80 length byte
+            self.pos = self.pos.saturating_add(1); // consume the indefinite-length octet
             let content_start = self.pos;
 
             // Walk nested TLVs to find the matching EOC
@@ -178,7 +234,7 @@ impl<'a> DerParser<'a> {
             .get(self.pos)
             .context("BER: missing length in skip")?;
 
-        if first == 0x80 {
+        if first == length::INDEFINITE {
             // Nested indefinite length -- recurse by scanning for EOC
             self.pos = self.pos.saturating_add(1);
             loop {
@@ -220,10 +276,10 @@ impl<'a> DerParser<'a> {
             .context("DER: missing length byte")?;
         self.pos = self.pos.saturating_add(1);
 
-        if first < 0x80 {
+        if first < length::SHORT_FORM_MAX {
             // Short form
             Ok(first as usize)
-        } else if first == 0x80 {
+        } else if first == length::INDEFINITE {
             anyhow::bail!("DER: indefinite length not supported");
         } else {
             // Long form
@@ -255,7 +311,7 @@ impl<'a> DerParser<'a> {
     /// Expect an OCTET STRING (tag 0x04) and return its contents.
     pub fn expect_octet_string(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv()?;
-        if tag != 0x04 {
+        if tag != tag::OCTET_STRING {
             anyhow::bail!("DER: expected OCTET STRING (0x04), got 0x{tag:02x}");
         }
         Ok(value)
@@ -266,7 +322,7 @@ impl<'a> DerParser<'a> {
     /// Expect a SEQUENCE, tolerating BER indefinite length.
     pub fn expect_sequence_ber(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv_ber()?;
-        if tag != 0x30 {
+        if tag != tag::SEQUENCE {
             anyhow::bail!("BER: expected SEQUENCE (0x30), got 0x{tag:02x}");
         }
         Ok(value)
@@ -274,7 +330,7 @@ impl<'a> DerParser<'a> {
 
     /// Expect context-specific EXPLICIT [n], tolerating BER indefinite length.
     pub fn expect_context_explicit_ber(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0xa0 | n;
+        let expected_tag = tag::context_constructed(n);
         let (tag, value) = self.read_tlv_ber()?;
         if tag != expected_tag {
             anyhow::bail!("BER: expected context [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
@@ -285,7 +341,7 @@ impl<'a> DerParser<'a> {
     /// Expect a SET, tolerating BER indefinite length.
     pub fn expect_set_ber(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv_ber()?;
-        if tag != 0x31 {
+        if tag != tag::SET {
             anyhow::bail!("BER: expected SET (0x31), got 0x{tag:02x}");
         }
         Ok(value)
@@ -312,8 +368,8 @@ impl<'a> DerParser<'a> {
     /// Returns the reassembled content as `Vec<u8>` since constructed encoding
     /// requires concatenation of multiple chunks.
     pub fn read_implicit_octet_string_ber(&mut self, n: u8) -> Result<Vec<u8>> {
-        let primitive_tag = 0x80 | n;
-        let constructed_tag = 0xa0 | n;
+        let primitive_tag = tag::context_primitive(n);
+        let constructed_tag = tag::context_constructed(n);
         let (tag, value) = self.read_tlv_ber()?;
 
         if tag == primitive_tag {
@@ -668,6 +724,47 @@ mod tests {
         assert!(
             msg.contains("expected implicit"),
             "Expected implicit tag error, got: {msg}"
+        );
+    }
+
+    /// The universal constants are identifier octets, not tag numbers: the
+    /// class and constructed bits are already folded in.
+    #[test]
+    fn universal_identifier_octets_carry_their_class_bits() {
+        assert_eq!(tag::OCTET_STRING, 0x04, "universal 4, primitive");
+        assert_eq!(tag::SEQUENCE, 0x30, "universal 16 with bit 6 set");
+        assert_eq!(tag::SET, 0x31, "universal 17 with bit 6 set");
+    }
+
+    /// Context-specific tags compose the class bit, the constructed bit and
+    /// the tag number, which is what `0x80|n` and `0xa0|n` were spelling.
+    #[test]
+    fn context_tags_compose_class_and_constructed_bits() {
+        assert_eq!(tag::context_primitive(0), 0x80);
+        assert_eq!(tag::context_primitive(2), 0x82);
+        assert_eq!(tag::context_constructed(0), 0xa0);
+        assert_eq!(tag::context_constructed(2), 0xa2);
+
+        // The constructed form is the primitive form with bit 6 set.
+        for n in 0..16 {
+            assert_eq!(
+                tag::context_constructed(n),
+                tag::context_primitive(n) | 0x20,
+                "tag [{n}]"
+            );
+        }
+    }
+
+    /// `0x80` means indefinite length in a length octet and context-specific
+    /// class in an identifier octet. The two modules keep that apart.
+    #[test]
+    fn indefinite_length_and_context_class_share_a_byte_value() {
+        assert_eq!(length::INDEFINITE, 0x80);
+        assert_eq!(tag::context_primitive(0), 0x80);
+        assert_eq!(
+            length::SHORT_FORM_MAX,
+            0x80,
+            "lengths below this are encoded in the octet itself"
         );
     }
 }
