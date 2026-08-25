@@ -9,8 +9,7 @@ use crate::{tr, tr_args};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use secrecy::{ExposeSecret, SecretString};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use vouch_common::{ApiError, protocol};
 
 /// Total timeout for interactive CLI operations.
@@ -339,93 +338,6 @@ impl HttpClient for ReqwestClient {
     }
 }
 
-/// Helper trait for common HTTP operations with JSON.
-pub trait HttpClientExt: HttpClient {
-    /// POST JSON and receive JSON response.
-    fn post_json<Req, Resp>(
-        &self,
-        url: &str,
-        body: &Req,
-    ) -> impl std::future::Future<Output = Result<Resp>> + Send
-    where
-        Req: Serialize + Sync,
-        Resp: DeserializeOwned,
-    {
-        async move {
-            let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
-            let response = self
-                .request(
-                    "POST",
-                    url,
-                    Some(&json),
-                    Some("application/json"),
-                    None,
-                    None,
-                )
-                .await?;
-            handle_response(response)
-        }
-    }
-
-    /// POST JSON with authentication and receive JSON response.
-    fn post_json_authenticated<Req, Resp>(
-        &self,
-        url: &str,
-        body: &Req,
-        token: &SecretString,
-    ) -> impl std::future::Future<Output = Result<Resp>> + Send
-    where
-        Req: Serialize + Sync,
-        Resp: DeserializeOwned,
-    {
-        let auth = format!("{} {}", protocol::AUTH_SCHEME_BEARER, token.expose_secret());
-        async move {
-            let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
-            let response = self
-                .request(
-                    "POST",
-                    url,
-                    Some(&json),
-                    Some("application/json"),
-                    Some(&auth),
-                    None,
-                )
-                .await?;
-            handle_response(response)
-        }
-    }
-
-    /// POST form data and receive JSON response.
-    fn post_form<Req, Resp>(
-        &self,
-        url: &str,
-        body: &Req,
-    ) -> impl std::future::Future<Output = Result<Resp>> + Send
-    where
-        Req: Serialize + Sync,
-        Resp: DeserializeOwned,
-    {
-        async move {
-            let form =
-                serde_urlencoded::to_string(body).context(tr!("err-failed-serialize-form-data"))?;
-            let response = self
-                .request(
-                    "POST",
-                    url,
-                    Some(form.as_bytes()),
-                    Some(protocol::CONTENT_TYPE_FORM_URLENCODED),
-                    None,
-                    None,
-                )
-                .await?;
-            handle_response(response)
-        }
-    }
-}
-
-// Implement HttpClientExt for all HttpClient implementations
-impl<T: HttpClient> HttpClientExt for T {}
-
 /// Convert an HTTP error status and body into an actionable error message.
 ///
 /// Shared logic used by both `VouchClient` (reqwest-based) and the
@@ -451,16 +363,6 @@ pub fn format_http_error(status: u16, error_text: &str) -> anyhow::Error {
             "err-unexpected-server-response",
             status = status.to_string()
         )),
-    }
-}
-
-/// Handle HTTP response, parsing JSON or error.
-fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Resp> {
-    if response.is_success() {
-        response.json()
-    } else {
-        let error_text = response.text().unwrap_or_default();
-        Err(format_http_error(response.status, &error_text))
     }
 }
 
@@ -835,36 +737,6 @@ mod tests {
         // Should fall through to status-based message since it can't parse as ApiError
         let err = format_http_error(400, body);
         assert!(err.to_string().contains("unexpected server response"));
-    }
-
-    #[test]
-    fn test_handle_response_success() {
-        let response = HttpResponse::new(200, br#"{"key":"value"}"#.to_vec());
-        let result: Result<serde_json::Value> = handle_response(response);
-        assert!(result.is_ok());
-        let val = result.unwrap();
-        assert_eq!(val.get("key").and_then(|v| v.as_str()), Some("value"));
-    }
-
-    #[test]
-    fn test_handle_response_success_invalid_json() {
-        let response = HttpResponse::new(200, b"not json".to_vec());
-        let result: Result<serde_json::Value> = handle_response(response);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_handle_response_error_status() {
-        let response = HttpResponse::new(401, b"{}".to_vec());
-        let result: Result<serde_json::Value> = handle_response(response);
-        assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("not authenticated")
-        );
     }
 
     // =========================================================================
