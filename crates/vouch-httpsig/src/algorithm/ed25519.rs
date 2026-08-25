@@ -61,8 +61,8 @@ impl std::fmt::Debug for Ed25519Signer {
 }
 
 impl SigningAlgorithm for Ed25519Signer {
-    fn algorithm_id(&self) -> &str {
-        "ed25519"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::Ed25519
     }
 
     fn key_id(&self) -> &str {
@@ -92,8 +92,8 @@ impl Ed25519Verifier {
 }
 
 impl VerifyingAlgorithm for Ed25519Verifier {
-    fn algorithm_id(&self) -> &str {
-        "ed25519"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::Ed25519
     }
 
     fn verify(&self, base: &[u8], sig: &[u8]) -> Result<(), HttpSigError> {
@@ -143,10 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn test_algorithm_id() {
+    fn test_algorithm_identifier() {
         let signer = Ed25519Signer::generate("k").unwrap();
-        assert_eq!(signer.algorithm_id(), "ed25519");
-        assert_eq!(signer.verifier().algorithm_id(), "ed25519");
+        assert_eq!(signer.algorithm().as_str(), "ed25519");
+        assert_eq!(signer.verifier().algorithm().as_str(), "ed25519");
     }
 
     #[test]

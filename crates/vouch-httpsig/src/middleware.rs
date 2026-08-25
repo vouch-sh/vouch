@@ -43,12 +43,14 @@ use crate::error::HttpSigError;
 use crate::sig_policy::requires_signature;
 use crate::signature_params::SignatureParams;
 use crate::verify::{DigestEnforced, extract_signature_labels, verify_request_signature};
+use std::sync::LazyLock;
 
 /// Minimum components a signature must cover for the middleware to accept it.
 ///
 /// Ensures signatures protect the request method and target, preventing
 /// replay attacks where an attacker moves a signature to a different endpoint.
-const REQUIRED_COVERAGE: &[&str] = &["@method", "@path"];
+static REQUIRED_COVERAGE: LazyLock<[ComponentIdentifier; 2]> =
+    LazyLock::new(|| [ComponentIdentifier::method(), ComponentIdentifier::path()]);
 
 /// Maximum signed request body buffered for Content-Digest verification.
 ///
@@ -94,7 +96,11 @@ fn build_accept_signature(has_body: bool) -> Option<http::HeaderValue> {
     // Components-only params: no created/keyid so serialize() emits no trailing `;`.
     let params = SignatureParams {
         components,
-        alg: Some("ecdsa-p256-sha256".to_string()),
+        alg: Some(
+            crate::algorithm::SignatureAlgorithm::EcdsaP256Sha256
+                .as_str()
+                .to_string(),
+        ),
         keyid: None,
         created: None,
         expires: None,
@@ -386,7 +392,7 @@ pub async fn require_signature<R: KeyResolver>(
         Ok(verified) => {
             // Reject signatures that don't cover minimum required components;
             // advertise the expected set so the client can fix and retry.
-            let covered = match verified.require_coverage(REQUIRED_COVERAGE) {
+            let covered = match verified.require_coverage(&*REQUIRED_COVERAGE) {
                 Ok(covered) => covered,
                 Err(e) => {
                     tracing::debug!(

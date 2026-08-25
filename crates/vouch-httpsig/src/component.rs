@@ -68,6 +68,24 @@ pub enum ComponentIdentifier {
 }
 
 impl ComponentIdentifier {
+    /// The bare component name, without parameters.
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Self::Field { name, .. } => name.clone(),
+            Self::Derived { component, .. } => derived_component_name(component),
+        }
+    }
+
+    /// Whether this covered component satisfies a requirement for `required`.
+    ///
+    /// Compares by name: a requirement for `@path` is met by the signature's
+    /// `@path` regardless of the parameters either carries.
+    #[must_use]
+    pub fn covers(&self, required: &Self) -> bool {
+        self.name() == required.name()
+    }
+
     /// Create a derived `@method` component.
     #[must_use]
     pub fn method() -> Self {

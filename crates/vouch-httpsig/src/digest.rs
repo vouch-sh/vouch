@@ -22,11 +22,28 @@ pub enum DigestAlgorithm {
 }
 
 impl DigestAlgorithm {
+    /// Every algorithm this crate accepts, paired with its RFC 9530 name.
+    ///
+    /// Both directions read this table, so adding a variant cannot leave the
+    /// parse side stale — the compiler rejects a missing match arm in
+    /// `algorithm_name`, and `from_name` iterates the table rather than
+    /// repeating it.
+    const NAMED: &'static [(Self, &'static str)] =
+        &[(Self::Sha256, "sha-256"), (Self::Sha512, "sha-512")];
+
     fn algorithm_name(self) -> &'static str {
         match self {
             Self::Sha256 => "sha-256",
             Self::Sha512 => "sha-512",
         }
+    }
+
+    /// Resolve an RFC 9530 algorithm name, or `None` when unrecognised.
+    fn from_name(name: &str) -> Option<Self> {
+        Self::NAMED
+            .iter()
+            .find(|(_, known)| *known == name)
+            .map(|(algorithm, _)| *algorithm)
     }
 
     fn digest_algorithm(self) -> &'static digest::Algorithm {
@@ -81,10 +98,8 @@ pub fn verify_content_digest(header_value: &str, body: &[u8]) -> Result<(), Http
     let mut found_recognized = false;
 
     for (algo_name, member) in &dict.entries {
-        let algorithm = match algo_name.as_str() {
-            "sha-256" => DigestAlgorithm::Sha256,
-            "sha-512" => DigestAlgorithm::Sha512,
-            _ => continue,
+        let Some(algorithm) = DigestAlgorithm::from_name(algo_name.as_str()) else {
+            continue;
         };
 
         let expected = match member {
