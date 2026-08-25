@@ -7,6 +7,7 @@ use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::error::ServiceError;
+use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{ClientAuthProof, ParCreationProof};
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
@@ -176,9 +177,9 @@ impl ClientAuthFields for ParRequest {
 )]
 pub(crate) async fn par(
     State(state): State<Arc<AppState>>,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<ParRequest>,
+    OAuthForm(params): OAuthForm<ParRequest>,
 ) -> Response {
     // RFC 9126 Section 2.1: request_uri MUST NOT be provided in a PAR request
     if params.request_uri.is_some() {

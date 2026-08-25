@@ -77,22 +77,14 @@ pub struct SubjectToken<'a> {
 }
 
 impl<'a> SubjectToken<'a> {
-    /// Pair the two wire parameters.
+    /// Pair the token with its declared type. Both parameters are REQUIRED,
+    /// so the caller resolves their presence and this takes them by value.
     ///
     /// # Errors
     ///
-    /// `invalid_request` when either REQUIRED parameter is absent, or when the
-    /// declared type is one this server does not accept.
-    pub fn from_params(
-        token: Option<&'a SecretString>,
-        token_type: Option<&str>,
-    ) -> ServiceResult<Self> {
-        let (Some(token), Some(urn)) = (token, token_type) else {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "subject_token and subject_token_type are both required",
-            ));
-        };
+    /// `invalid_request` when the declared type is one this server does not
+    /// accept.
+    pub fn new(token: &'a SecretString, urn: &str) -> ServiceResult<Self> {
         let token_type = TokenType::parse(urn).ok_or_else(|| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,
@@ -970,22 +962,13 @@ mod tests {
             .expect_err("actor_token_type MUST NOT be included without actor_token");
     }
 
-    #[test]
-    fn test_subject_token_requires_both_parameters() {
-        let token = SecretString::from("tok");
-        SubjectToken::from_params(None, Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
-            .expect_err("subject_token is REQUIRED");
-        SubjectToken::from_params(Some(&token), None).expect_err("subject_token_type is REQUIRED");
-        SubjectToken::from_params(None, None).expect_err("both are REQUIRED");
-    }
-
     /// Every [`TokenType`] is accepted as a subject type — this is the subset
     /// that must stay wider than [`ActorToken`]'s.
     #[test]
     fn test_subject_token_accepts_every_token_type() {
         let token = SecretString::from("tok");
         for token_type in [TokenType::AccessToken, TokenType::IdToken, TokenType::Jwt] {
-            let subject = SubjectToken::from_params(Some(&token), Some(token_type.as_urn()))
+            let subject = SubjectToken::new(&token, token_type.as_urn())
                 .expect("every token type is a valid subject type");
             assert_eq!(subject.token_type, token_type);
             assert_eq!(subject.token.expose_secret(), "tok");
@@ -995,7 +978,7 @@ mod tests {
     #[test]
     fn test_subject_token_rejects_unsupported_type() {
         let token = SecretString::from("tok");
-        SubjectToken::from_params(Some(&token), Some("urn:ietf:params:oauth:token-type:saml2"))
+        SubjectToken::new(&token, "urn:ietf:params:oauth:token-type:saml2")
             .expect_err("saml2 is not a subject type this server accepts");
     }
 
@@ -1004,8 +987,8 @@ mod tests {
     #[test]
     fn test_subject_and_actor_tokens_are_redacted_in_debug() {
         let token = SecretString::from("exchange-secret-token");
-        let subject = SubjectToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_JWT))
-            .expect("valid subject pair");
+        let subject =
+            SubjectToken::new(&token, protocol::TOKEN_TYPE_JWT).expect("valid subject pair");
         let actor = ActorToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_JWT))
             .expect("valid actor pair");
 

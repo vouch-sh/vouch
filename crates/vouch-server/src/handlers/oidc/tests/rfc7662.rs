@@ -851,3 +851,37 @@ async fn test_introspection_m2m_client_credentials_token_is_active() {
         "M2M token must introspect as active despite having no user row: {response}"
     );
 }
+
+/// RFC 6749 §3.2, which RFC 7662 §2.1 inherits for its error responses:
+/// "Parameters sent without a value MUST be treated as if they were omitted
+/// from the request." `token` is REQUIRED, so `token=` is a request missing it
+/// rather than one introspecting the empty string.
+#[tokio::test]
+async fn test_introspect_empty_token_is_treated_as_omitted() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "introspect-empty@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (empty_status, empty_body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        "token=",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let (omitted_status, omitted_body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        "",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(empty_status, omitted_status);
+    assert_eq!(
+        empty_body, omitted_body,
+        "`token=` must answer exactly as an omitted `token`"
+    );
+    assert_eq!(empty_status, StatusCode::BAD_REQUEST, "{empty_body}");
+}

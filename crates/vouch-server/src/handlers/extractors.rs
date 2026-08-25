@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use http::request::Parts;
 use serde::Deserialize;
 
@@ -108,6 +109,115 @@ where
                 rejection.body_text(),
             )),
         }
+    }
+}
+
+/// Deserialize form-encoded parameters with the empty-valued ones dropped.
+///
+/// RFC 6749 §3.1 (authorization endpoint) and §3.2 (token endpoint) carry the
+/// same paragraph:
+///
+/// > Parameters sent without a value MUST be treated as if they were omitted
+/// > from the request. The authorization server MUST ignore unrecognized
+/// > request parameters. Request and response parameters MUST NOT be included
+/// > more than once.
+///
+/// Dropping the empty-valued pairs before deserialization is what makes
+/// `scope=` and an omitted `scope` arrive as the same `None`. Unrecognized
+/// parameters are ignored by `T`'s derived deserializer, which also rejects a
+/// repeated recognized one — RFC 6749 §5.2 defines `invalid_request` as
+/// covering a request that "includes a parameter more than once". A repeated
+/// *unrecognized* parameter stays ignored, since the sentence before it
+/// requires exactly that.
+fn deserialize_present_params<T: serde::de::DeserializeOwned>(encoded: &[u8]) -> Result<T, String> {
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_bytes(encoded).map_err(|e| e.to_string())?;
+    let present: Vec<(String, String)> = pairs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    let reencoded = serde_urlencoded::to_string(&present).map_err(|e| e.to_string())?;
+    serde_urlencoded::from_str::<T>(&reencoded).map_err(|e| e.to_string())
+}
+
+/// Build the OAuth `invalid_request` envelope (RFC 6749 §5.2) for a request
+/// whose parameters could not be read.
+fn reject_oauth_params(description: String) -> axum::response::Response {
+    ServiceError::oauth(crate::error::OAuthErrorCode::InvalidRequest, description)
+        .into_oauth_response()
+        .into_response()
+}
+
+/// Form-body extractor for the OAuth endpoints, applying the RFC 6749 §3.2
+/// parameter rules that `axum::Form` does not — see
+/// [`deserialize_present_params`].
+///
+/// Rejections carry the OAuth error envelope rather than axum's `text/plain`
+/// body, so a client parsing `error`/`error_description` reads a malformed
+/// request the same way it reads every other failure.
+pub(crate) struct OAuthForm<T>(pub T);
+
+impl<T, S> FromRequest<S> for OAuthForm<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        // RFC 6749 §4.1.3: request parameters are sent "in the HTTP request
+        // entity-body using the application/x-www-form-urlencoded format".
+        // Any other media type is unsupported rather than malformed.
+        let is_form = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                // The media type may carry parameters (`; charset=utf-8`).
+                let media_type = v.split(';').next().unwrap_or(v).trim();
+                media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            });
+        if !is_form {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                axum::Json(crate::error::OAuthErrorResponse {
+                    error: crate::error::OAuthErrorCode::InvalidRequest
+                        .as_str()
+                        .to_string(),
+                    error_description: Some(
+                        "Expected application/x-www-form-urlencoded request body".to_string(),
+                    ),
+                    error_uri: None,
+                }),
+            )
+                .into_response());
+        }
+
+        let body = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| reject_oauth_params(e.body_text()))?;
+
+        deserialize_present_params(&body)
+            .map(Self)
+            .map_err(reject_oauth_params)
+    }
+}
+
+/// Query-string extractor for the OAuth endpoints, applying the RFC 6749 §3.1
+/// parameter rules that `axum::extract::Query` does not — see
+/// [`deserialize_present_params`]. The authorization endpoint's counterpart to
+/// [`OAuthForm`].
+pub(crate) struct OAuthQuery<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for OAuthQuery<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let query = parts.uri.query().unwrap_or_default();
+        deserialize_present_params(query.as_bytes())
+            .map(Self)
+            .map_err(reject_oauth_params)
     }
 }
 
@@ -533,5 +643,75 @@ mod tests {
             output.to_lowercase(),
             "output must be lowercase: {output}"
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_params_tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
+    use super::deserialize_present_params;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct Params {
+        required: String,
+        #[serde(default)]
+        optional: Option<String>,
+    }
+
+    /// RFC 6749 §3.1/§3.2: "Parameters sent without a value MUST be treated as
+    /// if they were omitted from the request."
+    #[test]
+    fn empty_valued_parameter_arrives_as_omitted() {
+        let empty: Params =
+            deserialize_present_params(b"required=r&optional=").expect("empty value is dropped");
+        let omitted: Params = deserialize_present_params(b"required=r").expect("valid");
+        assert_eq!(empty, omitted);
+        assert_eq!(empty.optional, None);
+    }
+
+    /// The same rule applied to a REQUIRED parameter: emptying it makes the
+    /// request one that is missing it, rather than one carrying an empty value.
+    #[test]
+    fn empty_required_parameter_is_missing_not_empty() {
+        let err = deserialize_present_params::<Params>(b"required=&optional=o")
+            .expect_err("an emptied REQUIRED parameter is a missing one");
+        assert!(
+            err.contains("required"),
+            "the rejection must name the missing field, got: {err}"
+        );
+    }
+
+    /// "The authorization server MUST ignore unrecognized request parameters."
+    #[test]
+    fn unrecognized_parameters_are_ignored() {
+        let value: Params = deserialize_present_params(b"required=r&surprise=1&surprise=2")
+            .expect("unrecognized parameters are ignored, repeated or not");
+        assert_eq!(value.required, "r");
+    }
+
+    /// "Request and response parameters MUST NOT be included more than once."
+    /// A repeated *recognized* parameter fails, which the callers report as
+    /// `invalid_request` (RFC 6749 §5.2: "includes a parameter more than once").
+    #[test]
+    fn repeated_recognized_parameter_is_rejected() {
+        let err = deserialize_present_params::<Params>(b"required=a&required=b")
+            .expect_err("a repeated recognized parameter must not deserialize");
+        assert!(
+            err.contains("duplicate"),
+            "expected a duplicate-field rejection, got: {err}"
+        );
+    }
+
+    /// A value that is only *syntactically* empty after decoding still counts:
+    /// `%20` is a space, not nothing, so it is a present value.
+    #[test]
+    fn whitespace_value_is_present() {
+        let value: Params =
+            deserialize_present_params(b"required=r&optional=%20").expect("a space is a value");
+        assert_eq!(value.optional.as_deref(), Some(" "));
     }
 }

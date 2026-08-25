@@ -3372,3 +3372,49 @@ async fn test_rfc9126_par_deleted_by_cleanup_breaks_deferred_flow() {
          (deleted {deleted} expired records but this one should survive)"
     );
 }
+
+/// RFC 6749 §3.1 applies to the pushed request too: PAR carries the
+/// authorization endpoint's parameters, so an empty-valued one must be treated
+/// as omitted. `prompt` is where the two diverge — `Prompt::parse("")` is
+/// `None`, which the handler rejects as an unsupported value.
+#[tokio::test]
+async fn test_par_empty_parameter_is_treated_as_omitted() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-empty@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (empty_status, empty_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        "response_type=code&redirect_uri=https://example.com/callback&prompt=",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let (omitted_status, omitted_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        "response_type=code&redirect_uri=https://example.com/callback",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    // Each success mints a fresh `request_uri`, so compare the outcome rather
+    // than the body: both must be the same status, and the empty-`prompt`
+    // request must not be rejected as carrying an unsupported value.
+    assert_eq!(
+        empty_status, omitted_status,
+        "`prompt=` must answer as an omitted `prompt`: {empty_body} vs {omitted_body}"
+    );
+    let empty: serde_json::Value = serde_json::from_str(&empty_body).expect("Valid JSON");
+    let omitted: serde_json::Value = serde_json::from_str(&omitted_body).expect("Valid JSON");
+    assert_eq!(
+        empty.get("error"),
+        omitted.get("error"),
+        "`prompt=` must not be rejected as an unsupported value: {empty_body}"
+    );
+    assert!(
+        empty.get("request_uri").is_some(),
+        "the pushed request must be accepted: {empty_body}"
+    );
+}

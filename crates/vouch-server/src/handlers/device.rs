@@ -3,13 +3,13 @@
 
 use crate::AppState;
 use crate::db::{self, DeviceAuthState};
+use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
-use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::token::validate_dpop_if_present;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -23,8 +23,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use std::sync::Arc;
 use vouch_common::{
-    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
-    protocol,
+    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError, protocol,
 };
 
 use crate::error::{OAuthErrorCode, ServiceError};
@@ -88,7 +87,7 @@ fn hash_device_code(code: &str) -> String {
 /// [`protocol::CONTENT_TYPE_FORM_URLENCODED`] format.
 pub(crate) async fn device_code(
     State(state): State<Arc<AppState>>,
-    axum::Form(req): axum::Form<DeviceCodeRequest>,
+    OAuthForm(req): OAuthForm<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
 
@@ -220,35 +219,14 @@ async fn revoke_sessions_for_device_replay(state: &AppState, user_id: &str) {
 pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    Json(req): Json<DeviceTokenRequest>,
+    device_code: &str,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
-    // Validate grant type through the owning enum; exhaustive so a new
-    // grant variant forces this dispatch to be revisited.
-    match req.grant_type.parse::<OAuthGrantType>() {
-        Ok(OAuthGrantType::DeviceCode) => {}
-        Ok(
-            OAuthGrantType::AuthorizationCode
-            | OAuthGrantType::ClientCredentials
-            | OAuthGrantType::TokenExchange
-            | OAuthGrantType::Fido2Assertion,
-        )
-        | Err(_) => {
-            return Err(oauth_error(
-                StatusCode::BAD_REQUEST,
-                OAuthError {
-                    error: OAuthErrorCode::UnsupportedGrantType.as_str().to_string(),
-                    error_description: Some("Expected device_code grant type".to_string()),
-                },
-            ));
-        }
-    }
-
     // Validate device_code format before hashing and DB lookup.
     // Generated codes are 32 random bytes base64url-encoded (43 chars).
     // Reject obviously invalid inputs to avoid unnecessary work.
-    if req.device_code.is_empty() || req.device_code.len() > 128 {
+    if device_code.is_empty() || device_code.len() > 128 {
         return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::invalid_grant(),
@@ -256,7 +234,7 @@ pub(crate) async fn device_token(
     }
 
     // Hash the device code and look it up
-    let device_code_hash = hash_device_code(&req.device_code);
+    let device_code_hash = hash_device_code(device_code);
     let request = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)
         .await
         .map_err(|e| {
@@ -1128,22 +1106,37 @@ mod tests {
     // Device Code Input Validation Tests
     // ========================================================================
 
+    /// RFC 6749 §3.2: "Parameters sent without a value MUST be treated as if
+    /// they were omitted from the request." `device_code=` is therefore a
+    /// request missing a REQUIRED parameter — `invalid_request` under §5.2 —
+    /// and must answer exactly as omitting it does.
     #[tokio::test]
-    async fn test_device_code_rejects_empty() {
-        // Empty device_code should be rejected before DB lookup
+    async fn test_device_code_empty_is_treated_as_omitted() {
         let (app, _state) = test_app().await;
 
-        let (status, body) = http_post_form(
+        let (empty_status, empty_body) = http_post_form(
             &app,
             "/oauth/token",
             "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=",
             &[],
         )
         .await;
+        let (omitted_status, omitted_body) = http_post_form(
+            &app,
+            "/oauth/token",
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code",
+            &[],
+        )
+        .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["error"], "invalid_grant");
+        assert_eq!(empty_status, StatusCode::BAD_REQUEST);
+        assert_eq!(empty_status, omitted_status);
+        assert_eq!(
+            empty_body, omitted_body,
+            "an empty parameter must answer exactly as an omitted one"
+        );
+        let error: serde_json::Value = serde_json::from_str(&empty_body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_request");
     }
 
     #[tokio::test]
