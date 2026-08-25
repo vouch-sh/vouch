@@ -196,9 +196,9 @@ async fn test_browser_register_complete_rejects_replayed_state() {
         .await
         .expect("pre-consume must succeed");
 
-    // POST to the complete endpoint with the already-consumed state.
-    // The fields must be well-formed base64url to get past deserialization,
-    // but their contents never matter — the replay check precedes every use.
+    // POST to the complete endpoint with the already-consumed state. The
+    // fields must be well-formed, since the body checks precede the replay
+    // check, but their contents are never used beyond those bounds.
     let body = serde_json::json!({
         "state": state_jwt,
         "credential_id": valid_credential_id(),
@@ -1376,4 +1376,122 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
         StatusCode::FORBIDDEN,
         "deactivated user must not complete key registration: {resp}"
     );
+}
+
+// ── malformed request bodies must not spend the registration state ───────
+//
+// The single-use registration state is consumed in Phase 5. Every check that
+// reads only the request body runs before it, so a rejected request leaves
+// the state token spendable and the user can retry the same enrollment.
+
+/// Build a registration state JWT together with the expiry needed to consume
+/// it directly, which `make_valid_state_token` does not expose.
+async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i64) {
+    let user_id = Uuid::now_v7();
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_id, email, email, None)
+        .expect("start_passkey_registration");
+
+    let now = jiff::Timestamp::now();
+    let exp = now.as_second() + 300;
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id,
+        user_email: email.to_string(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp,
+    };
+
+    let jwt = reg_state
+        .encode(&state.state_signer)
+        .await
+        .expect("encode state");
+    (jwt, exp)
+}
+
+/// Assert the state token is still unconsumed by spending it directly.
+async fn assert_state_unspent(state: &AppState, state_jwt: &str, exp: i64) {
+    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    let consume = crate::db::try_consume_challenge_state(&state.store, state_jwt, expires_at).await;
+    assert!(
+        consume.is_ok(),
+        "a rejected request spent the registration state: {consume:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_enrollment_complete_empty_credential_id_leaves_state_spendable() {
+    let (app, state) = test_app().await;
+    let (state_jwt, exp) = make_state_token_with_exp(&state, "empty-cred@example.com").await;
+
+    // An empty string is valid base64url decoding to `vec![]`, so the request
+    // deserializes and reaches the handler.
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": "",
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+    assert!(
+        resp_body.contains("invalid_credential"),
+        "expected 'invalid_credential' in body, got: {resp_body}"
+    );
+    assert_state_unspent(&state, &state_jwt, exp).await;
+}
+
+#[tokio::test]
+async fn test_enrollment_complete_malformed_client_data_leaves_state_spendable() {
+    let (app, state) = test_app().await;
+    let (state_jwt, exp) = make_state_token_with_exp(&state, "bad-client-data@example.com").await;
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        // Well-formed base64url, so it survives deserialization, but not JSON.
+        "client_data_json": URL_SAFE_NO_PAD.encode(b"not json"),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+    assert!(
+        resp_body.contains("invalid_client_data"),
+        "expected 'invalid_client_data' in body, got: {resp_body}"
+    );
+    assert_state_unspent(&state, &state_jwt, exp).await;
+}
+
+#[tokio::test]
+async fn test_enrollment_complete_foreign_origin_leaves_state_spendable() {
+    let (app, state) = test_app().await;
+    let (state_jwt, exp) = make_state_token_with_exp(&state, "foreign-origin@example.com").await;
+
+    let client_data = URL_SAFE_NO_PAD.encode(
+        r#"{"type":"webauthn.create","challenge":"abc","origin":"https://evil.example.com"}"#,
+    );
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": client_data,
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+    assert!(
+        resp_body.contains("invalid_client_data"),
+        "expected 'invalid_client_data' in body, got: {resp_body}"
+    );
+    assert_state_unspent(&state, &state_jwt, exp).await;
 }
