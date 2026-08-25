@@ -61,8 +61,8 @@ impl ClientKeySigner {
 }
 
 impl SigningAlgorithm for ClientKeySigner {
-    fn algorithm_id(&self) -> &str {
-        "ecdsa-p256-sha256"
+    fn algorithm(&self) -> vouch_httpsig::algorithm::SignatureAlgorithm {
+        vouch_httpsig::algorithm::SignatureAlgorithm::EcdsaP256Sha256
     }
 
     fn key_id(&self) -> &str {

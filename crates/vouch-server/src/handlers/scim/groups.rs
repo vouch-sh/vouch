@@ -15,6 +15,7 @@ use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
     ScimPatchOpType, ScimPatchRequest,
 };
+use super::urn;
 use crate::AppState;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
@@ -113,7 +114,7 @@ pub(crate) async fn list_groups(
     }
 
     Json(ScimListResponse {
-        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        schemas: vec![urn::LIST_RESPONSE.to_string()],
         total_results: total,
         items_per_page: resources.len(),
         start_index,
@@ -714,7 +715,7 @@ pub(crate) fn db_group_to_scim(
     members: Vec<ScimGroupMember>,
 ) -> ScimGroup {
     ScimGroup {
-        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:Group".to_string()],
+        schemas: vec![urn::GROUP.to_string()],
         id: Some(group.id.clone()),
         external_id: group.external_id,
         display_name: group.display_name,

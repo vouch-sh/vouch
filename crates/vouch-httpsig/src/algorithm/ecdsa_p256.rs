@@ -70,8 +70,8 @@ impl std::fmt::Debug for EcdsaP256Signer {
 }
 
 impl SigningAlgorithm for EcdsaP256Signer {
-    fn algorithm_id(&self) -> &str {
-        "ecdsa-p256-sha256"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::EcdsaP256Sha256
     }
 
     fn key_id(&self) -> &str {
@@ -105,8 +105,8 @@ impl EcdsaP256Verifier {
 }
 
 impl VerifyingAlgorithm for EcdsaP256Verifier {
-    fn algorithm_id(&self) -> &str {
-        "ecdsa-p256-sha256"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::EcdsaP256Sha256
     }
 
     fn verify(&self, base: &[u8], signature: &[u8]) -> Result<(), HttpSigError> {
@@ -147,10 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn test_algorithm_id() {
+    fn test_algorithm_identifier() {
         let signer = EcdsaP256Signer::generate("k1").unwrap();
-        assert_eq!(signer.algorithm_id(), "ecdsa-p256-sha256");
-        assert_eq!(signer.verifier().algorithm_id(), "ecdsa-p256-sha256");
+        assert_eq!(signer.algorithm().as_str(), "ecdsa-p256-sha256");
+        assert_eq!(signer.verifier().algorithm().as_str(), "ecdsa-p256-sha256");
     }
 
     #[test]

@@ -194,7 +194,7 @@ impl SignatureBuilder {
     fn build_params(&self, signer: &dyn SigningAlgorithm) -> SignatureParams {
         SignatureParams {
             components: self.components.clone(),
-            alg: Some(signer.algorithm_id().to_string()),
+            alg: Some(signer.algorithm().as_str().to_string()),
             keyid: Some(signer.key_id().to_string()),
             created: self.created,
             expires: self.expires,

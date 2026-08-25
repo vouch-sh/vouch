@@ -573,3 +573,69 @@ fn walk_for_literal(dir: &std::path::Path, needle: &str, found: &mut Vec<String>
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PUBLIC_V1_PATHS <-> registered routes
+// ---------------------------------------------------------------------------
+//
+// `test_router_v1_literals_all_in_route_table` above covers one direction:
+// every `/v1` route in router.rs is accounted for in `V1_ROUTES`, which
+// `test_signature_policy_per_route` checks against `requires_signature`.
+//
+// The other direction was unguarded. `PUBLIC_V1_PATHS` exempts paths from
+// signature enforcement, and nothing tied its entries back to real routes:
+// a renamed route silently loses its exemption and starts demanding
+// signatures, while an entry for a route that was removed, or never existed,
+// exempts nothing and gives no signal at all.
+
+/// Replace `{param}` segments with a placeholder so a route template can be
+/// requested as a concrete path.
+fn concrete_path(template: &str) -> String {
+    template
+        .split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "1"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Probe whether `path` is routed, using a method no route declares.
+///
+/// Axum answers 405 when the path matches a route whose method set excludes
+/// the request, and 404 when no route matches at all. Reading route existence
+/// this way keeps the result independent of whatever a handler would return.
+async fn route_is_registered(harness: &TestHarness, path: &str) -> bool {
+    let (status, _, _) = unsigned_request(harness, "TRACE", path, "").await;
+    status != StatusCode::NOT_FOUND
+}
+
+#[tokio::test]
+async fn test_public_v1_paths_all_resolve_to_registered_routes() {
+    let harness = TestHarness::new().await;
+
+    for template in vouch_httpsig::sig_policy::PUBLIC_V1_PATHS {
+        let path = concrete_path(template);
+        assert!(
+            route_is_registered(&harness, &path).await,
+            "PUBLIC_V1_PATHS entry {template} does not resolve to a registered \
+             route (requested as {path}); it exempts nothing from signature \
+             enforcement"
+        );
+    }
+}
+
+/// The probe must be able to fail, or the test above asserts nothing.
+#[tokio::test]
+async fn test_route_existence_probe_reports_absent_routes() {
+    let harness = TestHarness::new().await;
+
+    assert!(
+        !route_is_registered(&harness, "/v1/credentials/ssh/definitely-absent").await,
+        "an unregistered path must be distinguishable from a registered one"
+    );
+}

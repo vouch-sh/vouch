@@ -2,6 +2,7 @@
 //! RFC 9421 signature verification.
 
 use crate::algorithm::VerifyingAlgorithm;
+use crate::component::ComponentIdentifier;
 use crate::error::HttpSigError;
 use crate::sfv::parse::parse_dictionary;
 use crate::sfv::serialize::serialize_inner_list_to_string;
@@ -66,7 +67,10 @@ impl CryptoVerified {
     ///
     /// Returns [`HttpSigError::InvalidSignature`] when a required component is
     /// not among the signature's covered components.
-    pub fn require_coverage(self, required: &[&str]) -> Result<CoverageChecked, HttpSigError> {
+    pub fn require_coverage(
+        self,
+        required: &[ComponentIdentifier],
+    ) -> Result<CoverageChecked, HttpSigError> {
         validate_coverage(&self.params, required)?;
         Ok(CoverageChecked {
             params: self.params,
@@ -114,8 +118,11 @@ impl CoverageChecked {
             });
         }
 
-        validate_coverage(&self.params, &["content-digest"])
-            .map_err(|_| HttpSigError::MissingDigest)?;
+        validate_coverage(
+            &self.params,
+            &[ComponentIdentifier::field("content-digest")],
+        )
+        .map_err(|_| HttpSigError::MissingDigest)?;
 
         let header = headers
             .get("content-digest")
@@ -174,21 +181,16 @@ impl DigestEnforced {
 ///
 /// Returns [`HttpSigError::InvalidSignature`] if any required component is missing
 /// from the signature's covered components.
-fn validate_coverage(params: &SignatureParams, required: &[&str]) -> Result<(), HttpSigError> {
-    for req_name in required {
-        let found = params.components.iter().any(|c| {
-            // Extract the bare component name without parameters
-            let name = match c {
-                crate::component::ComponentIdentifier::Field { name, .. } => name.clone(),
-                crate::component::ComponentIdentifier::Derived { component, .. } => {
-                    crate::component::derived_component_name(component)
-                }
-            };
-            name == *req_name
-        });
+fn validate_coverage(
+    params: &SignatureParams,
+    required: &[ComponentIdentifier],
+) -> Result<(), HttpSigError> {
+    for req in required {
+        let found = params.components.iter().any(|c| c.covers(req));
         if !found {
             return Err(HttpSigError::InvalidSignature(format!(
-                "signature does not cover required component: {req_name}"
+                "signature does not cover required component: {}",
+                req.name()
             )));
         }
     }
@@ -300,11 +302,11 @@ fn validate_algorithm(
     verifier: &dyn VerifyingAlgorithm,
 ) -> Result<(), HttpSigError> {
     if let Some(alg) = &params.alg
-        && alg != verifier.algorithm_id()
+        && alg != verifier.algorithm().as_str()
     {
         return Err(HttpSigError::UnsupportedAlgorithm(format!(
             "signature claims alg=\"{alg}\", but verifier implements \"{}\"",
-            verifier.algorithm_id()
+            verifier.algorithm()
         )));
     }
     Ok(())
@@ -587,7 +589,14 @@ mod tests {
             nonce: None,
             tag: None,
         };
-        validate_coverage(&params, &["@method", "@authority"]).unwrap();
+        validate_coverage(
+            &params,
+            &[
+                ComponentIdentifier::method(),
+                ComponentIdentifier::authority(),
+            ],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -601,7 +610,13 @@ mod tests {
             nonce: None,
             tag: None,
         };
-        let result = validate_coverage(&params, &["@method", "@authority"]);
+        let result = validate_coverage(
+            &params,
+            &[
+                ComponentIdentifier::method(),
+                ComponentIdentifier::authority(),
+            ],
+        );
         assert!(result.is_err());
     }
 

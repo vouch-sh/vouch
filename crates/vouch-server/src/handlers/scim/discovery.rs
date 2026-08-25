@@ -8,6 +8,7 @@ use super::types::{
     ScimAttribute, ScimAuthScheme, ScimBulkConfig, ScimFilterConfig, ScimListResponse,
     ScimResourceType, ScimSchema, ScimServiceProviderConfig, ScimSupported,
 };
+use super::urn;
 use crate::AppState;
 
 /// GET /scim/v2/ServiceProviderConfig (RFC 7644 Section 4).
@@ -20,7 +21,7 @@ pub(crate) async fn service_provider_config(
     let base_url = &state.config().base_url;
 
     Json(ScimServiceProviderConfig {
-        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig".to_string()],
+        schemas: vec![urn::SERVICE_PROVIDER_CONFIG.to_string()],
         documentation_uri: format!("{base_url}/docs/scim"),
         patch: ScimSupported { supported: true },
         bulk: ScimBulkConfig {
@@ -49,7 +50,7 @@ pub(crate) async fn service_provider_config(
 /// Returns the schema definitions for supported resource types (RFC 7643 Section 7).
 pub(crate) async fn schemas() -> impl IntoResponse {
     let user_schema = ScimSchema {
-        id: "urn:ietf:params:scim:schemas:core:2.0:User".to_string(),
+        id: urn::USER.to_string(),
         name: "User".to_string(),
         description: "User Account".to_string(),
         attributes: vec![
@@ -97,7 +98,7 @@ pub(crate) async fn schemas() -> impl IntoResponse {
     };
 
     let group_schema = ScimSchema {
-        id: "urn:ietf:params:scim:schemas:core:2.0:Group".to_string(),
+        id: urn::GROUP.to_string(),
         name: "Group".to_string(),
         description: "Group".to_string(),
         attributes: vec![
@@ -125,9 +126,9 @@ pub(crate) async fn schemas() -> impl IntoResponse {
     };
 
     Json(ScimListResponse {
-        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
-        total_results: 2,
-        items_per_page: 2,
+        schemas: vec![urn::LIST_RESPONSE.to_string()],
+        total_results: urn::RESOURCE_SCHEMAS.len(),
+        items_per_page: urn::RESOURCE_SCHEMAS.len(),
         start_index: 1,
         resources: vec![user_schema, group_schema],
     })
@@ -140,27 +141,25 @@ pub(crate) async fn resource_types(State(state): State<Arc<AppState>>) -> impl I
     let base_url = &state.config().base_url;
 
     Json(ScimListResponse {
-        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        schemas: vec![urn::LIST_RESPONSE.to_string()],
         total_results: 2,
         items_per_page: 2,
         start_index: 1,
-        resources: vec![
-            ScimResourceType {
-                schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:ResourceType".to_string()],
-                id: "User".to_string(),
-                name: "User".to_string(),
-                endpoint: format!("{base_url}/scim/v2/Users"),
-                description: "User Account".to_string(),
-                schema: "urn:ietf:params:scim:schemas:core:2.0:User".to_string(),
-            },
-            ScimResourceType {
-                schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:ResourceType".to_string()],
-                id: "Group".to_string(),
-                name: "Group".to_string(),
-                endpoint: format!("{base_url}/scim/v2/Groups"),
-                description: "Group".to_string(),
-                schema: "urn:ietf:params:scim:schemas:core:2.0:Group".to_string(),
-            },
-        ],
+        // Derived from `urn::RESOURCE_SCHEMAS` so an advertised resource type
+        // and the schema its handler emits cannot be edited apart.
+        resources: urn::RESOURCE_SCHEMAS
+            .iter()
+            .map(|(schema, endpoint)| {
+                let name = endpoint.trim_start_matches('/').trim_end_matches('s');
+                ScimResourceType {
+                    schemas: vec![urn::RESOURCE_TYPE.to_string()],
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    endpoint: format!("{base_url}/scim/v2{endpoint}"),
+                    description: name.to_string(),
+                    schema: (*schema).to_string(),
+                }
+            })
+            .collect(),
     })
 }

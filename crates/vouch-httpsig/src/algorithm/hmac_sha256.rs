@@ -35,8 +35,8 @@ impl std::fmt::Debug for HmacSha256Key {
 }
 
 impl SigningAlgorithm for HmacSha256Key {
-    fn algorithm_id(&self) -> &str {
-        "hmac-sha256"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::HmacSha256
     }
 
     fn key_id(&self) -> &str {
@@ -50,8 +50,8 @@ impl SigningAlgorithm for HmacSha256Key {
 }
 
 impl VerifyingAlgorithm for HmacSha256Key {
-    fn algorithm_id(&self) -> &str {
-        "hmac-sha256"
+    fn algorithm(&self) -> super::SignatureAlgorithm {
+        super::SignatureAlgorithm::HmacSha256
     }
 
     fn verify(&self, base: &[u8], signature: &[u8]) -> Result<(), HttpSigError> {
@@ -116,9 +116,9 @@ mod tests {
     }
 
     #[test]
-    fn test_algorithm_id() {
+    fn test_algorithm_identifier() {
         let key = HmacSha256Key::new(b"s", "k");
-        assert_eq!(SigningAlgorithm::algorithm_id(&key), "hmac-sha256");
-        assert_eq!(VerifyingAlgorithm::algorithm_id(&key), "hmac-sha256");
+        assert_eq!(SigningAlgorithm::algorithm(&key).as_str(), "hmac-sha256");
+        assert_eq!(VerifyingAlgorithm::algorithm(&key).as_str(), "hmac-sha256");
     }
 }
