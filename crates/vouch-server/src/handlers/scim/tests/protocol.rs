@@ -487,8 +487,8 @@ async fn advertised_resource_type_endpoints_are_routed() {
 
     // Unauthenticated: a 401 proves the route exists just as well as a 200,
     // and avoids minting a token to answer a routing question.
-    for (_, endpoint) in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
-        let path = format!("/scim/v2{endpoint}");
+    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+        let path = format!("/scim/v2{}", resource.endpoint);
         let (status, _) = http_get(&app, &path, &[]).await;
         assert_ne!(
             status,
@@ -515,10 +515,165 @@ async fn schemas_endpoint_lists_every_emitted_resource_schema() {
         .filter_map(|r| r["id"].as_str())
         .collect();
 
-    for (schema, _) in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
         assert!(
-            ids.contains(schema),
-            "/Schemas does not list {schema}, which the handlers emit; listed: {ids:?}"
+            ids.contains(&resource.id),
+            "/Schemas does not list {}, which the handlers emit; listed: {ids:?}",
+            resource.id
         );
     }
+}
+
+// =========================================================================
+// RFC 7644 Section 3.4.2 — `totalResults` accuracy for discovery endpoints
+// =========================================================================
+//
+// `totalResults` MUST equal the number of returned resources, and both must
+// equal the single-sourced `RESOURCE_SCHEMAS` table. Regression guard for
+// commit af8ec098, which left `/Schemas` deriving its counts from
+// `RESOURCE_SCHEMAS.len()` but hardcoding its `resources` array (overcount),
+// and `/ResourceTypes` deriving `resources` from `RESOURCE_SCHEMAS` but
+// hardcoding its counts (undercount). With both endpoints single-sourced,
+// adding a resource stays one edit and the counts cannot diverge.
+
+#[tokio::test]
+async fn schemas_endpoint_total_results_matches_resources_length() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/scim/v2/Schemas", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let resources = listed["Resources"].as_array().expect("Resources array");
+    let total_results = listed["totalResults"]
+        .as_u64()
+        .expect("totalResults is a number");
+    let items_per_page = listed["itemsPerPage"]
+        .as_u64()
+        .expect("itemsPerPage is a number");
+    let start_index = listed["startIndex"]
+        .as_u64()
+        .expect("startIndex is a number");
+
+    let expected = crate::handlers::scim::urn::RESOURCE_SCHEMAS.len() as u64;
+    assert_eq!(
+        total_results, expected,
+        "/Schemas totalResults must equal RESOURCE_SCHEMAS.len()"
+    );
+    assert_eq!(
+        total_results,
+        resources.len() as u64,
+        "/Schemas totalResults ({total_results}) must equal Resources.len() ({})",
+        resources.len()
+    );
+    assert_eq!(items_per_page, total_results);
+    assert_eq!(start_index, 1);
+}
+
+#[tokio::test]
+async fn resource_types_endpoint_total_results_matches_resources_length() {
+    let (app, state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/scim/v2/ResourceTypes", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let resources = listed["Resources"].as_array().expect("Resources array");
+    let total_results = listed["totalResults"]
+        .as_u64()
+        .expect("totalResults is a number");
+    let items_per_page = listed["itemsPerPage"]
+        .as_u64()
+        .expect("itemsPerPage is a number");
+    let start_index = listed["startIndex"]
+        .as_u64()
+        .expect("startIndex is a number");
+
+    let expected = crate::handlers::scim::urn::RESOURCE_SCHEMAS.len() as u64;
+    assert_eq!(
+        total_results, expected,
+        "/ResourceTypes totalResults must equal RESOURCE_SCHEMAS.len()"
+    );
+    assert_eq!(
+        total_results,
+        resources.len() as u64,
+        "/ResourceTypes totalResults ({total_results}) must equal Resources.len() ({})",
+        resources.len()
+    );
+    assert_eq!(items_per_page, total_results);
+    assert_eq!(start_index, 1);
+
+    // Each advertised resource type must point at a live, absolute endpoint
+    // rooted at this server's base_url, and carry the schema its handler
+    // emits — the two fields `/ResourceTypes` exists to advertise.
+    let base_url = &state.config().base_url;
+    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+        let entry = resources
+            .iter()
+            .find(|r| r["schema"] == resource.id)
+            .expect("each RESOURCE_SCHEMAS entry is advertised by /ResourceTypes");
+        assert_eq!(
+            entry["endpoint"],
+            format!("{base_url}/scim/v2{}", resource.endpoint),
+            "endpoint for {} must be the absolute route",
+            resource.id
+        );
+        assert_eq!(entry["name"], resource.name);
+        assert_eq!(entry["description"], resource.description);
+    }
+}
+
+/// `/Schemas` must carry full attribute definitions (RFC 7643 Section 7)
+/// after single-sourcing, so the static table feeds `/Schemas` intact and no
+/// attribute was dropped in the conversion from the constant.
+#[tokio::test]
+async fn schemas_endpoint_carries_attribute_definitions() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/scim/v2/Schemas", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let resources = listed["Resources"].as_array().expect("Resources array");
+
+    let user = resources
+        .iter()
+        .find(|r| r["id"] == "urn:ietf:params:scim:schemas:core:2.0:User")
+        .expect("User schema present");
+
+    let attr_names: Vec<&str> = user["attributes"]
+        .as_array()
+        .expect("attributes array")
+        .iter()
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert_eq!(
+        attr_names,
+        ["userName", "name", "emails", "active"],
+        "User schema attribute names and order"
+    );
+
+    // Spot-check that per-attribute fields survived the single-sourcing.
+    let user_name = user["attributes"]
+        .as_array()
+        .expect("attributes array")
+        .iter()
+        .find(|a| a["name"] == "userName")
+        .expect("userName attribute");
+    assert_eq!(user_name["type"], "string");
+    assert_eq!(user_name["required"], true);
+    assert_eq!(user_name["multiValued"], false);
+    assert_eq!(user_name["uniqueness"], "server");
+
+    let group = resources
+        .iter()
+        .find(|r| r["id"] == "urn:ietf:params:scim:schemas:core:2.0:Group")
+        .expect("Group schema present");
+    let group_attr_names: Vec<&str> = group["attributes"]
+        .as_array()
+        .expect("attributes array")
+        .iter()
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert_eq!(group_attr_names, ["displayName", "members"]);
 }
