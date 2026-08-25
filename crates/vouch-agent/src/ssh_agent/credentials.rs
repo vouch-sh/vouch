@@ -4,7 +4,6 @@
 use crate::error::{AgentError, Result};
 use jiff::Timestamp;
 use ssh_key::{PrivateKey, certificate::Certificate};
-use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 /// Certificate metadata for cache management.
@@ -18,19 +17,11 @@ pub struct CertificateMetadata {
     pub serial: u64,
     /// Principals (users) the certificate is valid for.
     pub principals: Vec<String>,
-    /// Path to the private key file.
-    pub key_path: PathBuf,
-    /// Path to the certificate file.
-    pub cert_path: PathBuf,
 }
 
 impl CertificateMetadata {
-    /// Create metadata from a certificate and file paths.
-    pub fn from_certificate(
-        cert: &Certificate,
-        key_path: PathBuf,
-        cert_path: PathBuf,
-    ) -> Result<Self> {
+    /// Create metadata from a certificate.
+    pub fn from_certificate(cert: &Certificate) -> Result<Self> {
         // Extract validity times from certificate
         let valid_after = cert.valid_after();
         let valid_before = cert.valid_before();
@@ -53,8 +44,6 @@ impl CertificateMetadata {
             expires_at,
             serial: cert.serial(),
             principals,
-            key_path,
-            cert_path,
         })
     }
 
@@ -79,13 +68,11 @@ pub struct SshCredentials {
 }
 
 impl SshCredentials {
-    /// Create new SSH credentials with explicit paths.
+    /// Create new SSH credentials.
     pub fn new(
         private_key: PrivateKey,
         certificate: &Certificate,
         comment: String,
-        key_path: PathBuf,
-        cert_path: PathBuf,
     ) -> Result<Self> {
         // Get the certificate blob for the identities response
         let cert_openssh = certificate
@@ -94,7 +81,7 @@ impl SshCredentials {
         let certificate_blob = parse_openssh_public_key(&cert_openssh)?;
 
         // Create metadata from certificate
-        let metadata = CertificateMetadata::from_certificate(certificate, key_path, cert_path)?;
+        let metadata = CertificateMetadata::from_certificate(certificate)?;
 
         Ok(Self {
             private_key,
@@ -123,13 +110,7 @@ impl SshCredentials {
         // Generate comment from certificate key ID
         let comment = certificate.key_id().to_string();
 
-        Self::new(
-            private_key,
-            &certificate,
-            comment,
-            key_path.to_path_buf(),
-            cert_path.to_path_buf(),
-        )
+        Self::new(private_key, &certificate, comment)
     }
 
     /// Check if the certificate has expired.
@@ -190,8 +171,6 @@ mod tests {
             expires_at: future_expires,
             serial: 1,
             principals: vec!["user".to_string()],
-            key_path: PathBuf::from("/tmp/key"),
-            cert_path: PathBuf::from("/tmp/cert"),
         };
 
         assert!(!metadata.is_expired());
@@ -206,8 +185,6 @@ mod tests {
             expires_at: past_expires,
             serial: 1,
             principals: vec!["user".to_string()],
-            key_path: PathBuf::from("/tmp/key"),
-            cert_path: PathBuf::from("/tmp/cert"),
         };
 
         assert!(metadata.is_expired());
