@@ -8,6 +8,7 @@
 use crate::AppState;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
+use crate::handlers::extractors::OAuthForm;
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
@@ -153,7 +154,7 @@ pub(crate) async fn revoke(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<RevokeRequest>,
+    OAuthForm(params): OAuthForm<RevokeRequest>,
 ) -> Response {
     // RFC 7009 Section 2.1: Authenticate the calling client.
     // Supports client_secret_basic, client_secret_post, and private_key_jwt.
@@ -209,7 +210,7 @@ pub(crate) async fn revoke(
 pub(crate) async fn introspect(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<IntrospectRequest>,
+    OAuthForm(params): OAuthForm<IntrospectRequest>,
 ) -> Response {
     // RFC 7662 Section 2.1: The introspection endpoint MUST authenticate the caller.
     // Supports client_secret_basic, client_secret_post, and private_key_jwt.

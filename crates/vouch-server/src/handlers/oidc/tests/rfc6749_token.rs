@@ -590,7 +590,7 @@ fn test_token_request_debug_never_prints_credential_material() {
     // Every credential-bearing field must be absent from `{:?}` output —
     // the manual Debug impl prints [REDACTED] and the SecretString fields
     // self-redact even if a future impl prints them directly.
-    let request = crate::handlers::oidc::token::TokenRequest {
+    let request = crate::handlers::oidc::token::TokenRequestForm {
         grant_type: "authorization_code".to_string(),
         code: Some("visible-code".to_string()),
         redirect_uri: None,
@@ -778,5 +778,131 @@ async fn test_par_basic_auth_failure_challenges_with_basic() {
         www_authenticate(&response),
         "Basic",
         "PAR must carry the same challenge as the token endpoint"
+    );
+}
+
+// ========================================================================
+// RFC 6749 Section 3.2 — Token endpoint parameter rules
+// ========================================================================
+//
+// > Parameters sent without a value MUST be treated as if they were omitted
+// > from the request.  The authorization server MUST ignore unrecognized
+// > request parameters.  Request and response parameters MUST NOT be included
+// > more than once.
+//
+// The three cases below are that paragraph, one test each, checked at the
+// endpoint rather than against the request type: they are properties of what
+// the wire produces, and the wire is what a client sees.
+
+/// An empty-valued parameter must produce the same response as omitting it.
+/// `subject_token=` previously deserialized to `Some("")` and reached the
+/// decoder, which answered `invalid_grant` where an omitted `subject_token`
+/// answers `invalid_request`.
+#[tokio::test]
+async fn test_rfc6749_empty_parameter_is_treated_as_omitted() {
+    let (app, _state) = test_app().await;
+
+    let exchange = "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                    &subject_token_type=urn:ietf:params:oauth:token-type:access_token";
+
+    let (empty_status, empty_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!("{exchange}&subject_token="),
+        &[],
+    )
+    .await;
+    let (omitted_status, omitted_body) = http_post_form(&app, "/oauth/token", exchange, &[]).await;
+
+    assert_eq!(empty_status, omitted_status);
+    assert_eq!(
+        empty_body, omitted_body,
+        "`subject_token=` must answer exactly as an omitted `subject_token`"
+    );
+    assert_eq!(empty_status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&empty_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+}
+
+/// A repeated parameter is `invalid_request` under RFC 6749 §5.2 ("includes a
+/// parameter more than once"), reported in the OAuth error envelope. Axum's
+/// own rejection answered `422` with a `text/plain` body, which a client
+/// parsing `error`/`error_description` cannot read.
+#[tokio::test]
+async fn test_rfc6749_duplicate_parameter_is_rejected_in_the_oauth_envelope() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token=a&subject_token=b\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value =
+        serde_json::from_str(&body).expect("rejection must be the JSON OAuth envelope");
+    assert_eq!(error["error"], "invalid_request");
+}
+
+/// An unrecognized parameter must be ignored, including when repeated: the
+/// "MUST ignore unrecognized request parameters" sentence covers it, and the
+/// duplicate rule must not be read as overriding that.
+#[tokio::test]
+async fn test_rfc6749_unrecognized_parameters_are_ignored() {
+    let (app, _state) = test_app().await;
+
+    let (baseline_status, baseline_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=nonexistent",
+        &[],
+    )
+    .await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=nonexistent&surprise=1&surprise=2",
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, baseline_status);
+    assert_eq!(
+        body, baseline_body,
+        "an unrecognized parameter must not change the response"
+    );
+}
+
+/// A parameter this server implements for a *different* grant is recognized
+/// but foreign: it is unreachable from the handler and, like an unrecognized
+/// one, does not change the response.
+#[tokio::test]
+async fn test_rfc6749_another_grants_parameter_is_ignored() {
+    let (app, _state) = test_app().await;
+
+    let (baseline_status, baseline_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=nonexistent",
+        &[],
+    )
+    .await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=nonexistent\
+         &device_code=dc&subject_token=st&assertion=as",
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, baseline_status);
+    assert_eq!(
+        body, baseline_body,
+        "another grant's parameters must not change this grant's response"
     );
 }

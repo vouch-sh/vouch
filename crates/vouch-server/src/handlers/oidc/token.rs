@@ -9,6 +9,7 @@ use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{
     ClientAuthProof, GrantProof, SenderConstraintProof, TokenIssuanceProof,
 };
@@ -70,9 +71,13 @@ impl std::fmt::Debug for TokenResponse {
     }
 }
 
-/// Token request for all grant types (RFC 6749 Section 4.1.3, RFC 8628 Section 3.4, RFC 8693 Section 2.1).
+/// The token endpoint's form body as it arrives (RFC 6749 §4.1.3, RFC 8628
+/// §3.4, RFC 8693 §2.1): every parameter of every grant, all optional,
+/// because the wire cannot say which grant is being requested until
+/// `grant_type` is read. [`TokenRequestForm::parse`] resolves it into a
+/// [`TokenRequest`], which is what the handlers see.
 #[derive(Deserialize)]
-pub(crate) struct TokenRequest {
+pub(crate) struct TokenRequestForm {
     /// RFC 6749 Section 4.1.3: The grant type.
     pub grant_type: String,
     /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
@@ -132,9 +137,9 @@ pub(crate) struct TokenRequest {
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
-impl std::fmt::Debug for TokenRequest {
+impl std::fmt::Debug for TokenRequestForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokenRequest")
+        f.debug_struct("TokenRequestForm")
             .field("grant_type", &self.grant_type)
             .field("code", &self.code)
             .field("redirect_uri", &self.redirect_uri)
@@ -158,20 +163,171 @@ impl std::fmt::Debug for TokenRequest {
     }
 }
 
-/// Token request with a typed `grant_type` validated at the request boundary.
-#[derive(Debug)]
-struct ParsedTokenRequest {
-    grant_type: OAuthGrantType,
-    request: TokenRequest,
+/// RFC 6749 §2.3 client authentication parameters, which every grant carries.
+/// Held beside the per-grant value rather than repeated in each variant.
+struct ClientAuthParams {
+    client_id: Option<String>,
+    client_secret: Option<SecretString>,
+    client_assertion: Option<SecretString>,
+    client_assertion_type: Option<String>,
 }
 
-impl TokenRequest {
-    fn parse(self) -> Result<ParsedTokenRequest, ParseOAuthGrantTypeError> {
-        let grant_type = self.grant_type.parse::<OAuthGrantType>()?;
-        Ok(ParsedTokenRequest {
-            grant_type,
-            request: self,
-        })
+/// RFC 6749 §4.1.3 authorization code grant parameters.
+struct AuthorizationCodeParams {
+    /// REQUIRED.
+    code: String,
+    redirect_uri: Option<String>,
+    code_verifier: Option<String>,
+    resource: Option<String>,
+    authorization_details: Option<String>,
+}
+
+/// RFC 6749 §4.4 client credentials grant parameters.
+struct ClientCredentialsParams {
+    scope: Option<String>,
+}
+
+/// RFC 8628 §3.4 device authorization grant parameters.
+struct DeviceCodeParams {
+    /// REQUIRED.
+    device_code: String,
+}
+
+/// RFC 8693 §2.1 token exchange parameters. `subject_token` and
+/// `subject_token_type` are REQUIRED, so they are resolved here and the pair
+/// is typed by [`ExchangeTokens`] against this value.
+struct TokenExchangeRequestParams {
+    subject_token: SecretString,
+    subject_token_type: String,
+    actor_token: Option<SecretString>,
+    actor_token_type: Option<String>,
+    requested_token_type: Option<String>,
+    audience: Option<String>,
+    resource: Option<String>,
+    scope: Option<String>,
+    authorization_details: Option<String>,
+}
+
+/// FIDO2 assertion grant parameters (RFC 6749 §4.5 extension grant).
+struct Fido2AssertionParams {
+    /// REQUIRED.
+    assertion: SecretString,
+    scope: Option<String>,
+    authorization_details: Option<String>,
+}
+
+/// The parameters of one grant. A grant's parameters are reachable only
+/// through its own variant, so a handler cannot read another grant's.
+enum GrantParams {
+    AuthorizationCode(AuthorizationCodeParams),
+    ClientCredentials(ClientCredentialsParams),
+    DeviceCode(DeviceCodeParams),
+    TokenExchange(TokenExchangeRequestParams),
+    Fido2Assertion(Fido2AssertionParams),
+}
+
+/// A token request resolved to the grant it names, carrying only that grant's
+/// parameters plus the shared client authentication ones. Built by
+/// [`TokenRequestForm::parse`], which is the only way to obtain one.
+struct TokenRequest {
+    auth: ClientAuthParams,
+    grant: GrantParams,
+}
+
+/// Why a token request could not be resolved to a grant.
+enum TokenRequestRejection {
+    /// RFC 6749 §5.2: the `grant_type` names a grant this server does not
+    /// implement.
+    UnsupportedGrantType,
+    /// RFC 6749 §5.2: a parameter this grant declares REQUIRED is absent.
+    MissingParameter(&'static str),
+}
+
+impl TokenRequestRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::UnsupportedGrantType => {
+                let supported = OAuthGrantType::supported_wire_values().join(", ");
+                token_error_response(
+                    OAuthErrorCode::UnsupportedGrantType,
+                    &format!("Supported grant types: {supported}"),
+                )
+            }
+            Self::MissingParameter(name) => token_error_response(
+                OAuthErrorCode::InvalidRequest,
+                &format!("Missing {name} parameter"),
+            ),
+        }
+    }
+}
+
+impl TokenRequestForm {
+    /// Resolve the flat wire form into the named grant's parameters.
+    ///
+    /// Parameters belonging to other grants are dropped here: RFC 6749 §3.2
+    /// requires unrecognized parameters to be ignored, and a parameter this
+    /// server implements for a *different* grant is treated the same way —
+    /// representable on the wire, unreachable from the handler.
+    fn parse(self) -> Result<TokenRequest, TokenRequestRejection> {
+        let grant_type = self
+            .grant_type
+            .parse::<OAuthGrantType>()
+            .map_err(|_: ParseOAuthGrantTypeError| TokenRequestRejection::UnsupportedGrantType)?;
+
+        let auth = ClientAuthParams {
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+            client_assertion: self.client_assertion,
+            client_assertion_type: self.client_assertion_type,
+        };
+
+        let grant = match grant_type {
+            OAuthGrantType::AuthorizationCode => {
+                GrantParams::AuthorizationCode(AuthorizationCodeParams {
+                    code: self
+                        .code
+                        .ok_or(TokenRequestRejection::MissingParameter("code"))?,
+                    redirect_uri: self.redirect_uri,
+                    code_verifier: self.code_verifier,
+                    resource: self.resource,
+                    authorization_details: self.authorization_details,
+                })
+            }
+            OAuthGrantType::ClientCredentials => {
+                GrantParams::ClientCredentials(ClientCredentialsParams { scope: self.scope })
+            }
+            OAuthGrantType::DeviceCode => GrantParams::DeviceCode(DeviceCodeParams {
+                device_code: self
+                    .device_code
+                    .ok_or(TokenRequestRejection::MissingParameter("device_code"))?,
+            }),
+            OAuthGrantType::TokenExchange => {
+                GrantParams::TokenExchange(TokenExchangeRequestParams {
+                    subject_token: self
+                        .subject_token
+                        .ok_or(TokenRequestRejection::MissingParameter("subject_token"))?,
+                    subject_token_type: self.subject_token_type.ok_or(
+                        TokenRequestRejection::MissingParameter("subject_token_type"),
+                    )?,
+                    actor_token: self.actor_token,
+                    actor_token_type: self.actor_token_type,
+                    requested_token_type: self.requested_token_type,
+                    audience: self.audience,
+                    resource: self.resource,
+                    scope: self.scope,
+                    authorization_details: self.authorization_details,
+                })
+            }
+            OAuthGrantType::Fido2Assertion => GrantParams::Fido2Assertion(Fido2AssertionParams {
+                assertion: self
+                    .assertion
+                    .ok_or(TokenRequestRejection::MissingParameter("assertion"))?,
+                scope: self.scope,
+                authorization_details: self.authorization_details,
+            }),
+        };
+
+        Ok(TokenRequest { auth, grant })
     }
 }
 
@@ -226,9 +382,9 @@ const MAX_ASSERTION_LEN: usize = 8192;
 pub(crate) async fn token(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<TokenRequest>,
+    OAuthForm(params): OAuthForm<TokenRequestForm>,
 ) -> Response {
     // Input length validation — reject oversized parameters early.
     if let Some(ref v) = params.code_verifier
@@ -297,39 +453,52 @@ pub(crate) async fn token(
         );
     }
 
-    // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants.
-    let ParsedTokenRequest {
-        grant_type,
-        request: params,
-    } = match params.parse() {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            let supported = OAuthGrantType::supported_wire_values().join(", ");
-            return token_error_response(
-                OAuthErrorCode::UnsupportedGrantType,
-                &format!("Supported grant types: {supported}"),
-            );
-        }
+    // RFC 6749 Section 5.2: unknown grant, or a REQUIRED parameter the named
+    // grant did not carry.
+    let TokenRequest { auth, grant } = match params.parse() {
+        Ok(typed) => typed,
+        Err(rejection) => return rejection.into_response(),
     };
 
-    match grant_type {
-        OAuthGrantType::AuthorizationCode => {
-            handle_authorization_code_grant(State(state), client_cert, headers, params).await
+    match grant {
+        GrantParams::AuthorizationCode(params) => {
+            handle_authorization_code_grant(State(state), client_cert, headers, auth, params).await
         }
-        OAuthGrantType::ClientCredentials => {
-            handle_client_credentials_grant(State(state), client_info, client_cert, headers, params)
-                .await
+        GrantParams::ClientCredentials(params) => {
+            handle_client_credentials_grant(
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
-        OAuthGrantType::DeviceCode => {
+        GrantParams::DeviceCode(params) => {
             handle_device_code_grant(State(state), client_info, client_cert, headers, params).await
         }
-        OAuthGrantType::TokenExchange => {
-            handle_token_exchange_grant(State(state), client_info, client_cert, headers, params)
-                .await
+        GrantParams::TokenExchange(params) => {
+            handle_token_exchange_grant(
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
-        OAuthGrantType::Fido2Assertion => {
-            handle_fido2_assertion_grant(State(state), client_info, client_cert, headers, params)
-                .await
+        GrantParams::Fido2Assertion(params) => {
+            handle_fido2_assertion_grant(
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
     }
 }
@@ -365,8 +534,8 @@ async fn commit_optional_jti(
 async fn resolve_non_jwt_auth(
     state: &Arc<AppState>,
     headers: &HeaderMap,
-    params: &TokenRequest,
-    client_cert: &crate::handlers::extractors::OptionalClientCert,
+    auth: &ClientAuthParams,
+    client_cert: &OptionalClientCert,
 ) -> Result<
     (
         crate::services::oidc::token::AuthenticatedClient,
@@ -374,7 +543,7 @@ async fn resolve_non_jwt_auth(
     ),
     Response,
 > {
-    let creds = extract_client_credentials(headers, params);
+    let creds = extract_client_credentials(headers, auth);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -482,24 +651,17 @@ async fn resolve_non_jwt_auth(
 /// Handle authorization code grant.
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    params: TokenRequest,
+    auth: ClientAuthParams,
+    params: AuthorizationCodeParams,
 ) -> Response {
-    // RFC 6749 Section 4.1.3: The "code" parameter is REQUIRED
-    let code = match &params.code {
-        Some(c) => c,
-        None => {
-            return token_error_response(OAuthErrorCode::InvalidRequest, "Missing code parameter");
-        }
-    };
-
     // Extract client credentials from headers or body (including JWT assertion)
-    let has_jwt_assertion = params.client_assertion.is_some();
+    let has_jwt_assertion = auth.client_assertion.is_some();
 
     // For JWT assertion, authenticate and extract the client
     let (jwt_authenticated, jwt_pending_jti, jwt_auth) = if has_jwt_assertion {
-        let client_auth = match extract_client_auth(&headers, &params) {
+        let client_auth = match extract_client_auth(&headers, &auth) {
             Ok(auth) => auth,
             Err(resp) => return resp,
         };
@@ -551,14 +713,14 @@ async fn handle_authorization_code_grant(
     let non_jwt_auth = if has_jwt_assertion {
         None
     } else {
-        match resolve_non_jwt_auth(&state, &headers, &params, &client_cert).await {
+        match resolve_non_jwt_auth(&state, &headers, &auth, &client_cert).await {
             Ok(pair) => Some(pair),
             // RFC 6749 §5.2: every failure inside `resolve_non_jwt_auth` is a
             // client-authentication failure, so a client that used
             // `Authorization: Basic` is owed the matching challenge on the 401.
             Err(resp) => {
                 return with_client_auth_challenge(
-                    ClientAuthPresentation::of(&headers, &params),
+                    ClientAuthPresentation::of(&headers, &auth),
                     resp,
                 );
             }
@@ -624,7 +786,7 @@ async fn handle_authorization_code_grant(
     // Exchange the authorization code. `authenticated_client` is the
     // client_id used for RFC 8725 §3.9 audience validation.
     let exchange_params = AuthCodeExchangeParams {
-        code,
+        code: &params.code,
         redirect_uri: params.redirect_uri.as_deref(),
         authenticated_client: Some(&authenticated_client),
         code_verifier: params.code_verifier.as_deref(),
@@ -663,12 +825,13 @@ async fn handle_authorization_code_grant(
 async fn handle_client_credentials_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    params: TokenRequest,
+    auth: ClientAuthParams,
+    params: ClientCredentialsParams,
 ) -> Response {
     // RFC 6749 Section 4.4.2: Client authentication is REQUIRED
-    let client_auth = match extract_client_auth(&headers, &params) {
+    let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
@@ -838,20 +1001,16 @@ async fn handle_client_credentials_grant(
 async fn handle_device_code_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    params: TokenRequest,
+    params: DeviceCodeParams,
 ) -> Response {
-    let device_req = vouch_common::DeviceTokenRequest {
-        grant_type: params.grant_type,
-        device_code: params.device_code.unwrap_or_default(),
-    };
     match super::super::device::device_token(
         State(state),
         client_info,
         client_cert,
         headers,
-        Json(device_req),
+        &params.device_code,
     )
     .await
     {
@@ -880,7 +1039,7 @@ impl<'a> ExchangeTokens<'a> {
     /// `invalid_request` for a missing REQUIRED parameter, a token type this
     /// server does not accept, or a token and type that did not arrive
     /// together.
-    fn from_request(params: &'a TokenRequest) -> ServiceResult<Self> {
+    fn from_request(params: &'a TokenExchangeRequestParams) -> ServiceResult<Self> {
         let requested_token_type = match params.requested_token_type.as_deref() {
             Some(urn) => Some(TokenType::parse(urn).ok_or_else(|| {
                 ServiceError::oauth(
@@ -891,10 +1050,7 @@ impl<'a> ExchangeTokens<'a> {
             None => None,
         };
         Ok(Self {
-            subject: SubjectToken::from_params(
-                params.subject_token.as_ref(),
-                params.subject_token_type.as_deref(),
-            )?,
+            subject: SubjectToken::new(&params.subject_token, &params.subject_token_type)?,
             actor: ActorToken::from_params(
                 params.actor_token.as_ref(),
                 params.actor_token_type.as_deref(),
@@ -912,12 +1068,13 @@ impl<'a> ExchangeTokens<'a> {
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    params: TokenRequest,
+    auth: ClientAuthParams,
+    params: TokenExchangeRequestParams,
 ) -> Response {
     // Extract client authentication (supports secret-based and JWT assertion)
-    let client_auth = match extract_client_auth(&headers, &params) {
+    let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
@@ -1084,7 +1241,7 @@ async fn handle_token_exchange_grant(
 
 /// Implement `ClientAuthFields` for `TokenRequest` to enable shared client
 /// authentication extraction.
-impl ClientAuthFields for TokenRequest {
+impl ClientAuthFields for ClientAuthParams {
     fn client_id(&self) -> Option<&str> {
         self.client_id.as_deref()
     }
@@ -1109,23 +1266,15 @@ impl ClientAuthFields for TokenRequest {
 async fn handle_fido2_assertion_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
-    client_cert: crate::handlers::extractors::OptionalClientCert,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
-    params: TokenRequest,
+    auth: ClientAuthParams,
+    params: Fido2AssertionParams,
 ) -> Response {
-    // The assertion parameter is REQUIRED
-    let assertion = match &params.assertion {
-        Some(a) => a.clone(),
-        None => {
-            return token_error_response(
-                OAuthErrorCode::InvalidRequest,
-                "Missing assertion parameter for fido2-assertion grant",
-            );
-        }
-    };
+    let assertion = params.assertion;
 
     // Extract and authenticate client via private_key_jwt
-    let client_auth = match extract_client_auth(&headers, &params) {
+    let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
@@ -1251,7 +1400,7 @@ async fn handle_fido2_assertion_grant(
 async fn validate_mtls_client_auth(
     state: &Arc<AppState>,
     client: &crate::services::oidc::token::AuthenticatedClient,
-    client_cert: &crate::handlers::extractors::OptionalClientCert,
+    client_cert: &OptionalClientCert,
 ) -> Result<Option<crate::services::oidc::token::MtlsCertVerification>, Box<Response>> {
     if client.client.token_endpoint_auth_method != crate::db::TokenEndpointAuthMethod::TlsClientAuth
         && client.client.token_endpoint_auth_method
@@ -1282,7 +1431,7 @@ async fn validate_mtls_client_auth(
 /// `tls_client_certificate_bound_access_tokens` **and** a cert is present.
 fn extract_mtls_thumbprint(
     client: &crate::services::oidc::token::AuthenticatedClient,
-    client_cert: &crate::handlers::extractors::OptionalClientCert,
+    client_cert: &OptionalClientCert,
 ) -> Option<String> {
     if client.client.tls_client_certificate_bound_access_tokens {
         client_cert.0.as_ref().map(|c| c.thumbprint.clone())

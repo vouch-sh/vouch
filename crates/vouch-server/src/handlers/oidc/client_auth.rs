@@ -50,7 +50,7 @@ pub(crate) enum ExtractedClientAuth {
 
 /// Fields needed for client authentication extraction.
 ///
-/// Both `TokenRequest` and `ParRequest` implement this trait so the shared
+/// Both `ClientAuthParams` and `ParRequest` implement this trait so the shared
 /// extraction logic can work with either.
 pub(crate) trait ClientAuthFields {
     fn client_id(&self) -> Option<&str>;

@@ -1103,3 +1103,57 @@ async fn test_form_post_error_delivers_html_form() {
         "form_post error must echo the state parameter"
     );
 }
+
+/// RFC 6749 §3.1 carries the same parameter rules as §3.2 for the
+/// authorization endpoint: "Parameters sent without a value MUST be treated as
+/// if they were omitted from the request." Checked on the query string, which
+/// is how this endpoint receives them, and on `prompt`, where the two cases
+/// diverge: `Prompt::parse("")` is `None`, so an empty `prompt` used to be
+/// rejected as an unsupported value while an omitted one requests nothing.
+#[tokio::test]
+async fn test_rfc6749_authorize_empty_parameter_is_treated_as_omitted() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-empty@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let base = format!(
+        "/oauth/authorize?response_type=code&client_id={}&redirect_uri=https://example.com/callback",
+        client.client_id
+    );
+
+    // Both answers are redirects, so the Location header is where they differ:
+    // an unsupported prompt redirects to the client with `error=`, while an
+    // omitted one continues the flow.
+    let empty = http_get_full(&app, &format!("{base}&prompt="), &[]).await;
+    let omitted = http_get_full(&app, &base, &[]).await;
+
+    let location = |r: &crate::test_utils::HttpResponse| {
+        r.headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Each answer carries a fresh `pending_auth` id, so compare the target
+    // rather than the whole URL.
+    let target = |r: &crate::test_utils::HttpResponse| {
+        location(r)
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    assert_eq!(empty.status, omitted.status);
+    assert_eq!(
+        target(&empty),
+        target(&omitted),
+        "`prompt=` must answer exactly as an omitted `prompt`"
+    );
+    assert!(
+        !location(&empty).contains("error="),
+        "`prompt=` must not be rejected as an unsupported value: {}",
+        location(&empty)
+    );
+}

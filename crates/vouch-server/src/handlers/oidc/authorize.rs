@@ -14,6 +14,7 @@ use crate::AppState;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
 use crate::error::OAuthErrorCode;
+use crate::handlers::extractors::{OAuthForm, OAuthQuery};
 use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
@@ -25,8 +26,7 @@ use crate::services::oidc::authorization::{
 use crate::services::oidc::jar::{QueryParamHints, fetch_request_object, validate_request_object};
 use askama::Template;
 use axum::{
-    Form,
-    extract::{Query, State},
+    extract::State,
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -408,7 +408,7 @@ async fn check_session_and_authorize(
 /// - RFC 9700: Follows OAuth 2.0 Security BCP
 pub(crate) async fn authorize(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<AuthorizeQuery>,
+    OAuthQuery(params): OAuthQuery<AuthorizeQuery>,
     jar: CookieJar,
 ) -> Response {
     authorize_inner(state, params, jar).await
@@ -510,7 +510,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 pub(crate) async fn authorize_post(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    Form(params): Form<AuthorizeQuery>,
+    OAuthForm(params): OAuthForm<AuthorizeQuery>,
 ) -> Response {
     authorize_inner(state, params, jar).await
 }
