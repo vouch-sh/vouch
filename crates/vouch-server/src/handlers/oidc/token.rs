@@ -8,14 +8,14 @@ use super::client_auth::{
 use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
-use crate::error::{OAuthErrorCode, ServiceError};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     ClientAuthProof, GrantProof, SenderConstraintProof, TokenIssuanceProof,
 };
 use crate::services::oidc::{
     ScopeSet,
     client_credentials::{ClientCredentialsBindings, exchange_client_credentials},
-    exchange::{TokenExchangeParams, exchange_token},
+    exchange::{ActorToken, SubjectToken, TokenExchangeParams, TokenType, exchange_token},
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
@@ -860,6 +860,50 @@ async fn handle_device_code_grant(
     }
 }
 
+/// The RFC 8693 §2.1 token parameters in typed form: each token carries the
+/// type declared for it, so [`exchange_token`] cannot be reached with a token
+/// whose type went unchecked or a type whose token never arrived.
+struct ExchangeTokens<'a> {
+    /// `subject_token` + `subject_token_type`, both REQUIRED.
+    subject: SubjectToken<'a>,
+    /// `actor_token` + `actor_token_type`, present together or not at all.
+    actor: Option<ActorToken<'a>>,
+    /// `requested_token_type`, OPTIONAL.
+    requested_token_type: Option<TokenType>,
+}
+
+impl<'a> ExchangeTokens<'a> {
+    /// Pair up the flat form parameters at the request boundary.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` for a missing REQUIRED parameter, a token type this
+    /// server does not accept, or a token and type that did not arrive
+    /// together.
+    fn from_request(params: &'a TokenRequest) -> ServiceResult<Self> {
+        let requested_token_type = match params.requested_token_type.as_deref() {
+            Some(urn) => Some(TokenType::parse(urn).ok_or_else(|| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "Unsupported requested_token_type",
+                )
+            })?),
+            None => None,
+        };
+        Ok(Self {
+            subject: SubjectToken::from_params(
+                params.subject_token.as_ref(),
+                params.subject_token_type.as_deref(),
+            )?,
+            actor: ActorToken::from_params(
+                params.actor_token.as_ref(),
+                params.actor_token_type.as_deref(),
+            )?,
+            requested_token_type,
+        })
+    }
+}
+
 /// Handle token exchange grant (RFC 8693).
 ///
 /// RFC 8693 Section 2.1: The token exchange grant requires client
@@ -958,17 +1002,17 @@ async fn handle_token_exchange_grant(
         (None, None) => None,
     };
 
+    let tokens = match ExchangeTokens::from_request(&params) {
+        Ok(tokens) => tokens,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
+
     let exchange_params = TokenExchangeParams {
-        subject_token: params
-            .subject_token
-            .as_ref()
-            .map_or("", |s| s.expose_secret()),
-        subject_token_type: params.subject_token_type.as_deref().unwrap_or_default(),
-        actor_token: params.actor_token.as_ref().map(|s| s.expose_secret()),
-        actor_token_type: params.actor_token_type.as_deref(),
+        subject: tokens.subject,
+        actor: tokens.actor,
         audience: effective_audience,
         scope: params.scope.as_deref(),
-        requested_token_type: params.requested_token_type.as_deref(),
+        requested_token_type: tokens.requested_token_type,
         client_id: &authenticated_client.client.client_id,
         dpop_proof: dpop_proof.as_ref(),
         authorization_details: params.authorization_details.as_deref(),

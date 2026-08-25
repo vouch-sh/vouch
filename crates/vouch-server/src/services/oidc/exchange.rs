@@ -17,20 +17,159 @@ use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
 use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use vouch_common::protocol;
 
-/// Token type URNs for RFC 8693 §3, re-exported under the names this module
-/// uses. The values live in [`vouch_common::protocol`] so the CLI's exchange
+/// An RFC 8693 §3 token type identifier this server accepts.
+///
+/// The URN spellings live in [`vouch_common::protocol`] so the CLI's exchange
 /// requests are spelled from the same constants the server matches on.
-pub mod token_types {
-    /// Access token type.
-    pub use vouch_common::protocol::TOKEN_TYPE_ACCESS_TOKEN as ACCESS_TOKEN;
-    /// ID token type.
-    pub use vouch_common::protocol::TOKEN_TYPE_ID_TOKEN as ID_TOKEN;
-    /// JWT type.
-    pub use vouch_common::protocol::TOKEN_TYPE_JWT as JWT;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenType {
+    /// [`protocol::TOKEN_TYPE_ACCESS_TOKEN`].
+    AccessToken,
+    /// [`protocol::TOKEN_TYPE_ID_TOKEN`].
+    IdToken,
+    /// [`protocol::TOKEN_TYPE_JWT`].
+    Jwt,
+}
+
+impl TokenType {
+    /// The RFC 8693 §3 URN identifying this type on the wire.
+    #[must_use]
+    pub fn as_urn(self) -> &'static str {
+        match self {
+            Self::AccessToken => protocol::TOKEN_TYPE_ACCESS_TOKEN,
+            Self::IdToken => protocol::TOKEN_TYPE_ID_TOKEN,
+            Self::Jwt => protocol::TOKEN_TYPE_JWT,
+        }
+    }
+
+    /// Parse an RFC 8693 §3 URN, or `None` for a type this server neither
+    /// accepts nor issues (`saml1`, `saml2`, `refresh_token`).
+    #[must_use]
+    pub fn parse(urn: &str) -> Option<Self> {
+        match urn {
+            protocol::TOKEN_TYPE_ACCESS_TOKEN => Some(Self::AccessToken),
+            protocol::TOKEN_TYPE_ID_TOKEN => Some(Self::IdToken),
+            protocol::TOKEN_TYPE_JWT => Some(Self::Jwt),
+            _ => None,
+        }
+    }
+}
+
+/// RFC 8693 §2.1 `subject_token` with the `subject_token_type` declared for it.
+/// Both parameters are REQUIRED, so they are one value: a request missing
+/// either cannot be turned into [`TokenExchangeParams`].
+///
+/// Every [`TokenType`] is accepted here. All three URNs denote a JWT this
+/// server issued, and [`decode_token`] does not branch on the declared type.
+///
+/// The token stays wrapped in [`SecretString`] so that [`TokenExchangeParams`],
+/// which derives `Debug`, cannot print a bearer credential.
+#[derive(Debug)]
+pub struct SubjectToken<'a> {
+    /// The token representing the party the exchange is performed for.
+    pub token: &'a SecretString,
+    /// The type the client declared for it.
+    pub token_type: TokenType,
+}
+
+impl<'a> SubjectToken<'a> {
+    /// Pair the two wire parameters.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` when either REQUIRED parameter is absent, or when the
+    /// declared type is one this server does not accept.
+    pub fn from_params(
+        token: Option<&'a SecretString>,
+        token_type: Option<&str>,
+    ) -> ServiceResult<Self> {
+        let (Some(token), Some(urn)) = (token, token_type) else {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "subject_token and subject_token_type are both required",
+            ));
+        };
+        let token_type = TokenType::parse(urn).ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Unsupported subject_token_type",
+            )
+        })?;
+        Ok(Self { token, token_type })
+    }
+}
+
+/// RFC 8693 §2.1 `actor_token` with the `actor_token_type` declared for it:
+///
+/// > actor_token_type
+/// >    An identifier, as described in Section 3, that indicates the type
+/// >    of the security token in the "actor_token" parameter.  This is
+/// >    REQUIRED when the "actor_token" parameter is present in the
+/// >    request but MUST NOT be included otherwise.
+///
+/// Carrying both in one value is what stops the two parameters from existing
+/// independently. The variants are the accepted `actor_token_type` subset:
+/// [`TokenType::IdToken`] has none because an ID token asserts who a user is,
+/// not who is acting, so admitting it would take a new variant here rather
+/// than an edit to a list shared with the other two parameters.
+///
+/// As with [`SubjectToken`], the token stays wrapped in [`SecretString`].
+#[derive(Debug)]
+pub enum ActorToken<'a> {
+    /// `actor_token_type=urn:ietf:params:oauth:token-type:access_token`.
+    AccessToken(&'a SecretString),
+    /// `actor_token_type=urn:ietf:params:oauth:token-type:jwt`.
+    Jwt(&'a SecretString),
+}
+
+impl<'a> ActorToken<'a> {
+    /// The `actor_token` value.
+    #[must_use]
+    pub fn token(&self) -> &'a SecretString {
+        match *self {
+            Self::AccessToken(token) | Self::Jwt(token) => token,
+        }
+    }
+
+    /// Pair the two wire parameters, or `None` when the request carries
+    /// neither and is therefore not a delegation.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` when only one of the pair is present, or when the
+    /// declared type is outside the subset above. RFC 8693 §2.1 addresses the
+    /// lone `actor_token_type` to the client rather than to us, so rejecting
+    /// it is our choice, taken under RFC 6749 §5.2 — `invalid_request` covers
+    /// a request that "is otherwise malformed". Accepting and dropping it
+    /// would hide the client bug that produced it.
+    pub fn from_params(
+        token: Option<&'a SecretString>,
+        token_type: Option<&str>,
+    ) -> ServiceResult<Option<Self>> {
+        match (token, token_type) {
+            (None, None) => Ok(None),
+            (Some(token), Some(urn)) => match TokenType::parse(urn) {
+                Some(TokenType::AccessToken) => Ok(Some(Self::AccessToken(token))),
+                Some(TokenType::Jwt) => Ok(Some(Self::Jwt(token))),
+                Some(TokenType::IdToken) | None => Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "Invalid actor_token_type",
+                )),
+            },
+            (Some(_), None) => Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "actor_token_type is required when actor_token is present",
+            )),
+            (None, Some(_)) => Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "actor_token_type must not be present without actor_token",
+            )),
+        }
+    }
 }
 
 /// Default lifetime for an exchanged OIDC ID token
@@ -43,20 +182,17 @@ const DEFAULT_ID_TOKEN_EXPIRES_SECS: u64 = 600;
 /// Parameters for token exchange (RFC 8693 Section 2.1).
 #[derive(Debug)]
 pub struct TokenExchangeParams<'a> {
-    /// RFC 8693 Section 2.1: The subject token (REQUIRED).
-    pub subject_token: &'a str,
-    /// RFC 8693 Section 2.1: An identifier for the type of the subject token (REQUIRED).
-    pub subject_token_type: &'a str,
-    /// RFC 8693 Section 2.1: Optional actor token for delegation chains.
-    pub actor_token: Option<&'a str>,
-    /// RFC 8693 Section 2.1: An identifier for the type of the actor token.
-    pub actor_token_type: Option<&'a str>,
+    /// RFC 8693 Section 2.1: The subject token and its declared type (REQUIRED).
+    pub subject: SubjectToken<'a>,
+    /// RFC 8693 Section 2.1: The actor token and its declared type, for
+    /// delegation chains (OPTIONAL).
+    pub actor: Option<ActorToken<'a>>,
     /// RFC 8693 Section 2.1: The logical name of the target service (OPTIONAL).
     pub audience: Option<&'a str>,
     /// RFC 8693 Section 2.1: The requested scope for the new token (OPTIONAL).
     pub scope: Option<&'a str>,
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
-    pub requested_token_type: Option<&'a str>,
+    pub requested_token_type: Option<TokenType>,
     /// OAuth client_id of the requesting client.
     pub client_id: &'a str,
     /// RFC 9449 §6: the validated DPoP proof binding the issued token via
@@ -130,34 +266,11 @@ pub(crate) async fn exchange_token(
     params: TokenExchangeParams<'_>,
     proof: TokenIssuanceProof,
 ) -> ServiceResult<TokenExchangeResult> {
-    // Validate subject token type
-    let valid_token_types = [
-        token_types::ACCESS_TOKEN,
-        token_types::ID_TOKEN,
-        token_types::JWT,
-    ];
-    if !valid_token_types.contains(&params.subject_token_type) {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Unsupported subject_token_type",
-        ));
-    }
-
-    // RFC 8693 Section 2.1: Validate requested_token_type if provided
-    if let Some(requested_type) = params.requested_token_type
-        && !valid_token_types.contains(&requested_type)
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Unsupported requested_token_type",
-        ));
-    }
-
     // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
     // path issues a clean OIDC claim set and does not carry the `act` claim,
     // so honoring `actor_token` here would silently drop the delegation chain.
     // Refuse the combination explicitly rather than ignore the input.
-    if params.requested_token_type == Some(token_types::ID_TOKEN) && params.actor_token.is_some() {
+    if params.requested_token_type == Some(TokenType::IdToken) && params.actor.is_some() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "actor_token is not supported with requested_token_type=id_token",
@@ -166,7 +279,8 @@ pub(crate) async fn exchange_token(
 
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
-    let subject_decoded = decode_token(params.subject_token, &state.oidc_key, &config.base_url)
+    let subject_token = params.subject.token.expose_secret();
+    let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url)
         .ok_or_else(|| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
@@ -175,7 +289,7 @@ pub(crate) async fn exchange_token(
         })?;
 
     // Verify the subject token's session exists
-    let subject_token_hash = hash_token(params.subject_token);
+    let subject_token_hash = hash_token(subject_token);
     let subject_session = state
         .session_cache
         .get_session_by_token_hash(&state.store, &subject_token_hash)
@@ -224,16 +338,8 @@ pub(crate) async fn exchange_token(
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)
-    let actor_claim = if let Some(actor_token) = params.actor_token {
-        // Validate actor token type
-        if params.actor_token_type != Some(token_types::ACCESS_TOKEN)
-            && params.actor_token_type != Some(token_types::JWT)
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "Invalid actor_token_type",
-            ));
-        }
+    let actor_claim = if let Some(actor) = params.actor {
+        let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
         let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
@@ -350,7 +456,7 @@ pub(crate) async fn exchange_token(
     // upstream SSO but before FIDO2 registration) from minting a WIF
     // assertion that downstream relying parties trust as hardware-attested,
     // gate the fork on the subject token's hardware verification level.
-    if params.requested_token_type == Some(token_types::ID_TOKEN) {
+    if params.requested_token_type == Some(TokenType::IdToken) {
         if !subject_decoded.hardware_verification().hardware_verified() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::AccessDenied,
@@ -486,7 +592,7 @@ pub(crate) async fn exchange_token(
                 client_id: params.client_id.to_string(),
                 audience: params.audience.map(String::from),
                 scope: scope_string.clone(),
-                issued_token_type: token_types::ACCESS_TOKEN.to_string(),
+                issued_token_type: TokenType::AccessToken.as_urn().to_string(),
                 token_expires_at: Some(expires_at.to_string()),
             },
         )
@@ -507,7 +613,7 @@ pub(crate) async fn exchange_token(
 
     Ok(TokenExchangeResult {
         access_token: session_result.token.clone(),
-        issued_token_type: token_types::ACCESS_TOKEN.to_string(),
+        issued_token_type: TokenType::AccessToken.as_urn().to_string(),
         token_type: token_type.to_string(),
         expires_in,
         scope: granted_scope,
@@ -631,7 +737,7 @@ async fn issue_id_token(
                 client_id: ctx.client_id.to_string(),
                 audience: ctx.audience.map(String::from),
                 scope: None,
-                issued_token_type: token_types::ID_TOKEN.to_string(),
+                issued_token_type: TokenType::IdToken.as_urn().to_string(),
                 token_expires_at: Some(expires_at.to_string()),
             },
         )
@@ -646,7 +752,7 @@ async fn issue_id_token(
 
     Ok(TokenExchangeResult {
         access_token: id_token.into(),
-        issued_token_type: token_types::ID_TOKEN.to_string(),
+        issued_token_type: TokenType::IdToken.as_urn().to_string(),
         token_type: protocol::ACCESS_TOKEN_TYPE_BEARER.to_string(),
         expires_in,
         scope: None,
@@ -698,6 +804,10 @@ fn calculate_granted_scope(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 
@@ -757,16 +867,150 @@ mod tests {
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
-    /// The `token_types` aliases must map to the matching `protocol`
-    /// constants. A swapped `pub use` would still compile and would still
+    /// Each [`TokenType`] must map to the matching `protocol` constant in both
+    /// directions. Swapped match arms would still compile and would still
     /// carry the RFC 8693 §3 prefix, so the prefix alone proves nothing.
     #[test]
-    fn test_token_type_aliases_match_protocol_constants() {
+    fn test_token_type_urns_match_protocol_constants() {
         use vouch_common::protocol;
 
-        assert_eq!(token_types::ACCESS_TOKEN, protocol::TOKEN_TYPE_ACCESS_TOKEN);
-        assert_eq!(token_types::ID_TOKEN, protocol::TOKEN_TYPE_ID_TOKEN);
-        assert_eq!(token_types::JWT, protocol::TOKEN_TYPE_JWT);
+        assert_eq!(
+            TokenType::AccessToken.as_urn(),
+            protocol::TOKEN_TYPE_ACCESS_TOKEN
+        );
+        assert_eq!(TokenType::IdToken.as_urn(), protocol::TOKEN_TYPE_ID_TOKEN);
+        assert_eq!(TokenType::Jwt.as_urn(), protocol::TOKEN_TYPE_JWT);
+
+        assert_eq!(
+            TokenType::parse(protocol::TOKEN_TYPE_ACCESS_TOKEN),
+            Some(TokenType::AccessToken)
+        );
+        assert_eq!(
+            TokenType::parse(protocol::TOKEN_TYPE_ID_TOKEN),
+            Some(TokenType::IdToken)
+        );
+        assert_eq!(
+            TokenType::parse(protocol::TOKEN_TYPE_JWT),
+            Some(TokenType::Jwt)
+        );
+    }
+
+    /// RFC 8693 §3 lists types this server does not accept; they must not
+    /// parse into a [`TokenType`] at all.
+    #[test]
+    fn test_token_type_rejects_unsupported_urns() {
+        for urn in [
+            "urn:ietf:params:oauth:token-type:saml1",
+            "urn:ietf:params:oauth:token-type:saml2",
+            "urn:ietf:params:oauth:token-type:refresh_token",
+            "",
+            "access_token",
+        ] {
+            assert_eq!(TokenType::parse(urn), None, "{urn} must not parse");
+        }
+    }
+
+    // =========================================================================
+    // RFC 8693 §2.1 parameter pairing
+    //
+    // `actor_token_type` "is REQUIRED when the `actor_token` parameter is
+    // present in the request but MUST NOT be included otherwise", so every
+    // combination of the two has exactly one outcome.
+    // =========================================================================
+
+    #[test]
+    fn test_actor_token_absent_is_not_a_delegation() {
+        let actor = ActorToken::from_params(None, None).expect("neither parameter is valid");
+        assert!(actor.is_none());
+    }
+
+    #[test]
+    fn test_actor_token_pairs_with_declared_type() {
+        let token = SecretString::from("tok");
+
+        let actor = ActorToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
+            .expect("access_token is an accepted actor type")
+            .expect("the pair is a delegation");
+        assert!(matches!(actor, ActorToken::AccessToken(_)));
+        assert_eq!(actor.token().expose_secret(), "tok");
+
+        let actor = ActorToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_JWT))
+            .expect("jwt is an accepted actor type")
+            .expect("the pair is a delegation");
+        assert!(matches!(actor, ActorToken::Jwt(_)));
+        assert_eq!(actor.token().expose_secret(), "tok");
+    }
+
+    /// The subset that diverges from `subject_token_type`: an ID token asserts
+    /// who a user is, not who is acting.
+    #[test]
+    fn test_actor_token_rejects_id_token_type() {
+        let token = SecretString::from("tok");
+        let err = ActorToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_ID_TOKEN))
+            .expect_err("id_token is not an accepted actor type");
+        assert!(
+            format!("{err:?}").contains("Invalid actor_token_type"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_actor_token_without_type_is_rejected() {
+        let token = SecretString::from("tok");
+        ActorToken::from_params(Some(&token), None)
+            .expect_err("actor_token_type is REQUIRED when actor_token is present");
+    }
+
+    /// The case this pairing exists to catch: before it, the type check lived
+    /// inside `if let Some(actor_token)`, so a lone `actor_token_type` was
+    /// accepted and dropped.
+    #[test]
+    fn test_actor_token_type_without_token_is_rejected() {
+        ActorToken::from_params(None, Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
+            .expect_err("actor_token_type MUST NOT be included without actor_token");
+    }
+
+    #[test]
+    fn test_subject_token_requires_both_parameters() {
+        let token = SecretString::from("tok");
+        SubjectToken::from_params(None, Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
+            .expect_err("subject_token is REQUIRED");
+        SubjectToken::from_params(Some(&token), None).expect_err("subject_token_type is REQUIRED");
+        SubjectToken::from_params(None, None).expect_err("both are REQUIRED");
+    }
+
+    /// Every [`TokenType`] is accepted as a subject type — this is the subset
+    /// that must stay wider than [`ActorToken`]'s.
+    #[test]
+    fn test_subject_token_accepts_every_token_type() {
+        let token = SecretString::from("tok");
+        for token_type in [TokenType::AccessToken, TokenType::IdToken, TokenType::Jwt] {
+            let subject = SubjectToken::from_params(Some(&token), Some(token_type.as_urn()))
+                .expect("every token type is a valid subject type");
+            assert_eq!(subject.token_type, token_type);
+            assert_eq!(subject.token.expose_secret(), "tok");
+        }
+    }
+
+    #[test]
+    fn test_subject_token_rejects_unsupported_type() {
+        let token = SecretString::from("tok");
+        SubjectToken::from_params(Some(&token), Some("urn:ietf:params:oauth:token-type:saml2"))
+            .expect_err("saml2 is not a subject type this server accepts");
+    }
+
+    /// [`TokenExchangeParams`] derives `Debug`; holding the tokens as
+    /// [`SecretString`] is what keeps a bearer credential out of that output.
+    #[test]
+    fn test_subject_and_actor_tokens_are_redacted_in_debug() {
+        let token = SecretString::from("exchange-secret-token");
+        let subject = SubjectToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_JWT))
+            .expect("valid subject pair");
+        let actor = ActorToken::from_params(Some(&token), Some(protocol::TOKEN_TYPE_JWT))
+            .expect("valid actor pair");
+
+        let debug = format!("{subject:?} {actor:?}");
+        assert!(!debug.contains("exchange-secret-token"), "{debug}");
     }
 
     // =========================================================================
@@ -781,7 +1025,7 @@ mod tests {
     fn test_token_exchange_result_debug_redacts_access_token() {
         let result = TokenExchangeResult {
             access_token: "eyJhbGciOiJFUzI1NiJ9.exchange-secret-token".into(),
-            issued_token_type: token_types::ACCESS_TOKEN.to_string(),
+            issued_token_type: TokenType::AccessToken.as_urn().to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 3600,
             scope: Some(ScopeSet::parse("openid")),
