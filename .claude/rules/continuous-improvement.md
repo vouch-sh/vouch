@@ -71,7 +71,7 @@ Must be live-tested before any PR that touches them (silent breakage not caught 
 
 - **Database:** SQLite at `.local/testing/data/test.db` for local cycles; PostgreSQL/DSQL exercised in integration/CI.
 - **Upstream IdP:** at least one configured via `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` (server won't boot otherwise).
-- **YubiKey:** physical device required for FIDO2 tests — `cargo test --features yubikey-tests -- --ignored`. Without hardware these paths are **Blocked**, not Untested.
+- **YubiKey:** `cargo test` needs no hardware — server-side FIDO2 verification is covered via the `CoseVerifier` seam and `MockFidoDevice`. CTAP2 paths against real hardware have no automated harness (live-test via the CLI: `vouch login`/`enroll`/`register`); without hardware those paths are **Blocked**, not Untested.
 - **Fuzzing:** `make test-fuzz` requires the nightly toolchain.
 
 ## Reference Projects
