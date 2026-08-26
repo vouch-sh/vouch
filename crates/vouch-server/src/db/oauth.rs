@@ -45,8 +45,8 @@ pub struct OAuthClient {
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
     pub resource_uris: Vec<String>,
-    pub jwks: Option<serde_json::Value>,
-    pub jwks_uri: Option<String>,
+    /// RFC 7591 §2 key material, in whichever of the two forms was registered.
+    pub keys: Option<ClientKeys>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     pub require_signed_request_object: Option<bool>,
@@ -114,7 +114,7 @@ fn normalize_stored_auth_method(
 impl From<Document<OAuthClientDoc>> for OAuthClient {
     fn from(doc: Document<OAuthClientDoc>) -> Self {
         Self {
-            id: doc.id,
+            id: doc.id.clone(),
             user_id: doc.data.user_id,
             client_id: doc.data.client_id,
             name: doc.data.name,
@@ -128,8 +128,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             access_scope: doc.data.access_scope,
             org_id: doc.data.org_id,
             resource_uris: doc.data.resource_uris,
-            jwks: doc.data.jwks,
-            jwks_uri: doc.data.jwks_uri,
+            keys: stored_client_keys(&doc.id, doc.data.jwks, doc.data.jwks_uri),
             token_endpoint_auth_method: normalize_stored_auth_method(
                 doc.data.application_type,
                 doc.data.token_endpoint_auth_method,
@@ -204,6 +203,111 @@ impl OAuthClient {
 /// Enforced both at RFC 7591 dynamic registration time (services layer) and at
 /// self-service application creation time (handlers layer).
 pub const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Read a stored client's key material.
+///
+/// A row carrying both is a state RFC 7591 §2 forbids and no write path can
+/// produce. It fails closed rather than inventing a precedence: a client with
+/// no usable key material fails authentication instead of authenticating on a
+/// guess about which field was meant.
+fn stored_client_keys(
+    client: &str,
+    jwks: Option<serde_json::Value>,
+    jwks_uri: Option<String>,
+) -> Option<ClientKeys> {
+    ClientKeys::from_stored(jwks, jwks_uri).unwrap_or_else(|_| {
+        tracing::error!(
+            client,
+            "stored client has both jwks and jwks_uri; treating it as having neither"
+        );
+        None
+    })
+}
+
+/// A client's key material.
+///
+/// RFC 7591 §2 states the rule twice, once under each parameter: "The
+/// "jwks_uri" and "jwks" parameters MUST NOT both be present in the same
+/// request or response."
+///
+/// Holding them as one value is what makes that hold. While they were two
+/// options, "both present" was representable, so dynamic client registration
+/// carried a guard to reject it, the self-service path did not, and the
+/// resolver needed a precedence rule ("inline JWKS takes priority") for a
+/// state the specification says cannot occur.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientKeys {
+    /// RFC 7591 §2 `jwks`: the key set inline, "intended to be used by clients
+    /// that cannot use the "jwks_uri" parameter".
+    Inline(serde_json::Value),
+    /// RFC 7591 §2 `jwks_uri`, whose use "is preferred over the "jwks"
+    /// parameter, as it allows for easier key rotation".
+    Uri(String),
+}
+
+/// Both key parameters arrived together, which RFC 7591 §2 forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientKeysConflict;
+
+impl std::fmt::Display for ClientKeysConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("jwks and jwks_uri are mutually exclusive")
+    }
+}
+
+impl ClientKeys {
+    /// Build from the two stored columns, rejecting the state the type exists
+    /// to forbid.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientKeysConflict`] when both are present.
+    pub fn from_stored(
+        jwks: Option<serde_json::Value>,
+        jwks_uri: Option<String>,
+    ) -> Result<Option<Self>, ClientKeysConflict> {
+        match (jwks, jwks_uri) {
+            (Some(_), Some(_)) => Err(ClientKeysConflict),
+            (Some(jwks), None) => Ok(Some(Self::Inline(jwks))),
+            (None, Some(uri)) => Ok(Some(Self::Uri(uri))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The inline key set, when that is the form.
+    #[must_use]
+    pub fn inline(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Inline(jwks) => Some(jwks),
+            Self::Uri(_) => None,
+        }
+    }
+
+    /// The key set URI, when that is the form.
+    #[must_use]
+    pub fn uri(&self) -> Option<&str> {
+        match self {
+            Self::Uri(uri) => Some(uri),
+            Self::Inline(_) => None,
+        }
+    }
+}
+
+/// Split back into the two stored columns.
+///
+/// The document keeps the shape it has always had, so a rolling deploy reads
+/// and writes the same rows in both directions; exclusivity is carried by the
+/// only type the code uses.
+#[must_use]
+pub fn client_keys_to_stored(
+    keys: Option<&ClientKeys>,
+) -> (Option<serde_json::Value>, Option<String>) {
+    match keys {
+        Some(ClientKeys::Inline(jwks)) => (Some(jwks.clone()), None),
+        Some(ClientKeys::Uri(uri)) => (None, Some(uri.clone())),
+        None => (None, None),
+    }
+}
 
 /// Return `true` when `uri` is a syntactically valid post-logout redirect URI.
 ///
@@ -446,8 +550,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub jwks: Option<&'a serde_json::Value>,
-    pub jwks_uri: Option<&'a str>,
+    /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
+    pub keys: Option<&'a ClientKeys>,
     pub fapi_profile: Option<FapiProfile>,
     pub dpop_bound_access_tokens: Option<bool>,
     pub grant_types: Option<&'a [String]>,
@@ -487,6 +591,7 @@ pub async fn create_oauth_client(
     params: &CreateOAuthClientParams<'_>,
 ) -> Result<(OAuthClient, String)> {
     let client_id = uuid::Uuid::now_v7().to_string();
+    let (stored_jwks, stored_jwks_uri) = client_keys_to_stored(params.keys);
 
     let doc = OAuthClientDoc {
         user_id: params.user_id.map(String::from),
@@ -499,8 +604,8 @@ pub async fn create_oauth_client(
         access_scope: params.access_scope,
         org_id: params.org_id.map(String::from),
         resource_uris: params.resource_uris.to_vec(),
-        jwks: params.jwks.cloned(),
-        jwks_uri: params.jwks_uri.map(String::from),
+        jwks: stored_jwks,
+        jwks_uri: stored_jwks_uri,
         token_endpoint_auth_method: params.token_endpoint_auth_method,
         request_object_signing_alg: params.request_object_signing_alg,
         require_signed_request_object: params.require_signed_request_object,
@@ -574,8 +679,8 @@ pub struct UpdateOAuthClientParams<'a> {
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub jwks: Option<&'a serde_json::Value>,
-    pub jwks_uri: Option<&'a str>,
+    /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
+    pub keys: Option<&'a ClientKeys>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
@@ -601,7 +706,7 @@ pub async fn update_oauth_client(
     let jwks_uri_changing = store
         .get::<OAuthClientDoc>(params.id)
         .await?
-        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.jwks_uri);
+        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.keys.and_then(ClientKeys::uri));
 
     if jwks_uri_changing {
         super::jwks_cache::delete_jwks_cache(store, params.id).await?;
@@ -614,8 +719,9 @@ pub async fn update_oauth_client(
             data.redirect_uris = params.redirect_uris.to_vec();
             data.resource_uris = params.resource_uris.to_vec();
             data.token_endpoint_auth_method = params.token_endpoint_auth_method;
-            data.jwks = params.jwks.cloned();
-            data.jwks_uri = params.jwks_uri.map(String::from);
+            let (jwks, jwks_uri) = client_keys_to_stored(params.keys);
+            data.jwks = jwks;
+            data.jwks_uri = jwks_uri;
             data.fapi_profile = params.fapi_profile;
             data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
             if let Some(ref uris) = params.post_logout_redirect_uris {
@@ -1272,8 +1378,8 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub redirect_uris: &'a [String],
     pub grant_types: Option<&'a [String]>,
     pub response_types: Option<&'a [String]>,
-    pub jwks: Option<&'a serde_json::Value>,
-    pub jwks_uri: Option<&'a str>,
+    /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
+    pub keys: Option<&'a ClientKeys>,
     pub registration_access_token_hash: &'a str,
     pub registration_metadata: Option<&'a serde_json::Value>,
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
@@ -1302,7 +1408,7 @@ pub async fn update_oauth_client_registration(
     let jwks_uri_changing = store
         .get::<OAuthClientDoc>(id)
         .await?
-        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.jwks_uri);
+        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.keys.and_then(ClientKeys::uri));
 
     if jwks_uri_changing {
         super::jwks_cache::delete_jwks_cache(store, id).await?;
@@ -1318,8 +1424,9 @@ pub async fn update_oauth_client_registration(
                 data.response_types = Some(rt.to_vec());
             }
             // RFC 7592: PUT is a full replacement — clear fields not present.
-            data.jwks = params.jwks.cloned();
-            data.jwks_uri = params.jwks_uri.map(String::from);
+            let (jwks, jwks_uri) = client_keys_to_stored(params.keys);
+            data.jwks = jwks;
+            data.jwks_uri = jwks_uri;
             data.registration_access_token_hash =
                 Some(params.registration_access_token_hash.to_string());
             data.registration_metadata = params.registration_metadata.cloned();
@@ -1866,8 +1973,7 @@ mod tests {
                 org_id: None,
                 resource_uris: &[],
                 token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-                jwks: None,
-                jwks_uri: None,
+                keys: None,
                 fapi_profile: None,
                 dpop_bound_access_tokens: None,
                 grant_types: None,

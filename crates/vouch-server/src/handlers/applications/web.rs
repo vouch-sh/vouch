@@ -465,8 +465,7 @@ pub(crate) async fn update_application_form(
             org_id,
             resource_uris: &resource_uris,
             token_endpoint_auth_method: fapi.token_endpoint_auth_method,
-            jwks: fapi.jwks,
-            jwks_uri: fapi.jwks_uri,
+            keys: fapi.keys,
             fapi_profile: fapi.fapi_profile,
             dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
             post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
@@ -968,7 +967,7 @@ mod tests {
             "a rejected update must not clear the DPoP binding"
         );
         assert!(
-            record.jwks.is_some(),
+            record.keys.as_ref().is_some_and(|k| k.inline().is_some()),
             "a rejected update must not drop the JWKS"
         );
     }

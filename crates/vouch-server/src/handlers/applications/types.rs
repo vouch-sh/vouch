@@ -62,8 +62,16 @@ impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
         let fapi_profile = client.fapi_profile.as_str().to_string();
-        let jwks = client.jwks.map(|v| v.to_string());
-        let jwks_uri = client.jwks_uri.clone();
+        let jwks = client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+            .map(std::string::ToString::to_string);
+        let jwks_uri = client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::uri)
+            .map(String::from);
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -364,8 +372,13 @@ pub(crate) struct ApplicationResponse {
 
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
-        let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
-        let jwks_uri = client.jwks_uri.clone();
+        let jwks_configured = client.keys.as_ref().is_some_and(|k| k.inline().is_some())
+            || client.keys.as_ref().is_some_and(|k| k.uri().is_some());
+        let jwks_uri = client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::uri)
+            .map(String::from);
         Self {
             id: client.id,
             client_id: client.client_id,

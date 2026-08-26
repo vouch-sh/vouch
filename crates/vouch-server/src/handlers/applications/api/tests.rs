@@ -1485,7 +1485,10 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
         .expect("db lookup")
         .expect("client still exists");
     assert!(
-        persisted.jwks.is_some(),
+        persisted
+            .keys
+            .as_ref()
+            .is_some_and(|k| k.inline().is_some()),
         "JWKS must be preserved after update that omits fapi_profile"
     );
     assert_eq!(
@@ -1542,7 +1545,10 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
         .expect("db lookup")
         .expect("client still exists");
     assert!(
-        persisted.jwks.is_some(),
+        persisted
+            .keys
+            .as_ref()
+            .is_some_and(|k| k.inline().is_some()),
         "a rejected update must leave the client's keys intact"
     );
 }

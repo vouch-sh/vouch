@@ -1103,8 +1103,10 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
         TokenEndpointAuthMethod::PrivateKeyJwt
     );
     assert_eq!(
-        validated.jwks_uri,
-        Some("https://example.com/jwks.json".to_string())
+        validated.keys,
+        Some(crate::db::ClientKeys::Uri(
+            "https://example.com/jwks.json".to_string()
+        ))
     );
 }
 
@@ -1118,7 +1120,10 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
         validated.auth_method,
         TokenEndpointAuthMethod::PrivateKeyJwt
     );
-    assert!(validated.jwks_value.is_some());
+    assert!(matches!(
+        validated.keys,
+        Some(crate::db::ClientKeys::Inline(_))
+    ));
 }
 
 #[test]

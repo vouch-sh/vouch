@@ -1570,6 +1570,11 @@ pub async fn create_test_client(
         TestJwks::Custom(v) => Some(v),
     };
 
+    // `TestClientSpec` still offers the two knobs separately; pairing them here
+    // is what a caller setting both would trip on, which mirrors the endpoints.
+    let client_keys = crate::db::ClientKeys::from_stored(jwks_value, spec.jwks_uri.clone())
+        .expect("test spec sets jwks or jwks_uri, never both");
+
     let (client, client_id) = crate::db::create_oauth_client(
         store,
         &CreateOAuthClientParams {
@@ -1582,8 +1587,7 @@ pub async fn create_test_client(
             org_id: spec.org_id.as_deref(),
             resource_uris: &spec.resource_uris,
             token_endpoint_auth_method: spec.token_endpoint_auth_method.unwrap_or_default(),
-            jwks: jwks_value.as_ref(),
-            jwks_uri: spec.jwks_uri.as_deref(),
+            keys: client_keys.as_ref(),
             fapi_profile: spec.fapi_profile,
             dpop_bound_access_tokens: if spec.dpop_bound_access_tokens {
                 Some(true)
