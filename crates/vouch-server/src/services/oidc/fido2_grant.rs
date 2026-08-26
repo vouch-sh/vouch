@@ -32,6 +32,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::Challenge;
+use vouch_common::{
+    AuthData, Base64Url, ClientDataJson, CredentialId, Signature, StateToken, UserHandle,
+};
 
 /// State embedded in the challenge JWT (must match the challenge endpoint).
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,20 +46,113 @@ struct Fido2ChallengeState {
 }
 
 /// Parsed FIDO2 assertion payload from the `assertion` form parameter.
+///
+/// The binary members are typed rather than `String`, so base64url decoding
+/// and the WebAuthn length bounds happen while the payload is deserialized —
+/// the same guarantee the browser request types get, applied to a payload
+/// that arrives nested inside a form parameter.
 #[derive(Debug, Deserialize)]
 pub struct Fido2AssertionPayload {
     /// State JWT from the challenge endpoint.
-    pub state: String,
-    /// Credential ID (base64url).
-    pub credential_id: String,
-    /// Authenticator data (base64url).
-    pub authenticator_data: String,
-    /// Signature (base64url).
-    pub signature: String,
-    /// Client data JSON (base64url).
-    pub client_data_json: String,
-    /// User handle (base64url) — identifies the user via discoverable credential.
-    pub user_handle: String,
+    pub state: StateToken,
+    /// Credential ID naming the authenticator that signed.
+    pub credential_id: CredentialId<Base64Url>,
+    /// Authenticator data covered by the signature.
+    pub authenticator_data: AuthData<Base64Url>,
+    /// The assertion signature.
+    pub signature: Signature<Base64Url>,
+    /// Client data JSON, as built by the CLI.
+    pub client_data_json: ClientDataJson<Base64Url>,
+    /// User handle — identifies the user via discoverable credential.
+    pub user_handle: UserHandle<Base64Url>,
+}
+
+/// A FIDO2 assertion grant with its state token decoded and its user handle
+/// parsed.
+///
+/// Field lengths and base64url decoding are enforced by
+/// [`Fido2AssertionPayload`] itself (`vouch_common::encoding::Bounds`). What
+/// remains is the state decode and the user-handle parse, and
+/// [`AssertionGrant::validate`] is the only way to build a value
+/// [`db::try_consume_challenge_state`] will accept — so the challenge state
+/// cannot be consumed before those have run.
+struct AssertionGrant {
+    /// The assertion payload itself.
+    payload: Fido2AssertionPayload,
+    /// Decoded contents of `payload.state`.
+    challenge_state: Fido2ChallengeState,
+    /// `challenge_state.exp` as a timestamp, for the consumed row's TTL.
+    expires_at: jiff::Timestamp,
+    /// `payload.user_handle` parsed as the user's UUID.
+    user_id: Uuid,
+}
+
+impl db::ChallengeState for AssertionGrant {
+    fn state_jwt(&self) -> &str {
+        self.payload.state.as_str()
+    }
+
+    fn expires_at(&self) -> jiff::Timestamp {
+        self.expires_at
+    }
+}
+
+impl AssertionGrant {
+    /// Parse the `assertion` form parameter, decode its state token, and
+    /// parse the user handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ServiceError::OAuth` with `invalid_grant` for malformed
+    /// base64url, an assertion payload that fails to deserialize (which
+    /// includes a member outside its length bounds), a challenge state that
+    /// fails to decode or carries an unrepresentable `exp`, or a user handle
+    /// that is not a UUID.
+    async fn validate(assertion: &str, state: &Arc<AppState>) -> ServiceResult<Self> {
+        let assertion_bytes = URL_SAFE_NO_PAD.decode(assertion).map_err(|_| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Invalid base64url encoding in assertion parameter",
+            )
+        })?;
+
+        let payload: Fido2AssertionPayload =
+            serde_json::from_slice(&assertion_bytes).map_err(|e| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    format!("Invalid assertion JSON: {e}"),
+                )
+            })?;
+
+        let challenge_state: Fido2ChallengeState = state
+            .state_signer
+            .decode_state_token(payload.state.as_str(), JwtType::Fido2ChallengeState)
+            .await
+            .map_err(|e| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    format!("Invalid or expired challenge state: {e}"),
+                )
+            })?;
+
+        // A malformed `exp` is a security-relevant signal — a captured token
+        // with garbage `exp` must not be silently accepted with a "now"
+        // fallback that would extend its validity.
+        let expires_at = jiff::Timestamp::from_second(challenge_state.exp).map_err(|_| {
+            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid challenge state exp")
+        })?;
+
+        let user_id = Uuid::from_slice(payload.user_handle.as_bytes()).map_err(|_| {
+            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid user_handle format")
+        })?;
+
+        Ok(Self {
+            payload,
+            challenge_state,
+            expires_at,
+            user_id,
+        })
+    }
 }
 
 /// Parameters for the FIDO2 assertion grant exchange.
@@ -111,91 +207,19 @@ pub(crate) async fn exchange_fido2_assertion(
     client_auth: ClientAuthProof,
     sender_constraint: SenderConstraintProof,
 ) -> ServiceResult<Fido2AssertionResult> {
-    // 1. Base64url-decode and parse the assertion JSON
-    let assertion_bytes = URL_SAFE_NO_PAD.decode(params.assertion).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Invalid base64url encoding in assertion parameter",
-        )
-    })?;
+    // Parse and check the assertion. This reads only the assertion parameter,
+    // so it completes before the challenge state is consumed below.
+    let grant = AssertionGrant::validate(params.assertion, state).await?;
+    let user_id = grant.user_id;
 
-    let payload: Fido2AssertionPayload = serde_json::from_slice(&assertion_bytes).map_err(|e| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            format!("Invalid assertion JSON: {e}"),
-        )
-    })?;
-
-    // 2. Decode and verify the challenge state JWT
-    let challenge_state: Fido2ChallengeState = state
-        .state_signer
-        .decode_state_token(&payload.state, JwtType::Fido2ChallengeState)
-        .await
-        .map_err(|e| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                format!("Invalid or expired challenge state: {e}"),
-            )
-        })?;
-
-    // 2b. Prepare single-use challenge check. A malformed `exp` is a
-    // security-relevant signal — a captured token with garbage `exp`
-    // must not be silently accepted with a "now" fallback that would
-    // extend its validity. Reject as InvalidGrant.
-    let expires_at = jiff::Timestamp::from_second(challenge_state.exp).map_err(|_| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid challenge state exp")
-    })?;
-
-    // 3. Decode assertion fields from base64url (CPU-only, no I/O)
-    let credential_id_bytes = URL_SAFE_NO_PAD
-        .decode(&payload.credential_id)
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Invalid credential_id encoding",
-            )
-        })?;
-
-    let authenticator_data_bytes = URL_SAFE_NO_PAD
-        .decode(&payload.authenticator_data)
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Invalid authenticator_data encoding",
-            )
-        })?;
-
-    let signature_bytes = URL_SAFE_NO_PAD.decode(&payload.signature).map_err(|_| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid signature encoding")
-    })?;
-
-    let client_data_json_bytes =
-        URL_SAFE_NO_PAD
-            .decode(&payload.client_data_json)
-            .map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
-                    "Invalid client_data_json encoding",
-                )
-            })?;
-
-    let user_handle_bytes = URL_SAFE_NO_PAD.decode(&payload.user_handle).map_err(|_| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid user_handle encoding")
-    })?;
-
-    // 4. Parse user_handle as UUID
-    let user_id = Uuid::from_slice(&user_handle_bytes).map_err(|_| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid user_handle format")
-    })?;
-
-    // 5. Mark challenge used + look up authenticator in parallel
-    //    (independent DB operations on different tables). The returned
-    //    `ChallengeStateClaim` witness is the structural proof threaded
-    //    into the TokenIssuanceProof below — the only path to
-    //    `GrantProof::Fido2Assertion`.
-    let (challenge_claim_result, lookup_result) = tokio::try_join!(
+    // Mark challenge used + look up authenticator in parallel
+    // (independent DB operations on different tables). The returned
+    // `ChallengeStateClaim` witness is the structural proof threaded
+    // into the TokenIssuanceProof below — the only path to
+    // `GrantProof::Fido2Assertion`.
+    let (challenge_claim, lookup_result) = tokio::try_join!(
         async {
-            match db::try_consume_challenge_state(&state.store, &payload.state, expires_at).await {
+            match db::try_consume_challenge_state(&state.store, &grant).await {
                 Ok(claim) => Ok(claim),
                 Err(db::ClaimError::AlreadyConsumed) => Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidGrant,
@@ -210,7 +234,7 @@ pub(crate) async fn exchange_fido2_assertion(
             lookup_and_verify_authenticator(
                 state,
                 AuthenticatorLookupParams {
-                    credential_id: &credential_id_bytes,
+                    credential_id: grant.payload.credential_id.as_bytes(),
                     user_id,
                 },
             )
@@ -222,19 +246,23 @@ pub(crate) async fn exchange_fido2_assertion(
         },
     )?;
 
-    let challenge_claim = challenge_claim_result;
+    let AssertionGrant {
+        payload,
+        challenge_state,
+        ..
+    } = grant;
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
 
-    // 6. Verify WebAuthn assertion
+    // Verify WebAuthn assertion
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
     // Cloned for the failure audit event below, since the success path moves
     // `params.client_info` when it records the LoginSuccess event.
     let failure_client_info = params.client_info.clone();
     let assertion_result = verify_login_assertion(LoginAssertionParams {
-        authenticator_data: authenticator_data_bytes,
-        client_data_json: client_data_json_bytes,
-        signature: signature_bytes,
+        authenticator_data: payload.authenticator_data.into_bytes(),
+        client_data_json: payload.client_data_json.into_bytes(),
+        signature: payload.signature.into_bytes(),
         public_key: authenticator.public_key.clone(),
         rp_id: challenge_state.rp_id.clone(),
         // CLI flow: clientDataJSON.origin is `https://{rp_id}` since the
@@ -274,7 +302,7 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
-    // 7. Update counter in database
+    // Update counter in database
     // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
     db::update_authenticator_counter(
@@ -285,11 +313,11 @@ pub(crate) async fn exchange_fido2_assertion(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
-    // 8. Capture client metadata for the audit events below.
+    // Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip;
     let client_user_agent = params.client_info.user_agent.clone();
 
-    // 9. Validate authorization_details if provided (RFC 9396)
+    // Validate authorization_details if provided (RFC 9396)
     let validated_ad = params
         .authorization_details
         .map(AuthorizationDetails::parse)
@@ -297,7 +325,7 @@ pub(crate) async fn exchange_fido2_assertion(
 
     let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
 
-    // 9b. Evaluate device posture policies (if org has active policies).
+    // Evaluate device posture policies (if org has active policies).
     // The login audit event is written AFTER this gate: a policy-denied
     // attempt records login_failed, never login_success — temporal
     // policies (step-up recency on token exchange) treat login_success as
@@ -327,7 +355,7 @@ pub(crate) async fn exchange_fido2_assertion(
         return Err(denied);
     }
 
-    // 9c. Log the successful auth event (fire-and-forget)
+    // Log the successful auth event (fire-and-forget)
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -338,7 +366,7 @@ pub(crate) async fn exchange_fido2_assertion(
     };
     db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
-    // 10. Create OAuth access token
+    // Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
     let now = jiff::Timestamp::now().as_second();

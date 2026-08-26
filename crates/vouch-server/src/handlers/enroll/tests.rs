@@ -143,7 +143,11 @@ async fn test_enrollment_complete_oversized_credential_id() {
     let valid_state = make_valid_state_token(&state).await;
 
     // A credential ID one byte past the WebAuthn ceiling, encoded.
-    let oversized = URL_SAFE_NO_PAD.encode(vec![0u8; MAX_CREDENTIAL_ID_BYTES + 1]);
+    let oversized = URL_SAFE_NO_PAD.encode(vec![
+        0u8;
+        <vouch_common::CredentialIdData as vouch_common::Bounds>::MAX_BYTES
+            + 1
+    ]);
 
     let body = serde_json::json!({
         "state": valid_state,
@@ -157,8 +161,8 @@ async fn test_enrollment_complete_oversized_credential_id() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        resp_body.contains("invalid_credential"),
-        "expected 'invalid_credential' in body, got: {resp_body}"
+        resp_body.contains("invalid_request"),
+        "expected 'invalid_request' in body, got: {resp_body}"
     );
 }
 
@@ -192,7 +196,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
 
     // Pre-consume the state token to simulate prior use.
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
+    let _claim = crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
         .await
         .expect("pre-consume must succeed");
 
@@ -1378,11 +1382,12 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     );
 }
 
-// ── malformed request bodies must not spend the registration state ───────
+// ── a rejected body must leave the registration state unconsumed ─────────
 //
-// The single-use registration state is consumed in Phase 5. Every check that
-// reads only the request body runs before it, so a rejected request leaves
-// the state token spendable and the user can retry the same enrollment.
+// Field lengths are rejected during deserialization and the remaining checks
+// are what build a `RegistrationCompletion`, which the consume takes as an
+// argument. Either way the rejection happens first, so the user can retry the
+// same enrollment with the same state token.
 
 /// Build a registration state JWT together with the expiry needed to consume
 /// it directly, which `make_valid_state_token` does not expose.
@@ -1412,22 +1417,24 @@ async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i6
 }
 
 /// Assert the state token is still unconsumed by spending it directly.
-async fn assert_state_unspent(state: &AppState, state_jwt: &str, exp: i64) {
+async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let consume = crate::db::try_consume_challenge_state(&state.store, state_jwt, expires_at).await;
+    let consume =
+        crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
-        "a rejected request spent the registration state: {consume:?}"
+        "a rejected request consumed the registration state: {consume:?}"
     );
 }
 
 #[tokio::test]
-async fn test_enrollment_complete_empty_credential_id_leaves_state_spendable() {
+async fn test_enrollment_complete_empty_credential_id_leaves_state_unconsumed() {
     let (app, state) = test_app().await;
     let (state_jwt, exp) = make_state_token_with_exp(&state, "empty-cred@example.com").await;
 
-    // An empty string is valid base64url decoding to `vec![]`, so the request
-    // deserializes and reaches the handler.
+    // An empty string is valid base64url decoding to `vec![]`. The
+    // `CredentialIdData` bound rejects it while the body is deserialized, so
+    // the handler never runs and `invalid_request` is the extractor's code.
     let body = serde_json::json!({
         "state": state_jwt,
         "credential_id": "",
@@ -1440,14 +1447,14 @@ async fn test_enrollment_complete_empty_credential_id_leaves_state_spendable() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
-        resp_body.contains("invalid_credential"),
-        "expected 'invalid_credential' in body, got: {resp_body}"
+        resp_body.contains("invalid_request"),
+        "expected 'invalid_request' in body, got: {resp_body}"
     );
-    assert_state_unspent(&state, &state_jwt, exp).await;
+    assert_state_unconsumed(&state, &state_jwt, exp).await;
 }
 
 #[tokio::test]
-async fn test_enrollment_complete_malformed_client_data_leaves_state_spendable() {
+async fn test_enrollment_complete_malformed_client_data_leaves_state_unconsumed() {
     let (app, state) = test_app().await;
     let (state_jwt, exp) = make_state_token_with_exp(&state, "bad-client-data@example.com").await;
 
@@ -1467,11 +1474,11 @@ async fn test_enrollment_complete_malformed_client_data_leaves_state_spendable()
         resp_body.contains("invalid_client_data"),
         "expected 'invalid_client_data' in body, got: {resp_body}"
     );
-    assert_state_unspent(&state, &state_jwt, exp).await;
+    assert_state_unconsumed(&state, &state_jwt, exp).await;
 }
 
 #[tokio::test]
-async fn test_enrollment_complete_foreign_origin_leaves_state_spendable() {
+async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
     let (app, state) = test_app().await;
     let (state_jwt, exp) = make_state_token_with_exp(&state, "foreign-origin@example.com").await;
 
@@ -1493,5 +1500,5 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_spendable() {
         resp_body.contains("invalid_client_data"),
         "expected 'invalid_client_data' in body, got: {resp_body}"
     );
-    assert_state_unspent(&state, &state_jwt, exp).await;
+    assert_state_unconsumed(&state, &state_jwt, exp).await;
 }

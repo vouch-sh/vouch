@@ -306,6 +306,120 @@ async fn get_real_state_jwt(app: &axum::Router) -> String {
         .to_string()
 }
 
+/// Helper: post a FIDO2 assertion grant carrying `credential_id`, with every
+/// other field a well-formed placeholder. Returns the challenge state JWT the
+/// assertion referenced, so a caller can check whether it was consumed.
+async fn post_assertion_with_credential_id(
+    app: &axum::Router,
+    state: &std::sync::Arc<crate::AppState>,
+    email: &str,
+    credential_id: &str,
+) -> (String, StatusCode, String) {
+    let user = create_test_user(&state.store, email).await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        &pkcs8,
+        None,
+    );
+
+    let state_jwt = get_real_state_jwt(app).await;
+    let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
+    let assertion_payload = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": credential_id,
+        "authenticator_data": placeholder,
+        "signature": placeholder,
+        "client_data_json": placeholder,
+        "user_handle": URL_SAFE_NO_PAD.encode(uuid::Uuid::now_v7().as_bytes()),
+    });
+    let assertion =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
+
+    let (status, body) = http_post_form(
+        app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+             &assertion={assertion}\
+             &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+             &client_assertion={client_assertion}"
+        ),
+        &[],
+    )
+    .await;
+
+    (state_jwt, status, body)
+}
+
+/// Assert the challenge state is still unconsumed by spending it directly.
+async fn assert_challenge_unspent(state: &crate::AppState, state_jwt: &str) {
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(300))
+        .expect("expiry in range");
+    let consume =
+        crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+    assert!(
+        consume.is_ok(),
+        "a rejected assertion consumed the challenge state: {consume:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_fido2_token_short_credential_id_leaves_challenge_unconsumed() {
+    // A credential ID below the 16-byte floor must be rejected while the
+    // challenge state is still unconsumed, so the CLI can retry the assertion
+    // without a fresh challenge round-trip.
+    let (app, state) = test_app().await;
+    let short = URL_SAFE_NO_PAD.encode([0u8; 8]);
+    let (state_jwt, status, body) =
+        post_assertion_with_credential_id(&app, &state, "fido2-short-cred@example.com", &short)
+            .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Short credential_id must return 400: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "Short credential_id must return invalid_grant, got: {}",
+        error["error"]
+    );
+
+    assert_challenge_unspent(&state, &state_jwt).await;
+}
+
+#[tokio::test]
+async fn test_fido2_token_oversized_credential_id_leaves_challenge_unconsumed() {
+    // The 1023-byte ceiling is the other half of the same bound.
+    let (app, state) = test_app().await;
+    let oversized = URL_SAFE_NO_PAD.encode(vec![
+        0u8;
+        <vouch_common::CredentialIdData as vouch_common::Bounds>::MAX_BYTES
+            + 1
+    ]);
+    let (state_jwt, status, body) =
+        post_assertion_with_credential_id(&app, &state, "fido2-long-cred@example.com", &oversized)
+            .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Oversized credential_id must return 400: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "Oversized credential_id must return invalid_grant, got: {}",
+        error["error"]
+    );
+
+    assert_challenge_unspent(&state, &state_jwt).await;
+}
+
 #[tokio::test]
 async fn test_fido2_token_invalid_credential_id_encoding_rejected() {
     let (app, state) = test_app().await;

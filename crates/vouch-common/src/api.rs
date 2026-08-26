@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::encoding::{Base64Url, Raw};
 use crate::fido2_types::{
     AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
-    UserHandle,
+    StateToken, UserHandle,
 };
 
 // ============================================================================
@@ -55,7 +55,7 @@ pub struct RegisterStartResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterCompleteRequest {
     /// Registration state token from start response.
-    pub state: String,
+    pub state: StateToken,
     /// Credential ID from authenticator.
     pub credential_id: CredentialId<Raw>,
     /// COSE public key from authenticator.
@@ -291,7 +291,7 @@ pub struct BrowserRegisterStartResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserRegisterCompleteRequest {
     /// Registration state token.
-    pub state: String,
+    pub state: StateToken,
     /// Credential ID from the authenticator.
     pub credential_id: CredentialId<Base64Url>,
     /// Attestation object from the authenticator.
@@ -339,7 +339,7 @@ pub struct BrowserLoginStartResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserLoginCompleteRequest {
     /// Authentication state token from start response.
-    pub state: String,
+    pub state: StateToken,
     /// Credential ID from the authenticator.
     pub credential_id: CredentialId<Base64Url>,
     /// Authenticator data from the assertion.

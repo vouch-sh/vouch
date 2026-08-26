@@ -203,7 +203,11 @@ pub use pending_oauth::{
 
 // Re-export challenge state functions (FIDO2 single-use enforcement)
 pub(crate) use challenge_states::ChallengeStateClaim;
-pub use challenge_states::{delete_expired_challenge_states, try_consume_challenge_state};
+#[cfg(test)]
+pub(crate) use challenge_states::consume_challenge_state_for_test;
+pub use challenge_states::{
+    ChallengeState, delete_expired_challenge_states, try_consume_challenge_state,
+};
 
 // Re-export claim error type so handlers can pattern-match on it.
 pub(crate) use claim::ClaimError;

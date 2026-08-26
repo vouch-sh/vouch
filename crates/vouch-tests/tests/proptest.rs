@@ -94,7 +94,7 @@ proptest! {
         client_data in prop::collection::vec(any::<u8>(), 50..200),
     ) {
         let request = RegisterCompleteRequest {
-            state: "test-state".to_string(),
+            state: "test-state".to_string().into(),
             credential_id: cred_id.clone().into(),
             public_key: public_key.clone().into(),
             attestation_object: attestation_object.clone().into(),
@@ -244,9 +244,15 @@ proptest! {
         prop_assert_eq!(data.as_slice(), back_to_raw.as_bytes());
     }
 
-    /// Encoded<T, Raw> serde round-trip preserves data
+    /// Encoded<T, Raw> serde round-trip preserves data.
+    ///
+    /// Generated inside `ChallengeData`'s range: deserialization applies the
+    /// bound, so an out-of-range value is a rejection rather than a round-trip
+    /// (covered by `prop_out_of_range_encoded_is_rejected` below).
     #[test]
-    fn prop_encoded_raw_serde_round_trip(data: Vec<u8>) {
+    fn prop_encoded_raw_serde_round_trip(
+        data in prop::collection::vec(any::<u8>(), 16..=1024),
+    ) {
         let original: Challenge<Raw> = Challenge::from_raw(data.clone());
         let json = serde_json::to_string(&original).unwrap();
         let decoded: Challenge<Raw> = serde_json::from_str(&json).unwrap();
@@ -256,7 +262,9 @@ proptest! {
 
     /// Encoded<T, Base64Url> serde round-trip preserves data
     #[test]
-    fn prop_encoded_base64url_serde_round_trip(data: Vec<u8>) {
+    fn prop_encoded_base64url_serde_round_trip(
+        data in prop::collection::vec(any::<u8>(), 16..=1023),
+    ) {
         let raw: CredentialId<Raw> = CredentialId::from_raw(data.clone());
         let b64: CredentialId<Base64Url> = raw.to_base64url();
 
@@ -264,6 +272,26 @@ proptest! {
         let decoded: CredentialId<Base64Url> = serde_json::from_str(&json).unwrap();
 
         prop_assert_eq!(b64.as_bytes(), decoded.as_bytes());
+    }
+
+    /// A credential ID outside 16..=1023 bytes never deserializes, in either
+    /// encoding. This is the bound that #1069 lost when it was a hand-written
+    /// check inside a handler; as a property of the type there is no call site
+    /// that can omit it.
+    #[test]
+    fn prop_out_of_range_encoded_is_rejected(
+        short in prop::collection::vec(any::<u8>(), 0..16),
+        long in prop::collection::vec(any::<u8>(), 1024..1200),
+    ) {
+        for data in [short, long] {
+            let raw: CredentialId<Raw> = CredentialId::from_raw(data);
+
+            let raw_json = serde_json::to_string(&raw).unwrap();
+            prop_assert!(serde_json::from_str::<CredentialId<Raw>>(&raw_json).is_err());
+
+            let b64_json = serde_json::to_string(&raw.to_base64url()).unwrap();
+            prop_assert!(serde_json::from_str::<CredentialId<Base64Url>>(&b64_json).is_err());
+        }
     }
 
     /// From<Vec<u8>> conversion preserves data
@@ -354,29 +382,41 @@ fn test_all_byte_values_in_encoded() {
 
 #[test]
 fn test_empty_encoded() {
-    let empty: Vec<u8> = vec![];
-    let encoded: CredentialId<Raw> = CredentialId::from_raw(empty);
+    // `from_raw` is an in-process constructor and stays unbounded; the bound
+    // guards untrusted input, so it is deserialization that rejects an empty
+    // credential ID.
+    let encoded: CredentialId<Raw> = CredentialId::from_raw(vec![]);
 
     assert!(encoded.is_empty());
     assert_eq!(encoded.len(), 0);
 
     let json = serde_json::to_string(&encoded).unwrap();
-    let decoded: CredentialId<Raw> = serde_json::from_str(&json).unwrap();
-    assert!(decoded.is_empty());
+    assert!(
+        serde_json::from_str::<CredentialId<Raw>>(&json).is_err(),
+        "an empty credential ID must not deserialize"
+    );
 }
 
 #[test]
 fn test_large_encoded_data() {
-    // Test marker type for attestation objects
     use vouch_common::fido2_types::AttestationObject;
+    use vouch_common::{AttestationObjectData, Bounds};
 
-    let large = vec![0xABu8; 100_000];
+    // A full-size attestation round-trips; past the ceiling it does not.
+    let ceiling = <AttestationObjectData as Bounds>::MAX_BYTES;
+
+    let large = vec![0xABu8; ceiling];
     let encoded: AttestationObject<Raw> = AttestationObject::from_raw(large.clone());
-
     let json = serde_json::to_string(&encoded).unwrap();
     let decoded: AttestationObject<Raw> = serde_json::from_str(&json).unwrap();
-
     assert_eq!(large.as_slice(), decoded.as_bytes());
+
+    let oversized: AttestationObject<Raw> = AttestationObject::from_raw(vec![0xABu8; ceiling + 1]);
+    let json = serde_json::to_string(&oversized).unwrap();
+    assert!(
+        serde_json::from_str::<AttestationObject<Raw>>(&json).is_err(),
+        "an attestation object past the ceiling must not deserialize"
+    );
 }
 
 // =============================================================================

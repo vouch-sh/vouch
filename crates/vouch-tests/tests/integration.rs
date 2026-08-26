@@ -2523,8 +2523,13 @@ mod encoding_verification {
             AuthData, ClientDataJson, CredentialId, Signature, UserHandle,
         };
 
-        // Test with bytes that could cause issues
-        let problematic_bytes: Vec<u8> = vec![0x00, 0xFF, 0x7F, 0x80, 0xC0, 0xE0, 0xF0, 0xFE];
+        // Test with bytes that could cause issues. Sixteen of them, so the
+        // value clears `CredentialIdData`'s floor and the test exercises byte
+        // fidelity rather than the length bound.
+        let problematic_bytes: Vec<u8> = vec![
+            0x00, 0xFF, 0x7F, 0x80, 0xC0, 0xE0, 0xF0, 0xFE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08,
+        ];
 
         // Use typed FIDO2 encoded fields to verify special bytes survive serialization
         let cred_id: CredentialId<Raw> = problematic_bytes.clone().into();
