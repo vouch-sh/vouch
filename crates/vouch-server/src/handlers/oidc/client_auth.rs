@@ -108,15 +108,30 @@ impl ClientAuthPresentation {
         }
     }
 
-    /// The `WWW-Authenticate` challenge matching the scheme the client used,
-    /// or `None` when the client did not use the `Authorization` header.
+    /// The `WWW-Authenticate` challenge this failure carries, if any.
+    ///
+    /// `Basic` is the only one of the six methods in
+    /// `token_endpoint_auth_methods_supported` that is an HTTP authentication
+    /// scheme. RFC 9110 Section 11.3 (`specs/rfc/rfc9110.txt:4921`) defines a
+    /// challenge as `auth-scheme [ 1*SP ( token68 / #auth-param ) ]`, and
+    /// `client_secret_post` and `private_key_jwt` travel in the request body
+    /// while the two mTLS methods live in the TLS layer — none has a scheme
+    /// token to name. Clients discover the full set through RFC 8414
+    /// `token_endpoint_auth_methods_supported`.
     fn challenge(self) -> Option<HeaderValue> {
         match self {
+            // RFC 6749 Section 5.2 mandates the challenge here.
             Self::AuthorizationHeader => Some(HeaderValue::from_static("Basic")),
-            // RFC 6749 Section 5.2 mandates a challenge only for header
-            // authentication. Advertising `Basic` to a client that used
-            // neither would name a scheme it did not attempt.
-            Self::RequestBody | Self::NoCredentials => None,
+            // The same section permits it for a caller that presented nothing:
+            // "The authorization server MAY return an HTTP 401 (Unauthorized)
+            // status code to indicate which HTTP authentication schemes are
+            // supported." Answering uniformly means a client discovering the
+            // endpoint gets the same hint wherever it knocks.
+            Self::NoCredentials => Some(HeaderValue::from_static("Basic")),
+            // A client that authenticated in the body did attempt a scheme,
+            // just not an HTTP one. Naming `Basic` would name a scheme it did
+            // not use, which is what the RFC's "matching" rules out.
+            Self::RequestBody => None,
         }
     }
 }

@@ -23,7 +23,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
+use super::client_auth::{
+    ClientAuthFields, ClientAuthPresentation, complete_client_auth, extract_client_auth,
+    with_client_auth_challenge,
+};
 
 /// Token revocation request (RFC 7009 Section 2.1).
 ///
@@ -166,8 +169,11 @@ pub(crate) async fn revoke(
     let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth).await {
         Ok(Some(a)) => (a.client_id, a.pending_jti),
         Ok(None) => {
-            // No credentials provided → 401
-            return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
+            // No credentials provided → 401 with the shared challenge.
+            return with_client_auth_challenge(
+                ClientAuthPresentation::of(&headers, &params),
+                StatusCode::UNAUTHORIZED.into_response(),
+            );
         }
         Err(response) => return response,
     };
@@ -222,8 +228,11 @@ pub(crate) async fn introspect(
     let (authenticated_client, pending_jti) = match complete_client_auth(&state, auth).await {
         Ok(Some(a)) => (a.client.client, a.pending_jti),
         Ok(None) => {
-            // No credentials provided → 401
-            return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
+            // No credentials provided → 401 with the shared challenge.
+            return with_client_auth_challenge(
+                ClientAuthPresentation::of(&headers, &params),
+                StatusCode::UNAUTHORIZED.into_response(),
+            );
         }
         Err(response) => return response,
     };
