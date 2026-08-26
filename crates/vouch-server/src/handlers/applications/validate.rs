@@ -87,7 +87,9 @@ impl AppValidationError {
                 "Provide either a JWKS or a JWKS URI, not both".to_string()
             }
             Self::InvalidRedirectUris(invalid) => format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                "Invalid redirect URI(s): {}. Each URI must use https://, or http:// with \
+                 localhost, 127.0.0.1, or [::1], and must not contain a fragment. \
+                 A custom scheme is accepted only for native applications.",
                 invalid.join(", ")
             ),
             Self::InvalidPostLogoutRedirectUris(invalid) => format!(
@@ -203,7 +205,8 @@ pub(super) fn validate_create_application<'a>(
         return Err(AppValidationError::MissingRedirectUris);
     }
 
-    validate_redirect_uris(input.redirect_uris).map_err(AppValidationError::InvalidRedirectUris)?;
+    validate_redirect_uris(input.redirect_uris, app_type)
+        .map_err(AppValidationError::InvalidRedirectUris)?;
 
     if let Some(uris) = input.post_logout_redirect_uris {
         validate_post_logout_redirect_uris(uris)
@@ -318,14 +321,9 @@ pub(super) struct ValidatedUpdateApp<'a> {
 pub(super) fn validate_update_format<'a>(
     input: UpdateAppInput<'a>,
 ) -> Result<ValidatedUpdateApp<'a>, AppValidationError> {
-    if let Some(uris) = input.redirect_uris {
-        // Only validate URIs if the list is non-empty.  An empty list is
-        // accepted here and checked later by `validate_update_fapi` against
-        // the persisted client type.
-        if !uris.is_empty() {
-            validate_redirect_uris(uris).map_err(AppValidationError::InvalidRedirectUris)?;
-        }
-    }
+    // Redirect URIs are validated in `validate_update_fapi`, which is the stage
+    // that has the persisted client type — the type decides whether a custom
+    // URI scheme may be registered, and an update cannot change it.
 
     if let Some(uris) = input.resource_uris {
         validate_resource_uris(uris)?;
@@ -424,11 +422,12 @@ pub(super) fn validate_update_fapi(
     // An explicit empty redirect_uris list is only valid for service apps.
     // We skip this check in the pre-auth format pass (application_type=None
     // there), and enforce it here once we have the persisted client type.
-    if let Some(uris) = validated.redirect_uris
-        && uris.is_empty()
-        && !matches!(client.application_type, OAuthClientType::Service)
-    {
-        return Err(AppValidationError::MissingRedirectUris);
+    if let Some(uris) = validated.redirect_uris {
+        if uris.is_empty() && !matches!(client.application_type, OAuthClientType::Service) {
+            return Err(AppValidationError::MissingRedirectUris);
+        }
+        validate_redirect_uris(uris, client.application_type)
+            .map_err(AppValidationError::InvalidRedirectUris)?;
     }
 
     // A FAPI client authenticates with private_key_jwt and therefore has no

@@ -164,8 +164,35 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
 
 impl OAuthClient {
     #[must_use]
+    /// Whether `uri` may be redirected to for this client.
+    ///
+    /// OIDC Core §3.1.2.1 requires the requested URI to "exactly match one of
+    /// the Redirection URI values for the Client pre-registered at the OpenID
+    /// Provider, with the matching performed as described in Section 6.2.1 of
+    /// [RFC3986] (Simple String Comparison)", which is the default here.
+    ///
+    /// Two departures:
+    ///
+    /// - A fragment is refused outright. RFC 6749 §3.1.2 says the redirection
+    ///   endpoint URI "MUST NOT include a fragment component", so one can
+    ///   never be a legitimate target even if it reached storage.
+    /// - For loopback IP literals the port is ignored, because RFC 8252 §7.3
+    ///   says "The authorization server MUST allow any port to be specified at
+    ///   the time of the request for loopback IP redirect URIs, to accommodate
+    ///   clients that obtain an available ephemeral port from the operating
+    ///   system at the time of the request." Scheme, host, and path must still
+    ///   match exactly, and every non-loopback URI keeps simple string
+    ///   comparison.
     pub fn is_valid_redirect_uri(&self, uri: &str) -> bool {
-        self.redirect_uris.iter().any(|u| u == uri)
+        let Ok(requested) = url::Url::parse(uri) else {
+            return false;
+        };
+        if requested.fragment().is_some() {
+            return false;
+        }
+        self.redirect_uris.iter().any(|registered| {
+            registered == uri || loopback_matches_ignoring_port(registered, &requested)
+        })
     }
 
     #[must_use]
@@ -203,6 +230,115 @@ impl OAuthClient {
 /// Enforced both at RFC 7591 dynamic registration time (services layer) and at
 /// self-service application creation time (handlers layer).
 pub const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Whether a registered loopback IP redirect URI matches a requested one that
+/// differs only in port — the RFC 8252 §7.3 any-port rule.
+///
+/// Everything but the port must match exactly, and both sides must be `http`
+/// on a loopback IP literal, so this can never relax matching for a URI the
+/// rule does not cover.
+fn loopback_matches_ignoring_port(registered: &str, requested: &url::Url) -> bool {
+    let Ok(registered) = url::Url::parse(registered) else {
+        return false;
+    };
+    registered.scheme() == "http"
+        && requested.scheme() == "http"
+        && registered.host_str().is_some_and(is_loopback_ip_literal)
+        && registered.host_str() == requested.host_str()
+        && registered.path() == requested.path()
+        && registered.query() == requested.query()
+}
+
+/// The hosts an `http://` redirect URI may use.
+///
+/// OIDC Registration §2 and OIDC Core §3.1.2.1 both name exactly this set:
+/// "loopback URLs use "localhost" or the IP loopback literals "127.0.0.1" or
+/// "[::1]" as the hostname".
+///
+/// Deliberately not [`vouch_common::is_loopback_host`], which also accepts
+/// `host.docker.internal` and all of `127.0.0.0/8`. That helper exists for the
+/// dev-mode RP-ID and origin checks; `host.docker.internal` resolves off-device,
+/// which would break the assumption RFC 8252 §8.3 rests on — "This is
+/// acceptable for loopback interface redirect URIs as the HTTP request never
+/// leaves the device."
+#[must_use]
+pub fn is_loopback_redirect_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// The IP literals RFC 8252 §7.3 calls "loopback IP redirect URIs", which are
+/// the ones its any-port rule covers. `localhost` is a name, not an IP literal,
+/// so it is matched on its exact registered port like every other URI.
+fn is_loopback_ip_literal(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "[::1]")
+}
+
+/// Why a redirect URI was rejected at registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectUriError {
+    /// RFC 6749 §3.1.2: "The redirection endpoint URI MUST be an absolute URI".
+    NotAbsolute,
+    /// RFC 6749 §3.1.2: "The endpoint URI MUST NOT include a fragment component."
+    HasFragment,
+    /// `http` is permitted only for the loopback hosts above.
+    HttpNonLoopback,
+    /// OIDC Registration §2: "Native Clients MUST only register "redirect_uris"
+    /// using custom URI schemes or loopback URLs using the "http" scheme".
+    /// Everything else registers `https` (or loopback `http`).
+    CustomSchemeNotNative,
+}
+
+impl std::fmt::Display for RedirectUriError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::NotAbsolute => "must be an absolute URI",
+            Self::HasFragment => "must not contain a fragment component",
+            Self::HttpNonLoopback => "http:// is allowed only for localhost, 127.0.0.1, or [::1]",
+            Self::CustomSchemeNotNative => "a custom URI scheme is allowed only for native clients",
+        };
+        f.write_str(msg)
+    }
+}
+
+/// Validate one `redirect_uri` for registration, for a client of this type.
+///
+/// The single rule for every write path — dynamic client registration and both
+/// self-service paths — so a URI one path accepts cannot be a URI another
+/// rejects.
+///
+/// # Errors
+///
+/// Returns the specific [`RedirectUriError`] rather than a boolean, so each
+/// rejection reason can be reported to the client and tested on its own.
+pub fn validate_redirect_uri(
+    uri: &str,
+    application_type: OAuthClientType,
+) -> Result<(), RedirectUriError> {
+    let parsed = url::Url::parse(uri).map_err(|_| RedirectUriError::NotAbsolute)?;
+    if parsed.fragment().is_some() {
+        return Err(RedirectUriError::HasFragment);
+    }
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            if is_loopback_redirect_host(parsed.host_str().unwrap_or_default()) {
+                Ok(())
+            } else {
+                Err(RedirectUriError::HttpNonLoopback)
+            }
+        }
+        // OIDC Core §3.1.2.1: "The Redirection URI MAY use an alternate scheme,
+        // such as one that is intended to identify a callback into a native
+        // application." RFC 8252 §7.1's reverse-domain format is a MUST on the
+        // app, not on us, so the scheme's shape is not checked here.
+        _ => match application_type {
+            OAuthClientType::Native => Ok(()),
+            OAuthClientType::Web | OAuthClientType::Spa | OAuthClientType::Service => {
+                Err(RedirectUriError::CustomSchemeNotNative)
+            }
+        },
+    }
+}
 
 /// Read a stored client's key material.
 ///
@@ -326,10 +462,7 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
     }
     match parsed.scheme() {
         "https" => true,
-        "http" => {
-            let host = parsed.host_str().unwrap_or("");
-            matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-        }
+        "http" => is_loopback_redirect_host(parsed.host_str().unwrap_or_default()),
         _ => false,
     }
 }

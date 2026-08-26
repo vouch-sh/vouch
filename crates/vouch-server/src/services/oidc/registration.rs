@@ -77,6 +77,10 @@ const REGISTRATION_TOKEN_LENGTH: usize = 32;
 pub struct RegistrationRequest {
     /// RFC 7591 Section 2: Array of redirection URI strings.
     pub redirect_uris: Option<Vec<String>>,
+    /// OIDC Registration Section 2: `"native"` or `"web"`; the default when
+    /// omitted is `"web"`. Decides whether a custom URI scheme may be
+    /// registered, so it is read before the redirect URIs are validated.
+    pub application_type: Option<String>,
     /// RFC 7591 Section 2: Authentication method for the token endpoint.
     pub token_endpoint_auth_method: Option<String>,
     /// RFC 7591 Section 2: Array of OAuth 2.0 grant type strings.
@@ -353,11 +357,19 @@ pub async fn register_client(
     // 1. Validate grant/response types, apply defaults, check consistency
     let validated = validate_grant_and_response_types(&mut request)?;
 
-    // 7. Validate redirect URIs
-    let redirect_uris = validate_redirect_uris(&mut request, validated.auth_code_grant)?;
-
-    // 8-9. Validate JWKS and auth method
+    // 8-9. Validate JWKS and auth method. This runs before the redirect URIs
+    // because the application type decides whether a custom URI scheme may be
+    // registered, and inferring that type needs the auth method.
     let jwks_auth = validate_jwks_and_auth_method(&mut request, &validated.auth_method_str)?;
+
+    // 7. Resolve the application type, then validate redirect URIs against it.
+    let app_type = resolve_client_type(
+        request.application_type.as_deref(),
+        &validated.grant_types,
+        jwks_auth.auth_method,
+        request.redirect_uris.as_deref().unwrap_or_default(),
+    )?;
+    let redirect_uris = validate_redirect_uris(&mut request, validated.auth_code_grant, app_type)?;
 
     // 10-11. Validate contacts and URI fields
     validate_contacts_and_uris(&request)?;
@@ -572,13 +584,6 @@ pub async fn register_client(
     let require_signed = request
         .require_signed_request_object
         .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
-
-    // 13. Infer application type
-    let app_type = determine_client_type(
-        &validated.grant_types,
-        jwks_auth.auth_method,
-        &redirect_uris,
-    );
 
     // Build the client name (fallback to software_id or "Unnamed Client")
     let client_name = request.client_name.as_deref().unwrap_or("Unnamed Client");
@@ -975,6 +980,7 @@ fn validate_grant_and_response_types(
 fn validate_redirect_uris(
     request: &mut RegistrationRequest,
     auth_code_grant: AuthorizationCodeGrant,
+    application_type: OAuthClientType,
 ) -> Result<Vec<String>, ServiceError> {
     let redirect_uris = request.redirect_uris.take().unwrap_or_default();
     if auth_code_grant == AuthorizationCodeGrant::Present && redirect_uris.is_empty() {
@@ -990,7 +996,12 @@ fn validate_redirect_uris(
         ));
     }
     for uri in &redirect_uris {
-        validate_registration_redirect_uri(uri)?;
+        db::validate_redirect_uri(uri, application_type).map_err(|e| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRedirectUri,
+                format!("Invalid redirect URI '{uri}': {e}"),
+            )
+        })?;
     }
     Ok(redirect_uris)
 }
@@ -1150,6 +1161,47 @@ fn validate_contacts_and_uris(request: &RegistrationRequest) -> Result<(), Servi
 }
 
 /// Infer OAuth client application type from grants, auth method, and URIs.
+/// Parse the client-declared `application_type` (OIDC Registration §2).
+///
+/// > application_type
+/// >    OPTIONAL.  Kind of the application.  The default, if omitted, is
+/// >    "web".  The defined values are "native" or "web".
+///
+/// Only those two values are defined, so anything else is invalid metadata
+/// rather than a silent fallback.
+fn parse_declared_client_type(declared: &str) -> Result<OAuthClientType, ServiceError> {
+    match declared {
+        "native" => Ok(OAuthClientType::Native),
+        "web" => Ok(OAuthClientType::Web),
+        other => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported application_type '{other}': expected 'native' or 'web'"),
+        )),
+    }
+}
+
+/// The application type to validate this registration's redirect URIs against.
+///
+/// The client's own `application_type` wins when it sends one, since OIDC
+/// Registration §2 defines it as the client stating what it is. Otherwise it is
+/// inferred from the rest of the request, which is what this server did before
+/// it read the field at all.
+fn resolve_client_type(
+    declared: Option<&str>,
+    grant_types: &[String],
+    auth_method: TokenEndpointAuthMethod,
+    redirect_uris: &[String],
+) -> Result<OAuthClientType, ServiceError> {
+    match declared {
+        Some(value) => parse_declared_client_type(value),
+        None => Ok(determine_client_type(
+            grant_types,
+            auth_method,
+            redirect_uris,
+        )),
+    }
+}
+
 fn determine_client_type(
     grant_types: &[String],
     auth_method: TokenEndpointAuthMethod,
@@ -1160,16 +1212,22 @@ fn determine_client_type(
             .first()
             .is_some_and(|g| g == "client_credentials");
     let is_public = auth_method == TokenEndpointAuthMethod::None;
-    let has_loopback = redirect_uris.iter().any(|u| {
-        url::Url::parse(u)
-            .ok()
-            .and_then(|p| p.host_str().map(|h| h.to_string()))
-            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "[::1]")
+    // RFC 8252 §7: a native app receives its redirect either on the loopback
+    // interface or through a private-use URI scheme, so either shape is the
+    // signal. Without the scheme half, an app registering only
+    // `com.example.app://cb` would be classified as a browser app and then
+    // refused the very scheme that classification exists to permit.
+    let has_native_redirect = redirect_uris.iter().any(|u| {
+        url::Url::parse(u).is_ok_and(|parsed| match parsed.scheme() {
+            "http" => parsed.host_str().is_some_and(db::is_loopback_redirect_host),
+            "https" => false,
+            _ => true,
+        })
     });
 
     if has_client_credentials_only {
         OAuthClientType::Service
-    } else if is_public && has_loopback {
+    } else if is_public && has_native_redirect {
         OAuthClientType::Native
     } else if is_public {
         OAuthClientType::Spa
@@ -1275,8 +1333,15 @@ pub async fn update_client_configuration(
     let mut mutable_request = request;
     let validated = validate_grant_and_response_types(&mut mutable_request)?;
 
-    // Validate redirect URIs (same cardinality + format rules as initial registration)
-    let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.auth_code_grant)?;
+    // Validate redirect URIs (same cardinality + format rules as initial
+    // registration). An update may restate `application_type`; absent that, the
+    // client keeps the type it registered with.
+    let app_type = match mutable_request.application_type.as_deref() {
+        Some(declared) => parse_declared_client_type(declared)?,
+        None => client.application_type,
+    };
+    let redirect_uris =
+        validate_redirect_uris(&mut mutable_request, validated.auth_code_grant, app_type)?;
 
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = mutable_request.registration_metadata();
@@ -1577,58 +1642,18 @@ fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Option<Vec<
 // Validation Helpers
 // ============================================================================
 
-/// Validate a single redirect URI for dynamic registration.
-///
-/// Per RFC 7591 Section 2 and RFC 8252:
-/// - HTTPS is always valid
-/// - HTTP is only allowed for loopback (localhost, 127.0.0.1, [::1])
-/// - Custom schemes are allowed for native apps
-/// - Fragments are forbidden (RFC 6749 Section 3.1.2)
-fn validate_registration_redirect_uri(uri: &str) -> Result<(), ServiceError> {
-    // Check for fragments (forbidden per RFC 6749 Section 3.1.2)
-    if uri.contains('#') {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRedirectUri,
-            format!("Redirect URI must not contain a fragment component: '{uri}'"),
-        ));
-    }
-
-    match url::Url::parse(uri) {
-        Ok(parsed) => {
-            match parsed.scheme() {
-                "https" => Ok(()),
-                "http" => {
-                    // RFC 8252 Section 7.3: HTTP only for loopback
-                    let host = parsed.host_str().unwrap_or("");
-                    if matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
-                        Ok(())
-                    } else {
-                        Err(ServiceError::oauth(
-                            OAuthErrorCode::InvalidRedirectUri,
-                            format!(
-                                "http:// redirect URIs are only allowed for loopback \
-                                 addresses (localhost, 127.0.0.1, [::1]): '{uri}'"
-                            ),
-                        ))
-                    }
-                }
-                // Custom schemes are allowed for native apps (RFC 8252 Section 7.1)
-                _ => Ok(()),
-            }
-        }
-        Err(_) => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRedirectUri,
-            format!("Invalid redirect URI: '{uri}'"),
-        )),
-    }
-}
-
-/// Public alias for  exposed for property-based testing.
+/// The shared redirect-URI rule as it applies to a native client, exposed for
+/// property-based testing.
 ///
 /// Only available when the `test-utils` feature is enabled.
 #[cfg(feature = "test-utils")]
 pub fn validate_redirect_uri_for_test(uri: &str) -> Result<(), ServiceError> {
-    validate_registration_redirect_uri(uri)
+    db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRedirectUri,
+            format!("Invalid redirect URI '{uri}': {e}"),
+        )
+    })
 }
 
 /// Validate that a URI field is HTTPS (if present).
