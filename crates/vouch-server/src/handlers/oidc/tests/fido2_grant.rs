@@ -112,8 +112,10 @@ async fn test_fido2_token_missing_assertion_rejected() {
 
 #[tokio::test]
 async fn test_fido2_token_missing_client_auth_rejected() {
-    // The FIDO2 grant requires private_key_jwt client authentication.
-    // A request with assertion but no client auth must return invalid_client.
+    // The FIDO2 grant requires private_key_jwt client authentication, so a
+    // request carrying an assertion but no client credentials is
+    // `invalid_client`. RFC 6749 Section 5.2 permits 401 for that code, and
+    // `OAuthErrorCode::status_code` is what decides it.
     let (app, _state) = test_app().await;
 
     let garbage_assertion = URL_SAFE_NO_PAD.encode(b"not-a-real-assertion");
@@ -131,7 +133,7 @@ async fn test_fido2_token_missing_client_auth_rejected() {
 
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
         "Missing client auth must be rejected: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
