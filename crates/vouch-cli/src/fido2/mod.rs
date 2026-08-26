@@ -273,12 +273,25 @@ impl MockFidoDevice {
         let mut credential_id = vec![0u8; 32];
         aws_lc_rs::rand::fill(&mut credential_id).expect("system RNG failure");
 
+        // A discoverable credential always returns a user handle, and Vouch's
+        // is a 16-byte UUID. `register` takes `&self` and so cannot store the
+        // caller's value; generating one here keeps the mock's assertions
+        // shaped like a real authenticator's.
+        let mut user_id = vec![0u8; 16];
+        aws_lc_rs::rand::fill(&mut user_id).expect("system RNG failure");
+
         Self {
             signing_key,
             credential_id,
-            user_id: Vec::new(),
+            user_id,
             counter: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// The user handle this device returns from `authenticate`.
+    #[must_use]
+    pub fn user_id(&self) -> &[u8] {
+        &self.user_id
     }
 
     /// Get the public key in COSE format (for server storage).

@@ -10,11 +10,18 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use crate::encoding::{Base64Url, ConvertEncoding, Encoded, Raw};
+    use crate::encoding::{Base64Url, Bounds, ConvertEncoding, Encoded, Raw};
     use serde::{Deserialize, Serialize};
 
-    // Test marker type
+    // Test marker type. Every marker must declare a range before
+    // `Encoded<T, E>` will deserialize it; this one accepts anything so these
+    // tests exercise encoding rather than bounds.
     struct TestData;
+
+    impl Bounds for TestData {
+        const MIN_BYTES: usize = 0;
+        const MAX_BYTES: usize = usize::MAX;
+    }
 
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
     struct TestRequest {

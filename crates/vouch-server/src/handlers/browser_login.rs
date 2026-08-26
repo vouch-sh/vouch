@@ -27,6 +27,7 @@ use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
 use crate::handlers::extractors::ValidJson;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
+use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
 use crate::redact_email;
 use crate::services::auth::{
@@ -99,35 +100,6 @@ pub(crate) struct LoginTemplate {
 impl_template_response!(LoginTemplate);
 
 // ============================================================================
-// Validation Constants
-// ============================================================================
-
-/// Maximum decoded byte length for `authenticator_data`.
-/// Authenticator data is typically 37+ bytes; with extensions it can be larger.
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 3 * 1024;
-
-/// Maximum decoded byte length for `client_data_json`.
-/// Client data JSON is a small JSON object (origin, type, challenge).
-const MAX_CLIENT_DATA_JSON_BYTES: usize = 3 * 1024;
-
-/// Maximum decoded byte length for `signature`.
-/// ECDSA/EdDSA signatures are typically under 100 bytes.
-const MAX_SIGNATURE_BYTES: usize = 768;
-
-/// Maximum decoded byte length for `user_handle`.
-/// User handles are 16-byte UUIDs.
-const MAX_USER_HANDLE_BYTES: usize = 192;
-
-/// Maximum length for the authentication `state` JWT.
-const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
-
-/// Minimum decoded byte length for a valid credential ID.
-const MIN_CREDENTIAL_ID_BYTES: usize = 16;
-
-/// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
-const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
-
-// ============================================================================
 // Authentication State
 // ============================================================================
 
@@ -169,6 +141,115 @@ impl BrowserAuthenticationState {
                 crate::crypto::jwt::JwtType::BrowserAuthenticationState,
             )
             .await
+    }
+}
+
+// ============================================================================
+// Login Completion
+// ============================================================================
+
+/// A `POST /login/webauthn/complete` body whose configuration-dependent
+/// checks have run.
+///
+/// Field lengths and encodings are enforced by the request types themselves
+/// (`vouch_common::encoding::Bounds`), so what is left here is the handful of
+/// checks that need the server's configuration or the decoded state token.
+/// [`LoginCompletion::validate`] consumes the raw request and is the only way to
+/// build one, and [`db::try_consume_challenge_state`] takes one as an
+/// argument — so the single-use state cannot be consumed before those checks
+/// have run.
+struct LoginCompletion {
+    /// The request body itself.
+    req: BrowserLoginCompleteRequest,
+    /// `req.client_data_json` named `webauthn.get` and this server's origin.
+    #[expect(
+        dead_code,
+        reason = "the field carries no data; requiring it is what makes omitting the check a compile error"
+    )]
+    client_data: ClientDataProof,
+    /// Decoded contents of `req.state`.
+    auth_state: BrowserAuthenticationState,
+    /// `auth_state.exp` as a timestamp, for the consumed row's TTL.
+    expires_at: Timestamp,
+    /// `req.user_handle` parsed as the user's UUID.
+    user_id: Uuid,
+}
+
+impl db::ChallengeState for LoginCompletion {
+    fn state_jwt(&self) -> &str {
+        self.req.state.as_str()
+    }
+
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
+    }
+}
+
+impl LoginCompletion {
+    /// Check the client data against this server's configuration, parse the
+    /// user handle, and decode the state token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a 400 `ServiceError` for client data that is not JSON or names
+    /// the wrong ceremony type or origin, a user handle that is not a UUID, or
+    /// a state token that fails to decode or has expired.
+    async fn validate(
+        req: BrowserLoginCompleteRequest,
+        state: &AppState,
+    ) -> Result<Self, ServiceError> {
+        let client_data = ClientDataProof::verify(
+            &req.client_data_json,
+            protocol::CLIENT_DATA_TYPE_GET,
+            &state.config().base_url,
+        )
+        .map_err(|e| {
+            let message = match e {
+                ClientDataError::NotUtf8 => "Client data JSON is not valid UTF-8",
+                ClientDataError::Malformed(err) => {
+                    tracing::debug!("Client data JSON parse error: {err}");
+                    "Client data JSON is malformed"
+                }
+                ClientDataError::WrongType => "Client data type must be 'webauthn.get'",
+                ClientDataError::WrongOrigin(_) => "Client data origin mismatch",
+            };
+            ServiceError::api(StatusCode::BAD_REQUEST, "invalid_input", message)
+        })?;
+
+        let user_id = Uuid::from_slice(&req.user_handle).map_err(|_| {
+            ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_user_handle",
+                "Invalid user handle format",
+            )
+        })?;
+
+        let auth_state =
+            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer)
+                .await
+                .map_err(|e| {
+                    ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                })?;
+
+        let now = Timestamp::now().as_second();
+        if now > auth_state.exp {
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "expired",
+                "Authentication session expired",
+            ));
+        }
+
+        let expires_at =
+            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
+
+        Ok(Self {
+            req,
+            client_data,
+            auth_state,
+            expires_at,
+            user_id,
+        })
     }
 }
 
@@ -405,19 +486,11 @@ pub(crate) async fn browser_login_start(
 ///
 /// Verify WebAuthn assertion and create session.
 ///
-/// The binary fields arrive decoded: [`BrowserLoginCompleteRequest`] types
-/// them as `Encoded<_, Base64Url>`, so a malformed base64url value is rejected
-/// by [`ValidJson`] before the handler runs.
-///
-/// Every check on the request body runs before the single-use challenge state
-/// is consumed, so a malformed request cannot invalidate the state token it
-/// carries and lock the user out of the flow:
-/// 1. Origin header validation (CSRF protection)
-/// 2. Field length bounds (reject obviously oversized/empty fields)
-/// 3. Client data JSON structure (type, origin) and user handle format
-/// 4. State JWT decode + expiration check
-/// 5. Atomic single-use challenge state consume
-/// 6. Database operations (authenticator lookup, signature verification)
+/// Origin header validation (CSRF protection) runs first, then
+/// [`LoginCompletion::validate`] runs every check that reads only the
+/// request body. Consuming the single-use challenge state needs the checked
+/// request as an argument, so a malformed request cannot invalidate the state
+/// token it carries and lock the user out of the flow.
 #[expect(
     clippy::too_many_lines,
     reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
@@ -429,154 +502,42 @@ pub(crate) async fn browser_login_complete(
     jar: CookieJar,
     ValidJson(req): ValidJson<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
-    // ── Phase 1: Origin header validation ────────────────────────────────
     validate_origin(&headers, &state.config().base_url)?;
 
     tracing::info!("Browser login complete (discoverable credential flow)");
 
-    // ── Phase 2: Field length bounds ─────────────────────────────────────
-    // Reject obviously oversized or empty fields before any processing.
-    if req.state.len() > MAX_STATE_TOKEN_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_state",
-            "State token exceeds maximum length",
-        ));
-    }
-    if req.authenticator_data.is_empty()
-        || req.authenticator_data.len() > MAX_AUTHENTICATOR_DATA_BYTES
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Authenticator data is empty or exceeds maximum length",
-        ));
-    }
-    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_BYTES {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Client data JSON is empty or exceeds maximum length",
-        ));
-    }
-    if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_BYTES {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Signature is empty or exceeds maximum length",
-        ));
-    }
-    if req.user_handle.is_empty() || req.user_handle.len() > MAX_USER_HANDLE_BYTES {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "User handle is empty or exceeds maximum length",
-        ));
-    }
-    // An empty string is valid base64url that decodes to `vec![]`, so the
-    // credential ID needs a byte-length bound of its own rather than the
-    // `is_empty` check the other binary fields carry.
-    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
-        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Credential ID length is outside the valid range (16-1023 bytes)",
-        ));
-    }
+    let checked = LoginCompletion::validate(req, &state).await?;
 
-    // ── Phase 3: Client data and user handle structure ───────────────────
-    // Parsing the client data and the user handle needs nothing but the
-    // request body, so it runs while the state token is still spendable.
-    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Client data JSON is not valid UTF-8",
-        )
-    })?;
-
-    #[derive(serde::Deserialize)]
-    struct ClientData {
-        origin: String,
-        #[serde(rename = "type")]
-        typ: String,
-    }
-
-    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
-        tracing::debug!("Client data JSON parse error: {e}");
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Client data JSON is malformed",
-        )
-    })?;
-
-    if client_data.typ != protocol::CLIENT_DATA_TYPE_GET {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Client data type must be 'webauthn.get'",
-        ));
-    }
-
-    if client_data.origin != state.config().base_url {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "Client data origin mismatch",
-        ));
-    }
-
-    let user_id = Uuid::from_slice(&req.user_handle).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_user_handle",
-            "Invalid user handle format",
-        )
-    })?;
-
-    // ── Phase 4: State JWT decode + expiration ───────────────────────────
-    let auth_state = BrowserAuthenticationState::decode(&req.state, &state.state_signer)
-        .await
-        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
-
-    let now = Timestamp::now().as_second();
-    if now > auth_state.exp {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "expired",
-            "Authentication session expired",
-        ));
-    }
-
-    // ── Phase 5: Atomic single-use challenge consume ──────────────────────
     // Mark the authentication state JWT consumed before any side effects.
     // The returned `ChallengeStateClaim` witness is the structural proof
     // threaded into the TokenIssuanceProof below — the only path to
     // `GrantProof::BrowserLogin`. Two concurrent requests with the same
     // state JWT collide on the deterministic PRIMARY KEY; only one wins.
-    let expires_at = Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
-    let challenge_claim =
-        match db::try_consume_challenge_state(&state.store, &req.state, expires_at).await {
-            Ok(claim) => claim,
-            Err(db::ClaimError::AlreadyConsumed) => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "state_already_used",
-                    "Authentication state has already been used",
-                ));
-            }
-            Err(e) => {
-                tracing::error!("Failed to mark browser login state used: {e}");
-                return Err(ServiceError::Internal(
-                    "Failed to mark authentication state used".to_string(),
-                ));
-            }
-        };
+    let challenge_claim = match db::try_consume_challenge_state(&state.store, &checked).await {
+        Ok(claim) => claim,
+        Err(db::ClaimError::AlreadyConsumed) => {
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "state_already_used",
+                "Authentication state has already been used",
+            ));
+        }
+        Err(e) => {
+            tracing::error!("Failed to mark browser login state used: {e}");
+            return Err(ServiceError::Internal(
+                "Failed to mark authentication state used".to_string(),
+            ));
+        }
+    };
 
-    // ── Phase 6: Database operations ─────────────────────────────────────
+    let LoginCompletion {
+        req,
+        auth_state,
+        user_id,
+        client_data: _,
+        expires_at: _,
+    } = checked;
+
     // Helper to log failed login attempts. The email feeds the audit row's
     // `email_domain`/`email_hmac` columns (never stored raw); without it the
     // event is invisible to org-scoped audit queries, which filter on domain.
@@ -1234,9 +1195,10 @@ mod tests {
 
         // Pre-consume the state JWT to simulate a prior successful login.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
-            .await
-            .expect("pre-consume must succeed");
+        let _claim =
+            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+                .await
+                .expect("pre-consume must succeed");
 
         // POST to `/login/webauthn/complete` with the already-consumed state.
         // The body checks in Phases 2 and 3 precede the replay check, so the
@@ -1271,15 +1233,16 @@ mod tests {
         );
     }
 
-    // ── malformed request bodies must not spend the challenge state ──────
+    // ── a rejected body must leave the challenge state unconsumed ────────
     //
-    // The single-use challenge state is consumed in Phase 5. Every check that
-    // reads only the request body runs before it, so a rejected request leaves
-    // the state token spendable and the user can retry the same login.
+    // Field lengths are rejected during deserialization and the remaining
+    // checks are what build a `LoginCompletion`, which the consume takes as an
+    // argument. Either way the rejection happens first, so the user can retry
+    // the same login with the same state token.
 
-    /// POST `/login/webauthn/complete` with a fresh state JWT and length-valid
+    /// POST `/login/webauthn/complete` with a fresh state JWT and valid
     /// dummies for every field but the two under test, then assert the
-    /// rejection carries `expected_code` and left the state token spendable.
+    /// rejection carries `expected_code` and left the state token unconsumed.
     async fn assert_rejected_with_state_intact(
         credential_id: &str,
         client_data_json: &str,
@@ -1328,10 +1291,10 @@ mod tests {
 
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at).await;
+            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
-            "a rejected request spent the challenge state: {consume:?}"
+            "a rejected request consumed the challenge state: {consume:?}"
         );
     }
 
@@ -1343,31 +1306,31 @@ mod tests {
         )
     }
 
-    /// An empty string is valid base64url decoding to `vec![]`, so the request
-    /// deserializes and reaches the handler; the byte-length bound is what
-    /// rejects it.
+    /// An empty string is valid base64url decoding to `vec![]`. The
+    /// `CredentialIdData` bound rejects it while the body is deserialized, so
+    /// the handler never runs and `invalid_request` is the extractor's code.
     #[tokio::test]
-    async fn test_browser_login_empty_credential_id_leaves_state_spendable() {
-        assert_rejected_with_state_intact("", &valid_client_data(), "invalid_input").await;
+    async fn test_browser_login_empty_credential_id_leaves_state_unconsumed() {
+        assert_rejected_with_state_intact("", &valid_client_data(), "invalid_request").await;
     }
 
-    /// Below the 16-byte minimum, which locks in the whole range bound rather
-    /// than only the empty case.
+    /// Below the 16-byte minimum, which locks in the whole range rather than
+    /// only the empty case.
     #[tokio::test]
-    async fn test_browser_login_short_credential_id_leaves_state_spendable() {
+    async fn test_browser_login_short_credential_id_leaves_state_unconsumed() {
         let short = URL_SAFE_NO_PAD.encode([0u8; 8]);
-        assert_rejected_with_state_intact(&short, &valid_client_data(), "invalid_input").await;
+        assert_rejected_with_state_intact(&short, &valid_client_data(), "invalid_request").await;
     }
 
     #[tokio::test]
-    async fn test_browser_login_malformed_client_data_leaves_state_spendable() {
+    async fn test_browser_login_malformed_client_data_leaves_state_unconsumed() {
         let credential_id = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let not_json = URL_SAFE_NO_PAD.encode(b"not json");
         assert_rejected_with_state_intact(&credential_id, &not_json, "invalid_input").await;
     }
 
     #[tokio::test]
-    async fn test_browser_login_foreign_origin_leaves_state_spendable() {
+    async fn test_browser_login_foreign_origin_leaves_state_unconsumed() {
         let credential_id = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let foreign = URL_SAFE_NO_PAD.encode(
             br#"{"type":"webauthn.get","challenge":"abc","origin":"https://evil.example.com"}"#,

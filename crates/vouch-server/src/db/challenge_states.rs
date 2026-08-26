@@ -46,6 +46,29 @@ pub struct ChallengeStateClaim {
     _private: (),
 }
 
+/// A request whose remaining checks have run, and the single-use state token
+/// it carries.
+///
+/// [`try_consume_challenge_state`] takes one of these rather than a bare
+/// `&str`, which turns "check the request, then consume its state" into a
+/// data dependency. Each implementor is produced by a `check()` that takes
+/// the raw request by value, so until those checks have run there is no value
+/// to pass to the consume — and afterwards the unchecked request is gone.
+///
+/// Length and encoding checks are not among them: those live in the request
+/// types (`vouch_common::encoding::Bounds`) and are applied while the body is
+/// deserialized, which is before any handler code runs at all.
+///
+/// What the ordering protects: a request rejected after the consume has used
+/// up a state token that is still valid, forcing the user to restart the flow.
+pub trait ChallengeState {
+    /// The single-use state JWT this request consumes.
+    fn state_jwt(&self) -> &str;
+
+    /// Expiry of that state token, which becomes the consumed row's TTL.
+    fn expires_at(&self) -> Timestamp;
+}
+
 /// Atomically mark a state JWT as consumed (single-use enforcement).
 ///
 /// On success returns a [`ChallengeStateClaim`] witness; on replay returns
@@ -69,17 +92,54 @@ pub struct ChallengeStateClaim {
 /// catches. Only one transaction wins; the loser is reported as a replay.
 pub async fn try_consume_challenge_state(
     store: &DocumentStore,
-    state_jwt: &str,
-    expires_at: Timestamp,
+    request: &impl ChallengeState,
 ) -> std::result::Result<ChallengeStateClaim, ClaimError> {
-    let id = deterministic_challenge_state_id(state_jwt);
-    let doc = ChallengeStateDoc { expires_at };
+    let id = deterministic_challenge_state_id(request.state_jwt());
+    let doc = ChallengeStateDoc {
+        expires_at: request.expires_at(),
+    };
 
     match store.insert_with_id(&id, &doc).await {
         Ok(_) => Ok(ChallengeStateClaim { _private: () }),
         Err(e) if super::pool::is_unique_violation(&e) => Err(ClaimError::AlreadyConsumed),
         Err(e) => Err(ClaimError::Database(e.to_string())),
     }
+}
+
+/// Consume a bare state JWT, with no checked request behind it.
+///
+/// Test-only. The ordering tests assert that a rejected request left its
+/// state token unconsumed, which means consuming a JWT the test minted itself
+/// rather than one carried by a request that reached a handler.
+#[cfg(test)]
+pub(crate) async fn consume_challenge_state_for_test(
+    store: &DocumentStore,
+    state_jwt: &str,
+    expires_at: Timestamp,
+) -> std::result::Result<ChallengeStateClaim, ClaimError> {
+    struct BareState<'a> {
+        state_jwt: &'a str,
+        expires_at: Timestamp,
+    }
+
+    impl ChallengeState for BareState<'_> {
+        fn state_jwt(&self) -> &str {
+            self.state_jwt
+        }
+
+        fn expires_at(&self) -> Timestamp {
+            self.expires_at
+        }
+    }
+
+    try_consume_challenge_state(
+        store,
+        &BareState {
+            state_jwt,
+            expires_at,
+        },
+    )
+    .await
 }
 
 /// Delete expired challenge states.

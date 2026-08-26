@@ -10,7 +10,6 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
-use jiff::Timestamp;
 use vouch_common::{KeyInfo, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
@@ -33,17 +32,18 @@ pub(crate) enum RegistrationStateConsumed {
 /// emitting the audit event, since only the handler has access to the user
 /// context and the audit store.
 ///
+/// `request` is the caller's checked request wrapper, which is what makes
+/// spending the state token impossible before the body has been validated —
+/// see [`db::ChallengeState`].
+///
 /// # Errors
 ///
 /// Returns `ServiceError::Internal` if the persistence check itself fails.
 pub(crate) async fn consume_registration_state(
     store: &DocumentStore,
-    state_jwt: &str,
-    exp_seconds: i64,
+    request: &impl db::ChallengeState,
 ) -> Result<RegistrationStateConsumed, ServiceError> {
-    let expires_at = Timestamp::from_second(exp_seconds).unwrap_or_else(|_| Timestamp::now());
-
-    match db::try_consume_challenge_state(store, state_jwt, expires_at).await {
+    match db::try_consume_challenge_state(store, request).await {
         Ok(claim) => Ok(RegistrationStateConsumed::Won(claim)),
         Err(db::ClaimError::AlreadyConsumed) => Ok(RegistrationStateConsumed::Replay),
         Err(e) => {

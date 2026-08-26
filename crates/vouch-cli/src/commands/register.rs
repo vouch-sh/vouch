@@ -137,7 +137,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
         .post_authenticated(
             "/v1/keys/register/complete",
             &RegisterCompleteRequest {
-                state: start_resp.state,
+                state: start_resp.state.into(),
                 credential_id: result.credential_id,
                 public_key: result.public_key,
                 attestation_object: result.attestation_object,

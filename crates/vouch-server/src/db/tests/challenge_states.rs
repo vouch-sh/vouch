@@ -22,7 +22,7 @@ async fn test_challenge_state_mark_used() {
         .unwrap();
 
     // First use should succeed and return a witness
-    let _claim = try_consume_challenge_state(&store, state_jwt, expires_at)
+    let _claim = consume_challenge_state_for_test(&store, state_jwt, expires_at)
         .await
         .expect("First use should succeed");
 }
@@ -38,12 +38,12 @@ async fn test_challenge_state_replay_rejected() {
         .unwrap();
 
     // First use succeeds
-    let _first = try_consume_challenge_state(&store, state_jwt, expires_at)
+    let _first = consume_challenge_state_for_test(&store, state_jwt, expires_at)
         .await
         .expect("First use should succeed");
 
     // Second use must fail (replay)
-    let second = try_consume_challenge_state(&store, state_jwt, expires_at).await;
+    let second = consume_challenge_state_for_test(&store, state_jwt, expires_at).await;
     assert!(
         matches!(second, Err(ClaimError::AlreadyConsumed)),
         "Second use (replay) should be rejected, got: {second:?}"
@@ -55,7 +55,7 @@ async fn test_challenge_state_new_hash_succeeds() {
     let (store, _audit) = test_db().await;
 
     // A never-seen hash should succeed on first use
-    let _claim = try_consume_challenge_state(
+    let _claim = consume_challenge_state_for_test(
         &store,
         "never_seen_hash",
         jiff::Timestamp::now()
@@ -82,8 +82,8 @@ async fn test_challenge_state_concurrent_calls_produce_one_row() {
     let store_a = store.clone();
     let store_b = store.clone();
     let (result_a, result_b) = tokio::join!(
-        try_consume_challenge_state(&store_a, state_jwt, expires_at),
-        try_consume_challenge_state(&store_b, state_jwt, expires_at),
+        consume_challenge_state_for_test(&store_a, state_jwt, expires_at),
+        consume_challenge_state_for_test(&store_b, state_jwt, expires_at),
     );
 
     let a_won = result_a.is_ok();

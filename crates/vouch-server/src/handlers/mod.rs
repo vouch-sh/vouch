@@ -31,6 +31,69 @@ pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
+/// Evidence that a browser request's `clientDataJSON` names the expected
+/// ceremony type and this server's origin.
+///
+/// Both browser completion types hold one as a field. A struct literal must
+/// name every field, so a completion type built without this check does not
+/// compile — the same guarantee `TokenIssuanceProof`'s fields give the token
+/// endpoint. The only constructor is [`ClientDataProof::verify`], and it
+/// cannot be reached with an origin or type that did not match.
+///
+/// The comparisons themselves need the server's configured `base_url`, so
+/// unlike a field length they cannot be pushed into the request type.
+pub(crate) struct ClientDataProof {
+    _private: (),
+}
+
+/// Why a `clientDataJSON` was rejected. Each caller maps this to its own
+/// error code, which differ between the login and enrollment endpoints.
+pub(crate) enum ClientDataError {
+    /// The bytes are not UTF-8.
+    NotUtf8,
+    /// The bytes are UTF-8 but not the expected JSON object.
+    Malformed(serde_json::Error),
+    /// `type` named a different ceremony.
+    WrongType,
+    /// `origin` named a different server.
+    WrongOrigin(String),
+}
+
+/// The members of `clientDataJSON` a server compares (WebAuthn Level 2 §7.1
+/// step 9 and §7.2 step 11-13).
+#[derive(serde::Deserialize)]
+struct CollectedClientData {
+    origin: String,
+    #[serde(rename = "type")]
+    typ: String,
+}
+
+impl ClientDataProof {
+    /// Parse `client_data_json` and compare its ceremony type and origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ClientDataError`] variant naming which comparison failed.
+    pub(crate) fn verify(
+        client_data_json: &[u8],
+        expected_type: &str,
+        expected_origin: &str,
+    ) -> Result<Self, ClientDataError> {
+        let text = std::str::from_utf8(client_data_json).map_err(|_| ClientDataError::NotUtf8)?;
+        let client_data: CollectedClientData =
+            serde_json::from_str(text).map_err(ClientDataError::Malformed)?;
+
+        if client_data.typ != expected_type {
+            return Err(ClientDataError::WrongType);
+        }
+        if client_data.origin != expected_origin {
+            return Err(ClientDataError::WrongOrigin(client_data.origin));
+        }
+
+        Ok(Self { _private: () })
+    }
+}
+
 /// Implement [`axum::response::IntoResponse`] for an Askama template — render
 /// to HTML on success, log + 500 on error.
 ///

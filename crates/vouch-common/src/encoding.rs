@@ -216,6 +216,41 @@ impl<T> ConvertEncoding<T> for Encoded<T, Base64Url> {
 }
 
 // ============================================================================
+// Length Bounds
+// ============================================================================
+
+/// The decoded byte-length range a semantic marker accepts.
+///
+/// Deserialization applies the range, so a value outside it never exists:
+/// there is no length check in a handler to forget, delete, or run in the
+/// wrong order. `Encoded<T, E>` implements `Deserialize` only when `T`
+/// declares a range, so a new marker must state one before it can appear in
+/// a request body or a stored document.
+///
+/// The range covers what a *conforming* peer sends, not what a policy
+/// allows. Checks that need configuration — a matching origin, a permitted
+/// AAGUID — cannot be expressed here and stay where the configuration is.
+pub trait Bounds {
+    /// Smallest accepted length, in decoded bytes.
+    const MIN_BYTES: usize;
+
+    /// Largest accepted length, in decoded bytes.
+    const MAX_BYTES: usize;
+}
+
+/// Reject a decoded length outside `T`'s range.
+fn check_bounds<T: Bounds>(len: usize) -> Result<(), String> {
+    if len < T::MIN_BYTES || len > T::MAX_BYTES {
+        return Err(format!(
+            "expected {} to {} bytes, got {len}",
+            T::MIN_BYTES,
+            T::MAX_BYTES
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Serde Implementations
 // ============================================================================
 
@@ -226,9 +261,10 @@ impl<T> Serialize for Encoded<T, Raw> {
     }
 }
 
-impl<'de, T> Deserialize<'de> for Encoded<T, Raw> {
+impl<'de, T: Bounds> Deserialize<'de> for Encoded<T, Raw> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let data = Vec::<u8>::deserialize(deserializer)?;
+        check_bounds::<T>(data.len()).map_err(serde::de::Error::custom)?;
         Ok(Self::from_raw(data))
     }
 }
@@ -240,10 +276,12 @@ impl<T> Serialize for Encoded<T, Base64Url> {
     }
 }
 
-impl<'de, T> Deserialize<'de> for Encoded<T, Base64Url> {
+impl<'de, T: Bounds> Deserialize<'de> for Encoded<T, Base64Url> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Self::from_base64url(&s).map_err(serde::de::Error::custom)
+        let value = Self::from_base64url(&s).map_err(serde::de::Error::custom)?;
+        check_bounds::<T>(value.len()).map_err(serde::de::Error::custom)?;
+        Ok(value)
     }
 }
 
@@ -373,8 +411,15 @@ impl<T, E: Encoding> std::fmt::LowerHex for Encoded<T, E> {
 mod tests {
     use super::*;
 
-    // Test marker type
+    // Test marker type. Every marker must declare a range before
+    // `Encoded<T, E>` will deserialize it; this one accepts anything so the
+    // round-trip tests below exercise encoding rather than bounds.
     struct TestData;
+
+    impl Bounds for TestData {
+        const MIN_BYTES: usize = 0;
+        const MAX_BYTES: usize = usize::MAX;
+    }
 
     #[test]
     fn test_raw_round_trip() {

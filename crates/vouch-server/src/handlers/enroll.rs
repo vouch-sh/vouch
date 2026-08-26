@@ -26,6 +26,7 @@ use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse,
 
 use super::extractors::ValidJson;
 use super::session::AuthContext;
+use super::{ClientDataError, ClientDataProof};
 use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
     validate_registration_attestation,
@@ -230,6 +231,98 @@ impl BrowserRegistrationState {
         signer
             .decode_state_token(token, crate::crypto::jwt::JwtType::BrowserRegistrationState)
             .await
+    }
+}
+
+// ============================================================================
+// Registration Completion
+// ============================================================================
+
+/// A `POST /enroll/webauthn/complete` body whose configuration-dependent
+/// checks have run.
+///
+/// Field lengths and encodings are enforced by the request types themselves
+/// (`vouch_common::encoding::Bounds`), so what is left here is the client
+/// data check, which needs the server's configured origin, and the state
+/// decode. [`RegistrationCompletion::validate`] consumes the raw request and is
+/// the only way to build one, and the single-use registration state consume
+/// takes one as an argument — so the state cannot be consumed before those
+/// checks have run.
+struct RegistrationCompletion {
+    /// The request body itself.
+    req: BrowserRegisterCompleteRequest,
+    /// `req.client_data_json` named `webauthn.create` and this server's origin.
+    #[expect(
+        dead_code,
+        reason = "the field carries no data; requiring it is what makes omitting the check a compile error"
+    )]
+    client_data: ClientDataProof,
+    /// Decoded contents of `req.state`.
+    reg_state: BrowserRegistrationState,
+    /// `reg_state.exp` as a timestamp, for the consumed row's TTL.
+    expires_at: Timestamp,
+}
+
+impl db::ChallengeState for RegistrationCompletion {
+    fn state_jwt(&self) -> &str {
+        self.req.state.as_str()
+    }
+
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
+    }
+}
+
+impl RegistrationCompletion {
+    /// Check the client data against this server's configuration and decode
+    /// the state token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a 400 `ServiceError` for client data that is not JSON or names
+    /// the wrong ceremony type or origin, or a state token that fails to
+    /// decode.
+    async fn validate(
+        req: BrowserRegisterCompleteRequest,
+        state: &AppState,
+    ) -> Result<Self, ServiceError> {
+        let expected_origin = state.config().base_url.clone();
+        let client_data = ClientDataProof::verify(
+            &req.client_data_json,
+            protocol::CLIENT_DATA_TYPE_CREATE,
+            &expected_origin,
+        )
+        .map_err(|e| {
+            let message = match e {
+                ClientDataError::NotUtf8 => "Client data JSON is not valid UTF-8".to_string(),
+                ClientDataError::Malformed(err) => {
+                    format!("Client data JSON is malformed: {err}")
+                }
+                ClientDataError::WrongType => {
+                    "Client data type must be 'webauthn.create'".to_string()
+                }
+                ClientDataError::WrongOrigin(got) => {
+                    tracing::warn!("Origin mismatch: got '{got}', expected '{expected_origin}'");
+                    "Client data origin does not match the server".to_string()
+                }
+            };
+            ServiceError::api(StatusCode::BAD_REQUEST, "invalid_client_data", message)
+        })?;
+
+        let reg_state = BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer)
+            .await
+            .map_err(|e| {
+                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+            })?;
+
+        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+
+        Ok(Self {
+            req,
+            client_data,
+            reg_state,
+            expires_at,
+        })
     }
 }
 
@@ -1237,41 +1330,14 @@ pub(crate) async fn browser_register_start(
     }))
 }
 
-/// Maximum length for the registration `state` JWT.
-const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
-
-/// Maximum decoded byte length for `attestation_object`.
-/// Hardware key attestations with certificate chains are typically under 4 KB.
-const MAX_ATTESTATION_OBJECT_BYTES: usize = 12 * 1024;
-
-/// Maximum decoded byte length for `client_data_json`.
-/// Client data JSON is a small JSON object (origin, type, challenge).
-const MAX_CLIENT_DATA_JSON_BYTES: usize = 3 * 1024;
-
-/// Minimum decoded byte length for a valid credential ID.
-const MIN_CREDENTIAL_ID_BYTES: usize = 16;
-
-/// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
-const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
-
 /// Complete browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/complete
 ///
-/// The binary fields arrive decoded: [`BrowserRegisterCompleteRequest`] types
-/// them as `Encoded<_, Base64Url>`, so a malformed base64url value is rejected
-/// by [`ValidJson`] before the handler runs.
-///
-/// Every check on the request body runs before the single-use registration
-/// state is consumed, so a malformed request cannot invalidate the state token
-/// it carries and send the user back through enrollment:
-/// 1. Field length bounds (reject obviously oversized/empty fields)
-/// 2. Client data JSON structure validation (type, origin)
-/// 3. State JWT decode + expiration check
-/// 4. Account must be active
-/// 5. Single-use registration state consume
-/// 6. Hardware attestation validation (reject software passkeys)
-/// 7. WebAuthn cryptographic verification
-/// 8. Database operations (duplicate check, store, authorize)
+/// Consuming the single-use registration state takes a [`RegistrationCompletion`]
+/// as an argument, so the checks that build one — client data structure, ceremony
+/// type, origin, state decode — cannot be reordered after it. The account must
+/// also still be active, which is a database read rather than a body check and so
+/// runs between the two.
 #[expect(
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
@@ -1281,95 +1347,11 @@ pub(crate) async fn browser_register_complete(
     client_info: ClientInfo,
     ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    // ── Phase 1: Field length bounds ────────────────────────────────────
-    // Reject obviously oversized or empty fields before any processing.
-    if req.state.len() > MAX_STATE_TOKEN_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_state",
-            "State token exceeds maximum length",
-        ));
-    }
-    if req.attestation_object.is_empty()
-        || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_BYTES
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_attestation",
-            "Attestation object is empty or exceeds maximum length",
-        ));
-    }
-    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_BYTES {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data JSON is empty or exceeds maximum length",
-        ));
-    }
-    // An empty string is valid base64url that decodes to `vec![]`, so the
-    // credential ID needs a byte-length bound of its own rather than the
-    // `is_empty` check the other binary fields carry.
-    if req.credential_id.len() < MIN_CREDENTIAL_ID_BYTES
-        || req.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "Credential ID length is outside the valid range (16-1023 bytes)",
-        ));
-    }
+    let checked = RegistrationCompletion::validate(req, &state).await?;
 
-    // ── Phase 2: Client data JSON structure validation ──────────────────
-    // Parsing the client data needs nothing but the request body, so it runs
-    // while the state token is still spendable.
-    let client_data_str = std::str::from_utf8(&req.client_data_json).map_err(|_| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data JSON is not valid UTF-8",
-        )
-    })?;
-
-    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            format!("Client data JSON is malformed: {e}"),
-        )
-    })?;
-
-    if client_data.typ != protocol::CLIENT_DATA_TYPE_CREATE {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data type must be 'webauthn.create'",
-        ));
-    }
-
-    // Verify the origin matches the server's base URL.
-    let expected_origin = &state.config().base_url;
-    if client_data.origin != *expected_origin {
-        tracing::warn!(
-            "Origin mismatch: got '{}', expected '{}'",
-            client_data.origin,
-            expected_origin
-        );
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            "Client data origin does not match the server",
-        ));
-    }
-
-    // ── Phase 3: State JWT decode + expiration ──────────────────────────
-    let reg_state = BrowserRegistrationState::decode(&req.state, &state.state_signer)
-        .await
-        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
-
-    // ── Phase 4: Account must be active ─────────────────────────────────
     // A user deactivated after obtaining the registration state (valid for
     // five minutes) must not register a new hardware key.
-    let account = db::get_user_by_id(&state.store, &reg_state.user_id.to_string())
+    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
         .await
         .map_err(|e| {
             ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
@@ -1380,22 +1362,17 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::Forbidden("user_deactivated"));
     }
 
-    // ── Phase 5: Single-use enforcement ─────────────────────────────────
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
     // The witness is threaded into TokenIssuanceProof below — the only
     // path to `GrantProof::EnrollmentComplete`.
-    let registration_claim = match key_svc::consume_registration_state(
-        &state.store,
-        &req.state,
-        reg_state.exp,
-    )
-    .await?
+    let registration_claim = match key_svc::consume_registration_state(&state.store, &checked)
+        .await?
     {
         key_svc::RegistrationStateConsumed::Won(claim) => claim,
         key_svc::RegistrationStateConsumed::Replay => {
             tracing::warn!(
-                user_id = %reg_state.user_id,
+                user_id = %checked.reg_state.user_id,
                 "browser registration state replay rejected"
             );
             let audit_data = crate::db::documents::audit::RegistrationReplayData {
@@ -1407,8 +1384,8 @@ pub(crate) async fn browser_register_complete(
                 .audit
                 .insert_event(
                     db::AuditEventKind::KeyRegistrationReplay,
-                    Some(&reg_state.user_id.to_string()),
-                    Some(&reg_state.user_email),
+                    Some(&checked.reg_state.user_id.to_string()),
+                    Some(&checked.reg_state.user_email),
                     &audit_data,
                 )
                 .await
@@ -1423,7 +1400,13 @@ pub(crate) async fn browser_register_complete(
         }
     };
 
-    // ── Phase 6: Hardware attestation validation ────────────────────────
+    let RegistrationCompletion {
+        req,
+        reg_state,
+        client_data: _,
+        expires_at: _,
+    } = checked;
+
     // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
     let validated = validate_registration_attestation(
         &req.attestation_object,
@@ -1433,7 +1416,7 @@ pub(crate) async fn browser_register_complete(
 
     let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
 
-    // ── Phase 7: WebAuthn cryptographic verification ────────────────────
+    // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
     let credential_id_bytes = req.credential_id.as_bytes().to_vec();
     let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
@@ -1460,7 +1443,7 @@ pub(crate) async fn browser_register_complete(
             )
         })?;
 
-    // ── Phase 8: Database operations ────────────────────────────────────
+    // Database operations.
     // All cheap validation passed — now check for duplicate credentials.
     if let Some(_existing) =
         db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes).await?
@@ -1493,7 +1476,7 @@ pub(crate) async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
-    // ── Phase 8b: x5c attestation chain validation (browser enrollment) ──
+    // x5c attestation chain validation (browser enrollment).
     // The browser enrollment path uses webauthn-rs for verification, so we
     // additionally validate the x5c chain here for attestation_verified status.
     let mut validated = validated;

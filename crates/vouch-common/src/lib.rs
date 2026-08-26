@@ -24,11 +24,11 @@ mod api_tests;
 #[cfg(test)]
 mod encoding_tests;
 
-pub use encoding::{Base64Url, ConvertEncoding, Encoded, Encoding, Raw};
+pub use encoding::{Base64Url, Bounds, ConvertEncoding, Encoded, Encoding, Raw};
 pub use fido2_types::{
     AttestationObject, AttestationObjectData, AuthData, AuthenticatorDataMarker, Challenge,
     ChallengeData, ClientDataJson, ClientDataJsonData, CoseKey, CoseKeyData, CredentialId,
-    CredentialIdData, Signature, SignatureData, UserHandle, UserHandleData,
+    CredentialIdData, Signature, SignatureData, StateToken, UserHandle, UserHandleData,
 };
 
 pub use aaguid::{

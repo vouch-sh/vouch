@@ -18,6 +18,15 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
+    /// A credential ID inside the 16..=1023 byte range `CredentialIdData`
+    /// enforces during deserialization.
+    fn in_range_credential_id() -> Vec<u8> {
+        (0..16u8).collect()
+    }
+
+    /// The same value base64url-encoded, for the tests that post browser JSON.
+    const IN_RANGE_CREDENTIAL_ID_B64: &str = "AAECAwQFBgcICQoLDA0ODw";
+
     // =========================================================================
     // Round-Trip Tests (Existing)
     // =========================================================================
@@ -25,8 +34,8 @@ mod tests {
     #[test]
     fn test_register_complete_request_round_trip() {
         let request = RegisterCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![1u8, 2, 3, 4].into(),
+            state: "test-state".to_string().into(),
+            credential_id: in_range_credential_id().into(),
             public_key: vec![5u8, 6, 7, 8].into(),
             attestation_object: vec![9u8, 10, 11, 12].into(),
             client_data_json: br#"{"type":"webauthn.create"}"#.to_vec().into(),
@@ -49,7 +58,7 @@ mod tests {
             user_name: "test@test.com".to_string(),
             algorithms: vec![-7, -257],
             state: "state".to_string(),
-            exclude_credential_ids: vec![vec![1u8, 2, 3].into()],
+            exclude_credential_ids: vec![in_range_credential_id().into()],
         };
         let json = serde_json::to_string(&response).unwrap();
         let decoded: RegisterStartResponse = serde_json::from_str(&json).unwrap();
@@ -66,8 +75,8 @@ mod tests {
     fn test_binary_fields_with_special_bytes() {
         // Test that fields with special byte values (0x00, 0xFF, etc.) work correctly
         let request = RegisterCompleteRequest {
-            state: "test".to_string(),
-            credential_id: vec![0x00u8, 0xFF, 0x7F, 0x80].into(),
+            state: "test".to_string().into(),
+            credential_id: vec![0xFFu8; 16].into(),
             public_key: vec![0xC0u8, 0xE0, 0xF0, 0xFE].into(),
             attestation_object: vec![0x00u8, 0x01, 0xFE, 0xFF].into(),
             client_data_json: vec![0x7Bu8, 0x7D].into(), // "{}"
@@ -80,9 +89,11 @@ mod tests {
 
     #[test]
     fn test_nested_vec_u8_round_trip() {
-        // Test Vec<CredentialId<Raw>> (exclude_credential_ids) serialization
+        // Test Vec<CredentialId<Raw>> (exclude_credential_ids) serialization.
+        // Every entry is in range: `CredentialIdData`'s bounds apply to each
+        // element of the list, not just to a top-level field.
         let response = RegisterStartResponse {
-            challenge: vec![1u8, 2, 3].into(),
+            challenge: vec![1u8; 32].into(),
             rp_id: "test.com".to_string(),
             rp_name: "Test".to_string(),
             user_id: Uuid::nil(),
@@ -90,10 +101,9 @@ mod tests {
             algorithms: vec![-7],
             state: "state".to_string(),
             exclude_credential_ids: vec![
-                vec![1u8, 2, 3].into(),
-                vec![4u8, 5, 6, 7, 8].into(),
-                vec![0xFFu8, 0x00, 0x80].into(),
-                vec![].into(), // empty is allowed
+                in_range_credential_id().into(),
+                vec![4u8; 32].into(),
+                vec![0xFFu8; 1023].into(),
             ],
         };
         let json = serde_json::to_string(&response).unwrap();
@@ -113,7 +123,7 @@ mod tests {
         // Missing required 'public_key' field should fail
         let json = r#"{
             "state": "test-state",
-            "credential_id": [1, 2, 3],
+            "credential_id": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
             "attestation_object": [4, 5, 6],
             "client_data_json": [7, 8, 9]
         }"#;
@@ -123,22 +133,47 @@ mod tests {
     }
 
     // =========================================================================
-    // Empty Field Handling Tests
+    // Length Bound Tests
     // =========================================================================
 
     #[test]
-    fn test_register_complete_empty_public_key() {
-        // Empty public_key is syntactically valid
-        let request = RegisterCompleteRequest {
-            state: "test".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
-            public_key: vec![].into(),
-            attestation_object: vec![4u8, 5, 6].into(),
-            client_data_json: vec![7u8, 8, 9].into(),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: RegisterCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.public_key.is_empty());
+    fn test_register_complete_empty_public_key_rejected() {
+        // `CoseKeyData`'s floor is 1 byte, applied during deserialization, so
+        // an empty public key never reaches a handler.
+        let json = r#"{
+            "state": "test",
+            "credential_id": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+            "public_key": [],
+            "attestation_object": [4, 5, 6],
+            "client_data_json": [7, 8, 9]
+        }"#;
+        // Naming the offending field is `serde_path_to_error`'s job inside
+        // axum's `Json`; plain `serde_json` reports the range and the length.
+        let result: Result<RegisterCompleteRequest, _> = serde_json::from_str(json);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected 1 to 8192 bytes, got 0"),
+            "rejection must report the range and the length, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_register_complete_short_credential_id_rejected() {
+        // Below `CredentialIdData`'s 16-byte floor. This is the check that
+        // #1069 lost when it was written by hand inside a handler.
+        let json = r#"{
+            "state": "test",
+            "credential_id": [1, 2, 3],
+            "public_key": [4, 5, 6],
+            "attestation_object": [7, 8, 9],
+            "client_data_json": [10, 11, 12]
+        }"#;
+        let result: Result<RegisterCompleteRequest, _> = serde_json::from_str(json);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("expected 16 to 1023 bytes, got 3"),
+            "rejection must report the range and the length, got: {err}"
+        );
     }
 
     #[test]
@@ -164,19 +199,33 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_register_complete_large_attestation_object() {
-        // Large attestation_object should work
-        let large_att = vec![0xCDu8; 50_000];
+    fn test_register_complete_attestation_object_at_and_past_ceiling() {
+        // A full-size hardware attestation round-trips; one byte more does not.
+        // `AttestationObjectData`'s ceiling is what stops an arbitrarily large
+        // blob reaching attestation parsing.
+        let ceiling = <crate::AttestationObjectData as crate::Bounds>::MAX_BYTES;
+
         let request = RegisterCompleteRequest {
-            state: "test".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
+            state: "test".to_string().into(),
+            credential_id: in_range_credential_id().into(),
             public_key: vec![4u8, 5, 6].into(),
-            attestation_object: large_att.clone().into(),
+            attestation_object: vec![0xCDu8; ceiling].into(),
             client_data_json: vec![7u8, 8, 9].into(),
         };
         let json = serde_json::to_string(&request).unwrap();
         let decoded: RegisterCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.attestation_object.len(), 50_000);
+        assert_eq!(decoded.attestation_object.len(), ceiling);
+
+        let oversized = RegisterCompleteRequest {
+            attestation_object: vec![0xCDu8; ceiling + 1].into(),
+            ..request
+        };
+        let json = serde_json::to_string(&oversized).unwrap();
+        let result: Result<RegisterCompleteRequest, _> = serde_json::from_str(&json);
+        assert!(
+            result.is_err(),
+            "an attestation object past the ceiling must not deserialize"
+        );
     }
 
     #[test]
@@ -339,14 +388,19 @@ mod tests {
     #[test]
     fn test_browser_register_complete_request_accepts_browser_json() {
         // Exactly the body keys.js builds via bufferToBase64url().
-        let body = r#"{
+        let body = format!(
+            r#"{{
             "state": "state-token",
-            "credential_id": "AQID",
+            "credential_id": "{IN_RANGE_CREDENTIAL_ID_B64}",
             "attestation_object": "BAUG",
             "client_data_json": "BwgJ"
-        }"#;
-        let request: BrowserRegisterCompleteRequest = serde_json::from_str(body).unwrap();
-        assert_eq!(request.credential_id.as_bytes(), &[1, 2, 3]);
+        }}"#
+        );
+        let request: BrowserRegisterCompleteRequest = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            request.credential_id.as_bytes(),
+            in_range_credential_id().as_slice()
+        );
         assert_eq!(request.attestation_object.as_bytes(), &[4, 5, 6]);
         assert_eq!(request.client_data_json.as_bytes(), &[7, 8, 9]);
     }
@@ -354,17 +408,22 @@ mod tests {
     #[test]
     fn test_browser_login_complete_request_accepts_browser_json() {
         // Exactly the body login.js builds via bufferToBase64url().
-        let body = r#"{
+        let body = format!(
+            r#"{{
             "state": "state-token",
-            "credential_id": "AQID",
+            "credential_id": "{IN_RANGE_CREDENTIAL_ID_B64}",
             "authenticator_data": "BAUG",
             "client_data_json": "BwgJ",
             "signature": "CgsM",
             "user_handle": "DQ4P",
             "pending_auth": null
-        }"#;
-        let request: BrowserLoginCompleteRequest = serde_json::from_str(body).unwrap();
-        assert_eq!(request.credential_id.as_bytes(), &[1, 2, 3]);
+        }}"#
+        );
+        let request: BrowserLoginCompleteRequest = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            request.credential_id.as_bytes(),
+            in_range_credential_id().as_slice()
+        );
         assert_eq!(request.authenticator_data.as_bytes(), &[4, 5, 6]);
         assert_eq!(request.client_data_json.as_bytes(), &[7, 8, 9]);
         assert_eq!(request.signature.as_bytes(), &[10, 11, 12]);

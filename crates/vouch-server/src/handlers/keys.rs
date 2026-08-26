@@ -22,6 +22,7 @@ use vouch_common::{
     fido2_types::Challenge,
 };
 
+use super::extractors::ValidJson;
 use super::session::AuthenticatedToken;
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
@@ -29,11 +30,6 @@ use crate::crypto::webauthn_verify;
 // ============================================================================
 // Registration State (stored temporarily between start and complete)
 // ============================================================================
-
-/// Maximum accepted length of the registration state JWT (defense-in-depth).
-/// Matches the bounds used by `browser_register_complete` (`handlers/enroll.rs`)
-/// and the browser login handler.
-const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
 
 /// Registration state stored between start and complete.
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +62,60 @@ impl RegistrationState {
         signer
             .decode_state_token(token, crate::crypto::jwt::JwtType::RegistrationState)
             .await
+    }
+}
+
+/// A `POST /v1/keys/register/complete` body with its state token decoded.
+///
+/// Field lengths and encodings are enforced by the request type itself
+/// (`vouch_common::encoding::Bounds`). This endpoint has no
+/// configuration-dependent body check — the CLI is not a browser, so there is
+/// no page origin to compare, and the credential ID comes from the verified
+/// authenticator data rather than the body. What remains is the state decode,
+/// and [`RegistrationCompletion::validate`] is the only way to build a value the
+/// single-use consume will accept.
+struct RegistrationCompletion {
+    /// The request body itself.
+    req: RegisterCompleteRequest,
+    /// Decoded contents of `req.state`.
+    reg_state: RegistrationState,
+    /// `reg_state.exp` as a timestamp, for the consumed row's TTL.
+    expires_at: Timestamp,
+}
+
+impl db::ChallengeState for RegistrationCompletion {
+    fn state_jwt(&self) -> &str {
+        self.req.state.as_str()
+    }
+
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
+    }
+}
+
+impl RegistrationCompletion {
+    /// Decode the state token the request carries.
+    ///
+    /// # Errors
+    ///
+    /// Returns a 400 `ServiceError` if the state token fails to decode.
+    async fn validate(
+        req: RegisterCompleteRequest,
+        state: &AppState,
+    ) -> Result<Self, ServiceError> {
+        let reg_state = RegistrationState::decode(req.state.as_str(), &state.state_signer)
+            .await
+            .map_err(|e| {
+                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+            })?;
+
+        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+
+        Ok(Self {
+            req,
+            reg_state,
+            expires_at,
+        })
     }
 }
 
@@ -158,27 +208,16 @@ pub(crate) async fn register_start(
 pub(crate) async fn register_complete(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    Json(req): Json<RegisterCompleteRequest>,
+    ValidJson(req): ValidJson<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
-    if req.state.len() > MAX_STATE_TOKEN_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_state",
-            "State token exceeds maximum length",
-        ));
-    }
-
-    // Decode state
-    let reg_state = RegistrationState::decode(&req.state, &state.state_signer)
-        .await
-        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
+    let checked = RegistrationCompletion::validate(req, &state).await?;
 
     // Account must be active. A user deactivated after obtaining the
     // registration state (valid for five minutes) must not register a new
     // hardware key (issue #846). Mirrors `browser_register_complete`.
-    let account = db::get_user_by_id(&state.store, &reg_state.user_id.to_string())
+    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
         .await
         .map_err(|e| {
             ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
@@ -194,13 +233,11 @@ pub(crate) async fn register_complete(
     // CLI registration adds an authenticator without issuing a token, so the
     // returned witness is dropped — sealing is enforced by `#[must_use]` plus
     // the binding to `_claim`.
-    let _claim = match key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp)
-        .await?
-    {
+    let _claim = match key_svc::consume_registration_state(&state.store, &checked).await? {
         key_svc::RegistrationStateConsumed::Won(claim) => claim,
         key_svc::RegistrationStateConsumed::Replay => {
             tracing::warn!(
-                user_id = %reg_state.user_id,
+                user_id = %checked.reg_state.user_id,
                 "CLI registration state replay rejected"
             );
             let audit_data = crate::db::documents::audit::RegistrationReplayData {
@@ -212,8 +249,8 @@ pub(crate) async fn register_complete(
                 .audit
                 .insert_event(
                     db::AuditEventKind::KeyRegistrationReplay,
-                    Some(&reg_state.user_id.to_string()),
-                    Some(&reg_state.user_name),
+                    Some(&checked.reg_state.user_id.to_string()),
+                    Some(&checked.reg_state.user_name),
                     &audit_data,
                 )
                 .await
@@ -227,6 +264,12 @@ pub(crate) async fn register_complete(
             ));
         }
     };
+
+    let RegistrationCompletion {
+        req,
+        reg_state,
+        expires_at: _,
+    } = checked;
 
     // Server-side WebAuthn attestation verification
     // Verify the attestation object, client data, RP ID, challenge, and origin
@@ -655,6 +698,127 @@ mod tests {
     // Register Complete — Negative
     // ========================================================================
 
+    /// Mint a valid `RegistrationState` JWT for `user`, returning it with its
+    /// expiry so a caller can check afterwards whether it was consumed.
+    async fn make_reg_state(state: &AppState, user: &crate::db::User) -> (String, i64) {
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
+            user_name: user.email.clone(),
+            device_name: "Test Device".to_string(),
+            challenge: Challenge::from(vec![7u8; 32]),
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let jwt = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+        (jwt, exp)
+    }
+
+    /// Post a body to `/v1/keys/register/complete` on behalf of a fresh user,
+    /// returning the state token it carried alongside the response.
+    async fn post_register_complete(
+        email: &str,
+        attestation_object: serde_json::Value,
+        client_data_json: serde_json::Value,
+    ) -> (Arc<AppState>, String, i64, StatusCode, String) {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let (state_jwt, exp) = make_reg_state(&state, &user).await;
+
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": attestation_object,
+            "client_data_json": client_data_json,
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        (state, state_jwt, exp, status, resp_body)
+    }
+
+    /// Assert the registration state is still unconsumed by spending it directly.
+    async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let consume =
+            crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+        assert!(
+            consume.is_ok(),
+            "a rejected request consumed the registration state: {consume:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_empty_attestation_leaves_state_unconsumed() {
+        let (state, state_jwt, exp, status, body) = post_register_complete(
+            "cli-empty-attestation@example.com",
+            serde_json::json!([]),
+            serde_json::json!([4, 5, 6]),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_request");
+
+        assert_state_unconsumed(&state, &state_jwt, exp).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_oversized_attestation_leaves_state_unconsumed() {
+        let (state, state_jwt, exp, status, body) = post_register_complete(
+            "cli-huge-attestation@example.com",
+            serde_json::json!(vec![
+                0u8;
+                <vouch_common::AttestationObjectData as vouch_common::Bounds>::MAX_BYTES
+                    + 1
+            ]),
+            serde_json::json!([4, 5, 6]),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_request");
+
+        assert_state_unconsumed(&state, &state_jwt, exp).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_oversized_client_data_leaves_state_unconsumed() {
+        let (state, state_jwt, exp, status, body) = post_register_complete(
+            "cli-huge-client-data@example.com",
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!(vec![
+                0u8;
+                <vouch_common::ClientDataJsonData as vouch_common::Bounds>::MAX_BYTES
+                    + 1
+            ]),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_request");
+
+        assert_state_unconsumed(&state, &state_jwt, exp).await;
+    }
+
     #[tokio::test]
     async fn test_register_complete_invalid_state() {
         let (app, state) = test_app().await;
@@ -665,15 +829,18 @@ mod tests {
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-        // All Raw fields deserialize as Vec<u8> (JSON arrays); provide empty arrays
-        // so the JSON extractor succeeds, but the state JWT decode fails with 400.
-        let body = r#"{
+        // All Raw fields deserialize as Vec<u8> (JSON arrays), and their length
+        // bounds are applied there, so the binary fields must be in range for
+        // the request to reach the state decode. Their contents are unused.
+        let body = serde_json::json!({
             "state": "garbage.state.jwt",
-            "credential_id": [],
-            "public_key": [],
-            "attestation_object": [],
-            "client_data_json": []
-        }"#;
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        })
+        .to_string();
+        let body = body.as_str();
         let (status, resp_body) = http_post_json(
             &app,
             "/v1/keys/register/complete",
@@ -721,19 +888,20 @@ mod tests {
 
         // Pre-consume the state token to simulate prior use.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
-            .await
-            .expect("pre-consume must succeed");
+        let _claim =
+            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+                .await
+                .expect("pre-consume must succeed");
 
-        // POST to register/complete with the already-consumed state and dummy bytes.
-        // consume_registration_state runs before WebAuthn verification, so dummy
-        // attestation bytes are sufficient to trigger the replay rejection.
+        // POST to register/complete with the already-consumed state. The field
+        // bounds precede the replay check, so the binary fields must be
+        // well-formed; WebAuthn verification never runs, so dummy bytes suffice.
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": [],
-            "public_key": [],
-            "attestation_object": [],
-            "client_data_json": [],
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
         });
         let (status, resp_body) = http_post_json(
             &app,
@@ -789,14 +957,15 @@ mod tests {
             .await
             .expect("deactivate user");
 
-        // The active-user check runs before WebAuthn verification, so dummy
-        // attestation bytes are sufficient to trigger the deactivation rejection.
+        // The field bounds precede the active-user check, so the binary fields
+        // must be well-formed; WebAuthn verification never runs, so dummy bytes
+        // suffice to trigger the deactivation rejection.
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": [],
-            "public_key": [],
-            "attestation_object": [],
-            "client_data_json": [],
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
         });
         let (status, resp_body) = http_post_json(
             &app,
@@ -846,8 +1015,8 @@ mod tests {
 
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": [],
-            "public_key": [],
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
             "attestation_object": [],
             "client_data_json": [],
         });
