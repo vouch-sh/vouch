@@ -818,6 +818,75 @@ async fn test_par_basic_auth_failure_challenges_with_basic() {
     );
 }
 
+// ── no credentials at all ────────────────────────────────────────────────
+//
+// RFC 6749 Section 5.2, `specs/rfc/rfc6749.txt:2490-2492`:
+//
+// > The authorization server MAY return an HTTP 401 (Unauthorized) status
+// > code to indicate which HTTP authentication schemes are supported.
+//
+// A MAY, so any of these endpoints could stay silent and still conform. They
+// answer alike instead, so a client discovering one learns the same thing at
+// all four. `Basic` is the only method that has an HTTP auth-scheme token;
+// the rest are discoverable through RFC 8414 metadata.
+
+/// Each endpoint requiring client authentication, and a body that reaches its
+/// client-auth check without credentials.
+fn no_credential_requests() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "/oauth/token",
+            "grant_type=authorization_code&code=irrelevant\
+             &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+        ),
+        (
+            "/oauth/par",
+            "response_type=code&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
+             &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+             &code_challenge_method=S256",
+        ),
+        ("/oauth/revoke", "token=irrelevant"),
+        ("/oauth/introspect", "token=irrelevant"),
+    ]
+}
+
+#[tokio::test]
+async fn test_no_credentials_challenges_uniformly_across_endpoints() {
+    let (app, _state) = test_app().await;
+
+    for (path, body) in no_credential_requests() {
+        let response = http_post_form_full(&app, path, body, &[]).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{path} must reject a request carrying no client credentials: {}",
+            response.body
+        );
+        assert!(
+            www_authenticate(&response).starts_with("Basic"),
+            "{path} must advertise Basic when no credentials were presented, got: {:?}",
+            www_authenticate(&response)
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_introspect_no_credentials_keeps_resource_metadata_pointer() {
+    // Introspection is a protected resource, so its challenge also carries the
+    // RFC 9728 pointer. The uniform `Basic` must not displace it.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(&app, "/oauth/introspect", "token=irrelevant", &[]).await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let challenge = www_authenticate(&response);
+    assert!(
+        challenge.contains("resource_metadata="),
+        "introspection must keep its RFC 9728 pointer, got: {challenge:?}"
+    );
+}
+
 // ========================================================================
 // RFC 6749 Section 3.2 — Token endpoint parameter rules
 // ========================================================================
