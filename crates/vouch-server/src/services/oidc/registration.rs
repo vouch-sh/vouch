@@ -409,7 +409,7 @@ pub async fn register_client(
                 .keys
                 .as_ref()
                 .and_then(crate::db::ClientKeys::inline)
-            && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+            && !jwks_has_fapi_allowed_key(jwks)
         {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
@@ -734,7 +734,7 @@ pub async fn register_client(
             .keys
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
-            .cloned(),
+            .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: jwks_auth
             .keys
             .as_ref()
@@ -1027,25 +1027,14 @@ fn validate_jwks_shape(keys: Option<&crate::db::ClientKeys>) -> Result<(), Servi
     let jwks = keys.and_then(crate::db::ClientKeys::inline);
     let jwks_uri = keys.and_then(crate::db::ClientKeys::uri);
     if let Some(jwks) = jwks {
-        if !jwks
-            .get("keys")
-            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-        {
+        // A key set with no keys parses but can never authenticate anyone.
+        // Everything else the old shape check covered — that this is an object
+        // with a "keys" array, and that no member has an invalid type — is now
+        // established by `ClientKeys::from_stored`, which parses on the way in.
+        if jwks.keys.is_empty() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "jwks must be a JSON object with a non-empty \"keys\" array",
-            ));
-        }
-        // Reject a JWKS with a type-invalid member (e.g. "alg": true) at
-        // submission time, through the same typed representation the RFC
-        // 7523 client-assertion verifier uses at runtime — see
-        // db::JwkSet. Otherwise the client would be accepted here but
-        // permanently unable to authenticate once the runtime verifier
-        // fails to parse the same document.
-        if db::parse_jwks_set(jwks).is_err() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "jwks contains a key with an invalid field type",
             ));
         }
     }
@@ -1106,7 +1095,7 @@ fn validate_jwks_and_auth_method(
     // the FAPI algorithm-usability check.
     if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && !jwks_has_x5c(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1390,7 +1379,7 @@ pub async fn update_client_configuration(
     // inspected synchronously, so this only guards the inline case.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && !jwks_has_x5c(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1411,7 +1400,7 @@ pub async fn update_client_configuration(
     if client.is_fapi()
         && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && !jwks_has_fapi_allowed_key(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1591,7 +1580,7 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
             .keys
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
-            .cloned(),
+            .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: client
             .keys
             .as_ref()

@@ -974,7 +974,10 @@ async fn resolve_self_signed_jwks(
     jwks_cache: Option<&crate::db::documents::jwks_cache::JwksCacheDoc>,
 ) -> ServiceResult<(serde_json::Value, JwksOrigin)> {
     if let Some(jwks) = client.keys.as_ref().and_then(crate::db::ClientKeys::inline) {
-        return Ok((jwks.clone(), JwksOrigin::NoFetch));
+        return Ok((
+            serde_json::to_value(jwks).unwrap_or_default(),
+            JwksOrigin::NoFetch,
+        ));
     }
     let Some(uri) = client.keys.as_ref().and_then(crate::db::ClientKeys::uri) else {
         return Err(ServiceError::oauth(
@@ -1877,7 +1880,9 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Inline(jwks));
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        ));
 
         let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
@@ -1919,7 +1924,9 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Inline(jwks));
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        ));
 
         let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
@@ -2170,7 +2177,9 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "inline"}]});
-        client.keys = Some(crate::db::ClientKeys::Inline(jwks.clone()));
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks.clone()).expect("valid test JWKS"),
+        ));
 
         let (value, origin) = resolve_self_signed_jwks(&state, &client, None)
             .await

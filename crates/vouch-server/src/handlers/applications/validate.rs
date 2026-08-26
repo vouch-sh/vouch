@@ -244,13 +244,15 @@ pub(super) fn validate_create_application<'a>(
     let jwks = jwks_trimmed.map(parse_jwks).transpose()?;
     validate_jwks_uri(jwks_uri)?;
 
+    let keys = client_keys(jwks, jwks_uri)?;
+
     // FAPI validation: an inline JWKS must have at least one key the
     // FAPI_ALLOWED validator can actually select (see jwks_has_fapi_allowed_key).
     // A jwks_uri can't be inspected synchronously, so this only guards the
     // inline case; the same is true of validate_update_fapi.
     if is_fapi
-        && let Some(ref parsed_jwks) = jwks
-        && !crate::db::parse_jwks_set(parsed_jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && let Some(set) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_fapi_allowed_key(set)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -260,7 +262,7 @@ pub(super) fn validate_create_application<'a>(
         app_type,
         access_scope,
         is_fapi,
-        keys: client_keys(jwks, jwks_uri)?,
+        keys,
     })
 }
 
@@ -488,7 +490,7 @@ pub(super) fn validate_update_fapi(
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
             .or(client.keys.as_ref().and_then(crate::db::ClientKeys::inline))
-        && !crate::db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && !jwks_has_fapi_allowed_key(jwks)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -653,7 +655,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     // synchronously, so this only guards the inline case.
     if token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.and_then(crate::db::ClientKeys::inline)
-        && !crate::db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && !jwks_has_x5c(jwks)
     {
         return Err(AppValidationError::SelfSignedJwksMissingX5c);
     }
@@ -973,13 +975,18 @@ mod tests {
         email: &str,
     ) -> crate::db::OAuthClient {
         let user = create_test_user(&state.store, email).await;
-        let jwks = serde_json::json!({"keys": [{"kty": "EC", "alg": true}]});
+        // The type-invalid key set goes straight to the document. It cannot be
+        // registered any more — `ClientKeys` parses on the way in — so this
+        // models a row written before that gate, which is the case the read
+        // side still has to survive.
         let created = create_test_client(
             &state.store,
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(jwks),
+                jwks: TestJwks::Custom(
+                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}),
+                ),
                 dpop_bound_access_tokens: true,
                 fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
@@ -987,6 +994,13 @@ mod tests {
             },
         )
         .await;
+        state
+            .store
+            .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&created.app_id, |data| {
+                data.jwks = Some(serde_json::json!({"keys": [{"kty": "EC", "alg": true}]}));
+            })
+            .await
+            .expect("write a pre-gate JWKS");
         crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
@@ -1522,12 +1536,11 @@ mod tests {
     }
 
     // Same reverse edge, but the stored JWKS predates the strict shape gate
-    // (item 1) rather than merely using the wrong algorithm: a type-invalid
-    // member (a boolean `alg`) fails `parse_jwks_set` entirely. The
-    // fallback in `validate_update_fapi` treats a parse failure as "no
-    // usable key" (documented on `db::parse_jwks_set`), so this collapses
-    // to the same `fapi_jwks_algorithm_unsupported` error as a wrong
-    // algorithm, without panicking.
+    // rather than merely using the wrong algorithm: a type-invalid member (a
+    // boolean `alg`) cannot be parsed. Such a row reads as having no key
+    // material at all — `stored_client_keys` fails closed rather than guessing
+    // — so the update is refused for the absence rather than for an unusable
+    // algorithm. Either way it is refused, and neither path panics.
     #[tokio::test]
     async fn fapi_metadata_only_update_rejected_when_stored_jwks_has_type_invalid_shape() {
         let state = test_app_state().await;
@@ -1537,7 +1550,7 @@ mod tests {
         let validated = update_input(None);
         let err = validate_update_fapi(&validated, &client)
             .expect_err("a metadata-only update must surface a pre-existing malformed stored JWKS");
-        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+        assert_eq!(err.code(), "missing_jwks");
     }
 
     // Same reverse edge, but with `fapi_profile` explicitly re-confirmed and

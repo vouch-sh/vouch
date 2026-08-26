@@ -14,7 +14,7 @@ use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
 use jiff::Timestamp;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Maximum number of active (non-revoked, non-expired) secrets per OAuth client.
 ///
@@ -375,19 +375,35 @@ fn stored_client_keys(
 pub enum ClientKeys {
     /// RFC 7591 §2 `jwks`: the key set inline, "intended to be used by clients
     /// that cannot use the "jwks_uri" parameter".
-    Inline(serde_json::Value),
+    ///
+    /// Held parsed. RFC 7517 §4 says of members this crate does not model
+    /// ("x5t", "key_ops", extensions): "Additional members can be present in
+    /// the JWK; if not understood by implementations encountering them, they
+    /// MUST be ignored." They are dropped here rather than carried, and RFC
+    /// 7591 §3.2.1 requires the registration response to "return all
+    /// registered metadata about this client" — so what a client gets back is
+    /// what was registered, which is this.
+    Inline(JwkSet),
     /// RFC 7591 §2 `jwks_uri`, whose use "is preferred over the "jwks"
     /// parameter, as it allows for easier key rotation".
     Uri(String),
 }
 
-/// Both key parameters arrived together, which RFC 7591 §2 forbids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientKeysConflict;
+/// Why a client's key material could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientKeysError {
+    /// Both key parameters arrived together, which RFC 7591 §2 forbids.
+    Conflict,
+    /// The inline `jwks` is not a JWK Set this server can read.
+    InvalidJwks,
+}
 
-impl std::fmt::Display for ClientKeysConflict {
+impl std::fmt::Display for ClientKeysError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("jwks and jwks_uri are mutually exclusive")
+        f.write_str(match self {
+            Self::Conflict => "jwks and jwks_uri are mutually exclusive",
+            Self::InvalidJwks => "jwks contains a key with an invalid field type",
+        })
     }
 }
 
@@ -401,10 +417,12 @@ impl ClientKeys {
     pub fn from_stored(
         jwks: Option<serde_json::Value>,
         jwks_uri: Option<String>,
-    ) -> Result<Option<Self>, ClientKeysConflict> {
+    ) -> Result<Option<Self>, ClientKeysError> {
         match (jwks, jwks_uri) {
-            (Some(_), Some(_)) => Err(ClientKeysConflict),
-            (Some(jwks), None) => Ok(Some(Self::Inline(jwks))),
+            (Some(_), Some(_)) => Err(ClientKeysError::Conflict),
+            (Some(jwks), None) => parse_jwks_set(&jwks)
+                .map(|set| Some(Self::Inline(set)))
+                .map_err(|_| ClientKeysError::InvalidJwks),
             (None, Some(uri)) => Ok(Some(Self::Uri(uri))),
             (None, None) => Ok(None),
         }
@@ -412,7 +430,7 @@ impl ClientKeys {
 
     /// The inline key set, when that is the form.
     #[must_use]
-    pub fn inline(&self) -> Option<&serde_json::Value> {
+    pub fn inline(&self) -> Option<&JwkSet> {
         match self {
             Self::Inline(jwks) => Some(jwks),
             Self::Uri(_) => None,
@@ -439,7 +457,10 @@ pub fn client_keys_to_stored(
     keys: Option<&ClientKeys>,
 ) -> (Option<serde_json::Value>, Option<String>) {
     match keys {
-        Some(ClientKeys::Inline(jwks)) => (Some(jwks.clone()), None),
+        // `JwkSet` round-trips: every optional member skips rather than
+        // emitting null, so the stored column holds the same document the
+        // parse accepted.
+        Some(ClientKeys::Inline(jwks)) => (serde_json::to_value(jwks).ok(), None),
         Some(ClientKeys::Uri(uri)) => (None, Some(uri.clone())),
         None => (None, None),
     }
@@ -484,7 +505,7 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// raw `serde_json::Value` and are unaffected by this type: the mTLS `x5c`
 /// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`) and
 /// the RFC 9421 signature key resolver (`infra/httpsig.rs`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JwkSet {
     /// The keys in the set.
     pub keys: Vec<JwkEntry>,
@@ -503,7 +524,7 @@ pub struct JwkSet {
 /// does for the members this crate doesn't model (`x5t`, etc.) — it isn't
 /// selectable by any of the three known variants, so it stays unusable the
 /// same way `oct` or any other unmatched `kty` already is.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyType {
     Ec,
     Rsa,
@@ -512,6 +533,20 @@ pub enum KeyType {
     /// original string for diagnostics; never selected by a signing-key or
     /// FAPI-allowed-algorithm check.
     Other(String),
+}
+
+impl Serialize for KeyType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Ec => "EC",
+            Self::Rsa => "RSA",
+            Self::Okp => "OKP",
+            Self::Other(s) => s,
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for KeyType {
@@ -533,37 +568,37 @@ impl<'de> Deserialize<'de> for KeyType {
 }
 
 /// A single JWK entry in a JWKS.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JwkEntry {
     /// Key type (RFC 7517 §4.1).
     pub kty: KeyType,
     /// Key ID (optional).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kid: Option<String>,
     /// Algorithm (optional).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alg: Option<String>,
     /// Key use (optional, e.g., "sig").
-    #[serde(rename = "use", default)]
+    #[serde(rename = "use", default, skip_serializing_if = "Option::is_none")]
     pub use_: Option<String>,
 
     // EC key components
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crv: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<String>,
 
     // RSA key components
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e: Option<String>,
 
     /// X.509 certificate chain (RFC 7517 §4.7) — the certificate carrier for
     /// `self_signed_tls_client_auth` (RFC 8705 §2.2.2).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x5c: Option<Vec<String>>,
 }
 

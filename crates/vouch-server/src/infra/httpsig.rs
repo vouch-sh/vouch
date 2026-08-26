@@ -78,8 +78,12 @@ impl KeyResolver for OAuthClientKeyResolver {
             // Only clients registered with `jwks_uri` need the cached fetch —
             // skip the extra DB round trip for the inline case.
             let resolved;
+            let inline;
             let jwks_value = match client.keys.as_ref()? {
-                crate::db::ClientKeys::Inline(jwks) => jwks,
+                crate::db::ClientKeys::Inline(jwks) => {
+                    inline = serde_json::to_value(jwks).ok()?;
+                    &inline
+                }
                 crate::db::ClientKeys::Uri(uri) => {
                     let cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
                         .await

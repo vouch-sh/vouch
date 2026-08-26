@@ -692,10 +692,8 @@ mod tests {
             .keys
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
-            .and_then(|j| j.get("keys"))
-            .and_then(|k| k.get(0))
-            .and_then(|k| k.get("kid"))
-            .and_then(|k| k.as_str())
+            .and_then(|set| set.keys.first())
+            .and_then(|key| key.kid.as_deref())
             .expect("shared test JWKS has a kid")
             .to_string();
         (client, kid)

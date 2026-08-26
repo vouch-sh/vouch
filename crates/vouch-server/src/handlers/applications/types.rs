@@ -66,7 +66,7 @@ impl From<OAuthClient> for ApplicationInfo {
             .keys
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
-            .map(std::string::ToString::to_string);
+            .and_then(|set| serde_json::to_string(set).ok());
         let jwks_uri = client
             .keys
             .as_ref()
