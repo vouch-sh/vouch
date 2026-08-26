@@ -10,6 +10,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use clap::Parser;
 use std::process::ExitCode;
 use std::sync::Arc;
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use vouch_agent::daemon;
@@ -206,28 +207,53 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
     // Spawn session expiry monitor (background task)
     tokio::spawn(vouch_agent::expiry_monitor::run(Arc::clone(&state)));
 
-    // Spawn the signal handler as a separate task so the server futures are
-    // not dropped before they can observe the shutdown signal.  When SIGTERM
-    // or Ctrl+C arrives the handler sends `true` on the watch channel; both
-    // servers poll `shutdown.changed()` in their accept loops and exit
-    // cleanly instead of being cancelled mid-request.
+    // Arm the signal handlers here, before either listener binds its socket
+    // and before the waiter task below is first polled.
+    //
+    // `signal()` is what replaces a signal's disposition; until it returns,
+    // SIGTERM and SIGINT keep the default disposition, which is to terminate
+    // the process. Registering inside the spawned task left a window between
+    // the socket appearing and the task's first poll in which a SIGTERM killed
+    // the agent outright — no drain, and `cleanup()` never ran, so the socket
+    // and PID file were left behind. A stale PID file makes the next
+    // `vouch-agent` start refuse with "already running".
+    //
+    // Waiting still happens in a spawned task so the server futures are not
+    // dropped before they observe the shutdown signal. That is safe because
+    // `Signal` buffers: a signal delivered between registration and the first
+    // `recv()` is still delivered to the stream.
+    //
+    // SIGINT is registered directly rather than through `tokio::signal::ctrl_c`,
+    // which registers on first poll and so reintroduces the same window.
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(e) => {
+            error!("Failed to register the SIGTERM handler: {e}");
+            cleanup();
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(stream) => stream,
+        Err(e) => {
+            error!("Failed to register the SIGINT handler: {e}");
+            cleanup();
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // A registration failure is fatal rather than degraded: an agent that
+    // cannot catch SIGTERM cannot shut down cleanly, and the stale PID file it
+    // leaves behind blocks the next start. The previous code fell through to
+    // `pending()`, so the failure was invisible until a shutdown went wrong.
     let shutdown_tx_for_signal = shutdown_tx.clone();
     tokio::spawn(async move {
-        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                match result {
-                    Ok(()) => info!("Received Ctrl+C, initiating graceful shutdown"),
-                    Err(e) => warn!("Failed to listen for Ctrl+C: {e}"),
-                }
-            }
-            Some(()) = async {
-                match sigterm {
-                    Ok(mut s) => s.recv().await,
-                    Err(_) => std::future::pending().await,
-                }
-            } => {
+            _ = sigterm.recv() => {
                 info!("Received SIGTERM, initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                info!("Received Ctrl+C, initiating graceful shutdown");
             }
         }
         let _signaled = shutdown_tx_for_signal.send(true);

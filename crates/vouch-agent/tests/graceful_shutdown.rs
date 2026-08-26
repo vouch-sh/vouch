@@ -163,6 +163,26 @@ fn wait_for_exit(child: &mut Child) -> ExitStatus {
     }
 }
 
+/// Wait for a path to disappear, polling every 10 ms (max ~5 s).
+///
+/// `cleanup()` runs before the agent's `main` returns, so by the time
+/// [`wait_for_exit`] observes the exit the file is already gone on every
+/// platform seen so far. Polling rather than sleeping a fixed interval keeps
+/// the assertion from depending on that: a slower filesystem costs a few more
+/// iterations instead of a spurious failure.
+fn wait_for_removal(path: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !path.exists() {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The agent exits cleanly (status 0) when it receives SIGTERM.
 #[tokio::test]
 async fn agent_exits_cleanly_on_sigterm() {
@@ -254,11 +274,10 @@ async fn socket_removed_on_shutdown() {
     let status = wait_for_exit(&mut agent.child);
     assert!(status.success(), "agent should exit with status 0");
 
-    // Give the OS a moment to finalise file removal.
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !socket.exists(),
-        "socket should be removed after graceful shutdown"
+        wait_for_removal(&socket),
+        "socket at {} should be removed after graceful shutdown",
+        socket.display()
     );
 }
 
@@ -281,9 +300,43 @@ async fn pid_file_removed_on_shutdown() {
     let status = wait_for_exit(&mut agent.child);
     assert!(status.success(), "agent should exit with status 0");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !pid_file.exists(),
-        "PID file should be removed after graceful shutdown"
+        wait_for_removal(&pid_file),
+        "PID file at {} should be removed after graceful shutdown",
+        pid_file.display()
+    );
+}
+
+/// SIGINT cleans up the same files SIGTERM does.
+///
+/// Both signals are registered eagerly through `signal()` before either
+/// listener binds, so the cleanup guarantee must not depend on which one
+/// arrives. This test signals as soon as the socket exists, with no request
+/// round-trip first: that is the narrowest window between the socket appearing
+/// and the handler being armed, and the one a lazily-registered handler lost.
+#[tokio::test]
+async fn sigint_removes_socket_and_pid_file() {
+    let mut agent = spawn_agent();
+    let socket = wait_for_socket(&agent).await;
+    let pid_file = agent._dirs.cache.path().join("vouch").join("agent.pid");
+    assert!(
+        pid_file.exists(),
+        "PID file should exist at {} while the agent is running",
+        pid_file.display()
+    );
+
+    send_sigint(&agent.child);
+    let status = wait_for_exit(&mut agent.child);
+    assert!(status.success(), "agent should exit with status 0");
+
+    assert!(
+        wait_for_removal(&socket),
+        "socket at {} should be removed after SIGINT shutdown",
+        socket.display()
+    );
+    assert!(
+        wait_for_removal(&pid_file),
+        "PID file at {} should be removed after SIGINT shutdown",
+        pid_file.display()
     );
 }
