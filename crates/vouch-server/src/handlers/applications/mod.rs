@@ -130,33 +130,27 @@ pub(crate) fn validate_post_logout_redirect_uris(uris: &[String]) -> Result<(), 
     }
 }
 
-/// Validate that all redirect URIs are valid URLs with proper schemes.
+/// Validate every redirect URI for a client of this type.
 ///
-/// Per RFC 8252 Section 7.3 and RFC 9700 Section 4.1.3:
-/// - `http://` is only allowed for loopback addresses (`localhost`, `127.0.0.1`, `[::1]`)
-/// - `https://` is required for all other hosts
+/// Delegates to [`db::validate_redirect_uri`], the single rule shared with
+/// dynamic client registration, so the two paths cannot accept different sets.
 ///
-/// Returns `Ok(())` if all URIs are valid, or `Err` with a list of invalid URIs.
-fn validate_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
+/// Returns `Ok(())` if all URIs are valid, or `Err` listing the invalid ones.
+/// The rejection reason is deliberately not folded into these strings: they are
+/// rendered into `ApplicationErrorTemplate`, whose message is not yet
+/// translated, and per-reason detail there would be new untranslated UI text.
+/// Dynamic client registration, which answers in JSON, does report the reason.
+fn validate_redirect_uris(
+    uris: &[String],
+    application_type: db::OAuthClientType,
+) -> Result<(), Vec<String>> {
     let invalid: Vec<String> = uris
         .iter()
-        .filter(|uri| {
-            match url::Url::parse(uri) {
-                Ok(parsed) => {
-                    match parsed.scheme() {
-                        "https" => false, // HTTPS is always valid
-                        "http" => {
-                            // RFC 8252 Section 7.3: HTTP only for loopback
-                            let host = parsed.host_str().unwrap_or("");
-                            !matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-                        }
-                        _ => true, // Other schemes are not allowed
-                    }
-                }
-                Err(_) => true,
-            }
+        .filter_map(|uri| {
+            db::validate_redirect_uri(uri, application_type)
+                .err()
+                .map(|_| uri.clone())
         })
-        .cloned()
         .collect();
 
     if invalid.is_empty() {

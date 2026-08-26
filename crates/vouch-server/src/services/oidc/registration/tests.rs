@@ -19,51 +19,63 @@ fn assert_oauth_error<T: std::fmt::Debug>(
     );
 }
 
+/// The shared redirect-URI rule as it applies to a native client, which is the
+/// client kind these cases describe: `https`, loopback `http`, and a custom
+/// scheme are all registrable, and a fragment is not.
+fn validate_redirect_uri_for_native(uri: &str) -> Result<(), crate::error::ServiceError> {
+    crate::db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
+        crate::error::ServiceError::oauth(
+            OAuthErrorCode::InvalidRedirectUri,
+            format!("Invalid redirect URI '{uri}': {e}"),
+        )
+    })
+}
+
 // =========================================================================
 // Redirect URI Validation Tests
 // =========================================================================
 
 #[test]
 fn test_accepts_https_redirect_uri() {
-    let result = validate_registration_redirect_uri("https://example.com/callback");
+    let result = validate_redirect_uri_for_native("https://example.com/callback");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_accepts_http_localhost_redirect_uri() {
-    let result = validate_registration_redirect_uri("http://127.0.0.1:8080/callback");
+    let result = validate_redirect_uri_for_native("http://127.0.0.1:8080/callback");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_accepts_http_localhost_hostname() {
-    let result = validate_registration_redirect_uri("http://localhost:8080/callback");
+    let result = validate_redirect_uri_for_native("http://localhost:8080/callback");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_accepts_custom_scheme_redirect_uri() {
-    let result = validate_registration_redirect_uri("myapp://auth");
+    let result = validate_redirect_uri_for_native("myapp://auth");
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_rejects_http_non_loopback() {
-    let result = validate_registration_redirect_uri("http://example.com/callback");
+    let result = validate_redirect_uri_for_native("http://example.com/callback");
     assert!(result.is_err());
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
 
 #[test]
 fn test_rejects_redirect_uri_with_fragment() {
-    let result = validate_registration_redirect_uri("https://example.com/callback#anchor");
+    let result = validate_redirect_uri_for_native("https://example.com/callback#anchor");
     assert!(result.is_err());
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
 
 #[test]
 fn test_rejects_invalid_redirect_uri() {
-    let result = validate_registration_redirect_uri("not a valid uri !!!");
+    let result = validate_redirect_uri_for_native("not a valid uri !!!");
     assert!(result.is_err());
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
@@ -75,7 +87,7 @@ fn test_rejects_invalid_redirect_uri() {
 /// RFC 8252 Section 7.3: IPv6 loopback [::1] must be accepted over HTTP.
 #[test]
 fn test_accepts_http_ipv6_loopback_redirect_uri() {
-    let result = validate_registration_redirect_uri("http://[::1]:7777/callback");
+    let result = validate_redirect_uri_for_native("http://[::1]:7777/callback");
     assert!(
         result.is_ok(),
         "IPv6 loopback [::1] must be accepted: {result:?}"
@@ -85,14 +97,14 @@ fn test_accepts_http_ipv6_loopback_redirect_uri() {
 /// HTTP redirect URIs with a path component at loopback must be accepted.
 #[test]
 fn test_accepts_http_loopback_with_path() {
-    let result = validate_registration_redirect_uri("http://127.0.0.1/callback/deep/path");
+    let result = validate_redirect_uri_for_native("http://127.0.0.1/callback/deep/path");
     assert!(result.is_ok());
 }
 
 /// HTTPS URIs with query strings must be accepted (query is not a fragment).
 #[test]
 fn test_accepts_https_redirect_uri_with_query() {
-    let result = validate_registration_redirect_uri("https://example.com/cb?foo=bar");
+    let result = validate_redirect_uri_for_native("https://example.com/cb?foo=bar");
     assert!(result.is_ok());
 }
 
@@ -100,7 +112,7 @@ fn test_accepts_https_redirect_uri_with_query() {
 #[test]
 fn test_rejects_redirect_uri_with_fragment_before_parse() {
     // A URI that would otherwise be valid https but contains '#'
-    let err = validate_registration_redirect_uri("https://example.com/cb#").unwrap_err();
+    let err = validate_redirect_uri_for_native("https://example.com/cb#").unwrap_err();
     assert!(
         matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidRedirectUri)
     );
@@ -112,7 +124,7 @@ fn test_rejects_redirect_uri_with_fragment_before_parse() {
 /// HTTP to a non-loopback private IP (e.g., 192.168.x.x) must be rejected.
 #[test]
 fn test_rejects_http_private_ip_redirect_uri() {
-    let result = validate_registration_redirect_uri("http://192.168.1.1/callback");
+    let result = validate_redirect_uri_for_native("http://192.168.1.1/callback");
     assert!(result.is_err());
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
@@ -120,7 +132,7 @@ fn test_rejects_http_private_ip_redirect_uri() {
 /// An empty string is not a valid redirect URI.
 #[test]
 fn test_rejects_empty_redirect_uri() {
-    let result = validate_registration_redirect_uri("");
+    let result = validate_redirect_uri_for_native("");
     assert!(result.is_err());
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
@@ -983,14 +995,22 @@ fn make_request_with_redirect_uris(uris: Option<Vec<&str>>) -> RegistrationReque
 #[test]
 fn test_validate_redirect_uris_required_for_auth_code_empty() {
     let mut req = make_request_with_redirect_uris(None);
-    let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Present);
+    let result = validate_redirect_uris(
+        &mut req,
+        AuthorizationCodeGrant::Present,
+        crate::db::OAuthClientType::Web,
+    );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
 #[test]
 fn test_validate_redirect_uris_not_required_without_auth_code() {
     let mut req = make_request_with_redirect_uris(None);
-    let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
+    let result = validate_redirect_uris(
+        &mut req,
+        AuthorizationCodeGrant::Absent,
+        crate::db::OAuthClientType::Web,
+    );
     let uris = result.expect("Empty redirect_uris allowed without the authorization_code grant");
     assert!(uris.is_empty());
 }
@@ -1001,7 +1021,11 @@ fn test_validate_redirect_uris_too_many() {
         .map(|_| "https://example.com/callback")
         .collect();
     let mut req = make_request_with_redirect_uris(Some(many));
-    let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
+    let result = validate_redirect_uris(
+        &mut req,
+        AuthorizationCodeGrant::Absent,
+        crate::db::OAuthClientType::Web,
+    );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
@@ -1011,7 +1035,11 @@ fn test_validate_redirect_uris_valid_uris_pass_through() {
         "https://example.com/callback",
         "http://localhost:8080/callback",
     ]));
-    let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Present);
+    let result = validate_redirect_uris(
+        &mut req,
+        AuthorizationCodeGrant::Present,
+        crate::db::OAuthClientType::Web,
+    );
     let uris = result.expect("Valid URIs must pass");
     assert_eq!(uris.len(), 2);
 }
@@ -1019,7 +1047,11 @@ fn test_validate_redirect_uris_valid_uris_pass_through() {
 #[test]
 fn test_validate_redirect_uris_invalid_uri_rejected() {
     let mut req = make_request_with_redirect_uris(Some(vec!["not a uri !!"]));
-    let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
+    let result = validate_redirect_uris(
+        &mut req,
+        AuthorizationCodeGrant::Absent,
+        crate::db::OAuthClientType::Web,
+    );
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
 
