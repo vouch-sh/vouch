@@ -618,3 +618,206 @@ fn test_oauth_client_secret_is_valid_no_expiry() {
         "Secret with no expiry and not revoked must be valid"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Redirect URI validation — the one rule shared by every write path
+// ─────────────────────────────────────────────────────────────────────────
+
+use crate::db::{OAuthClientType, RedirectUriError, validate_redirect_uri};
+
+/// RFC 6749 §3.1.2: "The endpoint URI MUST NOT include a fragment component."
+/// Rejected for every client kind, which is the change here — the self-service
+/// path had no fragment check at all.
+#[test]
+fn redirect_uri_with_a_fragment_is_rejected_for_every_client_kind() {
+    for kind in [
+        OAuthClientType::Web,
+        OAuthClientType::Native,
+        OAuthClientType::Spa,
+        OAuthClientType::Service,
+    ] {
+        assert_eq!(
+            validate_redirect_uri("https://app.example/cb#x", kind),
+            Err(RedirectUriError::HasFragment),
+            "{kind:?} must not be able to register a fragment"
+        );
+    }
+}
+
+/// OIDC Registration §2: "Native Clients MUST only register "redirect_uris"
+/// using custom URI schemes or loopback URLs using the "http" scheme".
+/// Dynamic client registration accepted a custom scheme for any client and
+/// self-service rejected it for all of them; the rule is per client kind.
+#[test]
+fn custom_scheme_is_registrable_only_by_native_clients() {
+    assert_eq!(
+        validate_redirect_uri("com.example.app://cb", OAuthClientType::Native),
+        Ok(())
+    );
+    for kind in [
+        OAuthClientType::Web,
+        OAuthClientType::Spa,
+        OAuthClientType::Service,
+    ] {
+        assert_eq!(
+            validate_redirect_uri("com.example.app://cb", kind),
+            Err(RedirectUriError::CustomSchemeNotNative),
+            "{kind:?} is not a native client"
+        );
+    }
+}
+
+/// RFC 8252 §7.1's reverse-domain scheme format is a MUST on the app, not on
+/// the authorization server, so a scheme that does not follow it still
+/// registers.
+#[test]
+fn a_custom_scheme_is_not_required_to_be_reverse_domain() {
+    assert_eq!(
+        validate_redirect_uri("myapp://cb", OAuthClientType::Native),
+        Ok(())
+    );
+}
+
+/// The loopback set is exactly what OIDC Registration §2 and OIDC Core
+/// §3.1.2.1 enumerate — notably not `host.docker.internal`, which
+/// `vouch_common::is_loopback_host` accepts and which resolves off-device.
+#[test]
+fn http_is_registrable_only_for_the_three_loopback_hosts() {
+    for accepted in [
+        "http://localhost:8080/cb",
+        "http://127.0.0.1:8080/cb",
+        "http://[::1]:8080/cb",
+    ] {
+        assert_eq!(
+            validate_redirect_uri(accepted, OAuthClientType::Native),
+            Ok(()),
+            "{accepted} is a loopback redirect"
+        );
+    }
+    for rejected in [
+        "http://app.example/cb",
+        "http://127.0.0.2:8080/cb",
+        "http://host.docker.internal/cb",
+    ] {
+        assert_eq!(
+            validate_redirect_uri(rejected, OAuthClientType::Native),
+            Err(RedirectUriError::HttpNonLoopback),
+            "{rejected} is not a loopback redirect"
+        );
+    }
+}
+
+#[test]
+fn a_relative_uri_is_not_a_redirect_uri() {
+    assert_eq!(
+        validate_redirect_uri("/callback", OAuthClientType::Web),
+        Err(RedirectUriError::NotAbsolute)
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Redirect URI matching at the authorization endpoint
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Persist a client with these redirect URIs and hand back the stored record,
+/// so matching is exercised against a real row rather than a literal.
+async fn client_with_redirect_uris(uris: &[&str]) -> OAuthClient {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "redirect-match@example.com", None)
+        .await
+        .expect("create user");
+    let redirect_uris: Vec<String> = uris.iter().map(|u| (*u).to_string()).collect();
+    let (client, _) = create_oauth_client(
+        &store,
+        &CreateOAuthClientParams {
+            user_id: Some(&user_id),
+            name: "Redirect Match",
+            description: None,
+            application_type: OAuthClientType::Native,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: TokenEndpointAuthMethod::None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("create client");
+    client
+}
+
+/// RFC 8252 §7.3: "The authorization server MUST allow any port to be
+/// specified at the time of the request for loopback IP redirect URIs, to
+/// accommodate clients that obtain an available ephemeral port from the
+/// operating system at the time of the request."
+#[tokio::test]
+async fn a_loopback_ip_redirect_matches_on_any_port() {
+    let client = client_with_redirect_uris(&["http://127.0.0.1:51004/cb"]).await;
+    assert!(client.is_valid_redirect_uri("http://127.0.0.1:61023/cb"));
+    assert!(client.is_valid_redirect_uri("http://127.0.0.1:51004/cb"));
+
+    let client = client_with_redirect_uris(&["http://[::1]:51004/cb"]).await;
+    assert!(client.is_valid_redirect_uri("http://[::1]:61023/cb"));
+}
+
+/// The any-port rule is scoped to what §7.3 calls "loopback IP redirect URIs".
+/// `localhost` is a name, not an IP literal, so it keeps exact matching.
+#[tokio::test]
+async fn localhost_does_not_get_the_any_port_exemption() {
+    let client = client_with_redirect_uris(&["http://localhost:51004/cb"]).await;
+    assert!(client.is_valid_redirect_uri("http://localhost:51004/cb"));
+    assert!(!client.is_valid_redirect_uri("http://localhost:61023/cb"));
+}
+
+/// Everything but the port must still match: the exemption cannot be used to
+/// reach a different path, host, or scheme.
+#[tokio::test]
+async fn the_any_port_exemption_relaxes_only_the_port() {
+    let client = client_with_redirect_uris(&["http://127.0.0.1:51004/cb"]).await;
+    assert!(!client.is_valid_redirect_uri("http://127.0.0.1:61023/other"));
+    assert!(!client.is_valid_redirect_uri("http://127.0.0.1:61023/cb?x=1"));
+    assert!(!client.is_valid_redirect_uri("https://127.0.0.1:61023/cb"));
+    assert!(!client.is_valid_redirect_uri("http://[::1]:61023/cb"));
+}
+
+/// OIDC Core §3.1.2.1 keeps simple string comparison for everything else.
+#[tokio::test]
+async fn a_non_loopback_redirect_still_matches_exactly() {
+    let client = client_with_redirect_uris(&["https://app.example/cb"]).await;
+    assert!(client.is_valid_redirect_uri("https://app.example/cb"));
+    assert!(!client.is_valid_redirect_uri("https://app.example/cb2"));
+    assert!(!client.is_valid_redirect_uri("https://app.example:8443/cb"));
+}
+
+/// A fragment can never be a legitimate redirect target (RFC 6749 §3.1.2), so
+/// it is refused at the endpoint too rather than only at registration.
+#[tokio::test]
+async fn a_requested_uri_with_a_fragment_is_never_matched() {
+    let client = client_with_redirect_uris(&["https://app.example/cb"]).await;
+    assert!(!client.is_valid_redirect_uri("https://app.example/cb#x"));
+}
