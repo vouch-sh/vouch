@@ -275,9 +275,7 @@ proptest! {
     }
 
     /// A credential ID outside 16..=1023 bytes never deserializes, in either
-    /// encoding. This is the bound that #1069 lost when it was a hand-written
-    /// check inside a handler; as a property of the type there is no call site
-    /// that can omit it.
+    /// encoding. The bound belongs to the type, so no call site can omit it.
     #[test]
     fn prop_out_of_range_encoded_is_rejected(
         short in prop::collection::vec(any::<u8>(), 0..16),

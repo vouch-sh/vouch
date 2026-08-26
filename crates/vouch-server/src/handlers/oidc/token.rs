@@ -245,17 +245,19 @@ enum TokenRequestRejection {
 }
 
 impl TokenRequestRejection {
-    fn into_response(self) -> Response {
+    fn into_response(self, presentation: ClientAuthPresentation) -> Response {
         match self {
             Self::UnsupportedGrantType => {
                 let supported = OAuthGrantType::supported_wire_values().join(", ");
                 token_error_response(
                     OAuthErrorCode::UnsupportedGrantType,
+                    presentation,
                     &format!("Supported grant types: {supported}"),
                 )
             }
             Self::MissingParameter(name) => token_error_response(
                 OAuthErrorCode::InvalidRequest,
+                presentation,
                 &format!("Missing {name} parameter"),
             ),
         }
@@ -387,12 +389,18 @@ pub(crate) async fn token(
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<TokenRequestForm>,
 ) -> Response {
+    // Classified once, up front: `parse` consumes the form, and every error
+    // response below needs it to decide whether RFC 6749 Section 5.2 owes the
+    // client a challenge.
+    let presentation = ClientAuthPresentation::of(&headers, &params);
+
     // Input length validation — reject oversized parameters early.
     if let Some(ref v) = params.code_verifier
         && !is_valid_pkce_verifier(v)
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             "code_verifier must be 43-128 characters and contain only [A-Za-z0-9\\-._~]",
         );
     }
@@ -401,6 +409,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("redirect_uri exceeds maximum length of {MAX_TOKEN_REDIRECT_URI_LEN}"),
         );
     }
@@ -409,6 +418,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("client_id exceeds maximum length of {MAX_TOKEN_CLIENT_ID_LEN}"),
         );
     }
@@ -417,6 +427,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("scope exceeds maximum length of {MAX_TOKEN_SCOPE_LEN}"),
         );
     }
@@ -425,6 +436,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("resource exceeds maximum length of {MAX_TOKEN_RESOURCE_LEN}"),
         );
     }
@@ -433,6 +445,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("client_assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -441,6 +454,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidRequest,
+            presentation,
             &format!("assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -450,6 +464,7 @@ pub(crate) async fn token(
     {
         return token_error_response(
             OAuthErrorCode::InvalidAuthorizationDetails,
+            presentation,
             &format!("authorization_details exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
@@ -458,7 +473,7 @@ pub(crate) async fn token(
     // grant did not carry.
     let TokenRequest { auth, grant } = match params.parse() {
         Ok(typed) => typed,
-        Err(rejection) => return rejection.into_response(),
+        Err(rejection) => return rejection.into_response(presentation),
     };
 
     match grant {
@@ -1235,6 +1250,27 @@ async fn handle_token_exchange_grant(
     }
 }
 
+/// `TokenRequestForm` carries the same client-authentication fields as
+/// [`ClientAuthParams`], and `parse` consumes the form — so classifying how
+/// the client authenticated has to happen on the form, before the split.
+impl ClientAuthFields for TokenRequestForm {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
+    }
+
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
+    }
+
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
+    }
+}
+
 /// Implement `ClientAuthFields` for `TokenRequest` to enable shared client
 /// authentication extraction.
 impl ClientAuthFields for ClientAuthParams {
@@ -1268,6 +1304,7 @@ async fn handle_fido2_assertion_grant(
     params: Fido2AssertionParams,
 ) -> Response {
     let assertion = params.assertion;
+    let presentation = ClientAuthPresentation::of(&headers, &auth);
 
     // Extract and authenticate client via private_key_jwt
     let client_auth = match extract_client_auth(&headers, &auth) {
@@ -1286,6 +1323,7 @@ async fn handle_fido2_assertion_grant(
         _ => {
             return token_error_response(
                 OAuthErrorCode::InvalidClient,
+                presentation,
                 "fido2-assertion grant requires private_key_jwt client authentication",
             );
         }
@@ -1491,14 +1529,37 @@ pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
 }
 
 /// Build an OAuth error response for parameter validation failures.
-fn token_error_response(code: OAuthErrorCode, description: &str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
+/// Build an OAuth error response for the token endpoint.
+///
+/// The status comes from [`OAuthErrorCode::status_code`] rather than the call
+/// site, so a code and a status cannot disagree. `presentation` is required
+/// rather than optional because the RFC 6749 Section 5.2 challenge obligation
+/// depends on how the client authenticated, which is request state the error
+/// code alone cannot carry:
+///
+/// > If the client attempted to authenticate via the "Authorization" request
+/// > header field, the authorization server MUST respond with an HTTP 401
+/// > (Unauthorized) status code and include the "WWW-Authenticate" response
+/// > header field matching the authentication scheme used by the client.
+///
+/// `specs/rfc/rfc6749.txt:2493-2497`. Taking it as a parameter means a caller
+/// cannot build a client-authentication failure that silently omits the
+/// challenge — the argument has to be supplied, and
+/// [`with_client_auth_challenge`] decides whether it applies.
+fn token_error_response(
+    code: OAuthErrorCode,
+    presentation: ClientAuthPresentation,
+    description: &str,
+) -> Response {
+    let response = (
+        code.status_code(),
         Json(OAuthErrorResponse {
             error: code.as_str().to_string(),
             error_description: Some(description.to_string()),
             error_uri: None,
         }),
     )
-        .into_response()
+        .into_response();
+
+    with_client_auth_challenge(presentation, response)
 }

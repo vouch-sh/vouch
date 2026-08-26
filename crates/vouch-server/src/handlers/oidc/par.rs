@@ -184,7 +184,6 @@ pub(crate) async fn par(
     // RFC 9126 Section 2.1: request_uri MUST NOT be provided in a PAR request
     if params.request_uri.is_some() {
         return par_error_response(
-            StatusCode::BAD_REQUEST,
             OAuthErrorCode::InvalidRequest,
             "request_uri must not be provided in a pushed authorization request",
         );
@@ -197,11 +196,7 @@ pub(crate) async fn par(
     if let Some(ref request_jwt) = params.request
         && let Err(e) = validate_request_object_header(request_jwt)
     {
-        return par_error_response(
-            StatusCode::BAD_REQUEST,
-            OAuthErrorCode::InvalidRequestObject,
-            &e.oauth_description(),
-        );
+        return par_error_response(OAuthErrorCode::InvalidRequestObject, &e.oauth_description());
     }
 
     // Extract and authenticate the client (required for PAR)
@@ -216,7 +211,6 @@ pub(crate) async fn par(
         Err(resp) => return resp,
     }) else {
         return par_error_response(
-            StatusCode::UNAUTHORIZED,
             OAuthErrorCode::InvalidClient,
             "Client authentication is required for pushed authorization requests",
         );
@@ -240,7 +234,6 @@ pub(crate) async fn par(
         ) {
         let Some(cert) = client_cert.0.as_ref() else {
             return par_error_response(
-                StatusCode::UNAUTHORIZED,
                 OAuthErrorCode::InvalidClient,
                 "mTLS client certificate required",
             );
@@ -277,11 +270,7 @@ pub(crate) async fn par(
         &authenticated_client.client,
         actual_method,
     ) {
-        return par_error_response(
-            StatusCode::UNAUTHORIZED,
-            OAuthErrorCode::InvalidClient,
-            &e.oauth_description(),
-        );
+        return par_error_response(OAuthErrorCode::InvalidClient, &e.oauth_description());
     }
 
     // RFC 9101: Enforce require_signed_request_object for this client.
@@ -293,7 +282,6 @@ pub(crate) async fn par(
         && params.request.is_none()
     {
         return par_error_response(
-            StatusCode::BAD_REQUEST,
             OAuthErrorCode::InvalidRequest,
             "This client requires a signed Request Object (RFC 9101)",
         );
@@ -326,18 +314,10 @@ pub(crate) async fn par(
                 .into_response();
         }
         Err(e @ DpopError::Database(_)) => {
-            return par_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                OAuthErrorCode::ServerError,
-                &e.to_string(),
-            );
+            return par_error_response(OAuthErrorCode::ServerError, &e.to_string());
         }
         Err(e) => {
-            return par_error_response(
-                StatusCode::BAD_REQUEST,
-                OAuthErrorCode::InvalidDpopProof,
-                &e.to_string(),
-            );
+            return par_error_response(OAuthErrorCode::InvalidDpopProof, &e.to_string());
         }
     };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
@@ -348,7 +328,6 @@ pub(crate) async fn par(
         let is_match: bool = proof_jkt.as_bytes().ct_eq(param_jkt.as_bytes()).into();
         if !is_match {
             return par_error_response(
-                StatusCode::BAD_REQUEST,
                 OAuthErrorCode::InvalidDpopProof,
                 "dpop_jkt parameter does not match DPoP proof JWK thumbprint",
             );
@@ -373,14 +352,13 @@ pub(crate) async fn par(
                 Ok(params) => params,
                 Err(e) => {
                     let (error_code, description) = service_error_codes(&e);
-                    return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+                    return par_error_response(error_code, &description);
                 }
             };
 
         // client_id from JWT must match the authenticated client
         if request_params.client_id != authenticated_client.client.client_id {
             return par_error_response(
-                StatusCode::BAD_REQUEST,
                 OAuthErrorCode::InvalidRequestObject,
                 "client_id in Request Object does not match authenticated client",
             );
@@ -393,7 +371,7 @@ pub(crate) async fn par(
             Ok(v) => v,
             Err(e) => {
                 let (error_code, description) = service_error_codes(&e);
-                return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+                return par_error_response(error_code, &description);
             }
         };
         (v, jar_rm)
@@ -404,7 +382,6 @@ pub(crate) async fn par(
                 Some(prompt) => Some(prompt),
                 None => {
                     return par_error_response(
-                        StatusCode::BAD_REQUEST,
                         OAuthErrorCode::InvalidRequest,
                         &format!(
                             "Unsupported prompt value. Supported values: {}",
@@ -438,7 +415,7 @@ pub(crate) async fn par(
             Ok(v) => v,
             Err(e) => {
                 let (error_code, description) = service_error_codes(&e);
-                return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+                return par_error_response(error_code, &description);
             }
         };
         (v, None)
@@ -446,11 +423,7 @@ pub(crate) async fn par(
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
     if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
-        return par_error_response(
-            StatusCode::BAD_REQUEST,
-            OAuthErrorCode::InvalidRequest,
-            &e.oauth_description(),
-        );
+        return par_error_response(OAuthErrorCode::InvalidRequest, &e.oauth_description());
     }
 
     // Validate redirect_uri against registered URIs
@@ -459,7 +432,6 @@ pub(crate) async fn par(
         .is_valid_redirect_uri(validated.redirect_uri())
     {
         return par_error_response(
-            StatusCode::BAD_REQUEST,
             OAuthErrorCode::InvalidRequest,
             "redirect_uri is not registered for this client",
         );
@@ -470,7 +442,6 @@ pub(crate) async fn par(
         && !authenticated_client.client.is_valid_resource_uri(resource)
     {
         return par_error_response(
-            StatusCode::BAD_REQUEST,
             OAuthErrorCode::InvalidTarget,
             "The requested resource is not registered for this client",
         );
@@ -490,7 +461,6 @@ pub(crate) async fn par(
         let is_match: bool = requested_jkt.as_bytes().ct_eq(proof.jkt.as_bytes()).into();
         if !is_match {
             return par_error_response(
-                StatusCode::BAD_REQUEST,
                 OAuthErrorCode::InvalidDpopProof,
                 "dpop_jkt does not match DPoP proof JWK thumbprint",
             );
@@ -510,7 +480,6 @@ pub(crate) async fn par(
             Some(m) => m,
             None => {
                 return par_error_response(
-                    StatusCode::BAD_REQUEST,
                     OAuthErrorCode::InvalidRequest,
                     &format!(
                         "Unsupported response_mode. Supported values: {}",
@@ -550,12 +519,10 @@ pub(crate) async fn par(
                 // 500 for a replay tempts them to retry-loop with a consumed JTI.
                 return match e {
                     ClientAuthError::InvalidCredentials => par_error_response(
-                        StatusCode::UNAUTHORIZED,
                         OAuthErrorCode::InvalidClient,
                         "Client authentication failed",
                     ),
                     _ => par_error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
                         OAuthErrorCode::ServerError,
                         "Failed to complete client authentication",
                     ),
@@ -606,7 +573,6 @@ pub(crate) async fn par(
         Err(e) => {
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
                 OAuthErrorCode::ServerError,
                 "Failed to store pushed authorization request",
             )
@@ -615,9 +581,15 @@ pub(crate) async fn par(
 }
 
 /// Build a PAR error response.
-fn par_error_response(status: StatusCode, error: OAuthErrorCode, description: &str) -> Response {
+/// Build an OAuth error response for the PAR endpoint.
+///
+/// The status comes from [`OAuthErrorCode::status_code`], not from the call
+/// site, so the two cannot disagree. Several sites pass a code extracted from
+/// a `ServiceError` rather than a literal, and those carry statuses other than
+/// 400 — `server_error` is a 500.
+fn par_error_response(error: OAuthErrorCode, description: &str) -> Response {
     (
-        status,
+        error.status_code(),
         Json(OAuthErrorResponse {
             error: error.as_str().to_string(),
             error_description: Some(description.to_string()),

@@ -745,6 +745,43 @@ async fn test_token_malformed_basic_header_challenges_with_basic() {
 }
 
 #[tokio::test]
+async fn test_fido2_grant_basic_auth_failure_challenges_with_basic() {
+    // The fido2-assertion grant requires `private_key_jwt`, so a client that
+    // presents Basic credentials is rejected as `invalid_client`. It attempted
+    // header authentication, so the same MUST binds: 401 plus a challenge.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fido2-basic-challenge@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:wrong-secret", client.client_id).as_bytes());
+    let auth = format!("Basic {encoded}");
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+         &assertion=aXJyZWxldmFudA",
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "a client that used the Authorization header must get 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "a 401 for a client that used the Authorization header MUST carry a \
+         matching WWW-Authenticate challenge"
+    );
+}
+
+#[tokio::test]
 async fn test_par_basic_auth_failure_challenges_with_basic() {
     // PAR reaches the failure through `complete_client_auth` rather than the
     // token endpoint's own path, so it needs its own coverage.

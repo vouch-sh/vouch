@@ -159,8 +159,7 @@ mod tests {
 
     #[test]
     fn test_register_complete_short_credential_id_rejected() {
-        // Below `CredentialIdData`'s 16-byte floor. This is the check that
-        // #1069 lost when it was written by hand inside a handler.
+        // Below `CredentialIdData`'s 16-byte floor.
         let json = r#"{
             "state": "test",
             "credential_id": [1, 2, 3],
