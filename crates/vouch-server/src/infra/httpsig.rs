@@ -75,45 +75,51 @@ impl KeyResolver for OAuthClientKeyResolver {
                 }
             };
 
-            // Only clients registered with `jwks_uri` (no inline JWKS) need the
-            // cached fetch — skip the extra DB round trip for the common inline case.
+            // Only clients registered with `jwks_uri` need the cached fetch —
+            // skip the extra DB round trip for the inline case.
             let resolved;
-            let jwks_value = if let Some(jwks) = client.jwks.as_ref() {
-                jwks
-            } else {
-                let uri = client.jwks_uri.as_deref()?;
-                let cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
+            let inline;
+            let jwks_value = match client.keys.as_ref()? {
+                crate::db::ClientKeys::Inline(jwks) => {
+                    inline = serde_json::to_value(jwks).ok()?;
+                    &inline
+                }
+                crate::db::ClientKeys::Uri(uri) => {
+                    let cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "JWKS cache lookup failed for HTTP signature verification: {e}"
+                            );
+                        })
+                        .ok()
+                        .flatten();
+
+                    // Honor the cache TTL rather than trusting whatever was stored:
+                    // reading it verbatim let a key the client had already rotated
+                    // out keep verifying signatures until the row happened to be
+                    // replaced.
+                    // This path doesn't act on whether the resolution fetched —
+                    // that distinction only matters to the mTLS force-refetch
+                    // retry gate (services/oidc/token.rs).
+                    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
+                        &self.state.store,
+                        &client.id,
+                        uri,
+                        cached.as_ref(),
+                        !self.state.config().tls_configured(),
+                        &self.state.http_client,
+                    )
                     .await
                     .map_err(|e| {
                         tracing::warn!(
-                            "JWKS cache lookup failed for HTTP signature verification: {e}"
+                            "JWKS resolution failed for HTTP signature verification: {e}"
                         );
                     })
-                    .ok()
-                    .flatten();
-
-                // Honor the cache TTL rather than trusting whatever was stored:
-                // reading it verbatim let a key the client had already rotated
-                // out keep verifying signatures until the row happened to be
-                // replaced.
-                // This path doesn't act on whether the resolution fetched —
-                // that distinction only matters to the mTLS force-refetch
-                // retry gate (services/oidc/token.rs).
-                let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
-                    &self.state.store,
-                    &client.id,
-                    uri,
-                    cached.as_ref(),
-                    !self.state.config().tls_configured(),
-                    &self.state.http_client,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::warn!("JWKS resolution failed for HTTP signature verification: {e}");
-                })
-                .ok()?;
-                resolved = value;
-                &resolved
+                    .ok()?;
+                    resolved = value;
+                    &resolved
+                }
             };
             let keys = jwks_value.get("keys")?.as_array()?;
 

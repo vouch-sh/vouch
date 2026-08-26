@@ -362,7 +362,12 @@ pub async fn validate_request_object(
     // Gate on the URI, not on inline JWKS: a client configured with both still
     // reaches the kid-miss refresh path, where a `None` cache disables the
     // 10-second refresh interval.
-    let jwks_cache = if client.jwks_uri.is_none() {
+    let jwks_cache = if client
+        .keys
+        .as_ref()
+        .and_then(crate::db::ClientKeys::uri)
+        .is_none()
+    {
         None
     } else {
         crate::db::get_jwks_cache(&state.store, &client.id)
@@ -382,8 +387,8 @@ pub async fn validate_request_object(
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.jwks.as_ref(),
-        client.jwks_uri.as_deref(),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -401,7 +406,7 @@ pub async fn validate_request_object(
     let decoding_key = find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.jwks_uri.as_deref(),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,

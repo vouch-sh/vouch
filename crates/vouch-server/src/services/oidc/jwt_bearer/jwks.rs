@@ -11,21 +11,23 @@ use crate::db::{JwkEntry, JwkSet, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use vouch_common::protocol;
 
-/// Resolve the JWKS for a client — from inline `jwks` or fetched `jwks_uri`.
+/// Resolve the JWKS for a client — from an inline key set or a fetched
+/// `jwks_uri`. The two are exclusive (RFC 7591 §2), so there is no precedence
+/// between them: at most one is ever `Some`.
 ///
 /// For `jwks_uri` clients, uses database-backed caching with stale-while-revalidate.
 pub async fn resolve_client_jwks(
     store: &DocumentStore,
     client_id: &str,
-    jwks: Option<&serde_json::Value>,
+    jwks: Option<&JwkSet>,
     jwks_uri: Option<&str>,
     jwks_cache: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
-    // Inline JWKS takes priority
-    if let Some(jwks_value) = jwks {
-        return parse_jwks_value(jwks_value);
+    // An inline key set is already parsed — it arrives typed and needs no fetch.
+    if let Some(jwks) = jwks {
+        return Ok(jwks.clone());
     }
 
     // JWKS URI with caching

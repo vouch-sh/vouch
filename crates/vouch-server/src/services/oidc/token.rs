@@ -973,10 +973,13 @@ async fn resolve_self_signed_jwks(
     client: &crate::db::OAuthClient,
     jwks_cache: Option<&crate::db::documents::jwks_cache::JwksCacheDoc>,
 ) -> ServiceResult<(serde_json::Value, JwksOrigin)> {
-    if let Some(jwks) = client.jwks.as_ref() {
-        return Ok((jwks.clone(), JwksOrigin::NoFetch));
+    if let Some(jwks) = client.keys.as_ref().and_then(crate::db::ClientKeys::inline) {
+        return Ok((
+            serde_json::to_value(jwks).unwrap_or_default(),
+            JwksOrigin::NoFetch,
+        ));
     }
-    let Some(uri) = client.jwks_uri.as_deref() else {
+    let Some(uri) = client.keys.as_ref().and_then(crate::db::ClientKeys::uri) else {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "self_signed_tls_client_auth requires jwks or jwks_uri",
@@ -1026,7 +1029,12 @@ pub(crate) async fn authenticate_client_mtls(
             // path). The cache is an optimization, not a dependency even
             // when read: a lookup failure degrades to an uncached fetch
             // rather than failing authentication (same reasoning).
-            let jwks_cache = if client.jwks_uri.is_none() {
+            let jwks_cache = if client
+                .keys
+                .as_ref()
+                .and_then(crate::db::ClientKeys::uri)
+                .is_none()
+            {
                 None
             } else {
                 db::get_jwks_cache(&state.store, &client.id)
@@ -1060,7 +1068,8 @@ pub(crate) async fn authenticate_client_mtls(
                     // cross-request throttle is applied beyond that bound —
                     // repeated attempts across requests still cost one fetch
                     // each, bounded upstream by the per-IP auth rate limiter.
-                    let Some(uri) = client.jwks_uri.as_deref() else {
+                    let Some(uri) = client.keys.as_ref().and_then(crate::db::ClientKeys::uri)
+                    else {
                         return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
                     };
                     if matches!(origin, JwksOrigin::Fetched) {
@@ -1718,8 +1727,7 @@ mod tests {
             access_scope: AccessScope::Organization,
             org_id: None,
             resource_uris: vec![],
-            jwks: None,
-            jwks_uri: None,
+            keys: None,
             token_endpoint_auth_method: auth_method,
             request_object_signing_alg: None,
             require_signed_request_object: None,
@@ -1872,7 +1880,9 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks = Some(jwks);
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        ));
 
         let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
@@ -1914,7 +1924,9 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks = Some(jwks);
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        ));
 
         let result = authenticate_client_mtls(&state, &client, &cert).await;
         assert!(
@@ -1977,7 +1989,7 @@ mod tests {
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [x5c_b64]}]});
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         seed_jwks_cache(&state.store, &client.id, jwks, 60).await;
 
         // Success proves the cached JWKS was used — the URI would fail if dialed.
@@ -1994,7 +2006,7 @@ mod tests {
         let cert = make_cert_with_cn("self-signed-fetch-failure");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // No cache row: this exercises first-ever resolution, not the
         // post-verification retry path.
 
@@ -2013,7 +2025,7 @@ mod tests {
         let cert = make_cert_with_cn("self-signed-no-x5c-at-uri");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cached JWKS has key material but no x5c — same "accepted at
         // registration, unusable forever after" class PR 4 closed for the
         // write path, now proven at the runtime verification path too.
@@ -2052,7 +2064,7 @@ mod tests {
             crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cached cert predates a rotation but is well within the 1-hour TTL,
         // so resolution serves it from cache (`JwksOrigin::NoFetch`) and the
         // retry gate lets the force-refresh attempt proceed.
@@ -2084,7 +2096,7 @@ mod tests {
             crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cache is past the 1-hour TTL but within the 24-hour stale window:
         // resolution attempts a fetch (fails against the unreachable URI)
         // and falls back to serving this stale, mismatched document —
@@ -2114,7 +2126,7 @@ mod tests {
     async fn test_resolve_self_signed_jwks_reports_no_fetch_for_fresh_cache() {
         let state = crate::test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
         seed_jwks_cache(&state.store, &client.id, jwks.clone(), 60).await;
 
@@ -2135,7 +2147,7 @@ mod tests {
     async fn test_resolve_self_signed_jwks_reports_fetched_for_stale_cache() {
         let state = crate::test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
         // Past the 1-hour TTL, within the 24-hour stale window: resolution
         // attempts a fetch (fails against the unreachable URI) and falls
@@ -2156,20 +2168,26 @@ mod tests {
     }
 
     #[tokio::test]
+    /// An inline key set resolves without a network call.
+    ///
+    /// This used to also assert that inline wins over a `jwks_uri` on the same
+    /// client. `ClientKeys` cannot hold both, so there is no precedence left to
+    /// assert — RFC 7591 §2 says the two "MUST NOT both be present".
     async fn test_resolve_self_signed_jwks_reports_no_fetch_for_inline_jwks() {
         let state = crate::test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "inline"}]});
-        client.jwks = Some(jwks.clone());
-        client.jwks_uri = Some(UNREACHABLE_JWKS_URI.to_string());
+        client.keys = Some(crate::db::ClientKeys::Inline(
+            crate::db::parse_jwks_set(&jwks.clone()).expect("valid test JWKS"),
+        ));
 
         let (value, origin) = resolve_self_signed_jwks(&state, &client, None)
             .await
-            .expect("inline jwks must resolve without consulting jwks_uri");
+            .expect("inline jwks must resolve");
         assert_eq!(value, jwks);
         assert!(
             matches!(origin, JwksOrigin::NoFetch),
-            "inline jwks must win outright and never fetch"
+            "an inline key set never fetches"
         );
     }
 

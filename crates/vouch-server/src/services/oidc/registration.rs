@@ -390,7 +390,7 @@ pub async fn register_client(
                  'self_signed_tls_client_auth'",
             ));
         }
-        if jwks_auth.jwks_value.is_none() && jwks_auth.jwks_uri.is_none() {
+        if jwks_auth.keys.is_none() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "FAPI 2.0 requires jwks or jwks_uri",
@@ -405,8 +405,11 @@ pub async fn register_client(
         // conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
         // check does not apply to them.
         if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-            && let Some(ref jwks) = jwks_auth.jwks_value
-            && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+            && let Some(jwks) = jwks_auth
+                .keys
+                .as_ref()
+                .and_then(crate::db::ClientKeys::inline)
+            && !jwks_has_fapi_allowed_key(jwks)
         {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
@@ -609,8 +612,7 @@ pub async fn register_client(
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: jwks_auth.auth_method,
-            jwks: jwks_auth.jwks_value.as_ref(),
-            jwks_uri: jwks_auth.jwks_uri.as_deref(),
+            keys: jwks_auth.keys.as_ref(),
             fapi_profile: Some(fapi_profile),
             dpop_bound_access_tokens: Some(dpop_bound),
             grant_types: Some(&validated.grant_types),
@@ -728,8 +730,16 @@ pub async fn register_client(
         policy_uri: request.policy_uri,
         scope: request.scope,
         contacts: request.contacts,
-        jwks: jwks_auth.jwks_value,
-        jwks_uri: jwks_auth.jwks_uri,
+        jwks: jwks_auth
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+            .and_then(|set| serde_json::to_value(set).ok()),
+        jwks_uri: jwks_auth
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::uri)
+            .map(String::from),
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
@@ -999,46 +1009,32 @@ fn validate_redirect_uris(
 /// Validated JWKS and auth method from a registration request.
 #[derive(Debug)]
 struct ValidatedJwksAuth {
-    jwks_value: Option<serde_json::Value>,
-    jwks_uri: Option<String>,
+    /// RFC 7591 §2 key material, in whichever of the two forms was sent.
+    keys: Option<crate::db::ClientKeys>,
     auth_method: TokenEndpointAuthMethod,
 }
 
-/// Validate JWKS field mutual exclusivity, structure, and HTTPS URI constraint.
+/// Validate the structure of whichever key form was supplied, and the HTTPS
+/// constraint on a JWKS URI.
+///
+/// Mutual exclusivity is no longer checked here: [`crate::db::ClientKeys`] is
+/// the only shape this receives, and it cannot hold both.
 ///
 /// Shared by both initial registration and the update path. Does not validate the
 /// relationship to `token_endpoint_auth_method` — that is handled by
 /// `validate_jwks_and_auth_method` for the initial registration path.
-fn validate_jwks_fields(
-    jwks: Option<&serde_json::Value>,
-    jwks_uri: Option<&str>,
-) -> Result<(), ServiceError> {
-    if jwks.is_some() && jwks_uri.is_some() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks and jwks_uri are mutually exclusive",
-        ));
-    }
+fn validate_jwks_shape(keys: Option<&crate::db::ClientKeys>) -> Result<(), ServiceError> {
+    let jwks = keys.and_then(crate::db::ClientKeys::inline);
+    let jwks_uri = keys.and_then(crate::db::ClientKeys::uri);
     if let Some(jwks) = jwks {
-        if !jwks
-            .get("keys")
-            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-        {
+        // A key set with no keys parses but can never authenticate anyone.
+        // Everything else the old shape check covered — that this is an object
+        // with a "keys" array, and that no member has an invalid type — is now
+        // established by `ClientKeys::from_stored`, which parses on the way in.
+        if jwks.keys.is_empty() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "jwks must be a JSON object with a non-empty \"keys\" array",
-            ));
-        }
-        // Reject a JWKS with a type-invalid member (e.g. "alg": true) at
-        // submission time, through the same typed representation the RFC
-        // 7523 client-assertion verifier uses at runtime — see
-        // db::JwkSet. Otherwise the client would be accepted here but
-        // permanently unable to authenticate once the runtime verifier
-        // fails to parse the same document.
-        if db::parse_jwks_set(jwks).is_err() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "jwks contains a key with an invalid field type",
             ));
         }
     }
@@ -1061,10 +1057,12 @@ fn validate_jwks_and_auth_method(
     request: &mut RegistrationRequest,
     auth_method_str: &str,
 ) -> Result<ValidatedJwksAuth, ServiceError> {
-    let jwks_value = request.jwks.take();
-    let jwks_uri = request.jwks_uri.take();
-
-    validate_jwks_fields(jwks_value.as_ref(), jwks_uri.as_deref())?;
+    // Pairing the two parameters is the mutual-exclusion check: RFC 7591 §2
+    // says they "MUST NOT both be present in the same request or response",
+    // and `ClientKeys` is the only shape the rest of the code accepts.
+    let keys = crate::db::ClientKeys::from_stored(request.jwks.take(), request.jwks_uri.take())
+        .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
+    validate_jwks_shape(keys.as_ref())?;
 
     let auth_method: TokenEndpointAuthMethod = auth_method_str.parse().map_err(|_| {
         ServiceError::oauth(
@@ -1081,8 +1079,7 @@ fn validate_jwks_and_auth_method(
     if matches!(
         auth_method,
         TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    ) && jwks_value.is_none()
-        && jwks_uri.is_none()
+    ) && keys.is_none()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1097,8 +1094,8 @@ fn validate_jwks_and_auth_method(
     // inspected synchronously, so this only guards the inline case, same as
     // the FAPI algorithm-usability check.
     if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(ref jwks) = jwks_value
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_x5c(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1124,11 +1121,7 @@ fn validate_jwks_and_auth_method(
         }
     }
 
-    Ok(ValidatedJwksAuth {
-        jwks_value,
-        jwks_uri,
-        auth_method,
-    })
+    Ok(ValidatedJwksAuth { keys, auth_method })
 }
 
 /// Validate HTTPS URI fields and contacts.
@@ -1342,12 +1335,14 @@ pub async fn update_client_configuration(
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = mutable_request.registration_metadata();
 
-    // Validate JWKS and jwks_uri field format: mutually exclusive, valid
-    // structure, HTTPS URI.
-    validate_jwks_fields(
-        mutable_request.jwks.as_ref(),
-        mutable_request.jwks_uri.as_deref(),
-    )?;
+    // Pairing the two parameters is the mutual-exclusion check (RFC 7591 §2);
+    // the shape checks follow.
+    let keys = crate::db::ClientKeys::from_stored(
+        mutable_request.jwks.take(),
+        mutable_request.jwks_uri.take(),
+    )
+    .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
+    validate_jwks_shape(keys.as_ref())?;
 
     // PUT is a full replacement, so re-check the auth-method/JWKS
     // relationship enforced at initial registration against the client's
@@ -1366,8 +1361,7 @@ pub async fn update_client_configuration(
             TokenEndpointAuthMethod::PrivateKeyJwt
                 | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         ))
-        && mutable_request.jwks.is_none()
-        && mutable_request.jwks_uri.is_none()
+        && keys.is_none()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1384,8 +1378,8 @@ pub async fn update_client_configuration(
     // method exists for non-FAPI clients too). A remote jwks_uri can't be
     // inspected synchronously, so this only guards the inline case.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(ref jwks) = mutable_request.jwks
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_x5c(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1405,8 +1399,8 @@ pub async fn update_client_configuration(
     // registration and the admin application API.
     if client.is_fapi()
         && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && let Some(ref jwks) = mutable_request.jwks
-        && !db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_fapi_allowed_key(jwks)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1454,8 +1448,7 @@ pub async fn update_client_configuration(
             redirect_uris: &redirect_uris,
             grant_types: Some(&validated.grant_types),
             response_types: Some(&validated.response_types),
-            jwks: mutable_request.jwks.as_ref(),
-            jwks_uri: mutable_request.jwks_uri.as_deref(),
+            keys: keys.as_ref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),
             userinfo_signed_response_alg: userinfo_alg,
@@ -1583,8 +1576,16 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         policy_uri: metadata_string(&metadata, "policy_uri"),
         scope: metadata_string(&metadata, "scope"),
         contacts: metadata_string_array(&metadata, "contacts"),
-        jwks: client.jwks,
-        jwks_uri: client.jwks_uri,
+        jwks: client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+            .and_then(|set| serde_json::to_value(set).ok()),
+        jwks_uri: client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::uri)
+            .map(String::from),
         software_id: client.software_id,
         software_version: client.software_version,
         dpop_bound_access_tokens: if client.dpop_bound_access_tokens {

@@ -328,7 +328,12 @@ async fn resolve_client_decoding_key(
     // to an uncached fetch rather than failing authentication. Reporting a
     // transient DB fault as `invalid_client` tells a client its credentials
     // are wrong and stops it retrying.
-    let jwks_cache = if client.jwks_uri.is_none() {
+    let jwks_cache = if client
+        .keys
+        .as_ref()
+        .and_then(crate::db::ClientKeys::uri)
+        .is_none()
+    {
         None
     } else {
         crate::db::get_jwks_cache(&state.store, &client.id)
@@ -351,8 +356,8 @@ async fn resolve_client_decoding_key(
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.jwks.as_ref(),
-        client.jwks_uri.as_deref(),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -370,7 +375,7 @@ async fn resolve_client_decoding_key(
     find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.jwks_uri.as_deref(),
+        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -684,12 +689,11 @@ mod tests {
             .expect("db lookup")
             .expect("client exists");
         let kid = client
-            .jwks
+            .keys
             .as_ref()
-            .and_then(|j| j.get("keys"))
-            .and_then(|k| k.get(0))
-            .and_then(|k| k.get("kid"))
-            .and_then(|k| k.as_str())
+            .and_then(crate::db::ClientKeys::inline)
+            .and_then(|set| set.keys.first())
+            .and_then(|key| key.kid.as_deref())
             .expect("shared test JWKS has a kid")
             .to_string();
         (client, kid)
@@ -747,7 +751,9 @@ mod tests {
     async fn dual_config_client_still_loads_the_jwks_cache() {
         let state = make_state().await;
         let (mut client, _kid) = make_client_with_jwks(&state).await;
-        client.jwks_uri = Some("https://client.example/jwks.json".to_string());
+        client.keys = Some(crate::db::ClientKeys::Uri(
+            "https://client.example/jwks.json".to_string(),
+        ));
 
         // With a URI present the cache must be consulted, so a failed read is
         // observable: drop the table and confirm resolution still degrades

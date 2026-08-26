@@ -204,6 +204,10 @@ pub fn auth_code_lifetime_seconds(client: &OAuthClient) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
     use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType};
 
@@ -225,8 +229,10 @@ mod tests {
             access_scope: AccessScope::Organization,
             org_id: None,
             resource_uris: vec![],
-            jwks: Some(serde_json::json!({"keys":[]})),
-            jwks_uri: None,
+            keys: Some(crate::db::ClientKeys::Inline(
+                crate::db::parse_jwks_set(&serde_json::json!({"keys": []}))
+                    .expect("valid test JWKS"),
+            )),
             token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
             request_object_signing_alg: None,
             require_signed_request_object: None,
@@ -272,8 +278,7 @@ mod tests {
             access_scope: AccessScope::Organization,
             org_id: None,
             resource_uris: vec![],
-            jwks: None,
-            jwks_uri: None,
+            keys: None,
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
             request_object_signing_alg: None,
             require_signed_request_object: None,

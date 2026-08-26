@@ -178,8 +178,12 @@ pub(crate) async fn create_application_api(
 
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
-    let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
-    let response_jwks_uri = client.jwks_uri.clone();
+    let jwks_configured = client.keys.is_some();
+    let response_jwks_uri = client
+        .keys
+        .as_ref()
+        .and_then(db::ClientKeys::uri)
+        .map(String::from);
 
     Ok(Json(CreateApplicationResponse {
         id: client.id,
@@ -336,8 +340,7 @@ pub(crate) async fn update_application_api(
             org_id,
             resource_uris: &resource_uris,
             token_endpoint_auth_method: fapi.token_endpoint_auth_method,
-            jwks: fapi.jwks,
-            jwks_uri: fapi.jwks_uri,
+            keys: fapi.keys,
             fapi_profile: fapi.fapi_profile,
             dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
             post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),

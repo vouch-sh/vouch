@@ -29,7 +29,12 @@ pub(super) enum AppValidationError {
     MissingRedirectUris,
     InvalidRedirectUris(Vec<String>),
     InvalidPostLogoutRedirectUris(Vec<String>),
-    InvalidResourceUri { uri: String, detail: String },
+    InvalidResourceUri {
+        uri: String,
+        detail: String,
+    },
+    /// RFC 7591 §2: `jwks` and `jwks_uri` MUST NOT both be present.
+    JwksMutuallyExclusive,
     FapiRequiresConfidentialClient,
     FapiMissingJwks,
     AuthMethodMissingJwks,
@@ -51,6 +56,7 @@ impl AppValidationError {
             Self::InvalidAccessScope => "invalid_access_scope",
             Self::InvalidFapiProfile(_) => "invalid_fapi_profile",
             Self::MissingRedirectUris | Self::InvalidRedirectUris(_) => "invalid_redirect_uris",
+            Self::JwksMutuallyExclusive => "invalid_client_metadata",
             Self::InvalidPostLogoutRedirectUris(_) => "invalid_post_logout_redirect_uris",
             Self::InvalidResourceUri { .. } => "invalid_resource_uri",
             Self::FapiRequiresConfidentialClient => "invalid_fapi_profile",
@@ -77,6 +83,9 @@ impl AppValidationError {
                 format!("Invalid fapi_profile '{p}'. Valid values: none, fapi2_security")
             }
             Self::MissingRedirectUris => "At least one redirect URI is required".to_string(),
+            Self::JwksMutuallyExclusive => {
+                "Provide either a JWKS or a JWKS URI, not both".to_string()
+            }
             Self::InvalidRedirectUris(invalid) => format!(
                 "Invalid redirect URI(s): {}. Each URI must use https://, or http:// with \
                  localhost, 127.0.0.1, or [::1], and must not contain a fragment. \
@@ -168,10 +177,9 @@ pub(super) struct ValidatedCreateApp<'a> {
     pub app_type: OAuthClientType,
     pub access_scope: AccessScope,
     pub is_fapi: bool,
-    /// Parsed JWKS with a non-empty `keys` array (if provided).
-    pub jwks: Option<serde_json::Value>,
-    /// Trimmed, https-validated JWKS URI (if provided).
-    pub jwks_uri: Option<&'a str>,
+    /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
+    /// array, or a trimmed https JWKS URI. Never both.
+    pub keys: Option<crate::db::ClientKeys>,
 }
 
 /// Validate the format of a create-application request.
@@ -236,13 +244,15 @@ pub(super) fn validate_create_application<'a>(
     let jwks = jwks_trimmed.map(parse_jwks).transpose()?;
     validate_jwks_uri(jwks_uri)?;
 
+    let keys = client_keys(jwks, jwks_uri)?;
+
     // FAPI validation: an inline JWKS must have at least one key the
     // FAPI_ALLOWED validator can actually select (see jwks_has_fapi_allowed_key).
     // A jwks_uri can't be inspected synchronously, so this only guards the
     // inline case; the same is true of validate_update_fapi.
     if is_fapi
-        && let Some(ref parsed_jwks) = jwks
-        && !crate::db::parse_jwks_set(parsed_jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && let Some(set) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_fapi_allowed_key(set)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -252,9 +262,22 @@ pub(super) fn validate_create_application<'a>(
         app_type,
         access_scope,
         is_fapi,
-        jwks,
-        jwks_uri,
+        keys,
     })
+}
+
+/// Pair the two key parameters into the one value the rest of the code takes.
+///
+/// RFC 7591 §2: "The "jwks_uri" and "jwks" parameters MUST NOT both be present
+/// in the same request or response." This path used to parse both and keep
+/// them, which is how a self-service application could hold a state dynamic
+/// client registration rejects.
+fn client_keys(
+    jwks: Option<serde_json::Value>,
+    jwks_uri: Option<&str>,
+) -> Result<Option<crate::db::ClientKeys>, AppValidationError> {
+    crate::db::ClientKeys::from_stored(jwks, jwks_uri.map(String::from))
+        .map_err(|_| AppValidationError::JwksMutuallyExclusive)
 }
 
 /// Raw application fields for update requests.
@@ -282,10 +305,9 @@ pub(super) struct ValidatedUpdateApp<'a> {
     pub fapi_profile_provided: bool,
     /// Parsed access scope (`None` = field absent, preserve existing).
     pub access_scope: Option<AccessScope>,
-    /// Parsed JWKS with a non-empty `keys` array (if provided).
-    pub jwks: Option<serde_json::Value>,
-    /// Trimmed, https-validated JWKS URI (if provided).
-    pub jwks_uri: Option<&'a str>,
+    /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
+    /// array, or a trimmed https JWKS URI. Never both.
+    pub keys: Option<crate::db::ClientKeys>,
     /// Redirect URIs from the request (`None` = field absent, `Some(&[])` = explicitly cleared).
     pub redirect_uris: Option<&'a [String]>,
     /// Post-logout redirect URIs (`None` = preserve existing, `Some(&[])` = explicitly clear).
@@ -337,8 +359,7 @@ pub(super) fn validate_update_format<'a>(
         is_fapi,
         fapi_profile_provided: input.fapi_profile.is_some(),
         access_scope,
-        jwks,
-        jwks_uri,
+        keys: client_keys(jwks, jwks_uri)?,
         redirect_uris: input.redirect_uris,
         post_logout_redirect_uris: input.post_logout_redirect_uris,
     })
@@ -440,10 +461,17 @@ pub(super) fn validate_update_fapi(
     }
 
     // FAPI validation: require JWKS or JWKS URI (request or existing)
-    if validated.jwks.is_none()
-        && validated.jwks_uri.is_none()
-        && client.jwks.is_none()
-        && client.jwks_uri.is_none()
+    if validated.keys.is_none()
+        && client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+            .is_none()
+        && client
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::uri)
+            .is_none()
     {
         return Err(AppValidationError::FapiMissingJwks);
     }
@@ -457,8 +485,12 @@ pub(super) fn validate_update_fapi(
     // by, so the two cannot disagree about which clients this check covers.
     if effective_token_endpoint_auth_method(validated, client)
         == TokenEndpointAuthMethod::PrivateKeyJwt
-        && let Some(jwks) = validated.jwks.as_ref().or(client.jwks.as_ref())
-        && !crate::db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_fapi_allowed_key(&set))
+        && let Some(jwks) = validated
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+            .or(client.keys.as_ref().and_then(crate::db::ClientKeys::inline))
+        && !jwks_has_fapi_allowed_key(jwks)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -513,12 +545,11 @@ pub(super) fn build_create_params<'a>(
         } else {
             TokenEndpointAuthMethod::None
         },
-        jwks: if is_fapi {
-            validated.jwks.as_ref()
+        keys: if is_fapi {
+            validated.keys.as_ref()
         } else {
             None
         },
-        jwks_uri: if is_fapi { validated.jwks_uri } else { None },
         fapi_profile: if is_fapi {
             Some(FapiProfile::Fapi2Security)
         } else {
@@ -557,8 +588,7 @@ pub(super) fn build_create_params<'a>(
 pub(super) struct FapiUpdateFields<'a> {
     pub fapi_profile: FapiProfile,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub jwks: Option<&'a serde_json::Value>,
-    pub jwks_uri: Option<&'a str>,
+    pub keys: Option<&'a crate::db::ClientKeys>,
     pub dpop_bound_access_tokens: bool,
 }
 
@@ -579,20 +609,15 @@ pub(super) fn compute_fapi_update_fields<'a>(
     let fapi_profile = effective_fapi_profile(validated, client);
     let token_endpoint_auth_method = effective_token_endpoint_auth_method(validated, client);
 
-    let jwks = if validated.jwks.is_some() {
-        validated.jwks.as_ref()
+    // One value, so the merge cannot take the inline key set from the update
+    // and the URI from the stored client and end up holding both — which the
+    // two independent branches this replaces could do.
+    let keys = if validated.keys.is_some() {
+        validated.keys.as_ref()
     } else if !is_fapi && validated.fapi_profile_provided {
         None
     } else {
-        client.jwks.as_ref()
-    };
-
-    let jwks_uri = if validated.jwks_uri.is_some() {
-        validated.jwks_uri
-    } else if !is_fapi && validated.fapi_profile_provided {
-        None
-    } else {
-        client.jwks_uri.as_deref()
+        client.keys.as_ref()
     };
 
     // Leaving the FAPI profile stops *mandating* DPoP; it does not mean the
@@ -614,8 +639,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     if matches!(
         token_endpoint_auth_method,
         TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    ) && jwks.is_none()
-        && jwks_uri.is_none()
+    ) && keys.is_none()
     {
         return Err(AppValidationError::AuthMethodMissingJwks);
     }
@@ -630,8 +654,8 @@ pub(super) fn compute_fapi_update_fields<'a>(
     // `validate_update_fapi`. A remote jwks_uri can't be inspected
     // synchronously, so this only guards the inline case.
     if token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = jwks
-        && !crate::db::parse_jwks_set(jwks).is_ok_and(|set| jwks_has_x5c(&set))
+        && let Some(jwks) = keys.and_then(crate::db::ClientKeys::inline)
+        && !jwks_has_x5c(jwks)
     {
         return Err(AppValidationError::SelfSignedJwksMissingX5c);
     }
@@ -639,8 +663,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     Ok(FapiUpdateFields {
         fapi_profile,
         token_endpoint_auth_method,
-        jwks,
-        jwks_uri,
+        keys,
         dpop_bound_access_tokens,
     })
 }
@@ -755,7 +778,7 @@ mod tests {
         );
         assert_eq!(params.fapi_profile, Some(FapiProfile::Fapi2Security));
         assert_eq!(params.dpop_bound_access_tokens, Some(true));
-        assert!(params.jwks.is_some(), "validated JWKS must be stored");
+        assert!(params.keys.is_some(), "validated JWKS must be stored");
         assert_eq!(params.registration_source, RegistrationSource::Manual);
         assert_eq!(params.id_token_signed_response_alg, JwsAlgorithm::Rs256);
     }
@@ -797,8 +820,8 @@ mod tests {
         );
         assert_eq!(params.fapi_profile, None);
         assert_eq!(params.dpop_bound_access_tokens, None);
-        assert!(params.jwks.is_none());
-        assert!(params.jwks_uri.is_none());
+        assert!(params.keys.is_none());
+        assert!(params.keys.and_then(crate::db::ClientKeys::uri).is_none());
     }
 
     #[test]
@@ -952,13 +975,18 @@ mod tests {
         email: &str,
     ) -> crate::db::OAuthClient {
         let user = create_test_user(&state.store, email).await;
-        let jwks = serde_json::json!({"keys": [{"kty": "EC", "alg": true}]});
+        // The type-invalid key set goes straight to the document. It cannot be
+        // registered any more — `ClientKeys` parses on the way in — so this
+        // models a row written before that gate, which is the case the read
+        // side still has to survive.
         let created = create_test_client(
             &state.store,
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(jwks),
+                jwks: TestJwks::Custom(
+                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}),
+                ),
                 dpop_bound_access_tokens: true,
                 fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
@@ -966,6 +994,13 @@ mod tests {
             },
         )
         .await;
+        state
+            .store
+            .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&created.app_id, |data| {
+                data.jwks = Some(serde_json::json!({"keys": [{"kty": "EC", "alg": true}]}));
+            })
+            .await
+            .expect("write a pre-gate JWKS");
         crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
@@ -1051,7 +1086,10 @@ mod tests {
             fields.token_endpoint_auth_method,
             TokenEndpointAuthMethod::PrivateKeyJwt
         );
-        assert!(fields.jwks.is_some(), "existing JWKS preserved");
+        assert!(
+            fields.keys.is_some_and(|k| k.inline().is_some()),
+            "existing JWKS preserved"
+        );
         assert!(fields.dpop_bound_access_tokens);
     }
 
@@ -1112,7 +1150,7 @@ mod tests {
             access_scope: None,
             fapi_profile: Some("fapi2_security"),
             jwks: Some(&jwks),
-            jwks_uri: Some("https://client.example/jwks.json"),
+            jwks_uri: None,
         })
         .expect("valid update input");
         let fields = compute_fapi_update_fields(&validated, &client).expect("merge should succeed");
@@ -1122,9 +1160,35 @@ mod tests {
             fields.token_endpoint_auth_method,
             TokenEndpointAuthMethod::PrivateKeyJwt
         );
-        assert!(fields.jwks.is_some(), "request JWKS used");
-        assert_eq!(fields.jwks_uri, Some("https://client.example/jwks.json"));
+        assert!(
+            fields.keys.is_some_and(|k| k.inline().is_some()),
+            "request JWKS used"
+        );
         assert!(fields.dpop_bound_access_tokens);
+    }
+
+    /// RFC 7591 §2: "The "jwks_uri" and "jwks" parameters MUST NOT both be
+    /// present in the same request or response." The self-service path parsed
+    /// both and kept them, so an application here could hold a state dynamic
+    /// client registration rejects. Pairing them into `ClientKeys` is what
+    /// rejects it, on create and on update alike.
+    #[test]
+    fn supplying_both_key_forms_is_rejected() {
+        let jwks = fapi_jwks_json();
+
+        let update = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: Some("https://client.example/jwks.json"),
+        });
+        assert!(
+            matches!(update, Err(AppValidationError::JwksMutuallyExclusive)),
+            "an update carrying both key forms must be rejected"
+        );
     }
 
     // ========================================================================
@@ -1472,12 +1536,11 @@ mod tests {
     }
 
     // Same reverse edge, but the stored JWKS predates the strict shape gate
-    // (item 1) rather than merely using the wrong algorithm: a type-invalid
-    // member (a boolean `alg`) fails `parse_jwks_set` entirely. The
-    // fallback in `validate_update_fapi` treats a parse failure as "no
-    // usable key" (documented on `db::parse_jwks_set`), so this collapses
-    // to the same `fapi_jwks_algorithm_unsupported` error as a wrong
-    // algorithm, without panicking.
+    // rather than merely using the wrong algorithm: a type-invalid member (a
+    // boolean `alg`) cannot be parsed. Such a row reads as having no key
+    // material at all — `stored_client_keys` fails closed rather than guessing
+    // — so the update is refused for the absence rather than for an unusable
+    // algorithm. Either way it is refused, and neither path panics.
     #[tokio::test]
     async fn fapi_metadata_only_update_rejected_when_stored_jwks_has_type_invalid_shape() {
         let state = test_app_state().await;
@@ -1487,7 +1550,7 @@ mod tests {
         let validated = update_input(None);
         let err = validate_update_fapi(&validated, &client)
             .expect_err("a metadata-only update must surface a pre-existing malformed stored JWKS");
-        assert_eq!(err.code(), "fapi_jwks_algorithm_unsupported");
+        assert_eq!(err.code(), "missing_jwks");
     }
 
     // Same reverse edge, but with `fapi_profile` explicitly re-confirmed and
@@ -1724,7 +1787,10 @@ mod tests {
     async fn non_fapi_client_preserves_jwks_when_fapi_profile_absent() {
         let state = test_app_state().await;
         let client = non_fapi_pkjwt_client(&state, "pkjwt-keep@example.com").await;
-        assert!(client.jwks.is_some(), "client must start with JWKS");
+        assert!(
+            client.keys.as_ref().is_some_and(|k| k.inline().is_some()),
+            "client must start with JWKS"
+        );
 
         let validated = update_input(None);
         validate_update_fapi(&validated, &client).expect("absent profile is valid");
@@ -1737,10 +1803,14 @@ mod tests {
             "auth method preserved for non-FAPI client"
         );
         assert!(
-            fields.jwks.is_some(),
+            fields.keys.is_some_and(|k| k.inline().is_some()),
             "existing JWKS must be preserved when fapi_profile is absent"
         );
-        assert_eq!(fields.jwks, client.jwks.as_ref(), "same JWKS value");
+        assert_eq!(
+            fields.keys.and_then(crate::db::ClientKeys::inline),
+            client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+            "same JWKS value"
+        );
         assert!(
             !fields.dpop_bound_access_tokens,
             "dpop preserved from client (false)"
@@ -1770,7 +1840,7 @@ mod tests {
             .expect("db lookup")
             .expect("client exists");
         assert_eq!(
-            client.jwks_uri.as_deref(),
+            client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
             Some("https://client.example/jwks.json"),
             "client must start with jwks_uri"
         );
@@ -1779,7 +1849,7 @@ mod tests {
         let fields = compute_fapi_update_fields(&validated, &client).expect("merge should succeed");
 
         assert_eq!(
-            fields.jwks_uri,
+            fields.keys.and_then(crate::db::ClientKeys::uri),
             Some("https://client.example/jwks.json"),
             "existing jwks_uri must be preserved when fapi_profile is absent"
         );
@@ -1792,7 +1862,10 @@ mod tests {
     async fn explicit_none_is_refused_when_it_would_strip_a_pkjwt_client_of_keys() {
         let state = test_app_state().await;
         let client = non_fapi_pkjwt_client(&state, "pkjwt-clear@example.com").await;
-        assert!(client.jwks.is_some(), "client must start with JWKS");
+        assert!(
+            client.keys.as_ref().is_some_and(|k| k.inline().is_some()),
+            "client must start with JWKS"
+        );
 
         let validated = update_input(Some("none"));
         validate_update_fapi(&validated, &client).expect("non-FAPI -> non-FAPI is allowed");
@@ -1814,7 +1887,10 @@ mod tests {
     async fn explicit_none_is_refused_when_it_would_strip_a_self_signed_client_of_keys() {
         let state = test_app_state().await;
         let client = non_fapi_self_signed_client(&state, "self-signed-clear@example.com").await;
-        assert!(client.jwks.is_some(), "client must start with JWKS");
+        assert!(
+            client.keys.as_ref().is_some_and(|k| k.inline().is_some()),
+            "client must start with JWKS"
+        );
 
         let validated = update_input(Some("none"));
         validate_update_fapi(&validated, &client).expect("non-FAPI -> non-FAPI is allowed");
@@ -1892,7 +1968,10 @@ mod tests {
     async fn fapi_client_reconfirmed_preserves_existing_jwks() {
         let state = test_app_state().await;
         let client = fapi_test_client(&state, "fapi-reconfirm@example.com").await;
-        assert!(client.jwks.is_some(), "client must start with JWKS");
+        assert!(
+            client.keys.as_ref().is_some_and(|k| k.inline().is_some()),
+            "client must start with JWKS"
+        );
 
         let validated = update_input(Some("fapi2_security"));
         validate_update_fapi(&validated, &client).expect("FAPI -> FAPI is allowed");
@@ -1900,10 +1979,14 @@ mod tests {
 
         assert_eq!(fields.fapi_profile, FapiProfile::Fapi2Security);
         assert!(
-            fields.jwks.is_some(),
+            fields.keys.is_some_and(|k| k.inline().is_some()),
             "existing JWKS must be preserved when re-confirming FAPI without JWKS"
         );
-        assert_eq!(fields.jwks, client.jwks.as_ref(), "same JWKS value");
+        assert_eq!(
+            fields.keys.and_then(crate::db::ClientKeys::inline),
+            client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+            "same JWKS value"
+        );
     }
 
     // ========================================================================
