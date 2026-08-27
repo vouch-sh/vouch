@@ -715,6 +715,7 @@ mod tests {
     // Header parsing tests
     // ========================================================================
 
+    // RFC 9101 §10.1: a symmetric algorithm is not acceptable for a request object.
     #[test]
     fn test_jar_parse_header_rejects_hs256() {
         let jwt = make_jwt_with_header(
@@ -724,6 +725,7 @@ mod tests {
         assert!(result.is_err(), "HS256 must be rejected");
     }
 
+    // RFC 8725 §3.2: the none algorithm is not accepted.
     #[test]
     fn test_jar_parse_header_rejects_none_algorithm() {
         let jwt =
@@ -732,6 +734,7 @@ mod tests {
         assert!(result.is_err(), "alg=none must be rejected");
     }
 
+    // RFC 9101 §10.1: a symmetric algorithm is not acceptable for a request object.
     #[test]
     fn test_jar_parse_header_rejects_hs384() {
         let jwt = make_jwt_with_header(
@@ -741,6 +744,7 @@ mod tests {
         assert!(result.is_err(), "HS384 must be rejected");
     }
 
+    // RFC 9101 §6.2: an asymmetrically signed request object is accepted.
     #[test]
     fn test_jar_parse_header_accepts_es256() {
         let jwt = make_jwt_with_header(
@@ -752,6 +756,7 @@ mod tests {
         assert_eq!(full.typ.as_deref(), Some("oauth-authz-req+jwt"));
     }
 
+    // RFC 9101 §6.2: an asymmetrically signed request object is accepted.
     #[test]
     fn test_jar_parse_header_accepts_rs256() {
         let jwt = make_jwt_with_header(
@@ -762,6 +767,7 @@ mod tests {
         assert_eq!(assertion.alg, "RS256");
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: request objects carry typ oauth-authz-req+jwt.
     #[test]
     fn test_jar_parse_header_requires_typ_oauth_authz_req_jwt() {
         let jwt = make_jwt_with_header(
@@ -771,6 +777,7 @@ mod tests {
         assert!(result.is_ok(), "Correct typ should be accepted");
     }
 
+    // RFC 8725 §3.11: the generic JWT type is still accepted for interoperability.
     #[test]
     fn test_jar_parse_header_accepts_jwt_typ() {
         // RFC 9101: typ "JWT" is the generic type and must be accepted.
@@ -779,6 +786,7 @@ mod tests {
         assert!(result.is_ok(), "typ=JWT must be accepted: {result:?}");
     }
 
+    // RFC 8725 §3.11: typ is optional on a request object.
     #[test]
     fn test_jar_parse_header_accepts_missing_typ() {
         // RFC 9101 Section 10.2: typ is RECOMMENDED, not required.
@@ -787,6 +795,7 @@ mod tests {
         assert!(result.is_ok(), "Missing typ must be accepted: {result:?}");
     }
 
+    // RFC 8725 §3.11: the media type is matched case-insensitively.
     #[test]
     fn test_jar_parse_header_accepts_case_insensitive_typ() {
         // MIME types are case-insensitive.
@@ -800,6 +809,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.11: an unrelated typ is rejected.
     #[test]
     fn test_jar_parse_header_rejects_invalid_typ() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
@@ -811,6 +821,7 @@ mod tests {
     // PS256 in supported algorithms
     // ========================================================================
 
+    // RFC 9101 §10.1: the advertised algorithms are the ones accepted.
     #[test]
     fn test_jar_supported_algorithms_includes_ps256() {
         assert!(JwsAlgorithm::CLIENT_ASSERTION_ALLOWED.contains(&JwsAlgorithm::Ps256));
@@ -825,18 +836,21 @@ mod tests {
     // Malformed JWT tests
     // ========================================================================
 
+    // RFC 9101 §6.2: a request object is a JWS with three parts.
     #[test]
     fn test_jar_rejects_one_part_token() {
         let result = parse_request_object_header("singlepart");
         assert!(result.is_err(), "Single-part token must be rejected");
     }
 
+    // RFC 9101 §6.2: a request object is a JWS with three parts.
     #[test]
     fn test_jar_rejects_two_part_token() {
         let result = parse_request_object_header("two.parts");
         assert!(result.is_err(), "Two-part token must be rejected");
     }
 
+    // RFC 9101 §6.1: an encrypted request object is not accepted here.
     #[test]
     fn test_jar_rejects_five_part_jwe_envelope() {
         let result = parse_request_object_header("one.two.three.four.five");
@@ -933,6 +947,7 @@ mod tests {
     // through the public parse_request_object_header function and direct
     // signature verification.
 
+    // RFC 9101 §6.2: the request object signature is verified.
     #[test]
     fn test_jar_validate_signature_es256() {
         let (enc, dec) = test_es256_keys();
@@ -959,6 +974,7 @@ mod tests {
         );
     }
 
+    // RFC 9101 §6.2: a request object that does not verify is rejected.
     #[test]
     fn test_jar_validate_wrong_signature_rejected() {
         let (enc, _dec) = test_es256_keys();
@@ -975,6 +991,7 @@ mod tests {
         assert!(result.is_err(), "Wrong signing key must be rejected");
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: the exp claim bounds the request object's lifetime.
     #[test]
     fn test_jar_validate_expired_request_object_rejected() {
         let (enc, dec) = test_es256_keys();
@@ -1001,6 +1018,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: a bounded clock skew allowance is applied.
     #[test]
     fn test_jar_validate_future_iat_within_skew_accepted() {
         let now = Timestamp::now().as_second();
@@ -1011,6 +1029,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: an issue time beyond the skew allowance is rejected.
     #[test]
     fn test_jar_validate_future_iat_beyond_skew_rejected() {
         let now = Timestamp::now().as_second();
@@ -1021,6 +1040,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: the nbf claim bounds when the request object becomes usable.
     #[test]
     fn test_jar_validate_nbf_future_rejected() {
         let now = Timestamp::now().as_second();
@@ -1035,6 +1055,7 @@ mod tests {
     // Nesting prevention tests
     // ========================================================================
 
+    // RFC 9101 §4: request and request_uri must not appear inside a request object.
     #[test]
     fn test_jar_rejects_request_claim_in_payload() {
         let (enc, dec) = test_es256_keys();
@@ -1057,6 +1078,7 @@ mod tests {
         );
     }
 
+    // RFC 9101 §4: request and request_uri must not appear inside a request object.
     #[test]
     fn test_jar_rejects_request_uri_claim_in_payload() {
         let (enc, dec) = test_es256_keys();
@@ -1083,6 +1105,7 @@ mod tests {
     // Parameter extraction tests
     // ========================================================================
 
+    // RFC 9101 §4: the request object carries every parameter needed to process the request.
     #[test]
     fn test_jar_requires_response_type_in_payload() {
         let (enc, dec) = test_es256_keys();
@@ -1106,6 +1129,7 @@ mod tests {
         );
     }
 
+    // RFC 9101 §4: the request object carries every parameter needed to process the request.
     #[test]
     fn test_jar_requires_redirect_uri_in_payload() {
         let (enc, dec) = test_es256_keys();
@@ -1132,6 +1156,8 @@ mod tests {
     // FAPI 2.0 parameter matching tests
     // ========================================================================
 
+    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
+    // query's.
     #[test]
     fn test_jar_query_response_type_mismatch_detected() {
         // Simulate: query has response_type=token but JWT has response_type=code
@@ -1140,6 +1166,8 @@ mod tests {
         assert_ne!(query_rt, jwt_rt, "Mismatch should be detectable");
     }
 
+    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
+    // query's.
     #[test]
     fn test_jar_query_scope_mismatch_detected() {
         let query_scope = "openid profile";
@@ -1150,6 +1178,7 @@ mod tests {
         );
     }
 
+    // RFC 9101 §6.3: a query that agrees with the request object is unremarkable.
     #[test]
     fn test_jar_query_params_match_accepted() {
         let query_rt = "code";
@@ -1164,6 +1193,7 @@ mod tests {
     // Error code tests
     // ========================================================================
 
+    // RFC 9101 §5: a rejected request object is reported as invalid_request_object.
     #[test]
     fn test_jar_error_code_is_invalid_request_object() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
@@ -1177,6 +1207,7 @@ mod tests {
         );
     }
 
+    // RFC 9101 §5: a rejected request object is an error response.
     #[test]
     fn test_jar_invalid_request_object_status_is_400() {
         assert_eq!(
@@ -1197,6 +1228,7 @@ mod tests {
     const TEMPORAL_NOW: i64 = 1_700_000_000;
     const TEMPORAL_SKEW: i64 = 10;
 
+    // RFC 9101 §4: temporal claims are not required by the base profile.
     #[test]
     fn test_jar_temporal_no_claims_accepted() {
         let claims = temporal_claims(serde_json::json!({}));
@@ -1206,6 +1238,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: the exp boundary is exact.
     #[test]
     fn test_jar_temporal_exp_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW}));
@@ -1224,6 +1257,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: the nbf boundary is exact.
     #[test]
     fn test_jar_temporal_nbf_future_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW}));
@@ -1240,6 +1274,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: nbf may be no more than 60 minutes in the past.
     #[test]
     fn test_jar_temporal_nbf_past_fapi_boundary() {
         let at_edge =
@@ -1261,6 +1296,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 Message Signing §5.3.1: the iat boundary is exact.
     #[test]
     fn test_jar_temporal_iat_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"iat": TEMPORAL_NOW + TEMPORAL_SKEW}));
@@ -1284,6 +1320,7 @@ mod tests {
     /// inline-JWKS clients during a transient DB outage — even though their
     /// signing keys are embedded and need no cache. The cache lookup is now
     /// skipped when `client.jwks` is present, matching `infra::httpsig`.
+    // RFC 9101 §6.2: an inline key needs no key cache to verify.
     #[tokio::test]
     async fn test_validate_request_object_inline_jwks_ignores_cache_db_error() {
         use crate::db::{self, get_oauth_client_by_id};

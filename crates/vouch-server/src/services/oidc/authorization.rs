@@ -1139,6 +1139,7 @@ mod tests {
     // Validate authorize request tests
     // =========================================================================
 
+    // OIDC Core §3.1.2.1: a conformant authentication request is accepted.
     #[test]
     fn test_validate_authorize_request_valid() {
         let params = AuthorizeRequestParams {
@@ -1166,6 +1167,7 @@ mod tests {
         assert_eq!(*validated.scope(), ScopeSet::parse("openid email"));
     }
 
+    // OIDC Core §3.1.2.1: an unsupported response_type is rejected.
     #[test]
     fn test_validate_authorize_request_invalid_response_type() {
         let params = AuthorizeRequestParams {
@@ -1191,6 +1193,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::UnsupportedResponseType);
     }
 
+    // OIDC Core §3.1.2.1: client_id is required.
     #[test]
     fn test_validate_authorize_request_missing_client_id() {
         let params = AuthorizeRequestParams {
@@ -1215,6 +1218,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // OIDC Core §3.1.2.1: scope defaults when the request omits it.
     #[test]
     fn test_validate_authorize_request_default_scope() {
         let params = AuthorizeRequestParams {
@@ -1241,6 +1245,7 @@ mod tests {
         assert_eq!(*validated.scope(), ScopeSet::parse("openid")); // Default scope
     }
 
+    // OIDC Core §3.1.2.1: PKCE parameters are not required of every client.
     #[test]
     fn test_validate_authorize_request_allows_missing_pkce() {
         // PKCE enforcement is deferred to handler after client lookup.
@@ -1270,6 +1275,7 @@ mod tests {
         assert!(validated.code_challenge_method().is_none());
     }
 
+    // RFC 9700 §2.1.1: a public client uses PKCE.
     #[test]
     fn test_require_pkce_for_public_client() {
         use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
@@ -1282,6 +1288,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
+    // RFC 8252 §8.1: a native app protects the authorization code with PKCE.
     #[test]
     fn test_require_pkce_for_native_client() {
         use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
@@ -1296,6 +1303,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9700 §2.1.1: a confidential client may rely on client authentication instead.
     #[test]
     fn test_require_pkce_not_required_for_confidential_web_client() {
         use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
@@ -1310,6 +1318,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // RFC 9700 §2.1.1: a confidential client may also use PKCE.
     #[test]
     fn test_require_pkce_confidential_with_pkce_succeeds() {
         use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
@@ -1324,6 +1333,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // RFC 7636 §4.2: S256 is used when the client can support it.
     #[test]
     fn test_validate_authorize_request_rejects_plain_pkce() {
         // RFC 9700: Only S256 is supported
@@ -1425,6 +1435,7 @@ mod tests {
     // RFC 9470 Step-Up Authentication Tests
     // =========================================================================
 
+    // RFC 9470 §4: acr_values requests an authentication strength.
     #[test]
     fn test_validate_authorize_request_with_acr_values() {
         let params = AuthorizeRequestParams {
@@ -1454,6 +1465,7 @@ mod tests {
         );
     }
 
+    // OIDC Core §3.1.2.1: max_age bounds the age of the authentication.
     #[test]
     fn test_validate_authorize_request_with_max_age() {
         let params = AuthorizeRequestParams {
@@ -1480,6 +1492,7 @@ mod tests {
         assert_eq!(validated.max_age(), Some(300));
     }
 
+    // OIDC Core §3.1.2.1: prompt=login asks for reauthentication.
     #[test]
     fn test_validate_authorize_request_with_prompt_login() {
         let params = AuthorizeRequestParams {
@@ -1506,6 +1519,7 @@ mod tests {
         assert_eq!(validated.prompt(), Some(Prompt::Login));
     }
 
+    // OIDC Core §3.1.2.1: prompt=none forbids any user interaction.
     #[test]
     fn test_validate_authorize_request_with_prompt_none() {
         let params = AuthorizeRequestParams {
@@ -1532,6 +1546,7 @@ mod tests {
         assert_eq!(validated.prompt(), Some(Prompt::Silent));
     }
 
+    // RFC 9470 §4: the acr_values parameter is bounded.
     #[test]
     fn test_validate_authorize_request_rejects_long_acr_values() {
         let params = AuthorizeRequestParams {
@@ -1556,6 +1571,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // OIDC Core §3.1.2.1: prompt is a space-delimited list of values.
     #[test]
     fn test_prompt_parse() {
         assert_eq!(Prompt::parse("login"), Some(Prompt::Login));
@@ -1568,6 +1584,7 @@ mod tests {
     /// Every value the error message advertises must actually parse. This is
     /// the invariant that broke when the message and the parser were separate
     /// literals: the message listed fewer values than the parser accepted.
+    // OIDC Core §3.1.2.1: every advertised prompt value is one the server accepts.
     #[test]
     fn every_advertised_prompt_value_parses() {
         let advertised = Prompt::supported_values();
@@ -1587,18 +1604,21 @@ mod tests {
         }
     }
 
+    // OIDC Core §3.1.2.1: prompt values are the strings the specification names.
     #[test]
     fn test_prompt_as_str() {
         assert_eq!(Prompt::Login.as_str(), "login");
         assert_eq!(Prompt::Silent.as_str(), "none");
     }
 
+    // OIDC Core §3.1.2.1: prompt values are the strings the specification names.
     #[test]
     fn test_prompt_display() {
         assert_eq!(format!("{}", Prompt::Login), "login");
         assert_eq!(format!("{}", Prompt::Silent), "none");
     }
 
+    // OIDC Core §3.1.2.1: prompt values round-trip through their wire form.
     #[test]
     fn test_prompt_serde_roundtrip() {
         let login = Prompt::Login;
@@ -1609,6 +1629,7 @@ mod tests {
         assert_eq!(deserialized, Prompt::Login);
     }
 
+    // RFC 9470 §4: acr values are space-delimited strings, not quoted ones.
     #[test]
     fn test_validate_authorize_request_rejects_acr_values_with_quotes() {
         let params = AuthorizeRequestParams {
@@ -1639,6 +1660,7 @@ mod tests {
         );
     }
 
+    // RFC 9470 §4: acr values carry no control characters.
     #[test]
     fn test_validate_authorize_request_rejects_acr_values_with_control_chars() {
         let params = AuthorizeRequestParams {
@@ -1663,6 +1685,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // OIDC Core §3.1.2.1: max_age is a number of seconds.
     #[test]
     fn test_validate_authorize_request_rejects_excessive_max_age() {
         let params = AuthorizeRequestParams {
@@ -1688,6 +1711,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
+    // OIDC Core §3.1.2.1: the max_age boundary is exact.
     #[test]
     fn test_validate_authorize_request_accepts_max_max_age() {
         // Exactly 1 year should be accepted

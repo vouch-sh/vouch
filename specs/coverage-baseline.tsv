@@ -127,11 +127,6 @@ draft-miller-ssh-agent-17#5.1.1#e5b3c511	MUST NOT	The range of message numbers 2
 draft-miller-ssh-agent-17#7#56dda116	SHOULD	While a full treatment of side-channel attacks is beyond the scope of this specification, agents SHOULD use cryptographic implementations that are resistant to 
 draft-miller-ssh-agent-17#7#8d974984	SHOULD NOT	SSH implementations SHOULD NOT forward use of an agent by default and MAY implement additional controls over key visibility and use for forwarded agent connecti
 fapi-2_0-message-signing#11#c3d22f42	MUST	OpenID invites any interested party to bring to its attention any copyrights, patents, patent applications, or other proprietary rights that may cover technolog
-fapi-2_0-message-signing#5.3.1#2427f4dc	MUST	4 shall require the request object to contain an exp claim that has a lifetime of no longer than 60 minutes after the nbf claim;
-fapi-2_0-message-signing#5.3.1#76b9111a	MUST	3 shall require the request object to contain an nbf claim that is no longer than 60 minutes in the past; and.
-fapi-2_0-message-signing#5.3.1#8a52edb3	MUST	2 shall require the aud claim in the request object to be, or to be an array containing, the authorization server's issuer identifier URL;
-fapi-2_0-message-signing#5.3.1#ba2c8ce3	MUST	5 shall accept request objects with typ header parameter with a value oauth-authz-req+jwt.
-fapi-2_0-message-signing#5.3.1#eaefd016	MUST	1 shall support, require use of, and verify signed request objects according to JAR [RFC9101] at the PAR endpoint [RFC9126];
 fapi-2_0-message-signing#5.3.2#53e126d0	MUST	3 shall send a nbf claim in the request object;
 fapi-2_0-message-signing#5.3.2#568fde4f	MUST	4 shall send an exp claim in the request object that has a lifetime of no longer than 60 minutes;
 fapi-2_0-message-signing#5.3.2#9b32af15	MUST	2 shall send the aud claim in the request object as the authorization server's issuer identifier URL;
@@ -1983,7 +1978,6 @@ rfc7521#5.2#c5998612	MUST	If an assertion is self-issued, the Issuer MUST be the
 rfc7521#5.2#f4c5190b	MUST	o The assertion MUST contain an Expires At entity that limits the time window during which the assertion can be used.
 rfc7523#3.1#1e4ab447	MUST	The value of the "error" parameter MUST be the "invalid_grant" error code.
 rfc7523#3.1#b04b6551	MUST	However, if client credentials are present in the request, the authorization server MUST validate them.
-rfc7523#3.2#4cf54ea8	MUST	The value of the "error" parameter MUST be the "invalid_client" error code.
 rfc7591#2.3#3bc26542	MUST	When presented to the authorization server as part of a client registration request, the software statement MUST be digitally signed or MACed using JSON Web Sig
 rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digitally signed using the "RS256" signature algorithm, although particular applications MAY specify the use of di
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the
@@ -2292,7 +2286,6 @@ rfc8252#6#ac861722	MUST	Public native app clients MUST implement the Proof Key f
 rfc8252#6#b548bdcc	SHOULD	This best practice focuses on the browser as the RECOMMENDED external user-agent for native apps.
 rfc8252#7.2#8f7bda08	SHOULD	For this reason, native apps SHOULD use them over the other options where possible.
 rfc8252#7.2#e91b584b	MUST	As the redirect URI alone is not enough to distinguish public native app clients from confidential web clients, it is REQUIRED in Section 8.4 that the client ty
-rfc8252#8.1#4007eb1f	SHOULD	Authorization servers SHOULD reject authorization requests from native apps that don't use PKCE by returning an error message, as defined in Section 4.4.1 of PK
 rfc8252#8.10#01a2b1ea	MUST	To protect against a compromised or malicious authorization server attacking another authorization server used by the same app, it is REQUIRED that a unique red
 rfc8252#8.10#41d1cae1	MUST	The native app MUST store the redirect URI used in the authorization request with the authorization session data (i.e., along with "state" and other related dat
 rfc8252#8.12#1dbf7504	MUST NOT	This best current practice requires that native apps MUST NOT use embedded user-agents to perform authorization requests and allows that authorization endpoints
@@ -2347,9 +2340,6 @@ rfc8705#4#895a63d1	SHOULD	When the authorization server issues a refresh token t
 rfc8705#7.4#f9ce43a1	SHOULD	To cope with that threat, the authorization server SHOULD only accept, as trust anchors, a limited number of CAs whose certificate issuance policy meets its sec
 rfc8705#7.5#48dcffa2	SHOULD	For these reasons, implementors SHOULD use an established and well- tested X.509 library (such as one used by an established TLS library) for validation of X.50
 rfc8725#2.8#9fd141eb	MUST	If the JWT could be used in an application context in which it could be confused with other kinds of JWTs, then mitigations MUST be employed to prevent these su
-rfc8725#3.1#1301488b	MUST	Libraries MUST enable the caller to specify a supported set of algorithms and MUST NOT use any other algorithms when performing cryptographic operations.
-rfc8725#3.1#1d35c112	MUST	Moreover, each key MUST be used with exactly one algorithm, and this MUST be checked when the cryptographic operation is performed.
-rfc8725#3.1#d1665736	MUST	The library MUST ensure that the "alg" or "enc" header specifies the same algorithm that is used for the cryptographic operation.
 rfc8725#3.10#d25b2fe1	SHOULD	Applications SHOULD protect against such attacks, e.g., by matching the URL to a whitelist of allowed locations and ensuring no cookies are sent in the GET requ
 rfc8725#3.3#30c6a609	MUST	All cryptographic operations used in the JWT MUST be validated and the entire JWT MUST be rejected if any of them fail to validate.
 rfc8725#3.3#322307e0	MUST	This is true not only of JWTs with a single set of Header Parameters but also for Nested JWTs in which both outer and inner operations MUST be validated using t
@@ -2361,8 +2351,6 @@ rfc8725#3.8#37e0a767	MUST	If they do not, the application MUST reject the JWT.
 rfc8725#3.8#7b4d61c0	MUST	Similarly, when the JWT contains a "sub" (subject) claim, the application MUST validate that the subject value corresponds to a valid subject and/or issuer-subj
 rfc8725#3.8#bb83f5ab	MUST	If the issuer, subject, or the pair are invalid, the application MUST reject the JWT.
 rfc8725#3.8#c398ec0f	MUST	When a JWT contains an "iss" (issuer) claim, the application MUST validate that the cryptographic keys used for the cryptographic operations in the JWT belong t
-rfc8725#3.9#343cd31a	MUST	If the same issuer can issue JWTs that are intended for use by more than one relying party or application, the JWT MUST contain an "aud" (audience) claim that c
-rfc8725#3.9#a1ea09c1	MUST	In such cases, the relying party or application MUST validate the audience value, and if the audience value is not present or not associated with the recipient,
 rfc8941#1.2#6f66f78a	MUST	When parsing from HTTP fields, implementations MUST have behavior that is indistinguishable from following the algorithms.
 rfc8941#2#678d72a1	MUST	If | its value is not a valid URI-reference, the entire header field | MUST be ignored.
 rfc8941#2#6a1542eb	MUST	If its value is a relative reference | (Section 4.2 of [RFC3986]), it MUST be resolved (Section 5 of | [RFC3986]) before being used. | | For example: | | Foo-Ex
@@ -2383,7 +2371,6 @@ rfc9068#3#de585cd8	MUST NOT	The authorization server MUST NOT issue a JWT access
 rfc9068#3#ee138bbb	SHOULD	If a "scope" parameter is present in the request, the authorization server SHOULD use it to infer the value of the default resource indicator to be used in the 
 rfc9068#5#09f3f45a	MUST	To prevent cross-JWT confusion, authorization servers MUST use a distinct identifier as an "aud" claim value to uniquely identify access tokens issued by the sa
 rfc9068#6#83465a25	MUST NOT	The client MUST NOT inspect the content of the access token: the authorization server and the resource server might decide to change the token format at any tim
-rfc9101#10.1#84734f0c	MUST	When sending the Authorization Request Object through the "request" parameter, it MUST be either signed using JWS [RFC7515] or signed and then encrypted using J
 rfc9101#10.3#d996357b	SHOULD	It is RECOMMENDED by this specification to use this practice for the following endpoints defined in [RFC6749], [RFC6750], and [RFC8414]:
 rfc9101#10.5#5a3ea057	MUST	When the value of it as server metadata is "true", then the server MUST reject the authorization request from any client that does not conform to this specifica
 rfc9101#10.5#7f4ccab7	MUST	It MUST also reject the request if the Request Object uses an "alg" value of "none".
@@ -2395,20 +2382,6 @@ rfc9101#11.1#78091e7b	MUST	The Consent screen MUST indicate the client and SHOUL
 rfc9101#11.1#e9127831	SHOULD	When the client is being granted access to a protected resource containing personal data, the client SHOULD limit the collection of personal data to that which 
 rfc9101#11.2.1#287af311	MUST	Where the Request Object URI method is being used, if the Request Object contains personally identifiable or sensitive information, the "request_uri" SHOULD be 
 rfc9101#11.2.1#e7ed6bee	SHOULD	Since URI query parameters may leak through various means but most notably through referrer and browser history, if the authorization request contains a potenti
-rfc9101#4#17005029	SHOULD	If signed, the Authorization Request Object SHOULD contain the Claims "iss" (issuer) and "aud" (audience) as members with their semantics being the same as defi
-rfc9101#4#50ec06b8	MUST	Since Request Objects are handled across domains and potentially outside of a closed ecosystem, per Section 8.1 of [RFC8259], these JSON strings MUST be encoded
-rfc9101#4#6c8350f6	MUST	Parameter names and string values MUST be included as JSON strings.
-rfc9101#4#8e93beb4	MUST	Numerical values MUST be included as JSON numbers.
-rfc9101#4#92c18e96	MUST	When both signature and encryption are being applied, the JWT MUST be signed, then encrypted, as described in Section 11.2 of [RFC7519].
-rfc9101#4#934dd9ed	MUST NOT	The Request Object MAY be sent by value, as described in Section 5.1, or by reference, as described in Section 5.2. "request" and "request_uri" parameters MUST 
-rfc9101#4#ef55a553	MUST	It MUST contain all the parameters (including extension parameters) used to process the OAuth 2.0 [RFC6749] authorization request except the "request" and "requ
-rfc9101#5#2687b18b	MUST NOT	If this parameter is present in the authorization request, "request" MUST NOT be present.
-rfc9101#5#4dd50247	MUST	request REQUIRED unless "request_uri" is specified.
-rfc9101#5#9df24554	MUST NOT	If this parameter is present in the authorization request, "request_uri" MUST NOT be present.
-rfc9101#5#c030a628	MUST	The value MUST match the "request" or "request_uri" Request Object's (Section 2.1) "client_id".
-rfc9101#5#ce4241e6	MUST	request_uri REQUIRED unless "request" is specified.
-rfc9101#5#e65da523	MUST	However, the authorization server supporting this specification MUST only use the parameters included in the Request Object.
-rfc9101#5#f5d55354	MUST	The Authorization Request Object MUST be one of the following:
 rfc9101#5.2#25e2e47d	SHOULD NOT	The entire Request URI SHOULD NOT exceed 512 ASCII characters.
 rfc9101#5.2#306a5c14	MUST	In the first case, the "request_uri" MUST be an "https" URI, as specified in Section 2.7.2 of [RFC7230].
 rfc9101#5.2#618a08e6	MUST	In the second case, it MUST be a URN, as specified in [RFC8141].
@@ -2418,17 +2391,6 @@ rfc9101#5.2#81a6de18	SHOULD NOT	The entire Request URI SHOULD NOT exceed 512 ASC
 rfc9101#5.2.1#cc99a49c	MUST	As such, the "request_uri" MUST have appropriate entropy for its lifetime so that the URI is not guessable if publicly retrievable.
 rfc9101#5.2.1#f260c8ea	SHOULD	It is RECOMMENDED that the "request_uri" be removed after a reasonable timeout unless access control measures are taken.
 rfc9101#5.2.3#7fb53b33	MUST	Upon receipt of the Request, the authorization server MUST send an HTTP "GET" request to the "request_uri" to retrieve the referenced Request Object unless the 
-rfc9101#6.1#8e601922	MUST	If decryption fails, the authorization server MUST return an "invalid_request_object" error to the client in response to the authorization request.
-rfc9101#6.1#957f3735	MUST	If the Request Object is encrypted, the authorization server MUST decrypt the JWT in accordance with the JSON Web Encryption [RFC7516] specification.
-rfc9101#6.2#93fae378	MUST	If a "kid" Header Parameter is present, the key identified MUST be the key used and MUST be a key associated with the client.
-rfc9101#6.2#9786f0ec	MUST	The authorization server MUST validate the signature of the JWS- signed [RFC7515] Request Object.
-rfc9101#6.2#c9227339	MUST	If the key is not associated with the client or if signature validation fails, the authorization server MUST return an "invalid_request_object" error to the cli
-rfc9101#6.2#d1ba1ecf	MUST	Algorithm verification MUST be performed, as specified in Sections 3.1 and 3.2 of [RFC8725].
-rfc9101#6.2#db6c6b04	MUST	The signature MUST be validated using a key associated with the client and the algorithm specified in the "alg" Header Parameter.
-rfc9101#6.3#3dbdd407	MUST	If the Client ID check or the request validation fails, then the authorization server MUST return an error to the client in response to the authorization reques
-rfc9101#6.3#5c2fdf77	MUST	The client ID values in the "client_id" request parameter and in the Request Object "client_id" claim MUST be identical.
-rfc9101#6.3#65bbb4ae	MUST	The authorization server MUST only use the parameters in the Request Object, even if the same parameter is provided in the query parameter.
-rfc9101#6.3#ff9313cc	MUST	The authorization server MUST extract the set of authorization request parameters from the Request Object value.
 rfc9101#8#214f0c9c	MUST	To protect against information disclosure and tampering, confidentiality protection MUST be applied using TLS with a cipher suite that provides confidentiality 
 rfc9101#8#63c5de1b	MUST	HTTP clients MUST also verify the TLS server certificate, using DNS- ID [RFC6125], to avoid man-in-the-middle attacks. The rules and guidelines defined in [RFC6
 rfc9101#8#671f29cc	MUST	* Support for DNS-ID identifier type (that is, the dNSName identity in the subjectAltName extension) is REQUIRED.

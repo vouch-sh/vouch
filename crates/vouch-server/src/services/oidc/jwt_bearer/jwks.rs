@@ -381,6 +381,7 @@ mod tests {
     // find_matching_key tests
     // =======================================================================
 
+    // RFC 7517 §4: kid identifies a key within a set.
     #[test]
     fn test_find_matching_key_by_kid() {
         let jwks = JwkSet {
@@ -396,6 +397,7 @@ mod tests {
         assert!(result.is_ok(), "should find key with kid=key-2");
     }
 
+    // RFC 7517 §5: a kid absent from the set resolves no key.
     #[test]
     fn test_find_matching_key_kid_not_found() {
         let jwks = JwkSet {
@@ -416,6 +418,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: kty narrows candidate keys when kid is absent.
     #[test]
     fn test_find_matching_key_algorithm_fallback_ec() {
         let jwks = JwkSet {
@@ -428,6 +431,7 @@ mod tests {
         assert!(result.is_ok(), "should match EC key by algorithm fallback");
     }
 
+    // RFC 7517 §4: kty narrows candidate keys when kid is absent.
     #[test]
     fn test_find_matching_key_algorithm_fallback_rsa() {
         let jwks = JwkSet {
@@ -439,6 +443,7 @@ mod tests {
         assert!(result.is_ok(), "should match RSA key by algorithm fallback");
     }
 
+    // RFC 7517 §4: a key whose use is enc is not a signature verification key.
     #[test]
     fn test_find_matching_key_skips_enc_use() {
         // Key has use="enc" (encryption), should be skipped for signing
@@ -457,6 +462,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: a key whose use is sig verifies signatures.
     #[test]
     fn test_find_matching_key_allows_sig_use() {
         // Key with use="sig" should be accepted
@@ -469,6 +475,7 @@ mod tests {
         assert!(result.is_ok(), "should accept key with use=sig");
     }
 
+    // RFC 7517 §4: alg restricts the key to one algorithm.
     #[test]
     fn test_find_matching_key_skips_wrong_alg_field() {
         // Key has alg="ES384" but header wants ES256 — should skip
@@ -487,6 +494,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: a key whose alg matches is used.
     #[test]
     fn test_find_matching_key_accepts_matching_alg_field() {
         // Key with alg="ES256" matching header alg should be accepted
@@ -499,6 +507,7 @@ mod tests {
         assert!(result.is_ok(), "should accept key with matching alg");
     }
 
+    // RFC 7517 §4: an algorithm with no implementation resolves no key.
     #[test]
     fn test_find_matching_key_unsupported_algorithm() {
         // No kid in header, unsupported algorithm should error
@@ -517,6 +526,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §5: an empty key set resolves no key.
     #[test]
     fn test_find_matching_key_empty_jwks() {
         let jwks = JwkSet { keys: vec![] };
@@ -526,6 +536,7 @@ mod tests {
         assert!(result.is_err(), "empty JWKS should produce error");
     }
 
+    // RFC 7517 §4: kid is the primary selector.
     #[test]
     fn test_find_matching_key_kid_match_ignores_kty() {
         // When kid matches, the function uses that key regardless of kty filtering.
@@ -545,6 +556,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: use still disqualifies a kid-matched key.
     #[test]
     fn test_find_matching_key_kid_match_skips_enc_use() {
         // A key with use="enc" must not be selected for signature verification,
@@ -565,6 +577,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: alg still disqualifies a kid-matched key.
     #[test]
     fn test_find_matching_key_kid_match_skips_wrong_alg_field() {
         // A key whose declared alg differs from the header alg must not be selected,
@@ -585,6 +598,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: use and alg are optional.
     #[test]
     fn test_find_matching_key_kid_match_allows_absent_use_and_alg() {
         // A key with no use and no alg fields (both absent) should be accepted
@@ -602,6 +616,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: kid takes precedence over a type match.
     #[test]
     fn test_find_matching_key_prefers_kid_over_kty() {
         // Two keys: EC key-1 and EC key-2. Header has kid=key-2.
@@ -622,6 +637,7 @@ mod tests {
     // build_decoding_key_from_jwk tests
     // =======================================================================
 
+    // RFC 7517 §4: an EC key is built from its crv, x and y parameters.
     #[test]
     fn test_build_decoding_key_ec_valid() {
         let key = ec_jwk_entry(None, None, None);
@@ -629,6 +645,7 @@ mod tests {
         assert!(result.is_ok(), "should build valid EC decoding key");
     }
 
+    // RFC 7517 §4: an EC key without x is incomplete.
     #[test]
     fn test_build_decoding_key_ec_missing_x() {
         let mut key = ec_jwk_entry(None, None, None);
@@ -644,6 +661,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an EC key without y is incomplete.
     #[test]
     fn test_build_decoding_key_ec_missing_y() {
         let mut key = ec_jwk_entry(None, None, None);
@@ -659,6 +677,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: EC parameters are base64url encoded.
     #[test]
     fn test_build_decoding_key_ec_invalid_components() {
         let mut key = ec_jwk_entry(None, None, None);
@@ -674,6 +693,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an RSA key is built from its n and e parameters.
     #[test]
     fn test_build_decoding_key_rsa_valid() {
         let key = rsa_jwk_entry(None, None, None);
@@ -681,6 +701,7 @@ mod tests {
         assert!(result.is_ok(), "should build valid RSA decoding key");
     }
 
+    // RFC 7517 §4: an RSA key without n is incomplete.
     #[test]
     fn test_build_decoding_key_rsa_missing_n() {
         let mut key = rsa_jwk_entry(None, None, None);
@@ -696,6 +717,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an RSA key without e is incomplete.
     #[test]
     fn test_build_decoding_key_rsa_missing_e() {
         let mut key = rsa_jwk_entry(None, None, None);
@@ -711,6 +733,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: RSA parameters are base64url encoded.
     #[test]
     fn test_build_decoding_key_rsa_invalid_components() {
         let mut key = rsa_jwk_entry(None, None, None);
@@ -726,6 +749,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: kty and alg must agree.
     #[test]
     fn test_build_decoding_key_unsupported_kty_alg_combination() {
         // EC key with RS256 algorithm — unsupported combination
@@ -740,6 +764,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: kty and alg must agree.
     #[test]
     fn test_build_decoding_key_rsa_key_with_ec_alg() {
         // RSA key with ES256 algorithm — unsupported combination
@@ -748,6 +773,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 7517 §4: an unrecognized alg builds no key.
     #[test]
     fn test_build_decoding_key_unknown_algorithm() {
         let key = ec_jwk_entry(None, None, None);
@@ -759,6 +785,7 @@ mod tests {
     // PS256 support (RFC 9101 / FAPI 2.0)
     // ====================================================================
 
+    // RFC 7517 §4: kty narrows candidate keys when kid is absent.
     #[test]
     fn test_find_matching_key_algorithm_fallback_ps256() {
         let jwks = JwkSet {
@@ -773,6 +800,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an RSA key serves PS256 as well as RS256.
     #[test]
     fn test_build_decoding_key_rsa_ps256_valid() {
         let key = rsa_jwk_entry(None, None, None);
@@ -787,6 +815,7 @@ mod tests {
     // EdDSA / OKP support
     // ====================================================================
 
+    // RFC 7517 §4: kty narrows candidate keys when kid is absent.
     #[test]
     fn test_find_matching_key_algorithm_fallback_eddsa() {
         let jwks = JwkSet {
@@ -801,6 +830,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an OKP key is built from its crv and x parameters.
     #[test]
     fn test_build_decoding_key_okp_eddsa_valid() {
         let key = okp_jwk_entry(None, None, None);
@@ -811,6 +841,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an OKP key without x is incomplete.
     #[test]
     fn test_build_decoding_key_okp_missing_x() {
         let mut key = okp_jwk_entry(None, None, None);
@@ -826,6 +857,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: an OKP key without crv is incomplete.
     #[test]
     fn test_build_decoding_key_okp_missing_crv() {
         let mut key = okp_jwk_entry(None, None, None);
@@ -841,6 +873,7 @@ mod tests {
         );
     }
 
+    // RFC 7517 §4: crv must name the curve the algorithm uses.
     #[test]
     fn test_build_decoding_key_okp_wrong_curve() {
         let mut key = okp_jwk_entry(None, None, None);
