@@ -35,30 +35,35 @@ fn validate_redirect_uri_for_native(uri: &str) -> Result<(), crate::error::Servi
 // Redirect URI Validation Tests
 // =========================================================================
 
+// RFC 7591 §2: redirect_uris are registered as absolute URIs.
 #[test]
 fn test_accepts_https_redirect_uri() {
     let result = validate_redirect_uri_for_native("https://example.com/callback");
     assert!(result.is_ok());
 }
 
+// RFC 8252 §7.3: a native app may redirect to a loopback address over http.
 #[test]
 fn test_accepts_http_localhost_redirect_uri() {
     let result = validate_redirect_uri_for_native("http://127.0.0.1:8080/callback");
     assert!(result.is_ok());
 }
 
+// RFC 8252 §7.3: the loopback exemption covers the localhost name.
 #[test]
 fn test_accepts_http_localhost_hostname() {
     let result = validate_redirect_uri_for_native("http://localhost:8080/callback");
     assert!(result.is_ok());
 }
 
+// RFC 8252 §7.1: a native app may use a private-use URI scheme.
 #[test]
 fn test_accepts_custom_scheme_redirect_uri() {
     let result = validate_redirect_uri_for_native("myapp://auth");
     assert!(result.is_ok());
 }
 
+// RFC 8252 §7.3: http is permitted for loopback only, never for a remote host.
 #[test]
 fn test_rejects_http_non_loopback() {
     let result = validate_redirect_uri_for_native("http://example.com/callback");
@@ -66,6 +71,7 @@ fn test_rejects_http_non_loopback() {
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
 
+// RFC 6749 §3.1.2: a redirection endpoint URI must not include a fragment.
 #[test]
 fn test_rejects_redirect_uri_with_fragment() {
     let result = validate_redirect_uri_for_native("https://example.com/callback#anchor");
@@ -73,6 +79,7 @@ fn test_rejects_redirect_uri_with_fragment() {
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
 
+// RFC 6749 §3.1.2: the redirection endpoint must be an absolute URI.
 #[test]
 fn test_rejects_invalid_redirect_uri() {
     let result = validate_redirect_uri_for_native("not a valid uri !!!");
@@ -85,6 +92,7 @@ fn test_rejects_invalid_redirect_uri() {
 // =========================================================================
 
 /// RFC 8252 Section 7.3: IPv6 loopback [::1] must be accepted over HTTP.
+// RFC 8252 §7.3: the loopback exemption covers the IPv6 loopback.
 #[test]
 fn test_accepts_http_ipv6_loopback_redirect_uri() {
     let result = validate_redirect_uri_for_native("http://[::1]:7777/callback");
@@ -95,6 +103,7 @@ fn test_accepts_http_ipv6_loopback_redirect_uri() {
 }
 
 /// HTTP redirect URIs with a path component at loopback must be accepted.
+// RFC 8252 §7.3: a loopback redirect may carry a path.
 #[test]
 fn test_accepts_http_loopback_with_path() {
     let result = validate_redirect_uri_for_native("http://127.0.0.1/callback/deep/path");
@@ -102,6 +111,7 @@ fn test_accepts_http_loopback_with_path() {
 }
 
 /// HTTPS URIs with query strings must be accepted (query is not a fragment).
+// RFC 6749 §3.1.2: a redirection URI may include a query component.
 #[test]
 fn test_accepts_https_redirect_uri_with_query() {
     let result = validate_redirect_uri_for_native("https://example.com/cb?foo=bar");
@@ -109,6 +119,7 @@ fn test_accepts_https_redirect_uri_with_query() {
 }
 
 /// The fragment check is string-based and must catch '#' before URL parsing.
+// RFC 6749 §3.1.2: a fragment is rejected however the URI is spelled.
 #[test]
 fn test_rejects_redirect_uri_with_fragment_before_parse() {
     // A URI that would otherwise be valid https but contains '#'
@@ -122,6 +133,7 @@ fn test_rejects_redirect_uri_with_fragment_before_parse() {
 }
 
 /// HTTP to a non-loopback private IP (e.g., 192.168.x.x) must be rejected.
+// RFC 8252 §7.3: a private address is not a loopback address.
 #[test]
 fn test_rejects_http_private_ip_redirect_uri() {
     let result = validate_redirect_uri_for_native("http://192.168.1.1/callback");
@@ -130,6 +142,7 @@ fn test_rejects_http_private_ip_redirect_uri() {
 }
 
 /// An empty string is not a valid redirect URI.
+// RFC 7591 §2: an empty string is not a redirect URI.
 #[test]
 fn test_rejects_empty_redirect_uri() {
     let result = validate_redirect_uri_for_native("");
@@ -141,12 +154,14 @@ fn test_rejects_empty_redirect_uri() {
 // HTTPS URI Validation Tests
 // =========================================================================
 
+// RFC 7591 §2.2: informational client URIs are registered as https URLs.
 #[test]
 fn test_accepts_https_uri() {
     let result = validate_https_uri("client_uri", Some("https://example.com"));
     assert!(result.is_ok());
 }
 
+// RFC 7591 §2.2: an http informational URI is rejected.
 #[test]
 fn test_rejects_http_uri() {
     let result = validate_https_uri("client_uri", Some("http://example.com"));
@@ -154,12 +169,14 @@ fn test_rejects_http_uri() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.2: the informational URIs are optional.
 #[test]
 fn test_accepts_none_uri() {
     let result = validate_https_uri("client_uri", None);
     assert!(result.is_ok());
 }
 
+// RFC 7591 §2.2: an informational URI must parse as a URL.
 #[test]
 fn test_rejects_invalid_uri() {
     let result = validate_https_uri("client_uri", Some("not a url"));
@@ -172,6 +189,7 @@ fn test_rejects_invalid_uri() {
 // =========================================================================
 
 /// The error message must include the field name for debuggability.
+// RFC 7591 §3.2.2: the error names the metadata field at fault.
 #[test]
 fn test_https_uri_error_includes_field_name() {
     let err = validate_https_uri("logo_uri", Some("http://example.com/logo.png")).unwrap_err();
@@ -181,6 +199,7 @@ fn test_https_uri_error_includes_field_name() {
 }
 
 /// Custom (non-http/https) schemes must be rejected for URI fields.
+// RFC 7591 §2.2: a private-use scheme is not a web page URL.
 #[test]
 fn test_https_uri_rejects_custom_scheme() {
     let result = validate_https_uri("tos_uri", Some("ftp://example.com/tos"));
@@ -189,6 +208,7 @@ fn test_https_uri_rejects_custom_scheme() {
 }
 
 /// An empty string for a URI field must be rejected (invalid URL).
+// RFC 7591 §2.2: an empty string is not a URL.
 #[test]
 fn test_https_uri_rejects_empty_string() {
     let result = validate_https_uri("policy_uri", Some(""));
@@ -199,6 +219,7 @@ fn test_https_uri_rejects_empty_string() {
 // Registration Metadata Tests
 // =========================================================================
 
+// RFC 7591 §3.2.1: registered metadata is echoed in the client information response.
 #[test]
 fn test_build_metadata_includes_all_fields() {
     let request = RegistrationRequest {
@@ -239,6 +260,7 @@ fn test_build_metadata_includes_all_fields() {
     assert_eq!(contacts[0], "admin@example.com");
 }
 
+// RFC 7591 §3.2.1: a minimal registration yields a minimal response.
 #[test]
 fn test_build_metadata_empty_request() {
     let request = RegistrationRequest {
@@ -277,6 +299,7 @@ fn test_build_metadata_empty_request() {
 // =========================================================================
 
 /// `client_name` is NOT stored in the metadata blob (it has its own column).
+// RFC 7591 §3.2.1: metadata the client did not send is not invented.
 #[test]
 fn test_build_metadata_excludes_client_name() {
     let request = RegistrationRequest {
@@ -309,6 +332,7 @@ fn test_build_metadata_excludes_client_name() {
 }
 
 /// Multiple contacts must all appear in the metadata array.
+// RFC 7591 §2: contacts is an array of addresses.
 #[test]
 fn test_build_metadata_multiple_contacts() {
     let request = RegistrationRequest {
@@ -346,6 +370,7 @@ fn test_build_metadata_multiple_contacts() {
 }
 
 /// Partial metadata — only scope present — produces a single-key object.
+// RFC 7591 §2: scope is a space-separated string of scope values.
 #[test]
 fn test_build_metadata_scope_only() {
     let request = RegistrationRequest {
@@ -379,6 +404,7 @@ fn test_build_metadata_scope_only() {
 // Request Deserialization Tests
 // =========================================================================
 
+// RFC 7591 §3.1: the registration request body is a JSON client metadata document.
 #[test]
 fn test_request_deserialize_minimal() {
     let json = "{}";
@@ -390,6 +416,7 @@ fn test_request_deserialize_minimal() {
     assert!(req.client_name.is_none());
 }
 
+// RFC 7591 §2: metadata the server does not understand is ignored.
 #[test]
 fn test_request_deserialize_with_unknown_fields() {
     // RFC 7591 Section 2: "The authorization server MUST ignore any metadata it does not
@@ -415,6 +442,7 @@ fn test_request_deserialize_with_unknown_fields() {
     assert_eq!(req.client_name, Some("My App".to_string()));
 }
 
+// RFC 7591 §3.1: every supported metadata field parses.
 #[test]
 fn test_request_deserialize_full() {
     let json = r#"{
@@ -489,6 +517,7 @@ fn test_request_deserialize_full() {
 // =========================================================================
 
 /// `dpop_bound_access_tokens: true` must deserialize correctly.
+// RFC 7591 §3.1: DPoP binding is requested through client metadata.
 #[test]
 fn test_request_deserialize_dpop_true() {
     let json = r#"{"dpop_bound_access_tokens": true}"#;
@@ -497,6 +526,7 @@ fn test_request_deserialize_dpop_true() {
 }
 
 /// Inline JWKS must deserialize as a JSON object.
+// RFC 7591 §2: a client may register its keys inline as jwks.
 #[test]
 fn test_request_deserialize_jwks_inline() {
     let json = r#"{
@@ -514,6 +544,7 @@ fn test_request_deserialize_jwks_inline() {
 }
 
 /// `jwks_uri` must deserialize as a plain string.
+// RFC 7591 §2: a client may register its keys by reference as jwks_uri.
 #[test]
 fn test_request_deserialize_jwks_uri() {
     let json = r#"{"jwks_uri": "https://example.com/.well-known/jwks.json"}"#;
@@ -526,6 +557,7 @@ fn test_request_deserialize_jwks_uri() {
 }
 
 /// An empty contacts array is a valid (though unusual) value.
+// RFC 7591 §2: an empty contacts array is accepted.
 #[test]
 fn test_request_deserialize_empty_contacts() {
     let json = r#"{"contacts": []}"#;
@@ -539,6 +571,7 @@ fn test_request_deserialize_empty_contacts() {
 
 /// Optional fields marked `skip_serializing_if = "Option::is_none"` must be
 /// absent from the JSON when `None`, not serialized as `null`.
+// RFC 7591 §3.2.1: absent metadata is omitted rather than sent as null.
 #[test]
 fn test_response_serialization_omits_none_fields() {
     let response = RegistrationResponse {
@@ -608,6 +641,7 @@ fn test_response_serialization_omits_none_fields() {
 
 /// When `client_secret` is present, `client_secret_expires_at` must also be present
 /// (RFC 7591 Section 3.2.1 requires it when a secret is issued).
+// RFC 7591 §3.2.1: client_secret and registration_access_token are returned when issued.
 #[test]
 fn test_response_serialization_includes_secret_fields_when_present() {
     let response = RegistrationResponse {
@@ -655,6 +689,7 @@ fn test_response_serialization_includes_secret_fields_when_present() {
 // Constants Tests
 // =========================================================================
 
+// RFC 7591 §2.1: grant_types and response_types must be consistent.
 #[test]
 fn test_allowed_grant_types_includes_expected() {
     let allowed = allowed_grant_types();
@@ -681,6 +716,7 @@ fn test_allowed_grant_types_includes_expected() {
 /// guaranteed by construction (`allowed_grant_types` is the union); this
 /// guards the other direction — if a delta entry ever becomes
 /// dispatchable, it must be removed from the delta.
+// RFC 7591 §2.1: a registrable grant type is not automatically a dispatchable one.
 #[test]
 fn registration_only_grants_are_not_dispatchable() {
     for grant in REGISTRATION_ONLY_GRANT_TYPES {
@@ -694,6 +730,7 @@ fn registration_only_grants_are_not_dispatchable() {
     }
 }
 
+// RFC 7591 §2.1: response_type code pairs with the authorization_code grant.
 #[test]
 fn test_allowed_response_types_includes_code() {
     assert!(
@@ -707,6 +744,7 @@ fn test_allowed_response_types_includes_code() {
 // =========================================================================
 
 /// `implicit` must NOT be in the allowed grant types list.
+// FAPI 2.0 §5.3.2.1: authorization servers reject the implicit grant.
 #[test]
 fn test_implicit_grant_not_allowed() {
     assert!(
@@ -716,6 +754,7 @@ fn test_implicit_grant_not_allowed() {
 }
 
 /// `token` response type must NOT be in the allowed set.
+// FAPI 2.0 §5.3.2.2: response_type is restricted to code.
 #[test]
 fn test_token_response_type_not_allowed() {
     assert!(
@@ -725,6 +764,7 @@ fn test_token_response_type_not_allowed() {
 }
 
 /// `id_token` response type must NOT be in the allowed set.
+// FAPI 2.0 §5.3.2.2: response_type is restricted to code.
 #[test]
 fn test_id_token_response_type_not_allowed() {
     assert!(
@@ -734,6 +774,7 @@ fn test_id_token_response_type_not_allowed() {
 }
 
 /// MAX_REDIRECT_URIS must be a positive non-trivial limit.
+// RFC 7591 §5: registration input is bounded.
 #[test]
 fn test_max_redirect_uris_is_reasonable() {
     const {
@@ -743,6 +784,7 @@ fn test_max_redirect_uris_is_reasonable() {
 }
 
 /// MAX_CONTACTS must be a positive non-trivial limit.
+// RFC 7591 §5: registration input is bounded.
 #[test]
 fn test_max_contacts_is_reasonable() {
     const {
@@ -755,6 +797,7 @@ fn test_max_contacts_is_reasonable() {
 // =========================================================================
 
 /// Token must start with the "vouch_reg_" prefix.
+// RFC 7592 §2: the registration access token authenticates configuration requests.
 #[test]
 fn test_generate_registration_token_has_prefix() {
     let token = generate_registration_token().unwrap();
@@ -765,6 +808,7 @@ fn test_generate_registration_token_has_prefix() {
 }
 
 /// Tokens must be sufficiently long for security (prefix + 32 bytes base64url ≈ 53 chars).
+// RFC 7592 §2: the registration access token carries sufficient entropy.
 #[test]
 fn test_generate_registration_token_length() {
     let token = generate_registration_token().unwrap();
@@ -777,6 +821,7 @@ fn test_generate_registration_token_length() {
 }
 
 /// Two generated tokens must not be identical (random generation).
+// RFC 7592 §2: each client gets a distinct registration access token.
 #[test]
 fn test_generate_registration_token_is_unique() {
     let t1 = generate_registration_token().unwrap();
@@ -785,6 +830,7 @@ fn test_generate_registration_token_is_unique() {
 }
 
 /// Token suffix must be valid base64url (no '+', '/', '=' padding).
+// RFC 7592 §2: the registration access token is a bearer credential string.
 #[test]
 fn test_generate_registration_token_suffix_is_base64url() {
     let token = generate_registration_token().unwrap();
@@ -848,6 +894,7 @@ fn make_request_with_grant_response(
     }
 }
 
+// RFC 7591 §2.1: omitted grant_types and response_types take their defaults.
 #[test]
 fn test_validate_grant_and_response_types_defaults() {
     let mut req = make_request_with_grant_response(None, None);
@@ -863,6 +910,7 @@ fn test_validate_grant_and_response_types_defaults() {
     assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Present);
 }
 
+// FAPI 2.0 §5.3.2.1: authorization servers reject the implicit grant.
 #[test]
 fn test_validate_grant_and_response_types_implicit_grant_rejected() {
     let mut req = make_request_with_grant_response(Some(vec!["implicit"]), None);
@@ -870,6 +918,7 @@ fn test_validate_grant_and_response_types_implicit_grant_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// FAPI 2.0 §5.3.2.2: response_type is restricted to code.
 #[test]
 fn test_validate_grant_and_response_types_implicit_response_token_rejected() {
     let mut req = make_request_with_grant_response(None, Some(vec!["token"]));
@@ -877,6 +926,7 @@ fn test_validate_grant_and_response_types_implicit_response_token_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// FAPI 2.0 §5.3.2.2: response_type is restricted to code.
 #[test]
 fn test_validate_grant_and_response_types_implicit_response_id_token_rejected() {
     let mut req = make_request_with_grant_response(None, Some(vec!["id_token"]));
@@ -884,6 +934,7 @@ fn test_validate_grant_and_response_types_implicit_response_id_token_rejected() 
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.1: an unregistered grant type is rejected.
 #[test]
 fn test_validate_grant_and_response_types_unknown_grant_rejected() {
     let mut req = make_request_with_grant_response(Some(vec!["magic_grant"]), None);
@@ -896,6 +947,7 @@ fn test_validate_grant_and_response_types_unknown_grant_rejected() {
     );
 }
 
+// RFC 7591 §2.1: an unregistered response type is rejected.
 #[test]
 fn test_validate_grant_and_response_types_unknown_response_type_rejected() {
     let mut req = make_request_with_grant_response(None, Some(vec!["magic_response"]));
@@ -908,6 +960,7 @@ fn test_validate_grant_and_response_types_unknown_response_type_rejected() {
     );
 }
 
+// RFC 7591 §2.1: the authorization_code grant requires the code response type.
 #[test]
 fn test_validate_grant_and_response_types_auth_code_without_code_response() {
     // authorization_code grant requires "code" response type.
@@ -943,6 +996,7 @@ fn test_validate_grant_and_response_types_auth_code_without_code_response() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.1: client_credentials registers with no response type.
 #[test]
 fn test_validate_grant_and_response_types_client_credentials_valid() {
     let mut req =
@@ -957,6 +1011,7 @@ fn test_validate_grant_and_response_types_client_credentials_valid() {
     );
 }
 
+// RFC 7591 §2: token_endpoint_auth_method is client metadata.
 #[test]
 fn test_validate_grant_and_response_types_auth_method_extracted() {
     let mut req = make_request_with_grant_response(None, None);
@@ -992,6 +1047,7 @@ fn make_request_with_redirect_uris(uris: Option<Vec<&str>>) -> RegistrationReque
     }
 }
 
+// RFC 7591 §2.1: a client using the authorization_code grant must register a redirect URI.
 #[test]
 fn test_validate_redirect_uris_required_for_auth_code_empty() {
     let mut req = make_request_with_redirect_uris(None);
@@ -1003,6 +1059,7 @@ fn test_validate_redirect_uris_required_for_auth_code_empty() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.1: a client with no redirect-based grant need not register one.
 #[test]
 fn test_validate_redirect_uris_not_required_without_auth_code() {
     let mut req = make_request_with_redirect_uris(None);
@@ -1015,6 +1072,7 @@ fn test_validate_redirect_uris_not_required_without_auth_code() {
     assert!(uris.is_empty());
 }
 
+// RFC 7591 §5: the number of registered redirect URIs is bounded.
 #[test]
 fn test_validate_redirect_uris_too_many() {
     let many: Vec<&str> = (0..=MAX_REDIRECT_URIS)
@@ -1029,6 +1087,7 @@ fn test_validate_redirect_uris_too_many() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2: valid redirect_uris are stored as registered.
 #[test]
 fn test_validate_redirect_uris_valid_uris_pass_through() {
     let mut req = make_request_with_redirect_uris(Some(vec![
@@ -1044,6 +1103,7 @@ fn test_validate_redirect_uris_valid_uris_pass_through() {
     assert_eq!(uris.len(), 2);
 }
 
+// RFC 6749 §3.1.2: an invalid redirection URI is rejected at registration.
 #[test]
 fn test_validate_redirect_uris_invalid_uri_rejected() {
     let mut req = make_request_with_redirect_uris(Some(vec!["not a uri !!"]));
@@ -1085,6 +1145,7 @@ fn make_request_with_jwks(
     }
 }
 
+// RFC 7591 §2: jwks and jwks_uri must not both be present.
 #[test]
 fn test_validate_jwks_and_auth_method_mutual_exclusivity() {
     let jwks = serde_json::json!({"keys": [{"kty": "EC"}]});
@@ -1098,6 +1159,7 @@ fn test_validate_jwks_and_auth_method_mutual_exclusivity() {
     );
 }
 
+// RFC 7517 §5: a JWK Set contains a keys array.
 #[test]
 fn test_validate_jwks_and_auth_method_empty_keys_rejected() {
     let jwks = serde_json::json!({"keys": []});
@@ -1106,6 +1168,7 @@ fn test_validate_jwks_and_auth_method_empty_keys_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2: jwks_uri is an https URL.
 #[test]
 fn test_validate_jwks_and_auth_method_jwks_uri_not_https() {
     let mut req = make_request_with_jwks(None, Some("http://example.com/jwks"));
@@ -1118,6 +1181,7 @@ fn test_validate_jwks_and_auth_method_jwks_uri_not_https() {
     );
 }
 
+// RFC 7523 §2.2: private_key_jwt requires a registered public key.
 #[test]
 fn test_validate_jwks_and_auth_method_private_key_jwt_without_jwks() {
     let mut req = make_request_with_jwks(None, None);
@@ -1125,6 +1189,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_without_jwks() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7523 §2.2: the key may be registered by reference.
 #[test]
 fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
     let mut req = make_request_with_jwks(None, Some("https://example.com/jwks.json"));
@@ -1142,6 +1207,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
     );
 }
 
+// RFC 7523 §2.2: the key may be registered inline.
 #[test]
 fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
     let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256"}]});
@@ -1158,6 +1224,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
     ));
 }
 
+// RFC 7591 §2: token_endpoint_auth_method none registers a public client.
 #[test]
 fn test_validate_jwks_and_auth_method_none_auth_method() {
     let mut req = make_request_with_jwks(None, None);
@@ -1166,6 +1233,7 @@ fn test_validate_jwks_and_auth_method_none_auth_method() {
     assert_eq!(validated.auth_method, TokenEndpointAuthMethod::None);
 }
 
+// RFC 7591 §2: an unregistered authentication method is rejected.
 #[test]
 fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
     let mut req = make_request_with_jwks(None, None);
@@ -1178,6 +1246,7 @@ fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
 // =========================================================================
 
 /// tls_client_auth with a subject_dn identity field is accepted.
+// RFC 8705 §2.1.2: tls_client_auth is registered with exactly one subject identifier.
 #[test]
 fn test_validate_tls_client_auth_accepted() {
     let mut req = RegistrationRequest {
@@ -1193,6 +1262,7 @@ fn test_validate_tls_client_auth_accepted() {
 }
 
 /// tls_client_auth without any identity field must be rejected with invalid_client_metadata.
+// RFC 8705 §2.1.2: tls_client_auth without a subject identifier is incomplete.
 #[test]
 fn test_validate_tls_client_auth_requires_identity_field() {
     let mut req = RegistrationRequest {
@@ -1204,6 +1274,7 @@ fn test_validate_tls_client_auth_requires_identity_field() {
 }
 
 /// tls_client_auth with san_dns identity field is accepted.
+// RFC 8705 §2.1.2: tls_client_auth_san_dns identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_dns_accepted() {
     let mut req = RegistrationRequest {
@@ -1218,6 +1289,7 @@ fn test_validate_tls_client_auth_with_san_dns_accepted() {
 }
 
 /// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.1).
+// RFC 8705 §2.1.2: tls_client_auth_san_email identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_email() {
     let mut req = RegistrationRequest {
@@ -1233,6 +1305,7 @@ fn test_validate_tls_client_auth_with_san_email() {
 }
 
 /// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.1).
+// RFC 8705 §2.1.2: tls_client_auth_san_uri identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_uri() {
     let mut req = RegistrationRequest {
@@ -1248,6 +1321,7 @@ fn test_validate_tls_client_auth_with_san_uri() {
 }
 
 /// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.1).
+// RFC 8705 §2.1.2: tls_client_auth_san_ip identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_ip() {
     let mut req = RegistrationRequest {
@@ -1265,6 +1339,7 @@ fn test_validate_tls_client_auth_with_san_ip() {
 /// self_signed_tls_client_auth does not require identity fields — accepted without them.
 /// It does require a jwks or jwks_uri (its certificate carrier, RFC 8705
 /// §2.2.2), supplied here so this test isolates the identity-fields concern.
+// RFC 8705 §2.2: self_signed_tls_client_auth binds to the registered keys, not a subject name.
 #[test]
 fn test_validate_self_signed_tls_client_auth_accepted_without_identity() {
     let mut req = make_request_with_jwks(None, Some("https://example.com/jwks.json"));
@@ -1309,6 +1384,7 @@ fn make_request_with_uris(
     }
 }
 
+// RFC 7591 §2.2: the informational metadata fields are optional.
 #[test]
 fn test_validate_contacts_and_uris_all_none_valid() {
     let req = make_request_with_uris(None, None, None, None, None);
@@ -1316,6 +1392,7 @@ fn test_validate_contacts_and_uris_all_none_valid() {
     assert!(result.is_ok());
 }
 
+// RFC 7591 §2.2: https informational URIs are accepted.
 #[test]
 fn test_validate_contacts_and_uris_all_https_valid() {
     let req = make_request_with_uris(
@@ -1329,6 +1406,7 @@ fn test_validate_contacts_and_uris_all_https_valid() {
     assert!(result.is_ok());
 }
 
+// RFC 7591 §2.2: client_uri must be https.
 #[test]
 fn test_validate_contacts_and_uris_http_client_uri_rejected() {
     let req = make_request_with_uris(Some("http://example.com"), None, None, None, None);
@@ -1336,6 +1414,7 @@ fn test_validate_contacts_and_uris_http_client_uri_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.2: logo_uri must be https.
 #[test]
 fn test_validate_contacts_and_uris_http_logo_uri_rejected() {
     let req = make_request_with_uris(None, Some("http://example.com/logo.png"), None, None, None);
@@ -1343,6 +1422,7 @@ fn test_validate_contacts_and_uris_http_logo_uri_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.2: tos_uri must be https.
 #[test]
 fn test_validate_contacts_and_uris_http_tos_uri_rejected() {
     let req = make_request_with_uris(None, None, Some("http://example.com/tos"), None, None);
@@ -1350,6 +1430,7 @@ fn test_validate_contacts_and_uris_http_tos_uri_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2.2: policy_uri must be https.
 #[test]
 fn test_validate_contacts_and_uris_http_policy_uri_rejected() {
     let req = make_request_with_uris(None, None, None, Some("http://example.com/privacy"), None);
@@ -1357,6 +1438,7 @@ fn test_validate_contacts_and_uris_http_policy_uri_rejected() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §5: the number of registered contacts is bounded.
 #[test]
 fn test_validate_contacts_and_uris_too_many_contacts() {
     let contacts: Vec<&str> = (0..=MAX_CONTACTS).map(|_| "user@example.com").collect();
@@ -1365,6 +1447,7 @@ fn test_validate_contacts_and_uris_too_many_contacts() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+// RFC 7591 §2: contacts holds mailbox addresses.
 #[test]
 fn test_validate_contacts_and_uris_invalid_email_format() {
     let req = make_request_with_uris(None, None, None, None, Some(vec!["notanemail"]));
@@ -1488,6 +1571,7 @@ fn assert_rs256_fapi_error(result: Result<(), ServiceError>, field: &str) {
     );
 }
 
+// FAPI 2.0 §5.4.1: JWTs use PS256, ES256 or EdDSA.
 #[test]
 fn test_reject_rs256_for_fapi_rejects_jarm() {
     let result = reject_rs256_for_fapi(
@@ -1498,6 +1582,7 @@ fn test_reject_rs256_for_fapi_rejects_jarm() {
     assert_rs256_fapi_error(result, "authorization_signed_response_alg");
 }
 
+// FAPI 2.0 §5.4.1: JWTs use PS256, ES256 or EdDSA.
 #[test]
 fn test_reject_rs256_for_fapi_rejects_userinfo() {
     let result = reject_rs256_for_fapi(
@@ -1508,6 +1593,7 @@ fn test_reject_rs256_for_fapi_rejects_userinfo() {
     assert_rs256_fapi_error(result, "userinfo_signed_response_alg");
 }
 
+// FAPI 2.0 §5.4.1: JWTs use PS256, ES256 or EdDSA.
 #[test]
 fn test_reject_rs256_for_fapi_rejects_id_token() {
     let result = reject_rs256_for_fapi(
@@ -1518,6 +1604,7 @@ fn test_reject_rs256_for_fapi_rejects_id_token() {
     assert_rs256_fapi_error(result, "id_token_signed_response_alg");
 }
 
+// FAPI 2.0 §5.4.1: JWTs use PS256, ES256 or EdDSA.
 #[test]
 fn test_reject_rs256_for_fapi_rejects_request_object() {
     let result = reject_rs256_for_fapi(
@@ -1528,6 +1615,7 @@ fn test_reject_rs256_for_fapi_rejects_request_object() {
     assert_rs256_fapi_error(result, "request_object_signing_alg");
 }
 
+// FAPI 2.0 §5.4.1: the algorithm restriction applies to FAPI clients only.
 #[test]
 fn test_reject_rs256_for_fapi_allows_rs256_for_non_fapi() {
     // Non-FAPI clients are permitted to use RS256 (subject to other checks
@@ -1540,6 +1628,7 @@ fn test_reject_rs256_for_fapi_allows_rs256_for_non_fapi() {
     assert!(result.is_ok(), "Non-FAPI + RS256 must be allowed");
 }
 
+// FAPI 2.0 §5.4.1: ES256 is a permitted algorithm.
 #[test]
 fn test_reject_rs256_for_fapi_allows_es256_for_fapi() {
     // ES256 is the canonical FAPI-permitted algorithm.
@@ -1551,6 +1640,7 @@ fn test_reject_rs256_for_fapi_allows_es256_for_fapi() {
     assert!(result.is_ok(), "FAPI + ES256 must be allowed");
 }
 
+// FAPI 2.0 §5.4.1: JWTs use PS256, ES256 or EdDSA.
 #[test]
 fn test_validate_userinfo_signed_response_alg_rejects_rs256_for_fapi() {
     // Integration of reject_rs256_for_fapi into the userinfo validator.
@@ -1564,6 +1654,7 @@ fn test_validate_userinfo_signed_response_alg_rejects_rs256_for_fapi() {
     assert_rs256_fapi_error(result.map(|_| ()), "userinfo_signed_response_alg");
 }
 
+// FAPI 2.0 §5.4.1: ES256 is a permitted algorithm.
 #[test]
 fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
     // ES256 is allowed for FAPI clients regardless of RSA key availability.

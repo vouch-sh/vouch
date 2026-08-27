@@ -1984,29 +1984,11 @@ rfc7521#5.2#f4c5190b	MUST	o The assertion MUST contain an Expires At entity that
 rfc7523#3.1#1e4ab447	MUST	The value of the "error" parameter MUST be the "invalid_grant" error code.
 rfc7523#3.1#b04b6551	MUST	However, if client credentials are present in the request, the authorization server MUST validate them.
 rfc7523#3.2#4cf54ea8	MUST	The value of the "error" parameter MUST be the "invalid_client" error code.
-rfc7591#2.1#c82053c0	MUST	Extensions and profiles of this document that introduce new values to either the "grant_types" or "response_types" parameter MUST document all correspondences b
-rfc7591#2.1#df664285	SHOULD	SHOULD take steps to ensure that a client cannot register itself into an inconsistent state, for example, by returning an "invalid_client_metadata" error respon
 rfc7591#2.3#3bc26542	MUST	When presented to the authorization server as part of a client registration request, the software statement MUST be digitally signed or MACed using JSON Web Sig
 rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digitally signed using the "RS256" signature algorithm, although particular applications MAY specify the use of di
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the
 rfc7591#4.1.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
 rfc7591#4.2.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
-rfc7591#5#48a8612b	MUST	Additionally, in order to prevent hijacking of the return values of the redirection, registered redirection URI values MUST be one of:
-rfc7591#5#5216e9a5	MUST	For clients that use redirect-based grant types such as "authorization_code" and "implicit", authorization servers MUST require clients to register their redire
-rfc7591#5#60c8be60	SHOULD	Since these URI values that are intended to be displayed to the user at the authorization page, the authorization server SHOULD protect the user from malicious 
-rfc7591#5#6ec5ae36	SHOULD	If an authorization server receives a registration request for a client that is not intended to have multiple instances registered simultaneously and the author
-rfc7591#5#70f3b833	SHOULD	The authorization server SHOULD check to see if the "logo_uri", "tos_uri", "client_uri", and "policy_uri" have the same host and scheme as the those defined in 
-rfc7591#5#71c62101	MUST	Unless used as a claim in a software statement, the authorization server MUST treat all client metadata as self-asserted.
-rfc7591#5#808c66d7	MUST	Since requests to the client registration endpoint result in the transmission of clear-text credentials (in the HTTP request and response), the authorization se
-rfc7591#5#8264dc46	MUST	For clients that use redirect-based grant types such as "authorization_code" and "implicit", authorization servers MUST require clients to register their redire
-rfc7591#5#8dc86649	MUST	To counteract this, an authorization server MUST take appropriate steps to mitigate this risk by looking at the entire registration request and client configura
-rfc7591#5#90c37cab	MUST	For clients that use redirect-based grant types such as "authorization_code" and "implicit", authorization servers MUST require clients to register their redire
-rfc7591#5#a2fe7b3c	MUST	For clients that use redirect-based grant types such as "authorization_code" and "implicit", authorization servers MUST require clients to register their redire
-rfc7591#5#a340e56d	MUST	When using TLS, the client MUST perform a TLS/SSL server certificate check, per RFC 6125 [RFC6125].
-rfc7591#5#b14b62a2	MUST	The server MUST support TLS 1.2 [RFC5246] and MAY support additional transport-layer security mechanisms meeting its security requirements.
-rfc7591#5#d089aea6	MUST	If the software statement is valid and signed by an acceptable authority (such as the software API publisher), the values of client metadata within the software
-rfc7591#5#d8e5a6d2	MUST	An authorization server MUST consider the full registration request, including the software statement, initial access token, and JSON client metadata values, wh
-rfc7591#5#f3a41a3b	SHOULD NOT	An authorization server SHOULD NOT issue the same client secret to multiple instances of a registered client, even if they are issued the same client identifier
 rfc7592#5#5675aca4	MUST	As the registration access tokens are relatively long-term credentials, and since the registration access token is a Bearer Token and acts as the sole authentic
 rfc7592#5#6dc34f4d	MUST	If a client is deprovisioned from a server, any outstanding registration access token for that client MUST be invalidated at the same time.
 rfc7592#5#9b8f8d0f	MUST	The authorization server MUST treat all such requests as if the registration access token was invalid by returning an HTTP 401 Unauthorized error, as described.
@@ -2361,7 +2343,6 @@ rfc8693#4#5e0c0c44	MUST	For the purpose of applying access control policy, the c
 rfc8693#6#95614386	MUST	Tokens employed in the context of the functionality described herein may contain privacy-sensitive information and, to prevent disclosure of such information to
 rfc8693#6#e59b1faa	MUST	In cases where it is desirable to prevent disclosure of certain information to the client, the token MUST be encrypted to its intended recipient.
 rfc8693#6#eb946a19	SHOULD	Deployments SHOULD determine the minimally necessary amount of data and only include such information in issued tokens.
-rfc8705#2.1.2#0548b1f8	MUST	A client using the "tls_client_auth" authentication method MUST use exactly one of the below metadata parameters to indicate the certificate subject value that 
 rfc8705#4#895a63d1	SHOULD	When the authorization server issues a refresh token to such a client, it SHOULD also bind the refresh token to the respective certificate and check the binding
 rfc8705#7.4#f9ce43a1	SHOULD	To cope with that threat, the authorization server SHOULD only accept, as trust anchors, a limited number of CAs whose certificate issuance policy meets its sec
 rfc8705#7.5#48dcffa2	SHOULD	For these reasons, implementors SHOULD use an established and well- tested X.509 library (such as one used by an established TLS library) for validation of X.50
