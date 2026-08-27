@@ -219,6 +219,40 @@
     assertEqual('ISO and SQLite produce same output', iso, sqlite);
 
     // ================================================================
+    // VouchValidate.isValidRedirectUri (common.js)
+    //
+    // Must agree with db::validate_redirect_uri on the server. The two
+    // previously disagreed: the form accepted any http:// or https:// URI
+    // while the server had been tightened to loopback-only http, fragments
+    // rejected, and custom schemes for native clients only.
+    // ================================================================
+    group('VouchValidate.isValidRedirectUri');
+
+    var isValid = window.VouchValidate.isValidRedirectUri;
+
+    assert('https is accepted', isValid('https://example.com/cb', 'web'));
+    assert('http on a non-loopback host is rejected',
+        !isValid('http://evil.example/cb', 'web'));
+    assert('http on localhost is accepted', isValid('http://localhost:8080/cb', 'web'));
+    assert('http on 127.0.0.1 is accepted', isValid('http://127.0.0.1:1234/cb', 'web'));
+    assert('http on [::1] is accepted', isValid('http://[::1]:1234/cb', 'web'));
+
+    assert('a fragment is rejected', !isValid('https://example.com/cb#frag', 'web'));
+    assert('a bare trailing # is rejected', !isValid('https://example.com/cb#', 'web'));
+
+    assert('a custom scheme is accepted for native',
+        isValid('com.example.app:/oauth', 'native'));
+    assert('a custom scheme is rejected for web',
+        !isValid('com.example.app:/oauth', 'web'));
+    assert('a custom scheme is rejected for spa',
+        !isValid('com.example.app:/oauth', 'spa'));
+    assert('a custom scheme is rejected when the type is unknown',
+        !isValid('com.example.app:/oauth', null));
+
+    assert('a relative URI is rejected', !isValid('/callback', 'web'));
+    assert('a non-URI is rejected', !isValid('not a uri', 'web'));
+
+    // ================================================================
     // Summary
     // ================================================================
     var summary = document.createElement('div');

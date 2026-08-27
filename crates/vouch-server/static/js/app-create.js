@@ -40,12 +40,7 @@
             var invalid = [];
             for (var i = 0; i < uris.length; i++) {
                 var trimmed = uris[i].trim();
-                try {
-                    var url = new URL(trimmed);
-                    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-                        invalid.push(trimmed);
-                    }
-                } catch (e) {
+                if (!window.VouchValidate.isValidRedirectUri(trimmed, appType)) {
                     invalid.push(trimmed);
                 }
             }

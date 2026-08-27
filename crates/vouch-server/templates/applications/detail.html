@@ -237,7 +237,7 @@
         </div>
 
         <!-- Edit Mode (hidden by default) -->
-        <form id="edit-mode" action="/applications/{{ app.id }}" method="POST" class="hidden px-6 py-4 space-y-4">
+        <form id="edit-mode" action="/applications/{{ app.id }}" method="POST" data-application-type="{{ app.application_type }}" class="hidden px-6 py-4 space-y-4">
             <div>
                 <label for="name" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-detail-name") }}</label>
                 <input type="text" name="name" id="name" value="{{ app.name }}" required

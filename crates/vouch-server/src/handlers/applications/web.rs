@@ -33,25 +33,27 @@ use crate::infra::i18n::Tr;
 
 /// Render the standard application error page from translation keys, resolving
 /// them against the request locale.
-fn error_page(title: Tr<'_>, message: Tr<'_>, back_url: impl Into<String>) -> Response {
+fn error_page(title: Tr<'static>, message: Tr<'static>, back_url: impl Into<String>) -> Response {
     ApplicationErrorTemplate {
-        title: title.to_string(),
-        message: message.to_string(),
+        title,
+        message,
         back_url: back_url.into(),
     }
     .into_response()
 }
 
-/// Render a shared validation failure as the standard error page. The title is
-/// localized; `err.message()` stays English — it is shared with the JSON API
-/// path (`ServiceError`), which is English by spec (RFC 6749 §5.2).
+/// Render a shared validation failure as the standard error page.
+///
+/// Uses `err.localized()`, not `err.message()`. The two say the same thing to
+/// different readers: `message()` is the OAuth `error_description` the JSON
+/// API returns to a client developer, which RFC 6749 §5.2 keeps ASCII and
+/// English, while this page is read by whoever submitted the form.
 fn validation_error_response(err: &AppValidationError, back_url: String) -> Response {
-    ApplicationErrorTemplate {
-        title: Tr::new("apps-error-title-invalid-input").to_string(),
-        message: err.message(),
+    error_page(
+        Tr::new("apps-error-title-invalid-input"),
+        err.localized(),
         back_url,
-    }
-    .into_response()
+    )
 }
 
 /// List user's applications.

@@ -136,10 +136,11 @@ pub(crate) fn validate_post_logout_redirect_uris(uris: &[String]) -> Result<(), 
 /// dynamic client registration, so the two paths cannot accept different sets.
 ///
 /// Returns `Ok(())` if all URIs are valid, or `Err` listing the invalid ones.
-/// The rejection reason is deliberately not folded into these strings: they are
-/// rendered into `ApplicationErrorTemplate`, whose message is not yet
-/// translated, and per-reason detail there would be new untranslated UI text.
-/// Dynamic client registration, which answers in JSON, does report the reason.
+/// The rejection reason is deliberately not folded into these strings: the
+/// page states the whole rule (`apps-invalid-redirect-uris`), so a per-URI
+/// reason would need a catalog entry per `RedirectUriError` variant to say
+/// what the one sentence already says. Dynamic client registration, which
+/// answers in JSON, does report the reason.
 fn validate_redirect_uris(
     uris: &[String],
     application_type: db::OAuthClientType,

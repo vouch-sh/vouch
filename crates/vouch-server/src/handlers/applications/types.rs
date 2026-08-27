@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::session::AuthContext;
 use crate::filters;
+use crate::infra::i18n::Tr;
 
 // ============================================================================
 // Templates
@@ -153,8 +154,11 @@ pub(crate) struct SecretAddedTemplate {
 #[derive(Template)]
 #[template(path = "applications/error.html")]
 pub(crate) struct ApplicationErrorTemplate {
-    pub title: String,
-    pub message: String,
+    /// Both strings are `Tr` rather than `String` so a raw English literal
+    /// cannot reach this page: every construction names a catalog key and
+    /// resolves in the request locale at render time.
+    pub title: Tr<'static>,
+    pub message: Tr<'static>,
     pub back_url: String,
 }
 
