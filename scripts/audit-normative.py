@@ -64,11 +64,18 @@ KEYWORD_RE = re.compile(KEYWORD_PATTERN)
 # contains 61 lower-case "shall" and not one upper-case "MUST".
 KEYWORD_RE_CI = re.compile(KEYWORD_PATTERN, re.IGNORECASE)
 
-# A document that declares its keywords in lower case, e.g. FAPI 2.0:
-# 'The keywords "shall", "shall not", ... are to be interpreted as described in'
+# A document that declares its keywords in lower case. FAPI 2.0 and JARM lead
+# with "shall" per ISO drafting conventions; W3C XML Signature leads with
+# "must" -- 'The key words "must", "must not", "required", ... in this
+# specification are to be interpreted as described in RFC 2119'.
+# Matched case-sensitively on the keyword itself: the standard BCP 14 sentence
+# quotes "MUST" in capitals and adds "when, and only when, they appear in all
+# capitals", so a case-insensitive match would put every RFC into lower-case
+# mode and sweep up ordinary prose.
 ISO_CONVENTION_RE = re.compile(
-    r"keywords?\s+[\"\u201c\u2018']?shall[\"\u201d\u2019']?\s*,", re.IGNORECASE
+    r"(?i:key ?words?)\s+[\"\u201c\u2018']?(?:must|shall|should)[\"\u201d\u2019']?\s*,"
 )
+ALL_CAPITALS_RE = re.compile(r"appear in all capitals", re.IGNORECASE)
 
 # A list item marker.  Converted W3C and OASIS documents delimit numbered steps
 # with tabs ("\t13\tVerify that the rpIdHash in authData ..."), which is how
@@ -391,7 +398,8 @@ def rank(strength: str) -> int:
 def extract(spec_id: str, path: Path) -> list[dict]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     lines = strip_furniture(raw.splitlines())
-    keyword_re = KEYWORD_RE_CI if ISO_CONVENTION_RE.search(raw) else KEYWORD_RE
+    lower_case_keywords = ISO_CONVENTION_RE.search(raw) and not ALL_CAPITALS_RE.search(raw)
+    keyword_re = KEYWORD_RE_CI if lower_case_keywords else KEYWORD_RE
     results: list[dict] = []
     seen: set[str] = set()
 

@@ -3256,27 +3256,6 @@ saml-bindings-2.0-os#3.3.5.2#ab8d2d14	SHOULD	Support for the PAOS binding SHOULD
 saml-bindings-2.0-os#3.4.3#73053f47	MUST NOT	The value MUST NOT exceed 80 bytes in length and SHOULD be integrity protected by the entity creating the message independent of any other protections that may 
 saml-bindings-2.0-os#3.4.3#7de57ee4	SHOULD	Signing is not realistic given the space limitation, but because the value is exposed to third-party tampering, the entity SHOULD ensure that the value has not 
 saml-bindings-2.0-os#3.4.3#edc87044	MUST	If a SAML request message is accompanied by RelayState data, then the SAML responder MUST return its SAML protocol response using a binding that also supports a
-saml-bindings-2.0-os#3.4.4#20f6e95d	MUST	All endpoints that support this binding MUST support the DEFLATE encoding described in the following sub-section.
-saml-bindings-2.0-os#3.4.4#4b132df7	SHOULD	Binding endpoints SHOULD indicate which encodings they support using metadata, when appropriate.
-saml-bindings-2.0-os#3.4.4#4dbd07cd	MUST	Page 16 of 46 A URL encoding MUST place the message entirely within the URL query string, and MUST reserve the rest of the URL for the endpoint of the message r
-saml-bindings-2.0-os#3.4.4#b113fee0	MUST	Particular encodings MUST be uniquely identified with a URI when defined.
-saml-bindings-2.0-os#3.4.4#cd121708	MUST	It is not a requirement that all possible SAML messages be encodable with a particular set of rules, but the rules MUST clearly indicate which messages or conte
-saml-bindings-2.0-os#3.4.4.1#0157b3ed	MUST	Any signature on the SAML protocol message, including the <ds:Signature> XML element itself, MUST be removed.
-saml-bindings-2.0-os#3.4.4.1#1967193d	MUST	Linefeeds or other whitespace MUST be removed from the result.
-saml-bindings-2.0-os#3.4.4.1#2160aca6	MUST	XML digital signatures are not directly URL-encoded according to the above rules, due to space concerns. If the underlying SAML protocol message is signed with 
-saml-bindings-2.0-os#3.4.4.1#2afd0603	MUST	If the original SAML protocol message was signed using an XML digital signature, a new signature covering the encoded data as specified above MUST be attached u
-saml-bindings-2.0-os#3.4.4.1#415262cd	MUST	The relying party MUST therefore perform the verification step using the original URL-encoded values it received on the query string.
-saml-bindings-2.0-os#3.4.4.1#51e0d12e	MUST	The following signature algorithms (see [XMLSig]) and their URI representations MUST be supported with this encoding mechanism:
-saml-bindings-2.0-os#3.4.4.1#66563fed	MUST	The signature algorithm identifier MUST be included as an additional query string parameter, named SigAlg.
-saml-bindings-2.0-os#3.4.4.1#76f1e014	MUST	The base-64 encoded data is then URL-encoded, and added to the URL as a query string parameter which MUST be named SAMLRequest (if the message is a SAML request
-saml-bindings-2.0-os#3.4.4.1#7c5c0a5a	MUST	XML digital signatures are not directly URL-encoded according to the above rules, due to space concerns. If the underlying SAML protocol message is signed with 
-saml-bindings-2.0-os#3.4.4.1#a5ac49a4	MUST	The signature value MUST be encoded using the base64 encoding (see RFC 2045 [RFC2045]) with any whitespace removed, and included as a query string parameter nam
-saml-bindings-2.0-os#3.4.4.1#a7fa8eae	MUST	XML digital signatures are not directly URL-encoded according to the above rules, due to space concerns. If the underlying SAML protocol message is signed with 
-saml-bindings-2.0-os#3.4.4.1#aa41fbbd	MUST	The value of this parameter MUST be a URI that identifies the algorithm used to sign the URL-encoded SAML protocol message, specified according to [XMLSig] or w
-saml-bindings-2.0-os#3.4.4.1#d0e8447b	SHOULD NOT	Thus SAML protocol messages that contain signed content SHOULD NOT be encoded using this mechanism.
-saml-bindings-2.0-os#3.4.4.1#de23238b	MUST	If the underlying SAML protocol message is signed with an XML signature [XMLSig], the URL-encoded form of the message MUST be signed as follows:
-saml-bindings-2.0-os#3.4.4.1#ea7a60f2	MUST	If RelayState data is to accompany the SAML protocol message, it MUST be URL-encoded and placed in an additional query string parameter named RelayState.
-saml-bindings-2.0-os#3.4.4.1#ee214fce	MUST	Before verifying a signature, if any, the relying party MUST ensure that the parameter values to be verified are ordered as required by the signing rules above.
 saml-bindings-2.0-os#3.4.5#ef093d57	SHOULD	Eventually the responder SHOULD return a SAML response to the user agent to be returned to the SAML requester.
 saml-bindings-2.0-os#3.4.5#f314ba06	MUST	Page 18 of 46 response's Location header, and the HTTP status MUST be either 303 or 302.
 saml-bindings-2.0-os#3.4.5.1#1578eefb	SHOULD	HTTP proxies and the user agent intermediary should not cache SAML protocol messages. To ensure this, the following rules SHOULD be followed. When returning SAM
@@ -3294,15 +3273,6 @@ saml-bindings-2.0-os#3.4.7#4a400856	SHOULD	Support for the HTTP Redirect binding
 saml-bindings-2.0-os#3.5.3#73053f47	MUST NOT	The value MUST NOT exceed 80 bytes in length and SHOULD be integrity protected by the entity creating the message independent of any other protections that may 
 saml-bindings-2.0-os#3.5.3#7de57ee4	SHOULD	Signing is not realistic given the space limitation, but because the value is exposed to third-party tampering, the entity SHOULD ensure that the value has not 
 saml-bindings-2.0-os#3.5.3#edc87044	MUST	If a SAML request message is accompanied by RelayState data, then the SAML responder MUST return its SAML protocol response using a binding that also supports a
-saml-bindings-2.0-os#3.5.4#1e4762af	MUST	If a “RelayState” value is to accompany the SAML protocol message, it MUST be placed in an additional hidden form control named RelayState within the same form 
-saml-bindings-2.0-os#3.5.4#30f2d6d1	MUST	The HTML document MUST adhere to the XHTML specification, [XHTML].
-saml-bindings-2.0-os#3.5.4#3aa7103a	MUST	The method attribute MUST be "POST".
-saml-bindings-2.0-os#3.5.4#57972ee5	MUST	However, the recipient MUST be able to process the message without regard for the mechanism by which the form submission is initiated.
-saml-bindings-2.0-os#3.5.4#714520d9	MUST NOT	Any additional form controls or presentation MAY be included but MUST NOT be required in order for the recipient to process the message.
-saml-bindings-2.0-os#3.5.4#7903a99a	MUST	If the message is a SAML request, then the form control MUST be named SAMLRequest.
-saml-bindings-2.0-os#3.5.4#ac283197	MUST	The action attribute of the form MUST be the recipient's HTTP endpoint for the protocol or profile using this binding to which the SAML message is to be deliver
-saml-bindings-2.0-os#3.5.4#cf6947b4	MUST	Note that any form control values included MUST be transformed so as to be safe to include in the XHTML document.
-saml-bindings-2.0-os#3.5.4#f40c0a1b	MUST	If the message is a SAML response, then the form control MUST be named SAMLResponse.
 saml-bindings-2.0-os#3.5.5#ef093d57	SHOULD	Eventually the responder SHOULD return a SAML response to the user agent to be returned to the SAML requester.
 saml-bindings-2.0-os#3.5.5.1#1578eefb	SHOULD	HTTP proxies and the user agent intermediary should not cache SAML protocol messages. To ensure this, the following rules SHOULD be followed. When returning SAM
 saml-bindings-2.0-os#3.5.5.1#6fb7eb4e	SHOULD	HTTP proxies and the user agent intermediary should not cache SAML protocol messages. To ensure this, the following rules SHOULD be followed. When returning SAM
@@ -3381,48 +3351,21 @@ saml-core-2.0-os#1.3.1#b14b94c1	MUST	If an implementation is comparing values th
 saml-core-2.0-os#1.3.1#c7da1f6a	MUST	Unless otherwise noted in this specification or particular profiles, all strings in SAML messages MUST consist of at least one non-whitespace character (whitesp
 saml-core-2.0-os#1.3.1#e513b0ab	MUST	Applications that compare data received in SAML documents to data from external sources MUST take into account the normalization rules specified for XML.
 saml-core-2.0-os#1.3.2#7389ef9e	MUST	Unless otherwise indicated in this specification, all URI reference values used within SAML-defined elements or attributes MUST consist of at least one non-whit
-saml-core-2.0-os#1.3.3#0f4f24fe	MUST	All SAML time values have the type xs:dateTime, which is built in to the W3C XML Schema Datatypes specification [Schema2], and MUST be expressed in UTC form, wi
-saml-core-2.0-os#1.3.3#7e0a43a6	SHOULD NOT	SAML system entities SHOULD NOT rely on time resolution finer than milliseconds.
-saml-core-2.0-os#1.3.3#ca5eb8a4	MUST NOT	Implementations MUST NOT generate time instants that specify leap seconds.
-saml-core-2.0-os#1.3.4#00cc9d79	MUST	A pseudorandom generator MUST be seeded with unique material in order to ensure the desired uniqueness properties between different systems.
-saml-core-2.0-os#1.3.4#2ade702a	MUST	• Any party that assigns an identifier MUST ensure that there is negligible probability that that party or any other party will accidentally assign the same ide
-saml-core-2.0-os#1.3.4#3797eadc	MUST	In the case that a random or pseudorandom technique is employed, the probability of two randomly chosen identifiers being identical MUST be less than or equal t
-saml-core-2.0-os#1.3.4#450f822f	MUST	Values declared to be of type xs:ID in this specification MUST satisfy the following properties in addition to those imposed by the definition of the xs:ID type
-saml-core-2.0-os#1.3.4#a1afd2df	MUST	• Where a data object declares that it has a particular identifier, there MUST be exactly one such declaration.
 saml-core-2.0-os#2.2.1#c549cf0f	SHOULD	The NameQualifier and SPNameQualifier attributes SHOULD be omitted unless the identifier's type definition explicitly defines their use and semantics.
-saml-core-2.0-os#2.2.2#5e2107f9	SHOULD	The NameQualifier and SPNameQualifier attributes SHOULD be omitted unless the element or format explicitly defines their use and semantics.
 saml-core-2.0-os#2.2.4#09761aeb	SHOULD	The value of the Recipient attribute SHOULD be the URI identifier of a SAML system entity, as defined by Section 8.3.6.
 saml-core-2.0-os#2.2.4#219a605b	SHOULD	Each wrapped key SHOULD include a Recipient attribute that specifies the entity for whom the key has been encrypted.
 saml-core-2.0-os#2.2.4#8bc3a651	MUST	The encrypted content MUST contain an element that has a type of NameIDType or AssertionType, or a type that is derived from BaseIDAbstractType, NameIDType, or 
 saml-core-2.0-os#2.2.4#8bf24d9b	MUST	The Type attribute SHOULD be present and, if present, MUST contain a value of http://www.w3.org/2001/04/xmlenc#Element.
 saml-core-2.0-os#2.2.4#ec90a166	MUST	As such, the ciphertext MUST be unique to any given encryption operation.
-saml-core-2.0-os#2.3.3#0aa1cd47	MUST	It is of type xs:ID, and MUST follow the requirements specified in Section 1.3.4 for identifier uniqueness.
-saml-core-2.0-os#2.3.3#52f6ab98	MUST	An assertion with no statements MUST contain a <Subject> element.
-saml-core-2.0-os#2.3.3#7d988fdc	SHOULD	The issuer SHOULD be unambiguous to the intended relying parties.
-saml-core-2.0-os#2.3.3#85f64796	MUST	If such a signature is used, then the <ds:Signature> element MUST be present, and a relying party MUST verify that the signature is valid (that is, that the ass
-saml-core-2.0-os#2.3.3#976a79b7	MUST NOT	If it is invalid, then the relying party MUST NOT rely on the contents of the assertion.
-saml-core-2.0-os#2.3.3#9bf509e5	MUST	<Conditions> [Optional] Conditions that MUST be evaluated when assessing the validity of and/or when using the assertion.
-saml-core-2.0-os#2.3.3#daf4e52b	MUST	An xsi:type attribute MUST be used to indicate the actual statement type. <AuthnStatement> An authentication statement. <AuthzDecisionStatement> An authorizatio
-saml-core-2.0-os#2.3.3#eed3d840	SHOULD	If it is valid, then the relying party SHOULD evaluate the signature to determine the identity and appropriateness of the issuer and may continue to process the
 saml-core-2.0-os#2.3.4#219a605b	SHOULD	Each wrapped key SHOULD include a Recipient attribute that specifies the entity for whom the key has been encrypted.
 saml-core-2.0-os#2.3.4#8bf24d9b	MUST	The Type attribute SHOULD be present and, if present, MUST contain a value of http://www.w3.org/2001/04/xmlenc#Element.
 saml-core-2.0-os#2.3.4#b550115d	MUST	The encrypted content MUST contain an element that has a type of or derived from AssertionType.
 saml-core-2.0-os#2.3.4#e7e235f5	SHOULD	The value of the Recipient attribute SHOULD be the URI identifier of a SAML system entity as defined by Section 8.3.6.
-saml-core-2.0-os#2.4.1#b97bd515	SHOULD NOT	A <Subject> element SHOULD NOT identify more than one principal.
-saml-core-2.0-os#2.4.1.2#00bf05a0	SHOULD	Note that the time period specified by the optional NotBefore and NotOnOrAfter attributes, if present, SHOULD fall within the overall assertion validity period 
-saml-core-2.0-os#2.4.1.2#1bee5627	SHOULD	IPv4 addresses SHOULD be represented in the usual dotted-decimal format (e.g., "1.2.3.4").
-saml-core-2.0-os#2.4.1.2#404fd5eb	SHOULD	IPv6 addresses SHOULD be represented as defined by Section 2.2 of IETF RFC 3513 [RFC 3513] (e.g., "FEDC:BA98:7654:3210:FEDC:BA98:7654:3210").
-saml-core-2.0-os#2.4.1.2#8f5bb8f3	MUST	If both attributes are present, the value for NotBefore MUST be less than (earlier than) the value for NotOnOrAfter.
-saml-core-2.0-os#2.4.1.2#9f0adb4d	MUST NOT	SAML extensions MUST NOT add local (non-namespace- qualified) XML attributes or XML attributes qualified by a SAML-defined namespace to the SubjectConfirmationD
 saml-core-2.0-os#2.4.1.3#6e83c682	SHOULD	This complex type, or a type derived from it, SHOULD be used by any confirmation method that defines its confirmation data in terms of the <ds:KeyInfo> element.
 saml-core-2.0-os#2.4.1.3#a265e7da	MUST	Page 20 of 86 Note that in accordance with [XMLSig], each <ds:KeyInfo> element MUST identify a single cryptographic key.
 saml-core-2.0-os#2.4.1.3#ebf86f48	MUST	The particular confirmation method MUST define the exact mechanism by which the confirmation data can be used.
-saml-core-2.0-os#2.5.1#7a5889ae	MUST NOT	Page 21 of 86 <OneTimeUse> [Optional] Specifies that the assertion SHOULD be used immediately and MUST NOT be retained for future use.
-saml-core-2.0-os#2.5.1#91dc9c5d	MUST	Although the schema permits multiple occurrences, there MUST be at most one instance of this element.
-saml-core-2.0-os#2.5.1#d1bdb404	MUST	An xsi:type attribute MUST be used to indicate the actual condition type. <AudienceRestriction> [Any Number] Specifies that the assertion is addressed to a part
 saml-core-2.0-os#2.5.1.1#8a65224f	MUST	Page 22 of 86 An assertion that is determined to be Invalid or Indeterminate MUST be rejected by a relying party (within whatever context or profile it was bein
 saml-core-2.0-os#2.5.1.2#8f5bb8f3	MUST	If both attributes are present, the value for NotBefore MUST be less than (earlier than) the value for NotOnOrAfter.
-saml-core-2.0-os#2.5.1.4#733c0544	MUST	Page 23 of 86 Note that multiple <AudienceRestriction> elements MAY be included in a single assertion, and each MUST be evaluated independently.
 saml-core-2.0-os#2.5.1.5#6d90bc6d	MUST NOT	The <OneTimeUse> element indicates that the assertion SHOULD be used immediately by the relying party and MUST NOT be retained for future use.
 saml-core-2.0-os#2.5.1.5#a318f159	MUST	However, implementations that choose to retain assertions for future use MUST observe the <OneTimeUse> element.
 saml-core-2.0-os#2.5.1.5#c48bdc25	MUST NOT	A SAML authority MUST NOT include more than one <OneTimeUse> element within a <Conditions> element of an assertion.
@@ -3440,7 +3383,6 @@ saml-core-2.0-os#2.7.2#978edc0b	SHOULD	Two solutions that achieve this goal are 
 saml-core-2.0-os#2.7.2#a851f952	SHOULD	In general, any string value MAY be used as a SessionIndex value. However, when privacy is a consideration, care must be taken to ensure that the SessionIndex v
 saml-core-2.0-os#2.7.2.1#156732df	SHOULD	IPv4 addresses SHOULD be represented in dotted-decimal format (e.g., "1.2.3.4").
 saml-core-2.0-os#2.7.2.1#404fd5eb	SHOULD	IPv6 addresses SHOULD be represented as defined by Section 2.2 of IETF RFC 3513 [RFC 3513] (e.g., "FEDC:BA98:7654:3210:FEDC:BA98:7654:3210").
-saml-core-2.0-os#2.7.3#dceae730	MUST	Assertions containing <AttributeStatement> elements MUST contain a <Subject> element.
 saml-core-2.0-os#2.7.3.1#3128c626	SHOULD	If an attribute contains more than one discrete value, it is RECOMMENDED that each value appear in its own <AttributeValue> element.
 saml-core-2.0-os#2.7.3.1#8534e498	MUST	Within an <AttributeStatement>, if the SAML attribute exists but has no values, then the <AttributeValue> element MUST be omitted.
 saml-core-2.0-os#2.7.3.1#8adc68fe	MUST NOT	This attribute's value MUST NOT be used as a basis for formally identifying SAML attributes.
@@ -3470,17 +3412,6 @@ saml-core-2.0-os#3.2.1#a4fae331	MUST NOT	If it is invalid, then the responder MU
 saml-core-2.0-os#3.2.1#c0dffe3e	MUST	It is of type xs:ID and MUST follow the requirements specified in Section 1.3.4 for identifier uniqueness.
 saml-core-2.0-os#3.2.1#d2a112ce	MUST	If such a signature is used, then the <ds:Signature> element MUST be present, and the SAML responder MUST verify that the signature is valid (that is, that the 
 saml-core-2.0-os#3.2.1#f3fb52f7	SHOULD	If it is valid, then the responder SHOULD evaluate the signature to determine the identity and appropriateness of the signer and may continue to process the req
-saml-core-2.0-os#3.2.2#0aa1cd47	MUST	It is of type xs:ID, and MUST follow the requirements specified in Section 1.3.4 for identifier uniqueness.
-saml-core-2.0-os#3.2.2#385a5f5b	MUST NOT	If the response is not generated in response to a request, or if the ID attribute value of a request cannot be determined (for example, the request is malformed
-saml-core-2.0-os#3.2.2#4a3a26db	MUST NOT	If it is invalid, then the requester MUST NOT rely on the contents of the response and SHOULD treat it as an error.
-saml-core-2.0-os#3.2.2#661b260e	MUST	If it is present, the actual recipient MUST check that the URI reference identifies the location at which the message was received.
-saml-core-2.0-os#3.2.2#681cd95d	MUST	If it does not, the response MUST be discarded.
-saml-core-2.0-os#3.2.2#6ff13f5e	SHOULD	If it is valid, then the requester SHOULD evaluate the signature to determine the identity and appropriateness of the signer and may continue to process the res
-saml-core-2.0-os#3.2.2#82eff5f6	MUST	Otherwise, it MUST be present and its value MUST match the value of the corresponding request's ID attribute.
-saml-core-2.0-os#3.2.2#b24704b5	MUST	If such a signature is used, then the <ds:Signature> element MUST be present, and the SAML requester receiving the response MUST verify that the signature is va
-saml-core-2.0-os#3.2.2#b8ed6669	SHOULD	If a Consent attribute is included and the value indicates that some form of principal consent has been obtained, then the response SHOULD be signed.
-saml-core-2.0-os#3.2.2#d3bd6cbc	MUST	SAML extension elements MUST be namespace-qualified in a non- SAML-defined namespace. <Status> [Required] A code representing the status of the corresponding re
-saml-core-2.0-os#3.2.2.2#fa2dd581	MUST	The value of the topmost <StatusCode> element MUST be from the top-level list provided in this section. <StatusCode> [Optional] A subordinate status code that p
 saml-core-2.0-os#3.3.2.2#14b98867	MUST	• If the SessionIndex attribute is present in the query, at least one <AuthnStatement> element in the set of returned assertions MUST contain a SessionIndex att
 saml-core-2.0-os#3.3.2.2#20d606cb	MUST	• If the <RequestedAuthnContext> element is present in the query, at least one <AuthnStatement> element in the set of returned assertions MUST contain an <Authn
 saml-core-2.0-os#3.3.2.2#b86694bd	MUST NOT	The <AuthnQuery> message MUST NOT be used as a request for a new authentication using credentials provided in the request. <AuthnQuery> is a request for stateme
@@ -3502,16 +3433,6 @@ saml-core-2.0-os#3.3.4#38351a0e	MUST	• If S2 includes an identifier element (<
 saml-core-2.0-os#3.3.4#aa370b80	MUST	In response to a SAML-defined query message, every assertion returned by a SAML authority MUST contain a <saml:Subject> element that strongly matches the <saml:
 saml-core-2.0-os#3.3.4#d7e0ad7f	MUST	In other words, the decrypted form of the identifier MUST be identical in S1 and S2. "Identical" means that the identifier element's content and attribute value
 saml-core-2.0-os#3.3.4#edf2b0c4	MUST	• If S2 includes one or more <saml:SubjectConfirmation> elements, then S1 MUST include at least one <saml:SubjectConfirmation> element such that S1 can be confi
-saml-core-2.0-os#3.4#6b744dc2	MUST	Such assertions MAY contain additional statements of any type, but at least one assertion MUST contain at least one authentication statement.
-saml-core-2.0-os#3.4.1#0f2e0230	MUST NOT	However, if both ForceAuthn and IsPassive are "true", the identity provider MUST NOT freshly authenticate the presenter unless the constraints of IsPassive can 
-saml-core-2.0-os#3.4.1#1ec508fc	MUST	If "true", the identity provider MUST authenticate the presenter directly rather than rely on a previous security context.
-saml-core-2.0-os#3.4.1#235abcfd	MUST	AssertionConsumerServiceURL [Optional] Specifies by value the location to which the <Response> message MUST be returned to the requester.
-saml-core-2.0-os#3.4.1#54d091db	MUST	If omitted, then the identity provider MUST return the <Response> message to the default location associated with the requester for the profile of use.
-saml-core-2.0-os#3.4.1#5c666607	SHOULD	The <AuthnRequest> message SHOULD be signed or otherwise authenticated and integrity protected by the protocol binding used to deliver the message.
-saml-core-2.0-os#3.4.1#9025174d	MUST	The identity provider MUST have a trusted means to map the index value in the attribute to information associated with the requester.
-saml-core-2.0-os#3.4.1#9b868455	MUST	The responder MUST ensure by some means that the value specified is in fact associated with the requester.
-saml-core-2.0-os#3.4.1#da4f503a	MUST NOT	If "true", the identity provider and the user agent itself MUST NOT visibly take control of the user interface from the requester and interact with the presente
-saml-core-2.0-os#3.4.1#e52fee14	MUST	The identity provider MUST have a trusted means to map the index value in the attribute to a location associated with the requester.
 saml-core-2.0-os#3.4.1.1#01dc41c5	MUST	When this element is used, if the content is not understood by or acceptable to the identity provider, then a <Response> message element MUST be returned with a
 saml-core-2.0-os#3.4.1.1#d4e0da94	MUST	The special Format value urn:oasis:names:tc:SAML:2.0:nameid-format:encrypted indicates that the resulting assertion(s) MUST contain <EncryptedID> elements inste
 saml-core-2.0-os#3.4.1.1#e6372e77	MUST	Note that if the requester wishes to permit the identity provider to establish a new identifier for the principal if none exists, it MUST include this element w
@@ -3612,11 +3533,6 @@ saml-core-2.0-os#4.1.3.3#1d0d539a	MUST NOT	But a V1.0 assertion MUST NOT appear 
 saml-core-2.0-os#4.2#9297849d	MUST	The major and minor version in the URI MUST correspond to the major and minor version of the specification set in which the namespace is first introduced and de
 saml-core-2.0-os#4.2.1#7182db06	SHOULD	Implementations SHOULD expect and be prepared to deal with new extensions and message types in accordance with the processing rules laid out for those types.
 saml-core-2.0-os#4.2.1#ba7f31b7	SHOULD	Older implementations SHOULD reject such extensions gracefully when they are encountered in contexts that dictate mandatory semantics.
-saml-core-2.0-os#5#0db8050c	SHOULD	• A SAML protocol message arriving at a destination from an entity other than the originating sender SHOULD be signed by the sender.
-saml-core-2.0-os#5#7ff8c87f	SHOULD	It is RECOMMENDED that, in all other contexts, digital signatures be used for assertions and request and response messages.
-saml-core-2.0-os#5#98a5060f	SHOULD	SAML assertions and SAML protocol request and response messages may be signed, with the following benefits. An assertion signed by the asserting party supports 
-saml-core-2.0-os#5#9c861ef5	MUST	• Unless a profile specifies an alternative signature mechanism, any XML Digital Signatures MUST be enveloped.
-saml-core-2.0-os#5#9ed621af	SHOULD	• A SAML assertion obtained by a SAML relying party from an entity other than the SAML asserting party SHOULD be signed by the SAML asserting party.
 saml-core-2.0-os#5.4.1#4662badd	MUST	SAML assertions and protocols MUST use enveloped signatures when signing assertions and protocol messages.
 saml-core-2.0-os#5.4.1#b50ea4e7	SHOULD	SAML processors SHOULD support the use of RSA signing and verification for public key operations in accordance with the algorithm identified by http://www.w3.or
 saml-core-2.0-os#5.4.2#028403fa	MUST	SAML assertions and protocol messages MUST supply a value for the ID attribute on the root element of the assertion or protocol message being signed.
@@ -3649,23 +3565,9 @@ saml-core-2.0-os#8.3.8#02f068bf	MUST	Transient identifier values MUST be generat
 saml-core-2.0-os#8.3.8#91c48002	SHOULD	URI: urn:oasis:names:tc:SAML:2.0:nameid-format:transient Indicates that the content of the element is an identifier with transient semantics and SHOULD be treat
 saml-metadata-2.0-os#2.2.1#936e849e	MUST NOT	The use of a URI and holding to the rule that a single URI MUST NOT refer to different entities satisfies this requirement.
 saml-metadata-2.0-os#2.2.1#cbaaf7a4	MUST	An identifier of this type MUST be unique across all entities that interact within a given deployment.
-saml-metadata-2.0-os#2.2.2#c55bd498	MUST	Any such content MUST be namespace-qualified.
-saml-metadata-2.0-os#2.3#6294d355	MUST	In the former case, the root element MUST be <EntityDescriptor>.
-saml-metadata-2.0-os#2.3#cde09b1f	MUST	In the latter case, the root element MUST be <EntitiesDescriptor>.
-saml-metadata-2.0-os#2.3.1#53ddcf3e	MUST	Extension elements MUST be namespace-qualified by a non-SAML-defined namespace.
-saml-metadata-2.0-os#2.3.1#dd631bed	SHOULD	It is RECOMMENDED that only the root element of a metadata instance contain either attribute.
-saml-metadata-2.0-os#2.3.1#fab518a4	MUST	When used as the root element of a metadata instance, this element MUST contain either a validUntil or cacheDuration attribute.
-saml-metadata-2.0-os#2.3.2#203b3ae8	SHOULD	It is RECOMMENDED that if multiple role descriptor elements of the same type appear, that they do not share overlapping protocolSupportEnumeration values.
-saml-metadata-2.0-os#2.3.2#53ddcf3e	MUST	Extension elements MUST be namespace-qualified by a non-SAML-defined namespace.
-saml-metadata-2.0-os#2.3.2#dd631bed	SHOULD	It is RECOMMENDED that only the root element of a metadata instance contain either attribute.
-saml-metadata-2.0-os#2.3.2#fab518a4	MUST	When used as the root element of a metadata instance, this element MUST contain either a validUntil or cacheDuration attribute.
 saml-metadata-2.0-os#2.3.2.1#bb8055e8	MUST NOT	Extensions MUST NOT include global (non-namespace-qualified) elements or elements qualified by a SAML-defined namespace within this element.
 saml-metadata-2.0-os#2.3.2.2#53ddcf3e	MUST	Extension elements MUST be namespace-qualified by a non-SAML-defined namespace.
 saml-metadata-2.0-os#2.3.2.3#9a33f9b8	MUST	This required attribute MUST contain the XML namespace of the root element of the instance document found at the specified location.
-saml-metadata-2.0-os#2.4.1#0e610ebf	MUST	For SAML V2.0 entities, this set MUST include the SAML protocol namespace URI, urn:oasis:names:tc:SAML:2.0:protocol.
-saml-metadata-2.0-os#2.4.1#53ddcf3e	MUST	Extension elements MUST be namespace-qualified by a non-SAML-defined namespace.
-saml-metadata-2.0-os#2.4.1#b650c624	SHOULD	Note that future SAML specifications might share the same namespace URI, but SHOULD provide alternate "protocol support" identifiers to ensure discrimination wh
-saml-metadata-2.0-os#2.4.2#67942c6a	MUST	The ResponseLocation attribute MUST be omitted.
 saml-metadata-2.0-os#2.4.3#67942c6a	MUST	The ResponseLocation attribute MUST be omitted.
 saml-metadata-2.0-os#2.5#462c6b97	MUST	The owner is NOT presumed to be a member of the affiliation; if it is a member, its identifier MUST also appear in an <AffiliateMember> element.
 saml-metadata-2.0-os#2.5#53ddcf3e	MUST	Extension elements MUST be namespace-qualified by a non-SAML-defined namespace.
@@ -3734,36 +3636,6 @@ saml-profiles-2.0-os#4.1.3.5#a9fadcd5	MUST	A service provider MAY indicate the S
 saml-profiles-2.0-os#4.1.3.5#ab2d7c99	MUST	The identity provider MUST have some means to establish that this location is in fact controlled by the service provider.
 saml-profiles-2.0-os#4.1.3.5#b903a70e	SHOULD	Regardless of the success or failure of the <AuthnRequest>, the identity provider SHOULD produce an HTTP response to the user agent containing a <Response> mess
 saml-profiles-2.0-os#4.1.3.5#dd465ebc	MUST	The service provider MUST process the <Response> message and any enclosed <Assertion> elements as described in [SAMLCore].
-saml-profiles-2.0-os#4.1.4#01ca0c93	MUST	• The assertion(s) containing a bearer subject confirmation MUST contain an <AudienceRestriction> including the service provider's unique identifier as an <Audi
-saml-profiles-2.0-os#4.1.4#01da68f2	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following: • Verify that the NotOnOrAfter attr
-saml-profiles-2.0-os#4.1.4#07bfc74d	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following: • Verify that any assertions relied
-saml-profiles-2.0-os#4.1.4#133ad96a	MUST	• The <Issuer> element MAY be omitted, but if present it MUST contain the unique identifier of the issuing identity provider; the Format attribute MUST be omitt
-saml-profiles-2.0-os#4.1.4#16bf3e8f	MUST NOT	• Verify that the InResponseTo attribute in the bearer <SubjectConfirmationData> equals the ID of its original <AuthnRequest> message, unless the response is un
-saml-profiles-2.0-os#4.1.4#30baf11a	MUST NOT	4.1.4.2 <Response> Usage If the identity provider wishes to return an error, it MUST NOT include any assertions in the <Response> message.
-saml-profiles-2.0-os#4.1.4#36037972	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following:
-saml-profiles-2.0-os#4.1.4#3d3b2962	MUST	The <Issuer> element MUST be present and MUST contain the unique identifier of the requesting service provider; the Format attribute MUST be omitted or have a v
-saml-profiles-2.0-os#4.1.4#3f79bf3a	MUST NOT	It MUST NOT contain a NotBefore attribute.
-saml-profiles-2.0-os#4.1.4#5bca8646	MUST	If the containing message is in response to an <AuthnRequest>, then the InResponseTo attribute MUST match the request's ID.
-saml-profiles-2.0-os#4.1.4#5f6442ac	SHOULD	• If an <AuthnStatement> used to establish a security context for the principal contains a SessionNotOnOrAfter attribute, the security context SHOULD be discard
-saml-profiles-2.0-os#4.1.4#694def2a	MUST	• At least one assertion containing an <AuthnStatement> MUST contain a <Subject> element with at least one <SubjectConfirmation> element containing a Method of 
-saml-profiles-2.0-os#4.1.4#6c0ce877	MUST	If the identity provider supports the Single Logout profile, defined in Section 4.4, any such authentication statements MUST include a SessionIndex attribute to
-saml-profiles-2.0-os#4.1.4#8221d062	SHOULD	• Any assertion which is not valid, or whose subject confirmation requirements cannot be met SHOULD be discarded and SHOULD NOT be used to establish a security 
-saml-profiles-2.0-os#4.1.4#874527c7	MUST	• The set of one or more assertions MUST contain at least one <AuthnStatement> that reflects the authentication of the principal to the identity provider.
-saml-profiles-2.0-os#4.1.4#8aa8fb70	MUST	Each assertion's <Issuer> element MUST contain the unique identifier of the issuing identity provider; the Format attribute MUST be omitted or have a value of u
-saml-profiles-2.0-os#4.1.4#8bd74704	MUST	• The bearer <SubjectConfirmation> element described above MUST contain a <SubjectConfirmationData> element that contains a Recipient attribute containing the s
-saml-profiles-2.0-os#4.1.4#9202b6fa	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following: • If any bearer <SubjectConfirmatio
-saml-profiles-2.0-os#4.1.4#9a80b3a8	MUST	4.1.4.2 <Response> Usage If the identity provider wishes to return an error, it MUST NOT include any assertions in the <Response> message. Otherwise, if the req
-saml-profiles-2.0-os#4.1.4#9cd1ec04	MUST	If the identity provider cannot or will not satisfy the request, it MUST respond with a <Response> message containing an appropriate error status code or codes.
-saml-profiles-2.0-os#4.1.4#b834ed04	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following: • Verify that the Recipient attribu
-saml-profiles-2.0-os#4.1.4#b99c0d23	MUST	• It MUST contain at least one <Assertion>.
-saml-profiles-2.0-os#4.1.4#bd0bc70f	MUST	If the service provider wishes to permit the identity provider to establish a new identifier for the principal if none exists, it MUST include a <NameIDPolicy> 
-saml-profiles-2.0-os#4.1.4#cf3c2779	MUST	Whether the request is signed or not, the identity provider MUST ensure that any <AssertionConsumerServiceURL> or <AssertionConsumerServiceIndex> elements in th
-saml-profiles-2.0-os#4.1.4#cf74724a	MUST	4.1.4.3 <Response> Message Processing Rules Regardless of the SAML binding used, the service provider MUST do the following: • Verify any signatures present on 
-saml-profiles-2.0-os#4.1.4#cfc0d583	MUST NOT	Note that if the <AuthnRequest> is not authenticated and/or integrity protected, the information in it MUST NOT be trusted except as advisory.
-saml-profiles-2.0-os#4.1.4#e3015005	MUST	If the identity provider does not recognize the principal as that identity, then it MUST respond with a <Response> message containing an error status and no ass
-saml-profiles-2.0-os#4.1.4#eeef8a3c	MUST NOT	This element MUST NOT contain any <SubjectConfirmation> elements.
-saml-profiles-2.0-os#4.1.4#efc9c25a	MUST	Otherwise, if the request is successful (or if the response is not associated with a request), the <Response> element MUST conform to the following:
-saml-profiles-2.0-os#4.1.4#efe0600c	MUST	(Of course, all such conditions MUST be understood by and accepted by the service provider in order for the assertion to be considered valid.) The identity prov
 saml-profiles-2.0-os#4.1.4.4#0d5389b2	MUST	If the HTTP Artifact binding is used to deliver the <Response>, the dereferencing of the artifact using the Artifact Resolution profile MUST be mutually authent
 saml-profiles-2.0-os#4.1.4.4#8bfbf4ec	MUST	The identity provider MUST ensure that only the service provider to whom the <Response> message has been issued is given the message as the result of an <Artifa
 saml-profiles-2.0-os#4.1.4.5#224987d0	MUST	If the HTTP POST binding is used to deliver the <Response>, the enclosed assertion(s) MUST be signed.
@@ -4270,3 +4142,165 @@ webauthn-2#9.4#26bdf02b	MUST	Extensions that require authenticator processing MU
 webauthn-2#9.4#c7284d85	MUST NOT	There MUST NOT be any values returned for ignored extensions.
 webauthn-2#9.5#c7284d85	MUST NOT	There MUST NOT be any values returned for ignored extensions.
 xml-exc-c14n#4#83ee7087	MUST	<element name="InclusiveNamespaces" type="ec:InclusiveNamespaces"/> <complexType name="InclusiveNamespaces"> <attribute name="PrefixList" type="NMTOKENS"/> </co
+xmldsig-core1#0#7378cf99	MUST	An individual who has actual knowledge of a patent which the individual believes contains Essential Claim(s) must disclose the information in accordance with se
+xmldsig-core1#0#aac7e866	SHOULD	• 8.1.2 Only What is "Seen" Should be Signed.
+xmldsig-core1#0#c00c0e3d	MUST	The Second Edition was produced by the W3C XML Security Specifications Maintenance Working Group, adding Canonical XML 1.1 as a required canonicalization algori
+xmldsig-core1#1#72ca207c	MUST	Such an application must specify additional key, algorithm, processing and rendering requirements.
+xmldsig-core1#1.3#84166ae1	MUST	Implementations of this specification must be fully interoperable with the algorithms specified in [RFC6931], but may compute the requisite values through any t
+xmldsig-core1#1.3#bc93dfe1	MUST	Implementations of this specification must use the following XML namespace URIs: URI namespace prefix XML internal entity http://www.w3.org/2000/09/xmldsig# def
+xmldsig-core1#10#222b85cc	MUST	Signature, Application An application that implements the MANDATORY (required/must) portions of this specification; these conformance requirements are over appl
+xmldsig-core1#10#62e1001b	SHOULD	"A signature should identify what is signed, making it impracticable to falsify or alter either the signed matter or the signature without detection." [ABA-DSIG
+xmldsig-core1#10#89726ce0	SHOULD	"A signature should indicate who signed a document, message or record, and should be difficult for another person to produce without authorization." [ABA-DSIG-G
+xmldsig-core1#10#c7630d14	MUST	Obviously, enveloped signatures must take care not to include their own value in the calculation of the SignatureValue.
+xmldsig-core1#2#1730eaca	SHOULD	Since a Signature element (and its Id attribute value/name) may co-exist or be combined with other elements (and their IDs) within a single XML document, care s
+xmldsig-core1#2.1#a918a79b	MUST	Use of KeyInfo is optional, however note that senders and receivers must agree on how it will be used through a mechanism out of scope for this specification.
+xmldsig-core1#2.1#c17607b0	MUST	EXAMPLE 2 [s01] <Signature Id="MyFirstSignature" xmlns="http://www.w3.org/2000/09/xmldsig#"> [s02] <SignedInfo> [s03] <CanonicalizationMethod Algorithm="http://
+xmldsig-core1#2.1#d0965d16	MUST	To promote application interoperability we specify a set of signature algorithms that must be implemented, though their use is at the discretion of the signatur
+xmldsig-core1#2.1#ef12057b	SHOULD	We specify additional algorithms as recommended or optional for implementation; the design also permits arbitrary user specified algorithms.
+xmldsig-core1#2.1.1#eace3868	MUST	For example, if the resource being signed encloses the signature itself, such a transform must be used to exclude the signature value from its own computation.
+xmldsig-core1#2.2#21199c19	SHOULD	While the signing application should be very careful about what it signs (it should understand what is in the SignatureProperty) a receiving application has no 
+xmldsig-core1#2.2#2f9a83b8	SHOULD	References to an XML data element within an Object element should identify the actual element pointed to.
+xmldsig-core1#2.2#4b4cf423	MUST	Note that Type is advisory and no action based on it or checking of its correctness is required by core behavior.
+xmldsig-core1#2.2#7da3ce0f	MUST	Applications that wish to represent other semantics must rely upon other technologies, such as [XML10], [RDF-PRIMER].
+xmldsig-core1#2.2#d67c11d5	SHOULD	Where the element content is not XML (perhaps it is binary or encoded data) the reference should identify the Object and the Reference Type, if given, should in
+xmldsig-core1#2.2#e897defd	MUST	Consequently, it's the application that must understand and know how to make trust decisions given the validity of the signature and the meaning of assuredby sy
+xmldsig-core1#3.1#deaa026e	MUST	The required steps include the generation of Reference elements and the SignatureValue over SignedInfo.
+xmldsig-core1#3.1.2#93d0a69a	MUST	3 Construct the Signature element that includes SignedInfo, Object(s) (if desired, encoding may be different than that used for signing), KeyInfo (if required),
+xmldsig-core1#3.1.2#e1f444b2	SHOULD	Consequently, applications should be careful to consistently process the document or refrain from using external contributions (e.g., defaults and entities).
+xmldsig-core1#4.1#77480217	MUST	However, if HMAC-SHA1 is the signature algorithm then SignatureValue could have leading zero octets that must be preserved.
+xmldsig-core1#4.2#0f1c0daa	MUST	Implementation must generate laxly schema valid [XMLSCHEMA-1][XMLSCHEMA-2] Signature elements as specified by the following schema: Schema Definition: <element 
+xmldsig-core1#4.4.3.3#32e65a81	MUST	Dereferencing a same-document reference must result in an XPath node-set suitable for use by Canonical XML [XML-C14N]. Specifically, dereferencing a null URI (U
+xmldsig-core1#4.4.3.3#615eaa9e	MUST	The application must behave as if the result of XPointer processing [XPTR-FRAMEWORK] were a node-set derived from the resultant subresource as follows:
+xmldsig-core1#4.4.3.3#7c95de49	MUST	Dereferencing a same-document reference must result in an XPath node-set suitable for use by Canonical XML [XML-C14N]. Specifically, dereferencing a null URI (U
+xmldsig-core1#4.4.3.3#b3fcf8c9	MUST	Dereferencing a same-document reference must result in an XPath node-set suitable for use by Canonical XML [XML-C14N].
+xmldsig-core1#4.4.3.3#bb58e911	MUST	When processing an XPointer, the application must behave as if the XPointer was evaluated with respect to the XML document containing the URI attribute.
+xmldsig-core1#4.4.3.3#e19c3647	MUST	Specifically, dereferencing a null URI (URI="") must result in an XPath node-set that includes every non-comment node of the XML document containing the URI att
+xmldsig-core1#4.4.3.3#eafcc92e	MUST	Dereferencing a same-document reference must result in an XPath node-set suitable for use by Canonical XML [XML-C14N]. Specifically, dereferencing a null URI (U
+xmldsig-core1#4.4.3.3#eef347fb	MUST	Dereferencing a same-document reference must result in an XPath node-set suitable for use by Canonical XML [XML-C14N]. Specifically, dereferencing a null URI (U
+xmldsig-core1#4.4.3.5#170db967	MUST	<complexType name="DigestMethodType" mixed="true"> <sequence> <any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/> </sequence> <
+xmldsig-core1#4.4.3.5#42046e12	MUST	DigestMethod is a required element that identifies the digest algorithm to be applied to the signed object.
+xmldsig-core1#4.4.3.5#d3e76c0f	MUST	If the result of the URI dereference and application of Transforms is an XPath node-set (or sufficiently functional replacement implemented by the application) 
+xmldsig-core1#4.5#1a49db6d	MUST	For example, should a complete XML-PGP standard be defined, its root element must be a child of KeyInfo.
+xmldsig-core1#4.5#2500c02d	MUST	While applications may define and use any mechanism they choose through inclusion of elements from a different namespace, compliant versions must implement KeyV
+xmldsig-core1#4.5#3856ad63	MUST	Otherwise, external elements, including alternative structures to those defined by this specification, must be a child of KeyInfo.
+xmldsig-core1#4.5.10#44057efd	MUST	The result of dereferencing a KeyInfoReference must be a KeyInfo element, or an XML document with a KeyInfo element as the root.
+xmldsig-core1#4.5.10#4494124b	MUST	<complexType name="KeyInfoReferenceType"> <attribute name="URI" type="anyURI" use="required"/> <attribute name="Id" type="ID" use="optional"/> </complexType>.
+xmldsig-core1#4.5.2#5ed004fa	MUST	Structured formats for defining DSA (required), RSA (required) and ECDSA (required) public keys are defined in section 6.4 Signature Algorithms.
+xmldsig-core1#4.5.2.1#292d416a	MUST	As such, they are optional but P and Q must either both appear or both be absent.
+xmldsig-core1#4.5.2.1#b80f51fd	MUST	If all of P, Q, seed, and pgenCounter are present, implementations are not required to check if they are consistent and are free to use either P and Q or seed a
+xmldsig-core1#4.5.2.1#f6c6636f	MUST	As such, they are optional but must either both be present or both be absent.
+xmldsig-core1#4.5.2.3#89b89938	MUST	Identifier Type="http://www.w3.org/2009/xmldsig11#ECKeyValue" (this can be used within a RetrievalMethod or Reference element to identify the referent's type) T
+xmldsig-core1#4.5.2.3#8c194d06	MUST	Support for Elliptic-Curve-Point-to-Octet-String conversion without point compression is required.
+xmldsig-core1#4.5.2.3#8e2337f6	SHOULD	For named curves that are identified by OIDs, such as those defined in [RFC3279] and [RFC4055], the OID should be encoded according to [URN-OID].
+xmldsig-core1#4.5.2.3#d24d60fa	MUST	Conformant applications must support the dsig11:NamedCurve element and the 256-bit prime field curve as identified by the OID 1.2.840.10045.3.1.7.
+xmldsig-core1#4.5.2.3#e4187ecc	MUST	<complexType name="NamedCurveType"> <attribute name="URI" type="anyURI" use="required" /> </complexType>.
+xmldsig-core1#4.5.2.3.1#89da3d09	MUST	The cofactor is required in ECDH public key parameters.
+xmldsig-core1#4.5.2.3.1#b7688db5	MUST	Parameter validation is not required by this specification.
+xmldsig-core1#4.5.2.3.1#f2ec655c	MUST	<complexType name="ECValidationDataType"> <sequence> <element name="seed" type="ds:CryptoBinary" /> </sequence> <attribute name="hashAlgorithm" type="anyURI" us
+xmldsig-core1#4.5.2.3.1#f592cc21	MUST	The cofactor is not required to support ECDSA, except in parameter validation.
+xmldsig-core1#4.5.3#0b269dec	MUST	Note that when referencing one of the defined KeyInfo types within the same document, or some remote documents, at least one Transform is required to turn an ID
+xmldsig-core1#4.5.3#feaed1ca	MUST	<complexType name="RetrievalMethodType"> <sequence> <element ref="ds:Transforms" minOccurs="0" /> </sequence> <attribute name="URI" type="anyURI" /> <attribute 
+xmldsig-core1#4.5.4#2f964fc1	MUST	The digest algorithm URI is identified with a required Algorithm attribute.
+xmldsig-core1#4.5.4#350c79c7	MUST	Any X509IssuerSerial, X509SKI, X509SubjectName, and dsig11:X509Digest elements that appear must refer to the certificate or certificates containing the validati
+xmldsig-core1#4.5.4#37f9b62c	MUST	The input to the digest must be the raw octets that would be base64-encoded were the same certificate to appear in the X509Certificate element.
+xmldsig-core1#4.5.4#3dca3f97	SHOULD	While in principle many certificate encodings are possible, it is recommended that certificates appearing in an X509Certificate element be limited to an encodin
+xmldsig-core1#4.5.4#56276a8d	SHOULD	As a result, deployments that do make use of this element should take care if schema validation is involved.
+xmldsig-core1#4.5.4#6a39278a	MUST	All such elements that refer to a particular individual certificate must be grouped inside a single X509Data element and if the certificate to which they refer 
+xmldsig-core1#4.5.4#8f930b3f	MUST	Any X509IssuerSerial, X509SKI, X509SubjectName, and dsig11:X509Digest elements that relate to the same key but different certificates must be grouped within a s
+xmldsig-core1#4.5.4#90ab4a35	SHOULD	• The X509SubjectName element, which contains an X.509 subject distinguished name that should be represented as a string that complies with section 3 of RFC4514
+xmldsig-core1#4.5.4#a2431905	SHOULD NOT	In any case, XML Signature implementations should not alter or re-encode certificates, as doing so could invalidate their signatures.
+xmldsig-core1#4.5.4#ac478ff4	MUST	All certificates appearing in an X509Data element must relate to the validation key by either containing it or being part of a certification chain that terminat
+xmldsig-core1#4.5.4#b281a578	SHOULD	New deployments should avoid use of the element.
+xmldsig-core1#4.5.4#d090384b	SHOULD	Note that if X509Data child elements are used to identify a trusted certificate (rather than solely as an untrusted hint supplemented by validation by policy), 
+xmldsig-core1#4.5.4#f732e796	MUST	Whenever multiple certificates occur in an X509Data element, at least one such certificate must contain the public key which verifies the signature.
+xmldsig-core1#4.5.4#f7f1c241	SHOULD	The distinguished name should be represented as a string that complies with section 3 of RFC4514 [LDAP-DN], to be generated according to the Distinguished Name 
+xmldsig-core1#4.5.4.1#91b41bf5	SHOULD	To encode a distinguished name (X509IssuerSerial,X509SubjectName, and KeyName if appropriate), the encoding rules in section 2 of RFC 4514 [LDAP-DN] should be a
+xmldsig-core1#4.5.4.1#97624f13	SHOULD	To encode a distinguished name (X509IssuerSerial,X509SubjectName, and KeyName if appropriate), the encoding rules in section 2 of RFC 4514 [LDAP-DN] should be a
+xmldsig-core1#4.5.4.1#bca63bfe	SHOULD	<!-- Note, this schema permits X509Data to be empty; this is precluded by the text in <a href="#sec-KeyInfo" class="sectionRef"></a> which states that at least 
+xmldsig-core1#4.5.4.1#c3944734	MUST	<complexType name="X509DigestType"> <simpleContent> <extension base="base64Binary"> <attribute name="Algorithm" type="anyURI" use="required"/> </extension> </si
+xmldsig-core1#4.5.4.1#f46152c9	SHOULD	To encode a distinguished name (X509IssuerSerial,X509SubjectName, and KeyName if appropriate), the encoding rules in section 2 of RFC 4514 [LDAP-DN] should be a
+xmldsig-core1#4.5.5#54a01e77	MUST	PGPData must contain one PGPKeyID and/or one PGPKeyPacket and 0 or more elements from an external namespace.
+xmldsig-core1#4.5.6#30eca56d	MUST	SPKIData must have at least one SPKISexp; SPKISexp can be complemented/extended by siblings from an external namespace within SPKIData, or SPKIData can be entir
+xmldsig-core1#4.5.7#ffa3bc1b	SHOULD NOT	However, use of this element is not recommended and should not be used.
+xmldsig-core1#4.5.9#2439600d	SHOULD	For the key value types supported in this specification, refer to the following for normative references on the format of Subject Public Key Info and the releva
+xmldsig-core1#4.6#11f2cbdd	MUST	Note, if the application wishes to exclude the <Object> tags from the digest calculation the Reference must identify the actual data object (easy for XML docume
+xmldsig-core1#4.6#20aa0b58	MUST	This attribute is purely advisory; no validation of the MimeType information is required by this specification.
+xmldsig-core1#4.6#a2710f5a	SHOULD	Applications which require normative type and encoding information for signature validation should specify Transforms with well defined resulting types and/or e
+xmldsig-core1#5.2#d2376ee1	MUST	<complexType name="SignaturePropertyType" mixed="true"> <choice maxOccurs="unbounded"> <any namespace="##other" processContents="lax" /> <!-- (1,1) elements fro
+xmldsig-core1#6.1#1bf573ef	MUST	3 Exclusive XML Canonicalization 1.0 (with comments) http://www.w3.org/2001/10/xml-exc-c14n#WithComments Transform Required.
+xmldsig-core1#6.1#28c96088	SHOULD	2 HMAC-SHA256 http://www.w3.org/2001/04/xmldsig-more#hmac-sha256 Recommended.
+xmldsig-core1#6.1#46e71c16	MUST	3 SHA512 http://www.w3.org/2001/04/xmlenc#sha512 Encoding Required.
+xmldsig-core1#6.1#5385ebaa	MUST	This may be implemented via the XPath specification specified in 6.6.4: Enveloped Signature Transform; it must have the same effect as that specified by the XPa
+xmldsig-core1#6.1#81e3ba60	SHOULD	2 Enveloped Signature (**note) http://www.w3.org/2000/09/xmldsig#enveloped-signature Recommended.
+xmldsig-core1#6.1#92000f4d	MUST	9 DSAwithSHA256 http://www.w3.org/2009/xmldsig11#dsa-sha256 [section 6.4.1 DSA] Canonicalization Required.
+xmldsig-core1#6.1#94139a07	SHOULD	3 DSAwithSHA1 (signature verification) http://www.w3.org/2000/09/xmldsig#dsa-sha1 [section 6.4.1 DSA] Recommended.
+xmldsig-core1#6.1#bb740908	SHOULD	3 Exclusive XML Canonicalization 1.0 (omit comments) http://www.w3.org/2001/10/xml-exc-c14n# Recommended.
+xmldsig-core1#6.1#c3e5b78a	SHOULD	Use of XPath filter is recommended over use of XSLT.
+xmldsig-core1#6.1#d5e00ab8	MUST	Such parameter elements have a descriptive element name, which is frequently algorithm specific, and must be in the XML Signature namespace or an algorithm spec
+xmldsig-core1#6.1#ddbfe736	MUST	1 base64 (*note) http://www.w3.org/2000/09/xmldsig#base64 MAC Required.
+xmldsig-core1#6.1#e3cff523	SHOULD	When using transforms, we RECOMMEND selecting the least expressive choice that still accomplishes the needs of the use case at hand: Use of XPath filter 2.0 is 
+xmldsig-core1#6.1#e9a94cc7	MUST	1 HMAC-SHA224 http://www.w3.org/2001/04/xmldsig-more#hmac-sha224 Signature Required.
+xmldsig-core1#6.2#264ed95c	SHOULD	Use of SHA-256 is strongly recommended over SHA-1 because recent advances in cryptanalysis (see e.g. [SHA-1-Analysis]) have cast doubt on the long-term collisio
+xmldsig-core1#6.2#bcc1446c	SHOULD NOT	Digest algorithms that are known not to be collision resistant should not be used in DigestMethod elements.
+xmldsig-core1#6.2#c2534a3a	MUST	Therefore, SHA-1 support is required in this specification only for backwards-compatibility reasons.
+xmldsig-core1#6.2#eb1210d9	SHOULD NOT	For example, the MD5 message digest algorithm should not be used as specific collisions have been demonstrated for that algorithm.
+xmldsig-core1#6.2#ff41010a	MUST	This specification defines several possible digest algorithms for the DigestMethod element, including required algorithm SHA-256.
+xmldsig-core1#6.2.1#7af6b70b	SHOULD	Identifier: http://www.w3.org/2000/09/xmldsig#sha1 Note: Use of SHA-256 is strongly recommended over SHA-1 because recent advances in cryptanalysis (see e.g. [S
+xmldsig-core1#6.2.1#cdf9b985	MUST	The content of the DigestValue element shall be the base64 encoding of this bit string viewed as a 20-octet octet stream.
+xmldsig-core1#6.2.2#d395d2fa	MUST	The content of the DigestValue element shall be the base64 encoding of this bit string viewed as a 28-octet octet stream.
+xmldsig-core1#6.2.3#f0262c67	MUST	The content of the DigestValue element shall be the base64 encoding of this bit string viewed as a 32-octet octet stream.
+xmldsig-core1#6.2.4#90282658	MUST	The content of the DigestValue element shall be the base64 encoding of this bit string viewed as a 48-octet octet stream.
+xmldsig-core1#6.2.5#c8d914ec	MUST	The content of the DigestValue element shall be the base64 encoding of this bit string viewed as a 64-octet octet stream.
+xmldsig-core1#6.3.1#04914fa4	MUST	Any signature with a truncation length that is less than half the output length of the underlying hash algorithm must be deemed invalid.
+xmldsig-core1#6.3.1#41a0178f	MUST	This value shall be base64 encoded in the same straightforward fashion as the output of the digest algorithms.
+xmldsig-core1#6.4.1#4f6a464f	MUST	Integer to octet-stream conversion must be done according to the I2OSP operation defined in the RFC 3447 [PKCS1] specification with a l parameter equal to 20.
+xmldsig-core1#6.4.1#ba77bd80	MUST	XML Signature 1.1 implementations may but are not required to support DSA-based signature generation.
+xmldsig-core1#6.4.1#e12e68b6	SHOULD	Implementers should consult this publication for guidance on acceptable key lengths for applications, however 2048-bit public keys are the minimum recommended k
+xmldsig-core1#6.4.1#f3a3919f	SHOULD	Important older signatures should be re-signed with stronger signatures.
+xmldsig-core1#6.4.1#f8016ac8	SHOULD NOT	Given the short key size and SP800-57 guidelines, DSA with 1024-bit prime moduli should not be used to create signatures.
+xmldsig-core1#6.4.2#232b2c7c	SHOULD NOT	RSA public keys of 1024 bits or less should not be used to create new signatures but may be used to verify signatures created by older legacy systems.
+xmldsig-core1#6.4.2#3a7732fb	SHOULD	Implementers should consult this publication for guidance on acceptable key lengths for applications, however 2048-bit public keys are the minimum recommended k
+xmldsig-core1#6.4.2#9a86967f	MUST	XML Signature 1.1 implementations must use at least 2048-bit keys for creating signatures, and should use at least 3072-bit keys for signatures that will be ver
+xmldsig-core1#6.4.2#b587d5f1	MUST	All conforming implementations of XML Signature 1.1 must support RSA signature generation and verification with public keys at least 2048 bits in length.
+xmldsig-core1#6.4.3#3c01ab1a	MUST	Integer to octet-stream conversion must be done according to the I2OSP operation defined in the RFC 3447 [PKCS1] specification with the l parameter equal to the
+xmldsig-core1#6.4.3#98d48442	SHOULD	It is further recommended that implementations also implement algorithms that lead to the same results as ECDSA over the P-384 and P-521 prime curves; these cur
+xmldsig-core1#6.5#71858ad4	MUST	This is because the XML processor used to prepare the XPath data model input is required (by the Data Model) to use Normalization Form C when converting an XML 
+xmldsig-core1#6.5.1#f16a0deb	MUST	Identifier for required Canonical XML 1.0 (omits comments): http://www.w3.org/TR/2001/REC-xml-c14n-20010315 Identifier for Canonical XML 1.0 with Comments: http
+xmldsig-core1#6.5.2#5a3ee4f6	MUST	Identifier for required Canonical XML 1.1 (omits comments): http://www.w3.org/2006/12/xml-c14n11 Identifier for Canonical XML 1.1 with Comments: http://www.w3.o
+xmldsig-core1#6.5.3#dd6e8e73	MUST	Identifier for required Exclusive XML Canonicalization 1.0 (omits comments): http://www.w3.org/2001/10/xml-exc-c14n# Identifier for Exclusive XML Canonicalizati
+xmldsig-core1#6.6#5a73da95	SHOULD	Application developers are strongly encouraged to support all transforms that are listed as recommended unless the application environment has resource constrai
+xmldsig-core1#6.6#bd66db37	SHOULD	Compliance with this recommendation will maximize application interoperability and libraries should be available to enable support of these transforms in applic
+xmldsig-core1#6.6.3#15ea22d1	MUST	In the example above, use the XPath element: EXAMPLE 24 <XPath xmlns:dsig="&dsig;"> count(ancestor-or-self::dsig:Signature | here()/ancestor::dsig:Signature[1])
+xmldsig-core1#6.6.3#274e8af1	MUST	The input required by this transform is an XPath node-set or an octet-stream.
+xmldsig-core1#6.6.3#30b5cdb3	MUST	Each signature must omit itself from its own digest calculations, but it is also necessary to exclude the second signature element from the digest calculations 
+xmldsig-core1#6.6.3#442b9a03	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.3#5783f6fb	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.3#6f3442df	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.3#73044ce0	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.3#7408ecfd	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.3#8c36fbec	MUST	If the actual input is an octet stream, then the application must convert the octet stream to an XPath node-set suitable for use by Canonical XML with Comments.
+xmldsig-core1#6.6.3#ba2c40c3	MUST	(A subsequent application of the required Canonical XML algorithm would strip away these comments.) In other words, the input node-set should be equivalent to t
+xmldsig-core1#6.6.3#bcf7a9a2	MUST	Although the signed content should not be changed after signing, the elements within the Signature element are changing (e.g. the digest value must be put insid
+xmldsig-core1#6.6.3#ea314471	SHOULD	Should this problem arise in the application, it can be solved by either canonicalizing the document before the XPath transform to physically remove the comment
+xmldsig-core1#6.6.3#feb7a864	MUST	Identifier: http://www.w3.org/TR/1999/REC-xpath-19991116 Input: octet-stream, node-set Output: node-set The normative specification for XPath expression evaluat
+xmldsig-core1#6.6.4#beadf0fe	MUST	However, this transform must produce output in exactly the same manner as the XPath transform parameterized by the XPath expression above.
+xmldsig-core1#6.6.5#7b85fe85	MUST	Specification of a namespace-qualified stylesheet element, which must be the sole child of the Transform element, indicates that the specified style sheet shoul
+xmldsig-core1#7#3220095f	MUST	Third, there is the possibility of coded character set conversion, such as between UTF-8 and UTF-16, both of which all [XML10] compliant processors are required
+xmldsig-core1#7#bdb0383b	SHOULD	Any canonicalization algorithm should yield output in a specific fixed coded character set.
+xmldsig-core1#7#ecc72a57	MUST	If the surface representation of the signed data can change between signing and verification, then some way to standardize the changeable aspect must be used be
+xmldsig-core1#7.2#368d460b	MUST	For an XML Signature to be verifiable by an implementation using DOM or SAX, not only must the XML 1.0 syntax constraints given in the section 7.1 XML 1.0 Synta
+xmldsig-core1#8#97231f50	MUST	Implementers must give consideration to their application threat models and to the following factors.
+xmldsig-core1#8.1.1#3c413fda	SHOULD	Applications that do not canonicalize XML content (especially the SignedInfo element) should not use internal entities and should represent the namespace explic
+xmldsig-core1#8.1.2#044883e4	SHOULD	Instead, one can sign the data along with whatever filters, style sheets, client profile or other information that affects its presentation. 8.1.3 "See" What is
+xmldsig-core1#8.1.2#09f39af1	SHOULD	For instance, if an XML document includes an embedded style sheet [XSLT] it is the transformed document that should be represented to the user and signed.
+xmldsig-core1#8.1.2#26671eaa	MUST	• All documents operated upon and generated by signature applications must be in [NFC] (otherwise intermediate processors might unintentionally break the signat
+xmldsig-core1#8.1.2#7b92dc19	SHOULD	• Encoding normalizations should not be done as part of a signature transform, or (to state it another way) if normalization does occur, the application should 
+xmldsig-core1#8.1.2#aa049c7d	SHOULD	Some applications might operate over the original or intermediary data but should be extremely careful about potential weaknesses introduced between the origina
+xmldsig-core1#8.1.2#e09310e0	SHOULD	Additionally, the signature secures any information introduced by the transform: only what is "seen" (that which is represented to the user via visual, auditory
+xmldsig-core1#8.1.2#f2b7c299	SHOULD	To meet this recommendation where a document references an external style sheet, the content of that external resource should also be signed as via a signature 
+xmldsig-core1#8.2#6808c69c	SHOULD	The number of holders of the private key should be minimized and preferably be one.
+xmldsig-core1#8.2#8a469beb	MUST	Keyed hash authentication codes, based on secret keys, are typically much more efficient in terms of the computational effort required but have the characterist
+xmldsig-core1#8.2#e5390501	MUST	Care must be exercised by applications in executing the various algorithms that may be specified in an XML signature and in the processing of any "executable co
+xmldsig-core1#8.4#71f564ea	SHOULD	Error messages should be limited to a generic error message to avoid providing information to a potential attacker related to the specifics of the algorithm imp
+xmldsig-core1#8.4#ad6b2bb2	SHOULD	For example, if an error occurs in signature verification processing the error response should be a generic message providing no specifics on the details of the
+xmldsig-core1#8.4#d4c12e21	SHOULD NOT	Implementations should not provide detailed error responses related to security algorithm processing.

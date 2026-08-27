@@ -11,18 +11,21 @@ use super::*;
 // Timestamp parsing tests
 // =========================================================================
 
+// SAML Core §1.3.3: instants are UTC xsd:dateTime values.
 #[test]
 fn parse_saml_timestamp_utc() {
     let ts = parse_saml_timestamp("2026-03-19T12:00:00Z").unwrap();
     assert_eq!(ts.to_string(), "2026-03-19T12:00:00Z");
 }
 
+// SAML Core §1.3.3: fractional seconds are permitted.
 #[test]
 fn parse_saml_timestamp_with_milliseconds() {
     let ts = parse_saml_timestamp("2026-03-19T12:00:00.000Z").unwrap();
     assert_eq!(ts.to_string(), "2026-03-19T12:00:00Z");
 }
 
+// SAML Core §1.3.3: a value that is not an xsd:dateTime is rejected.
 #[test]
 fn parse_saml_timestamp_invalid() {
     let err = parse_saml_timestamp("not-a-timestamp").unwrap_err();
@@ -36,6 +39,7 @@ fn parse_saml_timestamp_invalid() {
 // Status validation tests
 // =========================================================================
 
+// SAML Core §3.2.2.2: the top-level status code reports whether the request succeeded.
 #[test]
 fn status_success_passes() {
     let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -48,6 +52,7 @@ fn status_success_passes() {
     assert!(validate_status(response).is_ok());
 }
 
+// SAML Core §3.2.2.2: a non-Success status is not an authentication.
 #[test]
 fn status_non_success_returns_error() {
     let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -68,6 +73,7 @@ fn status_non_success_returns_error() {
 // Conditions time validation tests
 // =========================================================================
 
+// SAML Core §2.5.1: the assertion is used only inside its validity window.
 #[test]
 fn conditions_valid_time_window_passes() {
     // NotBefore = 1 hour ago, NotOnOrAfter = 1 hour from now
@@ -93,6 +99,7 @@ fn conditions_valid_time_window_passes() {
     assert!(validate_conditions(assertion, now).is_ok());
 }
 
+// SAML Core §2.5.1: an assertion past NotOnOrAfter is rejected.
 #[test]
 fn conditions_expired_returns_error() {
     // NotOnOrAfter = 10 minutes ago (beyond clock skew tolerance)
@@ -117,6 +124,7 @@ fn conditions_expired_returns_error() {
     );
 }
 
+// SAML Core §2.5.1: an assertion before NotBefore is rejected.
 #[test]
 fn conditions_not_yet_valid_returns_error() {
     // NotBefore = 10 minutes from now (beyond clock skew tolerance)
@@ -141,6 +149,7 @@ fn conditions_not_yet_valid_returns_error() {
     );
 }
 
+// SAML Core §2.5.1: a bounded clock skew allowance is applied to the window.
 #[test]
 fn clock_skew_within_tolerance_passes() {
     // NotOnOrAfter = 30 seconds ago (within 120s skew tolerance)
@@ -165,6 +174,7 @@ fn clock_skew_within_tolerance_passes() {
 // Email extraction tests
 // =========================================================================
 
+// SAML Core §2.2.2: the subject identifier carries the principal's name.
 #[test]
 fn email_extracted_from_name_id() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -180,6 +190,7 @@ fn email_extracted_from_name_id() {
     assert_eq!(email, "user@example.com");
 }
 
+// SAML Core §2.7.3: an attribute statement can carry the principal's name.
 #[test]
 fn email_extracted_from_configured_attribute() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -199,6 +210,7 @@ fn email_extracted_from_configured_attribute() {
     assert_eq!(email, "user@example.com");
 }
 
+// SAML Core §2.7.3: a configured attribute is preferred over the subject identifier.
 #[test]
 fn email_attribute_takes_precedence_over_name_id() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -217,6 +229,7 @@ fn email_attribute_takes_precedence_over_name_id() {
     assert_eq!(email, "attr@example.com");
 }
 
+// SAML Profiles §4.1.4: an assertion with no usable identity is rejected.
 #[test]
 fn missing_email_returns_error() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -237,6 +250,7 @@ fn missing_email_returns_error() {
 // Domain extraction tests
 // =========================================================================
 
+// SAML Core §2.2.2: the identity is parsed out of the subject identifier.
 #[test]
 fn domain_extracted_from_email() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"/>
@@ -247,6 +261,7 @@ fn domain_extracted_from_email() {
     assert_eq!(domain, Some("example.com".to_string()));
 }
 
+// SAML Core §2.7.3: the identity is parsed out of the named attribute.
 #[test]
 fn domain_extracted_from_configured_attribute() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -265,6 +280,7 @@ fn domain_extracted_from_configured_attribute() {
 /// Regression: mixed-case configured-attribute value must be lowercased
 /// so org lookups (which match against the lowercase-stored primary or
 /// additional domain) find the right org.
+// SAML Core §2.7.3: the domain is compared case-insensitively.
 #[test]
 fn domain_from_configured_attribute_is_lowercased() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -282,6 +298,7 @@ fn domain_from_configured_attribute_is_lowercased() {
 
 /// Regression: when falling back to the email domain, the extracted
 /// domain must be lowercased.
+// SAML Core §2.2.2: the domain is compared case-insensitively.
 #[test]
 fn domain_from_email_fallback_is_lowercased() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"/>
@@ -296,6 +313,7 @@ fn domain_from_email_fallback_is_lowercased() {
 // Destination validation tests (via validate_saml_response)
 // =========================================================================
 
+// SAML Core §3.2.2: the recipient checks that Destination names where the message was delivered.
 #[test]
 fn destination_mismatch_returns_error() {
     // Test via direct construction of the ResponseError type
@@ -309,6 +327,7 @@ fn destination_mismatch_returns_error() {
     );
 }
 
+// SAML Core §3.2.2: InResponseTo must match the ID of the request that provoked it.
 #[test]
 fn in_response_to_mismatch_returns_error() {
     let err = ResponseError::InResponseToMismatch {
@@ -325,6 +344,7 @@ fn in_response_to_mismatch_returns_error() {
 // Multiple assertions rejection test
 // =========================================================================
 
+// SAML Profiles §4.1.4: the response carries the assertions the profile expects.
 #[test]
 fn multiple_assertions_error_displays_correctly() {
     let err = ResponseError::MultipleAssertions;
@@ -339,6 +359,7 @@ fn multiple_assertions_error_displays_correctly() {
 // decode error test
 // =========================================================================
 
+// SAML Bindings §3.5.4: the SAMLResponse form control is base64 encoded.
 #[test]
 fn invalid_base64_returns_decode_error() {
     use crate::services::idp::saml::IdpMetadata;
@@ -366,6 +387,7 @@ fn invalid_base64_returns_decode_error() {
     );
 }
 
+// SAML Bindings §3.5.4: the decoded form control is a SAML protocol message.
 #[test]
 fn invalid_xml_returns_xml_parse_error() {
     use crate::services::idp::saml::IdpMetadata;
@@ -398,6 +420,7 @@ fn invalid_xml_returns_xml_parse_error() {
 // Issuer validation tests (SAML Core 2.3.3)
 // =========================================================================
 
+// SAML Core §2.3.3: the assertion Issuer identifies the issuing identity provider.
 #[test]
 fn issuer_matching_passes() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -408,6 +431,7 @@ fn issuer_matching_passes() {
     assert!(validate_issuer(assertion, "https://idp.example.com").is_ok());
 }
 
+// SAML Core §2.3.3: an assertion from an unexpected issuer is rejected.
 #[test]
 fn issuer_mismatch_returns_error() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -422,6 +446,7 @@ fn issuer_mismatch_returns_error() {
     );
 }
 
+// SAML Core §2.3.3: the Issuer element is required on an assertion.
 #[test]
 fn missing_issuer_returns_error() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -439,6 +464,7 @@ fn missing_issuer_returns_error() {
 // AudienceRestriction validation tests (SAML Core 2.5.1.4)
 // =========================================================================
 
+// SAML Core §2.5.1.4: the service provider must be an intended audience.
 #[test]
 fn audience_restriction_matching_passes() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -453,6 +479,7 @@ fn audience_restriction_matching_passes() {
     assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
 }
 
+// SAML Core §2.5.1.4: an assertion addressed to another audience is rejected.
 #[test]
 fn audience_restriction_wrong_sp_returns_error() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -471,6 +498,7 @@ fn audience_restriction_wrong_sp_returns_error() {
     );
 }
 
+// SAML Core §2.5.1.4: one matching Audience satisfies the restriction.
 #[test]
 fn audience_restriction_multiple_audiences_one_matching() {
     let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -486,6 +514,7 @@ fn audience_restriction_multiple_audiences_one_matching() {
     assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
 }
 
+// SAML Core §2.5.1.4: an assertion with no audience restriction is not accepted.
 #[test]
 fn audience_restriction_absent_conditions_returns_error() {
     // No Conditions element — now required per SAML Profiles 4.1.4.3
@@ -499,6 +528,7 @@ fn audience_restriction_absent_conditions_returns_error() {
     );
 }
 
+// SAML Core §2.5.1.4: conditions without an AudienceRestriction are not accepted.
 #[test]
 fn audience_restriction_conditions_without_restriction_returns_error() {
     // Conditions exists but no AudienceRestriction — now required
@@ -518,6 +548,7 @@ fn audience_restriction_conditions_without_restriction_returns_error() {
 // SubjectConfirmation Method validation tests (SAML Core 2.4.1.2)
 // =========================================================================
 
+// SAML Profiles §4.1.4: the subject is confirmed by the bearer method.
 #[test]
 fn subject_confirmation_bearer_method_passes() {
     let now = Timestamp::now();
@@ -551,6 +582,7 @@ fn subject_confirmation_bearer_method_passes() {
     );
 }
 
+// SAML Profiles §4.1.4: a confirmation method other than bearer is not accepted.
 #[test]
 fn subject_confirmation_non_bearer_method_returns_error() {
     let now = Timestamp::now();
@@ -576,6 +608,7 @@ fn subject_confirmation_non_bearer_method_returns_error() {
     );
 }
 
+// SAML Core §2.4.1.2: SubjectConfirmation names a confirmation method.
 #[test]
 fn subject_confirmation_missing_method_returns_error() {
     let now = Timestamp::now();
@@ -621,6 +654,7 @@ fn assertion_with_subject_confirmations(confirmations_xml: &str) -> String {
 /// SAML Core 2.4.1: a Subject with multiple SubjectConfirmation elements is
 /// confirmed if ANY ONE is satisfied. The first bearer here has a wrong
 /// Recipient (fails), the second is fully valid — the assertion MUST pass.
+// SAML Profiles §4.1.4: one satisfied bearer confirmation is enough.
 #[test]
 fn subject_confirmation_multiple_one_valid_bearer_passes() {
     let now = Timestamp::now();
@@ -651,6 +685,7 @@ fn subject_confirmation_multiple_one_valid_bearer_passes() {
 
 /// When every bearer SubjectConfirmation fails (all Recipients wrong), the
 /// assertion MUST be rejected.
+// SAML Core §2.4.1.2: Recipient must name this service provider's endpoint.
 #[test]
 fn subject_confirmation_multiple_all_invalid_recipient_returns_error() {
     let now = Timestamp::now();
@@ -683,6 +718,7 @@ fn subject_confirmation_multiple_all_invalid_recipient_returns_error() {
 /// Mixed methods: a non-bearer (holder-of-key) SubjectConfirmation followed by
 /// a valid bearer one. Vouch supports only bearer, but per SAML Core 2.4.1 the
 /// assertion is confirmed by the valid bearer SubjectConfirmation.
+// SAML Profiles §4.1.4: a satisfied bearer confirmation among others is enough.
 #[test]
 fn subject_confirmation_mixed_methods_one_valid_bearer_passes() {
     let now = Timestamp::now();
@@ -713,6 +749,7 @@ fn subject_confirmation_mixed_methods_one_valid_bearer_passes() {
 /// The first bearer SubjectConfirmation is expired (NotOnOrAfter in the past,
 /// beyond clock skew), the second is valid. Per "any one" semantics the
 /// assertion MUST be accepted via the second.
+// SAML Core §2.4.1.2: an expired confirmation does not disqualify a valid one.
 #[test]
 fn subject_confirmation_multiple_first_expired_second_valid_passes() {
     let now = Timestamp::now();
@@ -749,18 +786,21 @@ fn subject_confirmation_multiple_first_expired_second_valid_passes() {
 // New error variant display tests
 // =========================================================================
 
+// SAML Core §3.2.2: a missing Destination is reported as such.
 #[test]
 fn missing_destination_error_displays_correctly() {
     let err = ResponseError::MissingDestination;
     assert!(err.to_string().contains("Destination"));
 }
 
+// SAML Core §3.2.2: a missing InResponseTo is reported as such.
 #[test]
 fn missing_in_response_to_error_displays_correctly() {
     let err = ResponseError::MissingInResponseTo;
     assert!(err.to_string().contains("InResponseTo"));
 }
 
+// SAML Core §2.3.3: an issuer mismatch is reported as such.
 #[test]
 fn issuer_mismatch_error_displays_correctly() {
     let err = ResponseError::IssuerMismatch {
@@ -770,6 +810,7 @@ fn issuer_mismatch_error_displays_correctly() {
     assert!(err.to_string().contains("issuer mismatch"));
 }
 
+// SAML Core §2.5.1.4: an audience mismatch is reported as such.
 #[test]
 fn audience_restriction_error_displays_correctly() {
     let err = ResponseError::AudienceRestrictionViolation {
@@ -1159,6 +1200,7 @@ fn valid_time_window() -> (String, String) {
 
 /// Happy-path: a fully-signed SAML Response must pass validation and return
 /// the correct email and domain.
+// XML Signature §3.2.2: a correctly signed response validates.
 #[test]
 fn validate_saml_response_rsa_signed_happy_path() {
     use base64::Engine as _;
@@ -1198,6 +1240,7 @@ fn validate_saml_response_rsa_signed_happy_path() {
 
 /// The NameID extractor returns the text and Format together, and
 /// `None` when the Format attribute is absent.
+// SAML Core §2.2.2: the identifier carries a Format and a value.
 #[test]
 fn extract_name_id_reads_text_and_format() {
     let with_format = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -1231,6 +1274,7 @@ fn extract_name_id_reads_text_and_format() {
 /// whole value too; reading only the first text node would let a holder of a
 /// legitimately signed assertion truncate it to another user's identity
 /// (CVE-2017-11427 class).
+// XML Signature §3.2.1: the verifier reads the same characters the digest covers.
 #[test]
 fn comment_split_text_is_read_whole_not_truncated() {
     let assertion_xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -1295,6 +1339,7 @@ fn comment_split_text_is_read_whole_not_truncated() {
 /// the attack has to be stopped by reading the whole value. The resulting
 /// identity must be the full attacker-controlled string, never the victim
 /// prefix.
+// XML Signature §3.2.1: a comment node must not change the identity the verifier reads.
 #[test]
 fn validate_saml_response_comment_injection_does_not_truncate_identity() {
     use base64::Engine as _;
@@ -1343,6 +1388,7 @@ fn validate_saml_response_comment_injection_does_not_truncate_identity() {
 
 /// Tamper-detection: modifying the email in the assertion after signing must
 /// cause digest mismatch during validation.
+// XML Signature §3.2.1: altering signed content breaks the reference digest.
 #[test]
 fn validate_saml_response_tampered_email_fails_digest_check() {
     use base64::Engine as _;
@@ -1394,6 +1440,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
 // Gap tests: Conditions required, Subject required, size limit, etc.
 // =========================================================================
 
+// SAML Profiles §4.1.4: the assertion must carry conditions the service provider can evaluate.
 #[test]
 fn conditions_missing_element_returns_error() {
     let now = Timestamp::now();
@@ -1408,6 +1455,7 @@ fn conditions_missing_element_returns_error() {
     );
 }
 
+// SAML Profiles §4.1.4: the assertion must carry a Subject the profile can confirm.
 #[test]
 fn subject_confirmation_missing_subject_returns_error() {
     let now = Timestamp::now();
@@ -1429,6 +1477,7 @@ fn subject_confirmation_missing_subject_returns_error() {
     );
 }
 
+// SAML Core §2.4.1.2: a Subject with no SubjectConfirmation cannot be confirmed.
 #[test]
 fn subject_confirmation_empty_children_returns_error() {
     let now = Timestamp::now();
@@ -1461,6 +1510,7 @@ fn subject_confirmation_empty_children_returns_error() {
 /// but its Reference URI points to the real Assertion nested inside a
 /// Container element. Without the direct-child check the victim's
 /// identity would be accepted.
+// SAML Core §5: a signature must cover the assertion that is relied upon.
 #[test]
 fn xsw_nested_assertion_rejected() {
     use base64::Engine as _;
@@ -1530,6 +1580,7 @@ fn xsw_nested_assertion_rejected() {
     );
 }
 
+// SAML Bindings §3.5.4: the decoded message size is bounded.
 #[test]
 fn oversized_response_returns_decode_error() {
     use crate::services::idp::saml::IdpMetadata;
@@ -1570,6 +1621,7 @@ fn oversized_response_returns_decode_error() {
 // =========================================================================
 
 /// The new error variant must produce a helpful, searchable message.
+// SAML Core §2.4.1.2: a missing InResponseTo is reported as such.
 #[test]
 fn missing_subject_confirmation_in_response_to_error_displays_correctly() {
     let err = ResponseError::MissingSubjectConfirmationInResponseTo;
@@ -1592,6 +1644,7 @@ fn missing_subject_confirmation_in_response_to_error_displays_correctly() {
 
 /// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
 /// absent, validation MUST fail with MissingSubjectConfirmationInResponseTo.
+// SAML Core §2.4.1.2: bearer confirmation data carries InResponseTo when the request is known.
 #[test]
 fn subject_confirmation_require_irt_missing_irt_returns_error() {
     let now = Timestamp::now();
@@ -1627,6 +1680,7 @@ fn subject_confirmation_require_irt_missing_irt_returns_error() {
 
 /// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
 /// present and matches, validation MUST pass.
+// SAML Core §2.4.1.2: a matching InResponseTo confirms the subject.
 #[test]
 fn subject_confirmation_require_irt_present_matching_passes() {
     let now = Timestamp::now();
@@ -1659,6 +1713,7 @@ fn subject_confirmation_require_irt_present_matching_passes() {
 
 /// When `require_irt` is true and SubjectConfirmationData.InResponseTo is
 /// present but wrong, validation MUST fail with InResponseToMismatch.
+// SAML Core §2.4.1.2: an InResponseTo naming another request is rejected.
 #[test]
 fn subject_confirmation_require_irt_mismatch_fails() {
     let now = Timestamp::now();
@@ -1694,6 +1749,7 @@ fn subject_confirmation_require_irt_mismatch_fails() {
 /// SAML Profiles 4.1.4.3 requires the bearer SubjectConfirmationData to
 /// carry InResponseTo for a solicited response, "Regardless of the SAML
 /// binding used". An assertion without it is rejected whatever is signed.
+// SAML Core §2.4.1.2: bearer confirmation without InResponseTo is rejected.
 #[test]
 fn subject_confirmation_missing_irt_is_rejected() {
     let now = Timestamp::now();
@@ -1735,6 +1791,7 @@ fn subject_confirmation_missing_irt_is_rejected() {
 /// Before the fix, this test would pass (is_ok) because the unsigned
 /// Response.InResponseTo was the sole binding to the request ID. After the
 /// fix, it fails with MissingSubjectConfirmationInResponseTo.
+// SAML Core §2.4.1.2: an unsigned response is bound to its request through the confirmation data.
 #[test]
 fn xsw_inresponseto_unsigned_response_missing_scd_irt_rejected() {
     use base64::Engine as _;
@@ -1773,6 +1830,7 @@ fn xsw_inresponseto_unsigned_response_missing_scd_irt_rejected() {
 /// NO REGRESSION: When only the Assertion is signed and
 /// SubjectConfirmationData.InResponseTo is present and matches, validation
 /// MUST pass. This is the common IdP configuration (Azure AD, Okta, etc.).
+// SAML Core §2.4.1.2: a matching confirmation InResponseTo binds the unsigned response.
 #[test]
 fn xsw_inresponseto_unsigned_response_with_matching_scd_irt_passes() {
     use base64::Engine as _;
@@ -1807,6 +1865,7 @@ fn xsw_inresponseto_unsigned_response_with_matching_scd_irt_passes() {
 /// is present but differs from the expected request ID, validation MUST fail
 /// with InResponseToMismatch. The signed SCD.InResponseTo is the authoritative
 /// binding.
+// SAML Core §2.4.1.2: a mismatched confirmation InResponseTo is rejected.
 #[test]
 fn xsw_inresponseto_scd_irt_mismatch_fails() {
     use base64::Engine as _;
@@ -1850,6 +1909,7 @@ fn xsw_inresponseto_scd_irt_mismatch_fails() {
 ///
 /// Validation MUST reject because the signed SCD.InResponseTo does not match
 /// the attacker's expected request ID.
+// SAML Core §5: relocating a signed element must not transfer its protection.
 #[test]
 fn xsw_inresponseto_attack_scenario_rejected() {
     use base64::Engine as _;
@@ -1902,6 +1962,7 @@ fn xsw_inresponseto_attack_scenario_rejected() {
 /// differs from the expected request ID (even if SCD.InResponseTo matches),
 /// validation MUST fail at the Response-level check. This is existing
 /// behavior that must not regress.
+// SAML Core §3.2.2: the response and its assertion must agree on the request they answer.
 #[test]
 fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
     use base64::Engine as _;
@@ -1945,6 +2006,7 @@ fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
 /// MUST do the following", with no exemption based on which element carries
 /// the signature — and 4.1.4.5 requires the assertion to be signed for the
 /// POST binding anyway, so the attribute is always inside signed content.
+// SAML Core §2.4.1.2: signing the response does not excuse the confirmation binding.
 #[test]
 fn response_signed_missing_scd_irt_is_still_rejected() {
     use base64::Engine as _;
@@ -1980,6 +2042,7 @@ fn response_signed_missing_scd_irt_is_still_rejected() {
 
 /// When the Response is signed and SCD.InResponseTo is present and matches,
 /// validation MUST pass (happy path for Response-signed configuration).
+// SAML Core §2.4.1.2: a signed response with matching confirmation data is accepted.
 #[test]
 fn response_signed_with_scd_irt_passes() {
     use base64::Engine as _;
@@ -2012,6 +2075,7 @@ fn response_signed_with_scd_irt_passes() {
 /// When the Response is signed and SCD.InResponseTo is present but wrong,
 /// validation MUST still fail (the signed SCD.InResponseTo is checked when
 /// present, regardless of whether the Response is signed).
+// SAML Core §2.4.1.2: a signed response with mismatched confirmation data is rejected.
 #[test]
 fn response_signed_scd_irt_mismatch_fails() {
     use base64::Engine as _;

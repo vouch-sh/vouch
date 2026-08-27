@@ -72,6 +72,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("Session Management", "oidc-session-1_0"),
     ("Message Signing", "fapi-2_0-message-signing"),
     ("Exclusive C14N", "xml-exc-c14n"),
+    ("XML Signature", "xmldsig-core1"),
     ("SAML Metadata", "saml-metadata-2.0-os"),
     ("SAML Bindings", "saml-bindings-2.0-os"),
     ("SAML Profiles", "saml-profiles-2.0-os"),

@@ -242,12 +242,14 @@ mod tests {
         }
     }
 
+    // SAML Core §1.3.4: an ID value is an xs:ID, which may not begin with a digit.
     #[test]
     fn request_id_starts_with_underscore() {
         let id = generate_request_id().unwrap();
         assert!(id.starts_with('_'), "Request ID must start with '_': {id}");
     }
 
+    // SAML Core §1.3.4: an ID value is an NCName.
     #[test]
     fn request_id_is_ncname_valid() {
         let id = generate_request_id().unwrap();
@@ -260,6 +262,7 @@ mod tests {
         assert_eq!(id.len(), 33, "ID must be '_' + 32 hex chars: {id}");
     }
 
+    // SAML Core §1.3.4: identifiers must be unique.
     #[test]
     fn two_calls_produce_different_ids() {
         let id1 = generate_request_id().unwrap();
@@ -267,6 +270,7 @@ mod tests {
         assert_ne!(id1, id2, "Each call must produce a unique ID");
     }
 
+    // SAML Core §3.4.1: the authentication request is a SAML protocol message.
     #[test]
     fn generated_xml_is_parseable() {
         let provider = make_provider(Some("https://idp.example.com/sso"), None);
@@ -278,6 +282,7 @@ mod tests {
         assert!(doc.is_ok(), "Generated XML must be parseable: {xml}");
     }
 
+    // SAML Core §3.4.1: the request carries the attributes the protocol requires.
     #[test]
     fn generated_xml_contains_required_fields() {
         let provider = make_provider(Some("https://idp.example.com/sso"), None);
@@ -307,6 +312,7 @@ mod tests {
         );
     }
 
+    // SAML Bindings §3.5.4: the HTTP-POST binding base64-encodes the message.
     #[test]
     fn post_binding_uses_standard_base64() {
         let provider = make_provider(Some("https://idp.example.com/sso"), None);
@@ -318,6 +324,8 @@ mod tests {
         assert!(decoded.is_ok(), "POST binding must produce valid base64");
     }
 
+    // SAML Bindings §3.4.4.1: the HTTP-Redirect binding DEFLATE-compresses then base64-encodes the
+    // message.
     #[test]
     fn redirect_binding_produces_deflate_base64() {
         let provider = make_provider(None, Some("https://idp.example.com/sso"));
@@ -339,6 +347,8 @@ mod tests {
         assert!(doc.is_ok(), "Decompressed XML must be parseable: {xml}");
     }
 
+    // SAML Metadata §2.2.2: the binding is chosen from the endpoints the identity provider
+    // advertises.
     #[test]
     fn post_binding_preferred_over_redirect() {
         let provider = make_provider(
@@ -350,6 +360,7 @@ mod tests {
         assert_eq!(result.sso_url, "https://idp.example.com/sso/post");
     }
 
+    // SAML Metadata §2.4.2: a request cannot be built without a single sign-on endpoint.
     #[test]
     fn no_sso_url_returns_error() {
         let provider = make_provider(None, None);
@@ -360,6 +371,7 @@ mod tests {
         );
     }
 
+    // SAML Core §1.3.4: the retained request identifier is the one sent.
     #[test]
     fn request_id_matches_xml_id_attribute() {
         let provider = make_provider(Some("https://idp.example.com/sso"), None);
