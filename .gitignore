@@ -83,6 +83,7 @@ docs/book/
 # because they are environment-independent (no local paths, no credentials) and
 # refresh committed data other people need to reproduce.
 scripts/*
+!scripts/README.md
 !scripts/refresh-specs.sh
 !scripts/update-geoip.sh
 !scripts/ykman-clear-fido-credentials.sh
