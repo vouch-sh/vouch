@@ -22,7 +22,6 @@ use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
-    jwks_has_fapi_allowed_key, jwks_has_x5c,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::oidc::grant_type::OAuthGrantType;
@@ -398,7 +397,7 @@ pub async fn register_client(
         }
         // Only for private_key_jwt: its JWKS carries client-assertion signing
         // keys, so an inline JWKS must have at least one key usable with
-        // FAPI_ALLOWED (ES256/PS256/EdDSA) — see db::jwks_has_fapi_allowed_key.
+        // FAPI_ALLOWED (ES256/PS256/EdDSA) — see JwkSet::has_fapi_allowed_key.
         // Without this, a client could register as FAPI 2.0 with an
         // RS256-only JWKS and be unable to authenticate at the token endpoint
         // from the start. tls_client_auth/self_signed_tls_client_auth JWKS
@@ -409,7 +408,7 @@ pub async fn register_client(
                 .keys
                 .as_ref()
                 .and_then(crate::db::ClientKeys::inline)
-            && !jwks_has_fapi_allowed_key(jwks)
+            && !jwks.has_fapi_allowed_key()
         {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
@@ -584,6 +583,48 @@ pub async fn register_client(
     let require_signed = request
         .require_signed_request_object
         .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
+
+    // 12e. A client that commits to Request Objects needs key material the
+    // verifier can select for them. RFC 9101 §6.2 governs the runtime side —
+    // "The signature MUST be validated using a key associated with the client
+    // and the algorithm specified in the 'alg' Header Parameter" — and is
+    // silent on whether an unsatisfiable registration must be refused; this
+    // refuses it for the same reason JwkSet::has_fapi_allowed_key and
+    // JwkSet::has_x5c refuse theirs. Accepted unchecked, the pairing leaves the
+    // client unable to reach the authorization endpoint at all: the signed
+    // path fails key resolution, and require_signed_request_object refuses
+    // the plain one. `require_signed_request_object` commits a client to
+    // signing without necessarily naming an algorithm, hence the separate
+    // presence check.
+    if require_signed || req_obj_alg.is_some() {
+        if jwks_auth.keys.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "A client registering request_object_signing_alg or \
+                 require_signed_request_object must also register jwks or jwks_uri",
+            ));
+        }
+        // A remote jwks_uri can't be inspected synchronously, so the
+        // per-algorithm check only guards the inline case.
+        if let Some(alg) = req_obj_alg
+            && let Some(jwks) = jwks_auth
+                .keys
+                .as_ref()
+                .and_then(crate::db::ClientKeys::inline)
+            && !jwks.has_key_for(alg)
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "The submitted jwks holds no key usable for \
+                     request_object_signing_alg '{alg}'; it needs a key of type \
+                     {} whose alg (if declared) is '{alg}' and whose use (if \
+                     declared) is 'sig'",
+                    crate::db::KeyType::for_alg(alg)
+                ),
+            ));
+        }
+    }
 
     // Build the client name (fallback to software_id or "Unnamed Client")
     let client_name = request.client_name.as_deref().unwrap_or("Unnamed Client");
@@ -1090,12 +1131,12 @@ fn validate_jwks_and_auth_method(
     // self_signed_tls_client_auth's certificate is carried by a key's `x5c`
     // member; an inline JWKS with none anywhere would pass the presence
     // check above but leave the client unable to ever complete mTLS
-    // authentication — see db::jwks_has_x5c. A remote jwks_uri can't be
+    // authentication — see JwkSet::has_x5c. A remote jwks_uri can't be
     // inspected synchronously, so this only guards the inline case, same as
     // the FAPI algorithm-usability check.
     if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks_has_x5c(jwks)
+        && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1373,13 +1414,13 @@ pub async fn update_client_configuration(
     // member (RFC 8705 §2.2.2 describes this representation); an inline JWKS
     // replacing the client's key material with none would pass the presence
     // check above but leave the client unable to ever complete mTLS
-    // authentication again — see db::jwks_has_x5c. Applies regardless of
+    // authentication again — see JwkSet::has_x5c. Applies regardless of
     // FAPI status, unlike the algorithm-usability check below (this auth
     // method exists for non-FAPI clients too). A remote jwks_uri can't be
     // inspected synchronously, so this only guards the inline case.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks_has_x5c(jwks)
+        && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1392,7 +1433,7 @@ pub async fn update_client_configuration(
     // preserves. Only for private_key_jwt: its JWKS carries client-assertion
     // signing keys, so an inline JWKS replacing the client's key material
     // must have at least one key usable with FAPI_ALLOWED — see
-    // db::jwks_has_fapi_allowed_key. tls_client_auth/self_signed_tls_client_auth
+    // JwkSet::has_fapi_allowed_key. tls_client_auth/self_signed_tls_client_auth
     // JWKS conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
     // check does not apply to them. A remote jwks_uri can't be inspected
     // synchronously, so this only guards the inline case, same as
@@ -1400,11 +1441,39 @@ pub async fn update_client_configuration(
     if client.is_fapi()
         && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
         && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks_has_fapi_allowed_key(jwks)
+        && !jwks.has_fapi_allowed_key()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
+        ));
+    }
+
+    // `request_object_signing_alg` and `require_signed_request_object` are not
+    // among the fields a PUT writes, so the client keeps whatever it
+    // registered — and this replacement has to stay compatible with it. A
+    // JWKS with no key the verifier could select for the pinned algorithm
+    // shuts both doors at the authorization endpoint, which is how a routine
+    // key rotation that swaps key type silently bricks a working client.
+    // Same inline-only limitation as the checks above.
+    if client.require_signed_request_object == Some(true) && keys.is_none() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "This client requires signed Request Objects, so it must keep a jwks or jwks_uri",
+        ));
+    }
+    if let Some(alg) = client.request_object_signing_alg
+        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && !jwks.has_key_for(alg)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "The submitted jwks holds no key usable for this client's \
+                 request_object_signing_alg '{alg}'; it needs a key of type {} whose \
+                 alg (if declared) is '{alg}' and whose use (if declared) is 'sig'",
+                crate::db::KeyType::for_alg(alg)
+            ),
         ));
     }
 

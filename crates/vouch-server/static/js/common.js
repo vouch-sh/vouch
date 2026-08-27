@@ -1,5 +1,37 @@
-// Shared UI utilities: clipboard copy, confirm dialogs.
+// Shared UI utilities: clipboard copy, confirm dialogs, redirect URI rules.
 // Attach behavior via data-* attributes — no inline handlers needed.
+
+// The redirect URI rule, mirroring db::validate_redirect_uri on the server.
+// It lives here, and not in each page's script, because the application create
+// and detail forms both apply it: while they each carried their own copy, a
+// server-side tightening reached neither, and the forms went on accepting URIs
+// the server had started rejecting.
+window.VouchValidate = {
+    // applicationType gates custom schemes: OIDC Registration §2 allows them
+    // for native clients only.
+    isValidRedirectUri: function(uri, applicationType) {
+        var url;
+        try {
+            url = new URL(uri);
+        } catch (e) {
+            return false;
+        }
+        // Tested on the raw string, not url.hash: a trailing bare "#" is an
+        // empty fragment the server rejects but url.hash reports as absent.
+        if (uri.indexOf('#') !== -1) {
+            return false;
+        }
+        if (url.protocol === 'https:') {
+            return true;
+        }
+        if (url.protocol === 'http:') {
+            return url.hostname === 'localhost'
+                || url.hostname === '127.0.0.1'
+                || url.hostname === '[::1]';
+        }
+        return applicationType === 'native';
+    }
+};
 
 (function() {
     // Render <time data-localize-time> elements in the viewer's locale and

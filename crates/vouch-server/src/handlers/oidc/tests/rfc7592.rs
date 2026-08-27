@@ -75,7 +75,7 @@ fn es256_jwk() -> serde_json::Value {
 // =========================================================================
 // FAPI 2.0 JWKS algorithm usability on PUT — RFC 7592 §2.2 is a full
 // replacement, so a PUT that swaps in an RS256-only JWKS must be rejected
-// exactly like initial registration. See db::jwks_has_fapi_allowed_key.
+// exactly like initial registration. See JwkSet::has_fapi_allowed_key.
 // =========================================================================
 
 #[tokio::test]
@@ -372,7 +372,7 @@ async fn test_rfc7592_put_rejects_non_fapi_self_signed_client_clearing_jwks() {
 
 #[tokio::test]
 async fn test_rfc7592_put_rejects_self_signed_client_swapping_in_certificate_less_jwks() {
-    // `jwks_has_x5c`: a PUT can replace the inline JWKS with one that still
+    // `JwkSet::has_x5c`: a PUT can replace the inline JWKS with one that still
     // satisfies the bare presence check but carries no x5c anywhere — must
     // be rejected the same as clearing it outright.
     let (app, _state) = test_app().await;

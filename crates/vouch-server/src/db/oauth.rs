@@ -497,7 +497,7 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// A JSON Web Key Set (RFC 7517 Section 5).
 ///
 /// The typed representation shared by write-time acceptance checks (this
-/// module: `jwks_has_fapi_allowed_key`, `jwks_has_x5c`) and the runtime RFC
+/// module: `JwkSet::has_fapi_allowed_key`, `JwkSet::has_x5c`) and the runtime RFC
 /// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
 /// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
 /// way in both places instead of silently read as absent by a separate,
@@ -541,6 +541,17 @@ impl Serialize for KeyType {
         S: serde::Serializer,
     {
         serializer.serialize_str(match self {
+            Self::Ec => "EC",
+            Self::Rsa => "RSA",
+            Self::Okp => "OKP",
+            Self::Other(s) => s,
+        })
+    }
+}
+
+impl std::fmt::Display for KeyType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             Self::Ec => "EC",
             Self::Rsa => "RSA",
             Self::Okp => "OKP",
@@ -610,7 +621,7 @@ pub struct JwkEntry {
 /// this to reject a malformed submission outright. Callers evaluating a
 /// JWKS that may be pre-existing stored data (which could predate this
 /// check) should treat a parse failure as "no usable key" rather than a
-/// hard error — see `jwks_has_fapi_allowed_key`'s callers.
+/// hard error — see `JwkSet::has_fapi_allowed_key`'s callers.
 ///
 /// # Errors
 /// Returns the `serde_json` deserialization error on a shape mismatch.
@@ -618,93 +629,126 @@ pub fn parse_jwks_set(value: &serde_json::Value) -> Result<JwkSet, serde_json::E
     serde_json::from_value(value.clone())
 }
 
-/// Returns `true` when `jwks` contains at least one key the FAPI 2.0
-/// client-assertion validator (`FapiProfile::client_assertion_algorithms`, which
-/// yields `JwsAlgorithm::FAPI_ALLOWED` for `FapiProfile::Fapi2Security`) could
-/// actually use: a key whose `use` (if present) is `sig`, and that either
-/// declares no `alg` but has a `kty` the runtime matcher can select for
-/// ES256/PS256/EdDSA (`EC`/`RSA`/`OKP`), or declares `alg` as ES256, PS256, or
-/// EdDSA outright.
-///
-/// A key search skips a JWK whose declared `alg` differs from the assertion's
-/// header, or whose `use` is present and not `sig`
-/// (`services/oidc/jwt_bearer/jwks.rs`). So a JWKS made only of `alg: RS256`
-/// keys would leave a FAPI client with no algorithm it is both allowed to use
-/// and has a matching key for, and a JWKS made only of `use: "enc"` keys would
-/// leave it with no key the search selects at all — both permanently
-/// unauthenticatable. The `kty` check on both branches closes the same bug
-/// class for an incompatible or missing `kty`: the runtime matcher only ever
-/// selects `EC` for ES256, `RSA` for PS256, and `OKP` for EdDSA, so a key
-/// whose `kty` is anything else (e.g. `oct`, or `RSA` declaring `alg: ES256`)
-/// is unmatchable regardless of `alg`.
-///
-/// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
-/// application creation and update (`handlers/applications/validate.rs`) and
-/// RFC 7591/7592 dynamic client registration (`services/oidc/registration.rs`).
-#[must_use]
-pub fn jwks_has_fapi_allowed_key(jwks: &JwkSet) -> bool {
-    jwks.keys.iter().any(|key| {
-        let use_is_sig = key.use_.as_deref().is_none_or(|u| u == "sig");
-        if !use_is_sig {
-            return false;
+impl KeyType {
+    /// The one key type a signing key must have for the runtime matcher to
+    /// select it for `alg`.
+    ///
+    /// The single home for the kty-per-alg rule. The runtime matcher
+    /// (`services/oidc/jwt_bearer/jwks.rs::find_matching_key`) and every
+    /// write-time usability check read it from here, so the two cannot drift
+    /// apart — they did once, and the write-time copy accepted key material
+    /// the runtime copy would never select.
+    #[must_use]
+    pub fn for_alg(alg: JwsAlgorithm) -> Self {
+        match alg {
+            JwsAlgorithm::Es256 => Self::Ec,
+            JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256 => Self::Rsa,
+            JwsAlgorithm::EdDsa => Self::Okp,
         }
-        let Some(alg) = key.alg.as_deref() else {
-            // An exhaustive match, not `matches!`: `matches!` isn't
-            // exhaustiveness-checked, so a `KeyType` variant added later
-            // without updating this arm would silently keep compiling here
-            // (unlike the exhaustive match in
-            // `jwt_bearer::jwks::build_decoding_key_from_jwk`, which would
-            // fail to compile until updated) instead of forcing the same
-            // explicit decision at both consumers.
-            return match key.kty {
-                KeyType::Ec | KeyType::Rsa | KeyType::Okp => true,
-                KeyType::Other(_) => false,
-            };
-        };
-        let Ok(parsed) = alg.parse::<JwsAlgorithm>() else {
-            return false;
-        };
-        if !JwsAlgorithm::FAPI_ALLOWED.contains(&parsed) {
-            return false;
-        }
-        // Same kty-per-alg selection rule as the runtime matcher
-        // (`jwt_bearer::jwks::find_matching_key` /
-        // `build_decoding_key_from_jwk`): a key whose `kty` can't carry its
-        // declared `alg` is unmatchable, so declaring an allowed `alg` alone
-        // must not count. Exhaustive for the same reason as the no-`alg`
-        // branch above.
-        let expected_kty = match parsed {
-            JwsAlgorithm::Es256 => KeyType::Ec,
-            JwsAlgorithm::Ps256 => KeyType::Rsa,
-            JwsAlgorithm::EdDsa => KeyType::Okp,
-            // Not FAPI-allowed; already rejected by the contains() gate.
-            JwsAlgorithm::Rs256 => return false,
-        };
-        key.kty == expected_kty
-    })
+    }
 }
 
-/// Returns `true` when `jwks` contains at least one key with a non-empty
-/// `x5c` member — `self_signed_tls_client_auth`'s certificate carrier (RFC
-/// 8705 §2.2.2 describes this representation; it is not itself a MUST). A
-/// JWKS with no `x5c` anywhere passes a bare presence check but leaves the
-/// client permanently unable to complete mTLS authentication:
-/// `verify_self_signed_tls_client_auth` (`services/oidc/mtls.rs`) only
-/// matches keys carrying an `x5c` entry and returns
-/// `CertificateNotRegistered` if none do — the same "accepted at
-/// registration, unusable forever after" class `jwks_has_fapi_allowed_key`
-/// closes for `private_key_jwt`.
-///
-/// Used wherever a `self_signed_tls_client_auth` client's inline JWKS is
-/// accepted or replaced: application creation and update
-/// (`handlers/applications/validate.rs`) and RFC 7591/7592 dynamic client
-/// registration (`services/oidc/registration.rs`). Not applicable to a
-/// `jwks_uri`, which can't be inspected synchronously.
-#[must_use]
-pub fn jwks_has_x5c(jwks: &JwkSet) -> bool {
-    jwks.keys
-        .iter()
-        .any(|key| key.x5c.as_ref().is_some_and(|c| !c.is_empty()))
+impl JwkEntry {
+    /// Returns `true` when the runtime verifier could build a decoding key
+    /// from this key for `alg`.
+    ///
+    /// Mirrors what a verification actually needs, in the order the runtime
+    /// applies it (`jwt_bearer::jwks::find_matching_key` for selection, then
+    /// `build_decoding_key_from_jwk` for construction):
+    ///
+    /// - `use`, if present, must be `sig` — a key declared for encryption is
+    ///   skipped even when its `kid` matches.
+    /// - `alg`, if present, must equal the algorithm in question.
+    /// - `kty` must be the one [`KeyType::for_alg`] names. A key whose `kty`
+    ///   can't carry the algorithm is unmatchable however it is declared, so
+    ///   an absent `alg` does not make an `oct` key usable.
+    /// - For `EdDSA`, `crv` must be `Ed25519`: `build_decoding_key_from_jwk`
+    ///   refuses any other curve outright. No equivalent constraint exists on
+    ///   its `EC` or `RSA` arms, so none is imposed here.
+    #[must_use]
+    pub fn is_usable_for(&self, alg: JwsAlgorithm) -> bool {
+        if self.use_.as_deref().is_some_and(|u| u != "sig") {
+            return false;
+        }
+        if self.alg.as_deref().is_some_and(|a| a != alg.as_str()) {
+            return false;
+        }
+        if self.kty != KeyType::for_alg(alg) {
+            return false;
+        }
+        if alg == JwsAlgorithm::EdDsa && self.crv.as_deref() != Some("Ed25519") {
+            return false;
+        }
+        true
+    }
+}
+
+impl JwkSet {
+    /// Returns `true` when the set holds at least one key the runtime
+    /// verifier could use to verify a signature made with `alg`.
+    ///
+    /// A client that pins an algorithm — `request_object_signing_alg` (RFC
+    /// 9101 §4) is the one that reaches here — and supplies key material
+    /// holding no such key is accepted and then permanently unable to use the
+    /// endpoint that algorithm governs. Every write path that sets either
+    /// half of that pair checks them against each other with this: RFC 7591
+    /// registration and RFC 7592 update (`services/oidc/registration.rs`),
+    /// and the admin application API and form
+    /// (`handlers/applications/validate.rs`).
+    ///
+    /// Not applicable to a `jwks_uri`, which can't be inspected
+    /// synchronously.
+    #[must_use]
+    pub fn has_key_for(&self, alg: JwsAlgorithm) -> bool {
+        self.keys.iter().any(|key| key.is_usable_for(alg))
+    }
+
+    /// Returns `true` when the set contains at least one key the FAPI 2.0
+    /// client-assertion validator (`FapiProfile::client_assertion_algorithms`,
+    /// which yields `JwsAlgorithm::FAPI_ALLOWED` for
+    /// `FapiProfile::Fapi2Security`) could actually use.
+    ///
+    /// A FAPI client authenticates with whichever of the allowed algorithms
+    /// it has a key for, so the question is whether *any* of them is
+    /// satisfiable — which is [`JwkSet::has_key_for`] over the allowlist. A
+    /// JWKS made only of `alg: RS256` keys leaves the client with no
+    /// algorithm it is both allowed to use and has a matching key for; one
+    /// made only of `use: "enc"` keys leaves it with no key the search
+    /// selects at all. Both are permanently unauthenticatable.
+    ///
+    /// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
+    /// application creation and update (`handlers/applications/validate.rs`)
+    /// and RFC 7591/7592 dynamic client registration
+    /// (`services/oidc/registration.rs`).
+    #[must_use]
+    pub fn has_fapi_allowed_key(&self) -> bool {
+        JwsAlgorithm::FAPI_ALLOWED
+            .iter()
+            .any(|alg| self.has_key_for(*alg))
+    }
+
+    /// Returns `true` when the set contains at least one key with a non-empty
+    /// `x5c` member — `self_signed_tls_client_auth`'s certificate carrier
+    /// (RFC 8705 §2.2.2 describes this representation; it is not itself a
+    /// MUST). A JWKS with no `x5c` anywhere passes a bare presence check but
+    /// leaves the client permanently unable to complete mTLS authentication:
+    /// `verify_self_signed_tls_client_auth` (`services/oidc/mtls.rs`) only
+    /// matches keys carrying an `x5c` entry and returns
+    /// `CertificateNotRegistered` if none do — the same "accepted at
+    /// registration, unusable forever after" class
+    /// [`JwkSet::has_fapi_allowed_key`] closes for `private_key_jwt`.
+    ///
+    /// Used wherever a `self_signed_tls_client_auth` client's inline JWKS is
+    /// accepted or replaced: application creation and update
+    /// (`handlers/applications/validate.rs`) and RFC 7591/7592 dynamic client
+    /// registration (`services/oidc/registration.rs`). Not applicable to a
+    /// `jwks_uri`, which can't be inspected synchronously.
+    #[must_use]
+    pub fn has_x5c(&self) -> bool {
+        self.keys
+            .iter()
+            .any(|key| key.x5c.as_ref().is_some_and(|c| !c.is_empty()))
+    }
 }
 
 /// Parameters for creating a new OAuth client application.
@@ -1802,7 +1846,7 @@ mod tests {
     // `#[serde(deny_unknown_fields)]`, so the write-path shape gate only
     // ever rejects a *known* member of the wrong JSON type, never an
     // unrecognized one. `x5c` is itself a known, typed member (needed by
-    // `jwks_has_x5c`): a type-invalid `x5c` (e.g. a string instead of an
+    // `JwkSet::has_x5c`): a type-invalid `x5c` (e.g. a string instead of an
     // array) now fails the parse the same way a type-invalid `alg` does —
     // see `test_parse_jwks_set_rejects_type_invalid_x5c` below.
     #[test]
@@ -1867,19 +1911,19 @@ mod tests {
     }
 
     #[test]
-    fn test_jwks_has_x5c() {
+    fn test_jwk_set_has_x5c() {
         let with_x5c = parse_jwks_set(&serde_json::json!({
             "keys": [{"kty": "RSA", "x5c": ["ZmFrZS1jZXJ0"]}]
         }))
         .expect("valid fixture");
-        assert!(jwks_has_x5c(&with_x5c));
+        assert!(with_x5c.has_x5c());
 
         let empty_x5c = parse_jwks_set(&serde_json::json!({
             "keys": [{"kty": "RSA", "x5c": []}]
         }))
         .expect("valid fixture");
         assert!(
-            !jwks_has_x5c(&empty_x5c),
+            !empty_x5c.has_x5c(),
             "an empty x5c array carries no certificate"
         );
 
@@ -1887,7 +1931,7 @@ mod tests {
             "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
         }))
         .expect("valid fixture");
-        assert!(!jwks_has_x5c(&no_x5c));
+        assert!(!no_x5c.has_x5c());
 
         let mixed = parse_jwks_set(&serde_json::json!({
             "keys": [
@@ -1896,7 +1940,69 @@ mod tests {
             ]
         }))
         .expect("valid fixture");
-        assert!(jwks_has_x5c(&mixed), "one x5c-bearing key is enough");
+        assert!(mixed.has_x5c(), "one x5c-bearing key is enough");
+    }
+
+    #[test]
+    fn test_jwk_set_has_key_for_alg() {
+        let set = |json| parse_jwks_set(&json).expect("valid fixture");
+
+        // RS256 and PS256 share a key type, so an unpinned RSA key satisfies
+        // both. Neither is reachable through has_fapi_allowed_key (RS256 is
+        // not FAPI-allowed), but request_object_signing_alg admits RS256 for
+        // a non-FAPI client.
+        let unpinned_rsa =
+            set(serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}));
+        assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Rs256));
+        assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Ps256));
+        assert!(!unpinned_rsa.has_key_for(JwsAlgorithm::Es256));
+
+        // A declared alg pins the key to exactly that algorithm, even within
+        // one key type.
+        let rs256_pinned = set(
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]}),
+        );
+        assert!(rs256_pinned.has_key_for(JwsAlgorithm::Rs256));
+        assert!(
+            !rs256_pinned.has_key_for(JwsAlgorithm::Ps256),
+            "a key declaring RS256 is skipped when PS256 is asked for"
+        );
+
+        // The pairing from issue #1082: ES256 pinned against RSA-only keys.
+        let rsa_only = set(serde_json::json!({
+            "keys": [{"kty": "RSA", "use": "sig", "kid": "k1", "n": "n", "e": "AQAB"}]
+        }));
+        assert!(
+            !rsa_only.has_key_for(JwsAlgorithm::Es256),
+            "no RSA key can verify an ES256 Request Object"
+        );
+
+        // `use` is honoured: an encryption key is never selected for signing.
+        let enc_only =
+            set(serde_json::json!({"keys": [{"kty": "EC", "use": "enc", "crv": "P-256"}]}));
+        assert!(!enc_only.has_key_for(JwsAlgorithm::Es256));
+
+        // One usable key among unusable ones is enough.
+        let mixed = set(serde_json::json!({
+            "keys": [
+                {"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"},
+                {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}
+            ]
+        }));
+        assert!(mixed.has_key_for(JwsAlgorithm::Es256));
+
+        let empty = set(serde_json::json!({"keys": []}));
+        assert!(!empty.has_key_for(JwsAlgorithm::Es256));
+    }
+
+    #[test]
+    fn test_kty_for_alg_matches_runtime_matcher() {
+        // The rule the runtime matcher reads. RS256 and PS256 deliberately
+        // share RSA; every other algorithm has its own key type.
+        assert_eq!(KeyType::for_alg(JwsAlgorithm::Es256), KeyType::Ec);
+        assert_eq!(KeyType::for_alg(JwsAlgorithm::Rs256), KeyType::Rsa);
+        assert_eq!(KeyType::for_alg(JwsAlgorithm::Ps256), KeyType::Rsa);
+        assert_eq!(KeyType::for_alg(JwsAlgorithm::EdDsa), KeyType::Okp);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Sess
 use crate::error::OAuthErrorCode;
 use crate::handlers::extractors::{OAuthForm, OAuthQuery};
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
@@ -38,7 +39,25 @@ use std::sync::Arc;
 #[template(path = "authorize_denied.html")]
 pub(super) struct AuthorizeDeniedTemplate {
     pub client_name: String,
-    pub error_message: String,
+    /// The reason shown in the page body. A `Tr` rather than a `String` so a
+    /// raw English literal cannot be rendered here: every construction has to
+    /// name a catalog key, and it resolves in the request locale at render
+    /// time like the rest of the page.
+    pub error_message: Tr<'static>,
+}
+
+/// The denied-page reason for a client-access failure.
+///
+/// `check_client_access` reports an org/scope restriction as an OAuth error
+/// whose description is the specific reason; anything else is a generic
+/// refusal. Shared by the two authenticated-user paths so they cannot drift.
+fn access_denied_message(e: crate::error::ServiceError) -> Tr<'static> {
+    match e {
+        crate::error::ServiceError::OAuth { description, .. } => {
+            Tr::new("authorize-denied-access-denied-detail").arg("detail", description)
+        }
+        _ => Tr::new("authorize-denied-no-access"),
+    }
 }
 
 impl_template_response!(AuthorizeDeniedTemplate);
@@ -205,8 +224,7 @@ impl ResolvedClient {
             );
             let resp = AuthorizeDeniedTemplate {
                 client_name: client.name,
-                error_message: "Invalid redirect_uri: not registered for this application"
-                    .to_string(),
+                error_message: Tr::new("authorize-denied-redirect-uri-unregistered"),
             }
             .into_response();
             return Err(resp);
@@ -425,9 +443,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     if params.request.is_some() && params.request_uri.is_some() {
         return AuthorizeDeniedTemplate {
             client_name: "Unknown Application".to_string(),
-            error_message:
-                "Invalid request: 'request' and 'request_uri' parameters are mutually exclusive"
-                    .to_string(),
+            error_message: Tr::new("authorize-denied-request-and-request-uri"),
         }
         .into_response();
     }
@@ -438,8 +454,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message: "Invalid request: client_id is required with request parameter"
-                    .to_string(),
+                error_message: Tr::new("authorize-denied-client-id-required-with-request"),
             }
             .into_response();
         }
@@ -453,8 +468,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message: "Invalid request: client_id is required with request_uri"
-                    .to_string(),
+                error_message: Tr::new("authorize-denied-client-id-required-with-request-uri"),
             }
             .into_response();
         }
@@ -464,7 +478,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             if request_uri.len() > 256 {
                 return AuthorizeDeniedTemplate {
                     client_name: "Unknown Application".to_string(),
-                    error_message: "Invalid request_uri format".to_string(),
+                    error_message: Tr::new("authorize-denied-request-uri-format"),
                 }
                 .into_response();
             }
@@ -493,7 +507,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         // Neither a PAR URN nor an HTTPS URL.
         return AuthorizeDeniedTemplate {
             client_name: "Unknown Application".to_string(),
-            error_message: "Invalid request_uri: must be a PAR URN or an HTTPS URL".to_string(),
+            error_message: Tr::new("authorize-denied-request-uri-scheme"),
         }
         .into_response();
     }
@@ -533,7 +547,7 @@ async fn handle_direct_request(
     if client_id.is_empty() {
         return AuthorizeDeniedTemplate {
             client_name: "Unknown Application".to_string(),
-            error_message: "Invalid request: client_id is required".to_string(),
+            error_message: Tr::new("authorize-denied-client-id-required"),
         }
         .into_response();
     }
@@ -661,7 +675,8 @@ async fn handle_jar_request(
         Err(e) => {
             return AuthorizeDeniedTemplate {
                 client_name: oauth_client.name,
-                error_message: format!("Invalid Request Object: {}", e.oauth_description()),
+                error_message: Tr::new("authorize-denied-invalid-request-object")
+                    .arg("detail", e.oauth_description()),
             }
             .into_response();
         }
@@ -777,9 +792,7 @@ async fn lookup_par(
             }
             Err(AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Invalid or expired request_uri. Please restart the authorization flow."
-                        .to_string(),
+                error_message: Tr::new("authorize-denied-request-uri-expired"),
             }
             .into_response())
         }
@@ -787,7 +800,7 @@ async fn lookup_par(
             tracing::error!("Failed to look up PAR: {}", e);
             Err(AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
+                error_message: Tr::new("authorize-denied-generic"),
             }
             .into_response())
         }
@@ -967,7 +980,8 @@ async fn fetch_and_resolve_request_uri(
     {
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
-            error_message: format!("Invalid request: {}", e.oauth_description()),
+            error_message: Tr::new("authorize-denied-invalid-request")
+                .arg("detail", e.oauth_description()),
         }
         .into_response());
     }
@@ -978,8 +992,7 @@ async fn fetch_and_resolve_request_uri(
     {
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
-            error_message: "Invalid request: request_uri is not registered for this client"
-                .to_string(),
+            error_message: Tr::new("authorize-denied-request-uri-unregistered"),
         }
         .into_response());
     }
@@ -988,18 +1001,18 @@ async fn fetch_and_resolve_request_uri(
     // Loopback request_uri destinations are permitted only in local development
     // (no TLS configured); private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
-    let fetched_jwt = match fetch_request_object(request_uri, allow_loopback, &state.http_client)
-        .await
-    {
-        Ok(jwt) => jwt,
-        Err(e) => {
-            return Err(AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: format!("Failed to fetch Request Object: {}", e.oauth_description()),
+    let fetched_jwt =
+        match fetch_request_object(request_uri, allow_loopback, &state.http_client).await {
+            Ok(jwt) => jwt,
+            Err(e) => {
+                return Err(AuthorizeDeniedTemplate {
+                    client_name: oauth_client.name,
+                    error_message: Tr::new("authorize-denied-request-object-fetch-failed")
+                        .arg("detail", e.oauth_description()),
+                }
+                .into_response());
             }
-            .into_response());
-        }
-    };
+        };
 
     // Step 5: validate the JWT.
     let query_hints = QueryParamHints {
@@ -1020,7 +1033,9 @@ async fn fetch_and_resolve_request_uri(
                 };
                 return Err(AuthorizeDeniedTemplate {
                     client_name: oauth_client.name,
-                    error_message: format!("Invalid Request Object ({error_code}): {description}"),
+                    error_message: Tr::new("authorize-denied-invalid-request-object-coded")
+                        .arg("code", error_code)
+                        .arg("detail", description),
                 }
                 .into_response());
             }
@@ -1057,7 +1072,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 );
                 return AuthorizeDeniedTemplate {
                     client_name: "Unknown Application".to_string(),
-                    error_message: "Authorization session expired. Please try again.".to_string(),
+                    error_message: Tr::new("authorize-denied-session-expired"),
                 }
                 .into_response();
             }
@@ -1065,7 +1080,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
                 return AuthorizeDeniedTemplate {
                     client_name: "Unknown Application".to_string(),
-                    error_message: "An error occurred. Please try again.".to_string(),
+                    error_message: Tr::new("authorize-denied-generic"),
                 }
                 .into_response();
             }
@@ -1122,7 +1137,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             tracing::warn!("User not authenticated after returning from login");
             AuthorizeDeniedTemplate {
                 client_name: resolved.client.name.clone(),
-                error_message: "Authentication failed. Please try again.".to_string(),
+                error_message: Tr::new("authorize-denied-authentication-failed"),
             }
             .into_response()
         }
@@ -1145,10 +1160,7 @@ async fn complete_pending_auth(
 ) -> Response {
     // Check client access for the authenticated user.
     if let Err(e) = check_client_access(&resolved.client, user) {
-        let error_message = match e {
-            crate::error::ServiceError::OAuth { description, .. } => description,
-            _ => "You don't have access to this application".to_string(),
-        };
+        let error_message = access_denied_message(e);
         return AuthorizeDeniedTemplate {
             client_name: resolved.client.name.clone(),
             error_message,
@@ -1279,16 +1291,14 @@ async fn lookup_and_check_active(
         Ok(None) => {
             return Err(AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Unknown client application. Please contact the application administrator."
-                        .to_string(),
+                error_message: Tr::new("authorize-denied-unknown-client"),
             }
             .into_response());
         }
         Err(_) => {
             return Err(AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
+                error_message: Tr::new("authorize-denied-generic"),
             }
             .into_response());
         }
@@ -1297,7 +1307,7 @@ async fn lookup_and_check_active(
     if !client.active {
         return Err(AuthorizeDeniedTemplate {
             client_name: client.name,
-            error_message: "This application has been deactivated.".to_string(),
+            error_message: Tr::new("authorize-denied-client-deactivated"),
         }
         .into_response());
     }
@@ -1327,8 +1337,7 @@ fn resolve_redirect_uri(
                 );
                 return Err(AuthorizeDeniedTemplate {
                     client_name: client.name.clone(),
-                    error_message: "Invalid redirect_uri: not registered for this application"
-                        .to_string(),
+                    error_message: Tr::new("authorize-denied-redirect-uri-unregistered"),
                 }
                 .into_response());
             }
@@ -1340,9 +1349,7 @@ fn resolve_redirect_uri(
         }
         _ => Err(AuthorizeDeniedTemplate {
             client_name: client.name.clone(),
-            error_message: "Invalid request: redirect_uri is required when multiple \
-                            redirect URIs are registered"
-                .to_string(),
+            error_message: Tr::new("authorize-denied-redirect-uri-required"),
         }
         .into_response()),
     }
@@ -1483,10 +1490,7 @@ async fn authorize_authenticated_user(
 ) -> Response {
     // Step 1: Check client access.
     if let Err(e) = check_client_access(oauth_client, user) {
-        let error_message = match e {
-            crate::error::ServiceError::OAuth { description, .. } => description,
-            _ => "You don't have access to this application".to_string(),
-        };
+        let error_message = access_denied_message(e);
         return AuthorizeDeniedTemplate {
             client_name: oauth_client.name.clone(),
             error_message,

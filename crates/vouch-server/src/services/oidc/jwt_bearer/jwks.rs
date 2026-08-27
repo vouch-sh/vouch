@@ -7,7 +7,7 @@
 use super::validate::JwtAssertionHeader;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{JwkEntry, JwkSet, KeyType};
+use crate::db::{JwkEntry, JwkSet, JwsAlgorithm, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use vouch_common::protocol;
 
@@ -122,18 +122,16 @@ pub fn find_matching_key(
         ));
     }
 
-    // Fall back to matching by algorithm/key type
-    let expected_kty = match header.alg.as_str() {
-        protocol::JWS_ALG_ES256 => KeyType::Ec,
-        "RS256" | "PS256" => KeyType::Rsa,
-        "EdDSA" => KeyType::Okp,
-        _ => {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                format!("Unsupported algorithm: {}", header.alg),
-            ));
-        }
+    // Fall back to matching by algorithm/key type. The kty-per-alg rule is
+    // `KeyType::for_alg`, shared with the write-time usability checks so the
+    // two cannot disagree about which keys are selectable.
+    let Ok(alg) = header.alg.parse::<JwsAlgorithm>() else {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            format!("Unsupported algorithm: {}", header.alg),
+        ));
     };
+    let expected_kty = KeyType::for_alg(alg);
 
     for key in &jwks.keys {
         if key.kty == expected_kty {

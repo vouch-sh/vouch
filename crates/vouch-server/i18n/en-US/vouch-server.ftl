@@ -87,6 +87,35 @@ apps-secret-new-label = New Client Secret
 # Merged from prior `apps-secret-back-to = Back to` + plain `{{ name }}`.
 apps-secret-back-to = Back to { $name }
 
+# Form validation failures, one per AppValidationError variant
+# (handlers/applications/validate.rs::localized). These are the browser-facing
+# half of each failure; the JSON API returns a separate ASCII English
+# error_description for the same variant, because RFC 6749 §5.2 addresses that
+# field to the client developer and restricts its character set.
+#
+# `$uris`, `$uri`, `$profile`, `$alg`, and `$kty` are echoed back from the
+# submitted request and are not translated.
+apps-invalid-name-required = An application name is required.
+apps-invalid-application-type = Invalid application type. Choose web, native, spa, or service.
+apps-invalid-access-scope = Invalid access scope. Choose personal, organization, or public.
+apps-invalid-fapi-profile = Invalid FAPI profile "{ $profile }". Choose none or fapi2_security.
+apps-invalid-redirect-uris-required = At least one redirect URI is required.
+apps-invalid-redirect-uris = Invalid redirect URI(s): { $uris }. Each URI must use https://, or http:// with localhost, 127.0.0.1, or [::1], and must not contain a fragment. A custom scheme is accepted only for native applications.
+apps-invalid-post-logout-redirect-uris = Invalid post-logout redirect URI(s): { $uris }. Each URI must be a valid http:// or https:// URL without a fragment.
+apps-invalid-resource-uri = Invalid resource URI "{ $uri }": { $detail }. Resource URIs must be absolute URIs without a fragment.
+apps-invalid-jwks-mutually-exclusive = Provide either a JWKS or a JWKS URI, not both.
+apps-invalid-fapi-confidential-required = The FAPI 2.0 Security Profile requires a confidential application type: web or service.
+apps-invalid-fapi-missing-jwks = FAPI 2.0 requires a JWKS or JWKS URI for private_key_jwt authentication.
+apps-invalid-auth-method-missing-jwks = This application authenticates with a method that requires key material (private_key_jwt or self_signed_tls_client_auth), so it must keep a JWKS or JWKS URI. Provide one, or change its authentication method first.
+apps-invalid-fapi-downgrade = A FAPI 2.0 application cannot be changed to a standard profile. Create a new standard application instead.
+apps-invalid-fapi-jwks-algorithm = FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA for client-assertion signing. None of the configured keys qualify: each either declares an algorithm outside that set, has a key type the signing-key matcher cannot select for those algorithms, or is marked for a non-signing use. Add a compatible key, or adjust an existing key's alg, kty, or use.
+apps-invalid-request-object-jwks-algorithm = This application requires Request Objects signed with { $alg }, and none of the submitted keys can verify one. It needs a key of type { $kty } whose alg, if declared, is { $alg } and whose use, if declared, is sig. Add a compatible key, or adjust an existing key's alg, kty, or use.
+apps-invalid-self-signed-jwks-x5c = This application authenticates with self_signed_tls_client_auth, whose certificate is carried in a JWKS key's x5c member. None of the configured keys carry one, so the application could never complete mTLS authentication. Add a key with an x5c certificate.
+apps-invalid-jwks-not-json = The JWKS must be valid JSON.
+apps-invalid-jwks-missing-keys = The JWKS must be a JSON object with a non-empty "keys" array.
+apps-invalid-jwks-key-shape = The JWKS contains a key with an invalid field type — "alg" and "use", for example, must be strings.
+apps-invalid-jwks-uri = The JWKS URI must be a valid https:// URL.
+
 ## Application detail (applications/detail.html)
 apps-detail-back = Back to Applications
 apps-detail-delete-confirm = Are you sure you want to delete this application? This action cannot be undone.
@@ -329,6 +358,37 @@ authorize-denied-subtitle = You cannot use this application
 authorize-denied-restricted-suffix = has restricted access.
 authorize-denied-contact = If you believe you should have access, contact the application owner.
 
+# Reasons shown in the body of authorize_denied.html. Every construction of
+# AuthorizeDeniedTemplate resolves one of these — the field is a `Tr`, so a
+# bare string does not compile.
+#
+# The `$detail` placeable in four of them carries an OAuth error_description
+# verbatim. That text is English by RFC 6749 §5.2 ("Human-readable ASCII
+# [USASCII] text ... to assist the client developer") and is passed through
+# untranslated on purpose; the sentence around it is what gets localized.
+authorize-denied-redirect-uri-unregistered = Invalid redirect_uri: not registered for this application.
+authorize-denied-redirect-uri-required = Invalid request: redirect_uri is required when multiple redirect URIs are registered.
+authorize-denied-request-and-request-uri = Invalid request: the request and request_uri parameters are mutually exclusive.
+authorize-denied-client-id-required = Invalid request: client_id is required.
+authorize-denied-client-id-required-with-request = Invalid request: client_id is required with the request parameter.
+authorize-denied-client-id-required-with-request-uri = Invalid request: client_id is required with request_uri.
+authorize-denied-request-uri-format = Invalid request_uri format.
+authorize-denied-request-uri-scheme = Invalid request_uri: must be a PAR URN or an HTTPS URL.
+authorize-denied-request-uri-unregistered = Invalid request: request_uri is not registered for this client.
+authorize-denied-request-uri-expired = Invalid or expired request_uri. Please restart the authorization flow.
+authorize-denied-invalid-request-object = Invalid Request Object: { $detail }
+authorize-denied-invalid-request-object-coded = Invalid Request Object ({ $code }): { $detail }
+authorize-denied-request-object-fetch-failed = Failed to fetch Request Object: { $detail }
+authorize-denied-invalid-request = Invalid request: { $detail }
+authorize-denied-session-expired = Authorization session expired. Please try again.
+authorize-denied-authentication-failed = Authentication failed. Please try again.
+authorize-denied-unknown-client = Unknown client application. Please contact the application administrator.
+authorize-denied-client-deactivated = This application has been deactivated.
+authorize-denied-no-access = You don't have access to this application.
+authorize-denied-access-denied-detail = { $detail }
+authorize-denied-jarm-signing-failed = The authorization server could not produce a signed response. Please try again, or contact the application owner if this persists.
+authorize-denied-generic = An error occurred. Please try again.
+
 ## GitHub connect result pages (github/success.html, github/error.html)
 github-success-page-title = { -product } - { -github } Connected
 github-success-heading = { -github } Connected
@@ -482,7 +542,10 @@ keys-js-reg-complete-failed = Failed to complete registration
 
 ## Application form validation — client-side JS (app-create.js, app-detail.js)
 appcreate-js-redirect-required = At least one redirect URI is required.
-appcreate-js-redirect-invalid = Invalid redirect URI(s): { $uris }. Each URI must be a valid http:// or https:// URL.
+# Mirrors apps-invalid-redirect-uris, the server-side wording for the same
+# rule. Keep the two in step: this is the message the form shows before
+# submitting, and that one is what comes back if it submits anyway.
+appcreate-js-redirect-invalid = Invalid redirect URI(s): { $uris }. Each URI must use https://, or http:// with localhost, 127.0.0.1, or [::1], and must not contain a fragment. A custom scheme is accepted only for native applications.
 # Per-URI validation errors. Each takes the offending URI as a placeable so JS
 # never concatenates strings around translated text — that pattern previously
 # required a `{ " " }(reason)` leading-space hack in the catalog.

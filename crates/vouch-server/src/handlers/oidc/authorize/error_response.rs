@@ -129,9 +129,7 @@ pub(super) async fn oauth_error_redirect_jarm(
             tracing::error!("Failed to build JARM error JWT: {e}");
             AuthorizeDeniedTemplate {
                 client_name: client.name.clone(),
-                error_message: "The authorization server could not produce a signed response. \
-                     Please try again, or contact the application owner if this persists."
-                    .to_string(),
+                error_message: Tr::new("authorize-denied-jarm-signing-failed"),
             }
             .into_response()
         }

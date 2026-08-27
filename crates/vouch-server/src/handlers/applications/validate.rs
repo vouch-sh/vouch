@@ -11,10 +11,11 @@
 use axum::http::StatusCode;
 
 use crate::db::{
-    AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
-    RegistrationSource, TokenEndpointAuthMethod, jwks_has_fapi_allowed_key, jwks_has_x5c,
+    AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, KeyType, OAuthClient,
+    OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
 };
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use crate::services::oidc::ResourceUri;
 
 use super::{validate_post_logout_redirect_uris, validate_redirect_uris};
@@ -40,6 +41,12 @@ pub(super) enum AppValidationError {
     AuthMethodMissingJwks,
     FapiDowngradeUnsupported,
     FapiJwksNoAllowedAlgorithm,
+    /// RFC 9101 §4: the submitted JWKS holds no key the Request Object
+    /// verifier could select for the algorithm the client pinned.
+    RequestObjectJwksNoKeyForAlg {
+        alg: JwsAlgorithm,
+        kty: KeyType,
+    },
     SelfSignedJwksMissingX5c,
     JwksNotJson,
     JwksMissingKeys,
@@ -63,6 +70,9 @@ impl AppValidationError {
             Self::FapiMissingJwks | Self::AuthMethodMissingJwks => "missing_jwks",
             Self::FapiDowngradeUnsupported => "fapi_downgrade_unsupported",
             Self::FapiJwksNoAllowedAlgorithm => "fapi_jwks_algorithm_unsupported",
+            Self::RequestObjectJwksNoKeyForAlg { .. } => {
+                "request_object_jwks_algorithm_unsupported"
+            }
             Self::SelfSignedJwksMissingX5c => "self_signed_jwks_missing_x5c",
             Self::JwksNotJson | Self::JwksMissingKeys | Self::JwksInvalidKeyShape => "invalid_jwks",
             Self::InvalidJwksUri => "invalid_jwks_uri",
@@ -128,6 +138,12 @@ impl AppValidationError {
                  an existing one's alg/kty/use."
                     .to_string()
             }
+            Self::RequestObjectJwksNoKeyForAlg { alg, kty } => format!(
+                "This application requires Request Objects signed with {alg} (RFC 9101), \
+                 and none of the submitted keys can verify one. It needs a key of type \
+                 {kty} whose alg, if declared, is {alg} and whose use, if declared, is \
+                 sig. Add a compatible key, or adjust an existing one's alg, kty, or use."
+            ),
             Self::SelfSignedJwksMissingX5c => {
                 "This application authenticates with self_signed_tls_client_auth, whose \
                  certificate is carried in a JWKS key's x5c member (RFC 8705 §2.2.2). None \
@@ -145,6 +161,57 @@ impl AppValidationError {
                     .to_string()
             }
             Self::InvalidJwksUri => "JWKS URI must be a valid https:// URL".to_string(),
+        }
+    }
+
+    /// The same failure, addressed to the person filling in the form.
+    ///
+    /// [`Self::message`] and this are deliberately separate strings for two
+    /// separate audiences. `message` is the OAuth `error_description` on the
+    /// JSON API path, which RFC 6749 §5.2 addresses to "the client developer"
+    /// and restricts to `%x20-21 / %x23-5B / %x5D-7E` — so it stays ASCII
+    /// English. This one is the body of an HTML page in a browser, where
+    /// neither constraint applies and the reader is an end user.
+    ///
+    /// Values interpolated from the submitted request (URI lists, an
+    /// algorithm name) are passed through verbatim; only the sentence around
+    /// them is translated.
+    pub(super) fn localized(&self) -> Tr<'static> {
+        match self {
+            Self::EmptyName => Tr::new("apps-invalid-name-required"),
+            Self::InvalidApplicationType => Tr::new("apps-invalid-application-type"),
+            Self::InvalidAccessScope => Tr::new("apps-invalid-access-scope"),
+            Self::InvalidFapiProfile(p) => {
+                Tr::new("apps-invalid-fapi-profile").arg("profile", p.clone())
+            }
+            Self::MissingRedirectUris => Tr::new("apps-invalid-redirect-uris-required"),
+            Self::InvalidRedirectUris(invalid) => {
+                Tr::new("apps-invalid-redirect-uris").arg("uris", invalid.join(", "))
+            }
+            Self::InvalidPostLogoutRedirectUris(invalid) => {
+                Tr::new("apps-invalid-post-logout-redirect-uris").arg("uris", invalid.join(", "))
+            }
+            Self::InvalidResourceUri { uri, detail } => Tr::new("apps-invalid-resource-uri")
+                .arg("uri", uri.clone())
+                .arg("detail", detail.clone()),
+            Self::JwksMutuallyExclusive => Tr::new("apps-invalid-jwks-mutually-exclusive"),
+            Self::FapiRequiresConfidentialClient => {
+                Tr::new("apps-invalid-fapi-confidential-required")
+            }
+            Self::FapiMissingJwks => Tr::new("apps-invalid-fapi-missing-jwks"),
+            Self::AuthMethodMissingJwks => Tr::new("apps-invalid-auth-method-missing-jwks"),
+            Self::FapiDowngradeUnsupported => Tr::new("apps-invalid-fapi-downgrade"),
+            Self::FapiJwksNoAllowedAlgorithm => Tr::new("apps-invalid-fapi-jwks-algorithm"),
+            Self::RequestObjectJwksNoKeyForAlg { alg, kty } => {
+                Tr::new("apps-invalid-request-object-jwks-algorithm")
+                    .arg("alg", alg.to_string())
+                    .arg("kty", kty.to_string())
+            }
+            Self::SelfSignedJwksMissingX5c => Tr::new("apps-invalid-self-signed-jwks-x5c"),
+            Self::JwksNotJson => Tr::new("apps-invalid-jwks-not-json"),
+            Self::JwksMissingKeys => Tr::new("apps-invalid-jwks-missing-keys"),
+            Self::JwksInvalidKeyShape => Tr::new("apps-invalid-jwks-key-shape"),
+            Self::InvalidJwksUri => Tr::new("apps-invalid-jwks-uri"),
         }
     }
 }
@@ -247,12 +314,12 @@ pub(super) fn validate_create_application<'a>(
     let keys = client_keys(jwks, jwks_uri)?;
 
     // FAPI validation: an inline JWKS must have at least one key the
-    // FAPI_ALLOWED validator can actually select (see jwks_has_fapi_allowed_key).
+    // FAPI_ALLOWED validator can actually select (see JwkSet::has_fapi_allowed_key).
     // A jwks_uri can't be inspected synchronously, so this only guards the
     // inline case; the same is true of validate_update_fapi.
     if is_fapi
         && let Some(set) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks_has_fapi_allowed_key(set)
+        && !set.has_fapi_allowed_key()
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -443,6 +510,32 @@ pub(super) fn validate_update_fapi(
         return Err(AppValidationError::FapiDowngradeUnsupported);
     }
 
+    // RFC 9101 §4's `request_object_signing_alg` pins the algorithm every
+    // Request Object from this client must carry, and the verifier selects a
+    // key by that algorithm's key type. A submitted JWKS holding no such key
+    // shuts both doors at the authorization endpoint: the signed path fails
+    // key resolution, and `require_signed_request_object` refuses the plain
+    // one. The pin is not editable here, so the submitted key material is the
+    // only thing this update can change — and the only thing checked. Key
+    // material the client already had is left alone; a metadata-only edit
+    // isn't what stranded it, and blocking one would just stop the client
+    // being repaired.
+    //
+    // Above the FAPI early return because the pin is not FAPI-specific: a
+    // `client_secret_basic` client can register one.
+    if let Some(alg) = client.request_object_signing_alg
+        && let Some(jwks) = validated
+            .keys
+            .as_ref()
+            .and_then(crate::db::ClientKeys::inline)
+        && !jwks.has_key_for(alg)
+    {
+        return Err(AppValidationError::RequestObjectJwksNoKeyForAlg {
+            alg,
+            kty: KeyType::for_alg(alg),
+        });
+    }
+
     // Everything below applies whenever the client is FAPI *after* this
     // update — whether the request just declared it, or it stays FAPI
     // because `fapi_profile` was omitted. A JWKS-only edit to an
@@ -490,7 +583,7 @@ pub(super) fn validate_update_fapi(
             .as_ref()
             .and_then(crate::db::ClientKeys::inline)
             .or(client.keys.as_ref().and_then(crate::db::ClientKeys::inline))
-        && !jwks_has_fapi_allowed_key(jwks)
+        && !jwks.has_fapi_allowed_key()
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
@@ -647,7 +740,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     // self_signed_tls_client_auth's certificate is carried by a key's `x5c`
     // member; an inline JWKS with none anywhere would pass the presence
     // check above but leave the client unable to ever complete mTLS
-    // authentication — see db::jwks_has_x5c. Applies to both a freshly
+    // authentication — see JwkSet::has_x5c. Applies to both a freshly
     // submitted and a stored (pre-existing) inline JWKS, and regardless of
     // FAPI status (this auth method exists for non-FAPI clients too) —
     // this function runs on every update, unlike the FAPI-gated checks in
@@ -655,7 +748,7 @@ pub(super) fn compute_fapi_update_fields<'a>(
     // synchronously, so this only guards the inline case.
     if token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         && let Some(jwks) = keys.and_then(crate::db::ClientKeys::inline)
-        && !jwks_has_x5c(jwks)
+        && !jwks.has_x5c()
     {
         return Err(AppValidationError::SelfSignedJwksMissingX5c);
     }
@@ -1654,10 +1747,10 @@ mod tests {
     }
 
     #[test]
-    fn jwks_has_fapi_allowed_key_covers_alg_and_kty_cases() {
+    fn has_fapi_allowed_key_covers_alg_and_kty_cases() {
         let no_alg = serde_json::json!({"keys": [{"kty": "EC"}]});
         assert!(
-            jwks_has_fapi_allowed_key(&jwk_set(no_alg)),
+            jwk_set(no_alg).has_fapi_allowed_key(),
             "no alg field survives"
         );
 
@@ -1666,28 +1759,45 @@ mod tests {
         // be presented with PS256 instead.
         let unpinned_rsa = serde_json::json!({"keys": [{"kty": "RSA"}]});
         assert!(
-            jwks_has_fapi_allowed_key(&jwk_set(unpinned_rsa)),
+            jwk_set(unpinned_rsa).has_fapi_allowed_key(),
             "an RSA key with no alg field survives (usable with PS256)"
         );
 
         let es256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256"}]});
-        assert!(jwks_has_fapi_allowed_key(&jwk_set(es256)));
+        assert!(jwk_set(es256).has_fapi_allowed_key());
 
         let ps256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256"}]});
-        assert!(jwks_has_fapi_allowed_key(&jwk_set(ps256)));
+        assert!(jwk_set(ps256).has_fapi_allowed_key());
 
-        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "alg": "EdDSA"}]});
-        assert!(jwks_has_fapi_allowed_key(&jwk_set(eddsa)));
+        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA"}]});
+        assert!(jwk_set(eddsa).has_fapi_allowed_key());
+
+        // EdDSA is the one algorithm whose runtime key construction constrains
+        // the curve: `build_decoding_key_from_jwk` requires `crv` to be present
+        // and `Ed25519`, so an OKP key that omits it or names another curve is
+        // unusable however it declares its alg.
+        let okp_no_crv = serde_json::json!({"keys": [{"kty": "OKP", "alg": "EdDSA"}]});
+        assert!(
+            !jwk_set(okp_no_crv).has_fapi_allowed_key(),
+            "an OKP key with no crv cannot build an EdDSA decoding key"
+        );
+
+        let okp_ed448 =
+            serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed448", "alg": "EdDSA"}]});
+        assert!(
+            !jwk_set(okp_ed448).has_fapi_allowed_key(),
+            "EdDSA requires an Ed25519 curve"
+        );
 
         let rs256_only = serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256"}]});
-        assert!(!jwks_has_fapi_allowed_key(&jwk_set(rs256_only)));
+        assert!(!jwk_set(rs256_only).has_fapi_allowed_key());
 
         // A kty the runtime matcher never selects for ES256/PS256/EdDSA (e.g. a
         // symmetric "oct" key) must not survive just because it omits alg —
         // it's unmatchable at runtime regardless.
         let unmatchable_kty_no_alg = serde_json::json!({"keys": [{"kty": "oct"}]});
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(unmatchable_kty_no_alg)),
+            !jwk_set(unmatchable_kty_no_alg).has_fapi_allowed_key(),
             "a kty outside EC/RSA/OKP must not survive on a missing alg"
         );
 
@@ -1697,25 +1807,25 @@ mod tests {
         // the declared alg is FAPI-allowed.
         let oct_with_allowed_alg = serde_json::json!({"keys": [{"kty": "oct", "alg": "ES256"}]});
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(oct_with_allowed_alg)),
+            !jwk_set(oct_with_allowed_alg).has_fapi_allowed_key(),
             "an oct key must not survive by declaring an allowed alg"
         );
 
         let rsa_with_es256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256"}]});
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(rsa_with_es256)),
+            !jwk_set(rsa_with_es256).has_fapi_allowed_key(),
             "an RSA key declaring ES256 is unmatchable at runtime"
         );
 
         let ec_with_ps256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "PS256"}]});
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(ec_with_ps256)),
+            !jwk_set(ec_with_ps256).has_fapi_allowed_key(),
             "an EC key declaring PS256 is unmatchable at runtime"
         );
 
         let okp_with_es256 = serde_json::json!({"keys": [{"kty": "OKP", "alg": "ES256"}]});
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(okp_with_es256)),
+            !jwk_set(okp_with_es256).has_fapi_allowed_key(),
             "an OKP key declaring ES256 is unmatchable at runtime"
         );
 
@@ -1723,7 +1833,7 @@ mod tests {
             "keys": [{"kty": "RSA", "alg": "RS256"}, {"kty": "EC", "alg": "ES256"}]
         });
         assert!(
-            jwks_has_fapi_allowed_key(&jwk_set(mixed)),
+            jwk_set(mixed).has_fapi_allowed_key(),
             "one usable key is enough"
         );
 
@@ -1733,7 +1843,7 @@ mod tests {
             "keys": [{"kty": "EC", "alg": "ES256", "use": "enc"}]
         });
         assert!(
-            !jwks_has_fapi_allowed_key(&jwk_set(enc_only)),
+            !jwk_set(enc_only).has_fapi_allowed_key(),
             "a use: enc key must not survive even with an allowed alg"
         );
 
@@ -1741,12 +1851,12 @@ mod tests {
             "keys": [{"kty": "EC", "alg": "ES256", "use": "sig"}]
         });
         assert!(
-            jwks_has_fapi_allowed_key(&jwk_set(explicit_sig)),
+            jwk_set(explicit_sig).has_fapi_allowed_key(),
             "an explicit use: sig key survives"
         );
 
         let empty = serde_json::json!({"keys": []});
-        assert!(!jwks_has_fapi_allowed_key(&jwk_set(empty)));
+        assert!(!jwk_set(empty).has_fapi_allowed_key());
     }
 
     #[test]
@@ -1901,7 +2011,7 @@ mod tests {
     }
 
     // A JWKS-only update can swap in a JWKS that still satisfies the bare
-    // presence check but carries no x5c anywhere — `jwks_has_x5c` must catch
+    // presence check but carries no x5c anywhere — `JwkSet::has_x5c` must catch
     // this the same way the FAPI algorithm-usability check catches an
     // RS256-only JWKS for private_key_jwt.
     #[tokio::test]

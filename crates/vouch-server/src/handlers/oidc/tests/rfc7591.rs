@@ -1037,7 +1037,7 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 // FAPI 2.0 JWKS algorithm usability — a client that registers as FAPI 2.0
 // with a JWKS containing no key usable under ES256/PS256/EdDSA would be
 // unable to authenticate at the token endpoint from the moment it's created.
-// See db::jwks_has_fapi_allowed_key.
+// See JwkSet::has_fapi_allowed_key.
 // ========================================================================
 
 #[tokio::test]
@@ -1260,7 +1260,7 @@ async fn test_rfc7591_accepts_self_signed_registration_with_jwks_uri_only() {
 
 #[tokio::test]
 async fn test_rfc7591_rejects_self_signed_registration_with_certificate_less_jwks() {
-    // `jwks_has_x5c`: a self-signed client's inline JWKS carrying no x5c
+    // `JwkSet::has_x5c`: a self-signed client's inline JWKS carrying no x5c
     // passes the bare presence check but leaves the client unable to ever
     // complete mTLS authentication — verify_self_signed_tls_client_auth
     // (services/oidc/mtls.rs) matches only on x5c.

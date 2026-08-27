@@ -53,7 +53,11 @@
             toggleEditForm();
         }
 
-        // --- URI validation (mirrors app-create.js rules) ---
+        // --- URI validation (rules shared with app-create.js via common.js) ---
+
+        // Custom schemes are accepted only for native applications, so the
+        // rule needs the type this application was registered with.
+        var applicationType = editForm ? editForm.getAttribute('data-application-type') : null;
 
         function validateRedirectUris() {
             var uris = redirectTextarea.value.trim().split('\n').filter(function(line) {
@@ -63,12 +67,7 @@
             var invalid = [];
             for (var i = 0; i < uris.length; i++) {
                 var trimmed = uris[i].trim();
-                try {
-                    var url = new URL(trimmed);
-                    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-                        invalid.push(trimmed);
-                    }
-                } catch (e) {
+                if (!window.VouchValidate.isValidRedirectUri(trimmed, applicationType)) {
                     invalid.push(trimmed);
                 }
             }

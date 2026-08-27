@@ -1570,3 +1570,304 @@ async fn test_rfc9101_discovery_require_signed_request_object_is_false_by_defaul
         doc["require_signed_request_object"]
     );
 }
+
+// ========================================================================
+// RFC 9101 — Write-time key/algorithm usability
+//
+// `request_object_signing_alg` pins the algorithm every Request Object from
+// this client must carry, and the runtime verifier selects a key by that
+// algorithm's key type. Key material that holds no such key leaves the
+// client permanently unable to authorize, so every path that writes either
+// half of the pair checks them against each other.
+// ========================================================================
+
+/// A JWKS holding only an RSA key, for a client that pins ES256. The runtime
+/// matcher selects `kty` `EC` for ES256, so no key in this set can ever
+/// verify one of its Request Objects.
+fn rsa_only_jwks() -> serde_json::Value {
+    serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAt\
+                  VT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9y\
+                  BXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgd\
+                  AZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksI\
+                  NHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+            "e": "AQAB",
+            "use": "sig",
+            "kid": "rsa-key-1"
+        }]
+    })
+}
+
+/// Register a JAR client that pins ES256 and holds a usable EC key, then
+/// confirm it can authorize. Returns the client_id, its registration access
+/// token, and the signing key behind its JWKS.
+async fn register_working_jar_client(
+    app: &axum::Router,
+    state: &std::sync::Arc<crate::AppState>,
+    session_token: &str,
+    client_name: &str,
+) -> (String, String, Vec<u8>) {
+    let (pkcs8_bytes, ec_jwk) = generate_es256_signing_key();
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
+        "jwks": { "keys": [ec_jwk] },
+        "client_name": client_name
+    });
+    let (reg_status, reg_body) = http_post_json(
+        app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {session_token}"))],
+    )
+    .await;
+    assert_eq!(reg_status, StatusCode::CREATED, "setup: {reg_body}");
+
+    let reg: serde_json::Value = serde_json::from_str(&reg_body).expect("valid JSON");
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let reg_token = reg["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let issuer = &state.config().base_url;
+    let before = http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?client_id={}&request={}",
+            client_id,
+            urlencoding::encode(&build_request_object(&client_id, issuer, &pkcs8_bytes)),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+    assert!(
+        before
+            .headers
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|l| l.contains("code=")),
+        "setup: the client must be able to authorize before its JWKS is replaced"
+    );
+
+    (client_id, reg_token, pkcs8_bytes)
+}
+
+#[tokio::test]
+async fn test_rfc9101_registration_rejects_pinned_alg_without_usable_key() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-unusable-reg@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
+        "jwks": rsa_only_jwks(),
+        "client_name": "Unusable JAR Key App"
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {session_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "registering request_object_signing_alg ES256 against an RSA-only JWKS must be \
+         rejected as invalid_client_metadata; the client is otherwise accepted and then \
+         unable to authorize at all. Got {status}: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_registration_rejects_required_signing_without_any_key() {
+    // `require_signed_request_object` commits the client to signing without
+    // necessarily naming an algorithm, so it needs key material even when
+    // `request_object_signing_alg` is absent.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-no-keys-reg@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "require_signed_request_object": true,
+        "client_name": "Signed JAR Without Keys"
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {session_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "require_signed_request_object with no jwks or jwks_uri leaves the client with \
+         nothing to verify its Request Objects against. Got {status}: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-unusable-put@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (client_id, reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "JAR PUT App").await;
+
+    let put_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_id": client_id,
+        "jwks": rsa_only_jwks(),
+    });
+    let (put_status, put_resp) = http_put_json(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &put_body.to_string(),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        put_status,
+        StatusCode::BAD_REQUEST,
+        "replacing the JWKS with a set holding no key usable for the client's pinned \
+         ES256 must be rejected; it otherwise succeeds and silently breaks every \
+         subsequent authorization request. Got {put_status}: {put_resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
+    // The rotation the check must not block: a new EC key, same pinned alg.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-rotate-put@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (client_id, reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "JAR Rotate App").await;
+
+    let (_new_pkcs8, new_ec_jwk) = generate_es256_signing_key();
+    let put_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_id": client_id,
+        "jwks": { "keys": [new_ec_jwk] },
+    });
+    let (put_status, put_resp) = http_put_json(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &put_body.to_string(),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "rotating to another ES256-usable key must still be accepted. \
+         Got {put_status}: {put_resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_admin_update_rejects_jwks_without_key_for_pinned_alg() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-admin-patch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = format!("Bearer {session_token}");
+
+    let (client_id, _reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "Admin JAR App").await;
+
+    // The admin API is keyed by the stored document id, not the client_id.
+    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists")
+        .id;
+
+    // `jwks` on this endpoint is a JSON string, not an object.
+    let patch_body = serde_json::json!({ "jwks": rsa_only_jwks().to_string() }).to_string();
+    let (patch_status, patch_resp) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{app_id}"),
+        Some(patch_body),
+        &[
+            ("Authorization", &auth),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        patch_status,
+        StatusCode::BAD_REQUEST,
+        "the admin API must reject a JWKS holding no key usable for the client's pinned \
+         ES256; it otherwise succeeds and silently breaks every subsequent authorization \
+         request. Got {patch_status}: {patch_resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg() {
+    // The admin UI form writes the same field through the same validator as
+    // the JSON API, so it carries the same rule.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-admin-form@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (client_id, _reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "Admin JAR Form App").await;
+
+    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists")
+        .id;
+
+    let form_body = format!(
+        "name=Admin+JAR+Form+App&redirect_uris={}&jwks={}",
+        urlencoding::encode("https://example.com/callback"),
+        urlencoding::encode(&rsa_only_jwks().to_string()),
+    );
+    let (status, resp) = http_request(
+        &app,
+        "POST",
+        &format!("/applications/{app_id}"),
+        Some(form_body),
+        &[
+            ("Cookie", &format!("__Host-vouch_session={session_token}")),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+        ],
+    )
+    .await;
+
+    assert!(
+        resp.contains("ES256") || status == StatusCode::BAD_REQUEST,
+        "the admin form must refuse a JWKS with no key usable for the pinned ES256. \
+         Got {status}: {resp}"
+    );
+}
