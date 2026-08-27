@@ -291,9 +291,11 @@ fn build_credential_routes(
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     // Credential routes with HTTP signature verification.
-    // Layer order (outside→inside): rate_limit → body_limit →
+    // Layer order (outside→inside): body_limit → rate_limit →
     //     resource_metadata → httpsig → handler
-    // Rate limiting runs first to reject DoS before signature verification.
+    // The last `.layer()` call is the outermost, so the body limit
+    // applied at the end of this function sits outside the rate
+    // limiter; both run before signature verification.
     // The RFC 9728 middleware wraps the signature middleware so that
     // when either the signature check or the handler returns 401, the
     // response gets a `resource_metadata` parameter.

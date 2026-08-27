@@ -68,9 +68,17 @@ vouch/
 │           ├── integration.rs
 │           ├── golden_files.rs
 │           └── proptest.rs
-├── docs/                   # Architecture, security, deployment guides
+├── docs/                   # Operator guide (mdBook): install, configure, operate
 └── packaging/              # AMI and post-install scripts
 ```
+
+Two documents are worth reading before changing the server:
+
+- [`crates/vouch-server/ARCHITECTURE.md`](crates/vouch-server/ARCHITECTURE.md) — how a
+  request travels from the Axum listener through the middleware stack, the proofs and
+  verifications on the way, and how responses and errors are shaped.
+- [`docs/`](docs/) is the **operator** guide — installing, configuring and running a
+  server. It is not contributor documentation; keep internals out of it.
 
 ### Running Locally
 
