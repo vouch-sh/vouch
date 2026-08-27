@@ -99,6 +99,7 @@ fn make_attestation_object_none(auth_data: &[u8]) -> Vec<u8> {
 // Basic Tests (existing)
 // =========================================================================
 
+// WebAuthn L2 §7.2 step 15: the rpIdHash in authData is the SHA-256 hash of the expected RP ID.
 #[test]
 fn test_rp_id_hash_verification() {
     // Create minimal valid authenticator data with correct RP ID hash
@@ -114,6 +115,7 @@ fn test_rp_id_hash_verification() {
     assert_eq!(&auth_data[0..32], rp_id_hash.as_ref());
 }
 
+// WebAuthn L2 §6.1: the UP and UV flags occupy defined bits of authenticator data.
 #[test]
 fn test_flags_parsing() {
     let flags_up_only: u8 = 0x01;
@@ -130,6 +132,7 @@ fn test_flags_parsing() {
 // COSE Key Parsing Tests
 // =========================================================================
 
+// WebAuthn L2 §6.5.1: a credential public key with no kty is not a COSE_Key.
 #[test]
 fn test_cose_key_missing_kty() {
     // Create COSE key without kty field
@@ -144,6 +147,7 @@ fn test_cose_key_missing_kty() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("1")));
 }
 
+// WebAuthn L2 §6.5.1: a credential public key with no alg is not a COSE_Key.
 #[test]
 fn test_cose_key_missing_alg() {
     // Create COSE key without alg field
@@ -158,6 +162,7 @@ fn test_cose_key_missing_alg() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("3")));
 }
 
+// WebAuthn L2 §6.5.1: an unregistered alg cannot be used to verify.
 #[test]
 fn test_cose_key_unsupported_algorithm() {
     // Create COSE key with unsupported algorithm (e.g., -999)
@@ -181,6 +186,7 @@ fn test_cose_key_unsupported_algorithm() {
     ));
 }
 
+// WebAuthn L2 §6.5.1: an EC2 key without its x coordinate is malformed.
 #[test]
 fn test_cose_key_ec2_missing_x() {
     // EC2 key missing x coordinate
@@ -209,6 +215,7 @@ fn test_cose_key_ec2_missing_x() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("-2")));
 }
 
+// WebAuthn L2 §6.5.1: an EC2 key without its y coordinate is malformed.
 #[test]
 fn test_cose_key_ec2_missing_y() {
     // EC2 key missing y coordinate
@@ -237,6 +244,7 @@ fn test_cose_key_ec2_missing_y() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("-3")));
 }
 
+// WebAuthn L2 §6.5.1: an OKP key without its public key is malformed.
 #[test]
 fn test_cose_key_okp_missing_x() {
     // OKP key missing x (public key)
@@ -261,6 +269,7 @@ fn test_cose_key_okp_missing_x() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("-2")));
 }
 
+// WebAuthn L2 §6.5.1: truncated CBOR does not decode to a COSE_Key.
 #[test]
 fn test_cose_key_truncated_cbor() {
     // Truncated CBOR data
@@ -269,6 +278,7 @@ fn test_cose_key_truncated_cbor() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(_))));
 }
 
+// WebAuthn L2 §6.5.1: a COSE_Key is a CBOR map.
 #[test]
 fn test_cose_key_not_a_map() {
     // CBOR integer instead of map
@@ -279,6 +289,7 @@ fn test_cose_key_not_a_map() {
     assert!(matches!(result, Err(VerifyError::InvalidCoseKey(msg)) if msg.contains("map")));
 }
 
+// WebAuthn L2 §6.5.1: an Ed25519 public key is 32 bytes.
 #[test]
 fn test_cose_key_eddsa_wrong_key_length() {
     // Ed25519 key with wrong length (not 32 bytes)
@@ -292,6 +303,7 @@ fn test_cose_key_eddsa_wrong_key_length() {
 // Signature Verification Tests
 // =========================================================================
 
+// WebAuthn L2 §7.2 step 20: a malformed signature does not verify.
 #[test]
 fn test_eddsa_signature_wrong_length() {
     // Generate a real Ed25519 keypair for testing
@@ -308,6 +320,7 @@ fn test_eddsa_signature_wrong_length() {
     assert!(matches!(result, Err(VerifyError::SignatureInvalid)));
 }
 
+// WebAuthn L2 §7.2 step 20: sig verifies over authData concatenated with the client data hash.
 #[test]
 fn test_eddsa_signature_valid() {
     use ed25519_dalek::{Signer, SigningKey};
@@ -323,6 +336,7 @@ fn test_eddsa_signature_valid() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §7.2 step 20: an altered signature does not verify.
 #[test]
 fn test_eddsa_signature_tampered() {
     use ed25519_dalek::{Signer, SigningKey};
@@ -341,6 +355,7 @@ fn test_eddsa_signature_tampered() {
     assert!(matches!(result, Err(VerifyError::SignatureInvalid)));
 }
 
+// WebAuthn L2 §7.2 step 20: a signature over different data does not verify.
 #[test]
 fn test_eddsa_wrong_message() {
     use ed25519_dalek::{Signer, SigningKey};
@@ -361,6 +376,7 @@ fn test_eddsa_wrong_message() {
 // Authenticator Data Tests
 // =========================================================================
 
+// WebAuthn L2 §6.1: authenticator data is at least 37 bytes.
 #[test]
 fn test_auth_data_minimum_length() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -390,6 +406,7 @@ fn test_auth_data_minimum_length() {
     assert!(matches!(result, Err(VerifyError::InvalidAuthDataLength)));
 }
 
+// WebAuthn L2 §6.1: 37 bytes is a complete assertion authenticator data.
 #[test]
 fn test_auth_data_exactly_minimum_length() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -417,6 +434,7 @@ fn test_auth_data_exactly_minimum_length() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §7.2 step 15: an rpIdHash for a different RP ID is rejected.
 #[test]
 fn test_auth_data_rp_id_mismatch() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -443,6 +461,7 @@ fn test_auth_data_rp_id_mismatch() {
     assert!(matches!(result, Err(VerifyError::RpIdMismatch)));
 }
 
+// WebAuthn L2 §7.2 step 16: the User Present bit must be set.
 #[test]
 fn test_auth_data_user_presence_required() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -470,6 +489,7 @@ fn test_auth_data_user_presence_required() {
     assert!(matches!(result, Err(VerifyError::UserNotPresent)));
 }
 
+// WebAuthn L2 §7.2 step 17: when user verification is required, the UV bit must be set.
 #[test]
 fn test_auth_data_user_verification_required() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -497,6 +517,7 @@ fn test_auth_data_user_verification_required() {
     assert!(matches!(result, Err(VerifyError::UserNotVerified)));
 }
 
+// WebAuthn L2 §7.2 step 17: when user verification is not required, a clear UV bit is accepted.
 #[test]
 fn test_auth_data_user_verification_not_required() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -528,6 +549,7 @@ fn test_auth_data_user_verification_not_required() {
 // Counter Validation Tests (Replay Protection)
 // =========================================================================
 
+// WebAuthn L2 §7.2 step 21: a signCount greater than the stored value is accepted.
 #[test]
 fn test_counter_must_increase() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -557,6 +579,7 @@ fn test_counter_must_increase() {
     assert_eq!(result.unwrap().counter, 5);
 }
 
+// WebAuthn L2 §7.2 step 21: a signCount equal to the stored value is a cloned authenticator.
 #[test]
 fn test_counter_exact_match_rejected() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -585,6 +608,7 @@ fn test_counter_exact_match_rejected() {
     assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
 }
 
+// WebAuthn L2 §7.2 step 21: a signCount below the stored value is a cloned authenticator.
 #[test]
 fn test_counter_decrease_rejected() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -613,6 +637,7 @@ fn test_counter_decrease_rejected() {
     assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
 }
 
+// WebAuthn L2 §6.1.1: an authenticator that implements no counter reports zero throughout.
 #[test]
 fn test_counter_zero_special_case() {
     // Some CTAP1 authenticators always return 0
@@ -642,6 +667,7 @@ fn test_counter_zero_special_case() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §6.1.1: a counter may begin reporting after a zero start.
 #[test]
 fn test_counter_zero_to_nonzero() {
     // First use with stored=0, new counter=1
@@ -670,6 +696,7 @@ fn test_counter_zero_to_nonzero() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §6.1: signCount is an unsigned 32-bit value.
 #[test]
 fn test_counter_u32_max_boundary() {
     // Test near u32::MAX boundary
@@ -699,6 +726,8 @@ fn test_counter_u32_max_boundary() {
     assert_eq!(result.unwrap().counter, u32::MAX);
 }
 
+// WebAuthn L2 §7.2 step 21: a credential that has reported a nonzero counter must never regress to
+// zero.
 #[test]
 fn test_counter_regression_to_zero_rejected() {
     // A credential that has reported a nonzero counter must never regress
@@ -731,9 +760,11 @@ fn test_counter_regression_to_zero_rejected() {
 }
 
 // =========================================================================
-// Origin Relaxation Gating Tests (P2.2)
+// Origin Relaxation Gating Tests
 // =========================================================================
 
+// WebAuthn L2 §7.2 step 13: loopback origin variation is tolerated only under an explicit
+// development opt-in.
 #[test]
 fn test_localhost_origin_relaxation_allowed_when_enabled() {
     // With relaxation enabled (development, no TLS), a loopback origin
@@ -763,6 +794,7 @@ fn test_localhost_origin_relaxation_allowed_when_enabled() {
     assert!(result.is_ok(), "expected ok, got {result:?}");
 }
 
+// WebAuthn L2 §7.2 step 13: C.origin must match the Relying Party origin in production.
 #[test]
 fn test_localhost_origin_relaxation_rejected_when_disabled() {
     // With relaxation disabled (production), the same loopback origin
@@ -797,6 +829,7 @@ fn test_localhost_origin_relaxation_rejected_when_disabled() {
 // Client Data JSON Tests
 // =========================================================================
 
+// WebAuthn L2 §7.2 step 10: clientDataJSON that is not valid JSON cannot yield C.
 #[test]
 fn test_client_data_invalid_json() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -823,6 +856,7 @@ fn test_client_data_invalid_json() {
     assert!(matches!(result, Err(VerifyError::InvalidClientData(_))));
 }
 
+// WebAuthn L2 §7.2 step 11: C.type must be the string webauthn.get.
 #[test]
 fn test_client_data_wrong_type() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -853,6 +887,7 @@ fn test_client_data_wrong_type() {
     );
 }
 
+// WebAuthn L2 §7.2 step 12: C.challenge must equal the base64url encoding of the issued challenge.
 #[test]
 fn test_client_data_challenge_mismatch() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -880,6 +915,7 @@ fn test_client_data_challenge_mismatch() {
     assert!(matches!(result, Err(VerifyError::ChallengeMismatch)));
 }
 
+// WebAuthn L2 §7.2 step 13: C.origin must match the Relying Party origin.
 #[test]
 fn test_client_data_origin_mismatch() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -906,6 +942,7 @@ fn test_client_data_origin_mismatch() {
     assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
 }
 
+// WebAuthn L2 §7.2 step 13: loopback spellings compare equal under the development opt-in.
 #[test]
 fn test_client_data_localhost_variations_allowed() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -934,6 +971,7 @@ fn test_client_data_localhost_variations_allowed() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §7.2 step 13: a container loopback alias compares equal under the development opt-in.
 #[test]
 fn test_client_data_docker_internal_to_localhost_allowed() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -962,6 +1000,7 @@ fn test_client_data_docker_internal_to_localhost_allowed() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §7.2 step 13: the IPv6 loopback compares equal under the development opt-in.
 #[test]
 fn test_client_data_ipv6_loopback_to_localhost_allowed() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -989,6 +1028,7 @@ fn test_client_data_ipv6_loopback_to_localhost_allowed() {
     assert!(result.is_ok());
 }
 
+// WebAuthn L2 §7.2 step 13: relaxation never admits a remote origin.
 #[test]
 fn test_client_data_loopback_vs_remote_rejected() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -1017,6 +1057,7 @@ fn test_client_data_loopback_vs_remote_rejected() {
     assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
 }
 
+// WebAuthn L2 §7.2 step 13: relaxation never admits a loopback origin for a remote RP.
 #[test]
 fn test_client_data_remote_vs_loopback_rejected() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -1044,6 +1085,7 @@ fn test_client_data_remote_vs_loopback_rejected() {
     assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
 }
 
+// WebAuthn L2 §7.2 step 13: the origin comparison is on the origin, not a substring of the URL.
 #[test]
 fn test_client_data_localhost_in_path_not_matched() {
     // An origin like https://evil.com/localhost must NOT be treated as
@@ -1081,6 +1123,7 @@ fn test_client_data_localhost_in_path_not_matched() {
 // Full Assertion Verification Tests
 // =========================================================================
 
+// WebAuthn L2 §7.2: a complete, conformant assertion verifies.
 #[test]
 fn test_verify_assertion_success() {
     let verifier = TestCoseVerifier::always_succeed();
@@ -1112,6 +1155,7 @@ fn test_verify_assertion_success() {
     assert!(verification.user_verified);
 }
 
+// WebAuthn L2 §7.2 step 20: an assertion whose signature does not verify is rejected.
 #[test]
 fn test_verify_assertion_signature_invalid() {
     let verifier = TestCoseVerifier::always_fail();
@@ -1168,6 +1212,7 @@ fn test_test_cose_verifier_default() {
 // Registration Attested-Credential-Data Parsing Tests
 // =========================================================================
 
+// WebAuthn L2 §7.1: a credential public key that is not a COSE_Key fails registration.
 #[test]
 fn test_verify_registration_empty_cose_key_returns_invalid_cose_key() {
     let rp_id = "example.com";
@@ -1194,6 +1239,7 @@ fn test_verify_registration_empty_cose_key_returns_invalid_cose_key() {
     assert!(matches!(err, VerifyError::InvalidCoseKey(_)), "got {err:?}");
 }
 
+// WebAuthn L2 §6.5.1: truncated attested credential data is malformed.
 #[test]
 fn test_verify_registration_truncated_attested_data_returns_invalid_auth_data_length() {
     let rp_id = "example.com";
@@ -1227,6 +1273,8 @@ fn test_verify_registration_truncated_attested_data_returns_invalid_auth_data_le
     );
 }
 
+// WebAuthn L2 §7.1 step 9: loopback origin variation is tolerated only under an explicit
+// development opt-in.
 #[test]
 fn test_registration_localhost_origin_relaxation_allowed_when_enabled() {
     // With relaxation enabled (development), a loopback origin variation
@@ -1253,6 +1301,7 @@ fn test_registration_localhost_origin_relaxation_allowed_when_enabled() {
     assert!(result.is_ok(), "expected ok, got {result:?}");
 }
 
+// WebAuthn L2 §7.1 step 9: C.origin must match the Relying Party origin in production.
 #[test]
 fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
     // With relaxation disabled (production), the same loopback origin
@@ -1333,6 +1382,7 @@ fn es256_fixture(message: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 /// WebAuthn Level 2 Section 6.5.5: "the sig value MUST be encoded as an
 /// ASN.1 DER Ecdsa-Sig-Value". Both browsers and CTAP2 authenticators emit
 /// this encoding, so it is the only one a conformant client produces.
+// WebAuthn L2 §7.2 step 20: an ES256 signature in the encoding WebAuthn specifies verifies.
 #[test]
 fn test_es256_der_signature_is_accepted() {
     let message = b"webauthn assertion signing input";
@@ -1344,6 +1394,7 @@ fn test_es256_der_signature_is_accepted() {
 /// A raw r||s pair is a valid signature over the same message, but not a
 /// conformant encoding. Accepting it on the strength of its 64-byte length
 /// was the heuristic this replaces, so rejection is the property under test.
+// WebAuthn L2 §7.2 step 20: a raw (r, s) pair is not the ES256 signature encoding.
 #[test]
 fn test_es256_raw_rs_signature_is_rejected() {
     let message = b"webauthn assertion signing input";
@@ -1361,6 +1412,7 @@ fn test_es256_raw_rs_signature_is_rejected() {
 
 /// A DER signature over a different message must still fail, so the test
 /// above is not passing merely because DER parsing succeeded.
+// WebAuthn L2 §7.2 step 20: an ES256 signature over different data does not verify.
 #[test]
 fn test_es256_der_signature_over_wrong_message_is_rejected() {
     let (cose_key, der, _raw) = es256_fixture(b"original message");
@@ -1410,6 +1462,7 @@ fn make_ec2_cose_key_with(alg: i64, crv: i64, x: &[u8], y: &[u8]) -> Vec<u8> {
 ///
 /// RFC 9053 Section 2.1: "Implementations need to check that the key type and
 /// curve are correct when creating and verifying a signature."
+// WebAuthn L2 §6.5.1: the crv of an EC2 key must match the algorithm it declares.
 #[test]
 fn test_es256_with_p384_curve_is_rejected() {
     let message = b"webauthn assertion signing input";
@@ -1427,6 +1480,7 @@ fn test_es256_with_p384_curve_is_rejected() {
 
 /// The mismatch must be caught even when the signature itself is well-formed
 /// and the coordinates are a genuine P-256 point.
+// WebAuthn L2 §6.5.1: a curve mismatch is rejected before any signature arithmetic.
 #[test]
 fn test_es256_curve_mismatch_precedes_signature_check() {
     use p256::ecdsa::{Signature, SigningKey, signature::Signer};
@@ -1446,6 +1500,7 @@ fn test_es256_curve_mismatch_precedes_signature_check() {
 }
 
 /// An EdDSA key declaring the wrong key type must be rejected.
+// WebAuthn L2 §6.5.1: EdDSA requires an OKP key type.
 #[test]
 fn test_eddsa_with_ec2_key_type_is_rejected() {
     // kty = EC2 (2) but alg = EdDSA (-8), which requires OKP.
@@ -1459,6 +1514,7 @@ fn test_eddsa_with_ec2_key_type_is_rejected() {
 }
 
 /// An unknown algorithm still reports `UnsupportedAlgorithm`, not a mismatch.
+// WebAuthn L2 §6.5.1: an unrecognized alg is reported as unsupported.
 #[test]
 fn test_unknown_algorithm_reports_unsupported() {
     let cose_key = make_ec2_cose_key_with(-999, 1, &[1u8; 32], &[2u8; 32]);
@@ -1471,6 +1527,7 @@ fn test_unknown_algorithm_reports_unsupported() {
 
 /// The conformant triple still verifies, so the check is not simply refusing
 /// everything.
+// WebAuthn L2 §6.5.1: the conformant ES256/EC2/P-256 combination verifies.
 #[test]
 fn test_conformant_es256_p256_triple_still_verifies() {
     let message = b"webauthn assertion signing input";
@@ -1481,6 +1538,7 @@ fn test_conformant_es256_p256_triple_still_verifies() {
 
 /// An EC2 key carrying no `crv` label is malformed: RFC 9053 Section 2.1
 /// requires the curve be checked, which is impossible when it is absent.
+// WebAuthn L2 §6.5.1: an EC2 key must carry a crv parameter.
 #[test]
 fn test_ec2_key_without_curve_is_rejected() {
     let mut buf = Vec::new();
