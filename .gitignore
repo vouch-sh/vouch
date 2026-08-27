@@ -86,6 +86,9 @@ scripts/*
 !scripts/refresh-specs.sh
 !scripts/update-geoip.sh
 !scripts/ykman-clear-fido-credentials.sh
+!scripts/audit-normative.py
+!scripts/audit-coverage.py
+scripts/__pycache__/
 .local/
 fuzz/corpus/
 fuzz/artifacts/
