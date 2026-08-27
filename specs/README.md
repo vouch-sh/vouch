@@ -61,6 +61,40 @@ jq -r '.[] | select(.errata_status_code=="Verified")
        | "\(.section)\t\(.orig_text[0:60])"' specs/rfc/errata/rfc9449.json
 ```
 
+## Normative coverage audit
+
+Three further files turn the corpus into a coverage audit of the test suite:
+
+| Path | Contents |
+|---|---|
+| `requirements.tsv` | Every MUST / MUST NOT / SHOULD / SHOULD NOT statement, one per row |
+| `audit-scope.tsv` | Whether each spec imposes obligations on Vouch, with a reason |
+| `coverage-baseline.tsv` | The statements with no citing test -- the accepted backlog |
+| `coverage-report.md` | Per-spec summary rendered from the three above |
+
+A statement counts as covered when a test function names its spec and section
+in a comment or assertion message, e.g. `// RFC 9421 §2.1.4: ...`. Linkage is
+section-level and deliberately optimistic: it establishes that a statement is
+untested, not that a cited one is tested well.
+
+`crates/vouch-tests/tests/spec_coverage.rs` owns the scan and gates it as a
+ratchet -- the existing backlog is tolerated, but a statement that loses its
+citing test fails the build, and a statement that gains one fails until the
+baseline is pruned, so the backlog can only shrink.
+
+Regenerate all of it, in this order:
+
+```sh
+scripts/audit-normative.py
+UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
+scripts/audit-coverage.py
+```
+
+Known limitation: a nested enumeration collapses to its outer item. FAPI 2.0
+section 5.4.1 lists "1 adhere to [RFC8725]; 2 use PS256, ES256, or EdDSA; 3
+not use the none algorithm" under an outer item, and those three are recorded
+as one statement rather than three.
+
 ## Refreshing
 
 ```sh
