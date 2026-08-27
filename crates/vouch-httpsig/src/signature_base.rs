@@ -75,6 +75,7 @@ mod tests {
         builder.body(()).unwrap()
     }
 
+    // RFC 9421 §2.5: each covered component contributes one line to the signature base.
     #[test]
     fn test_basic_request_base() {
         let req = make_request(
@@ -115,6 +116,7 @@ mod tests {
         assert!(!base_str.ends_with('\n'));
     }
 
+    // RFC 9421 §2.5: @signature-params is the final line and carries no trailing newline.
     #[test]
     fn test_signature_params_is_final_line() {
         let req = make_request("GET", "https://example.com/", &[]);
@@ -144,6 +146,7 @@ mod tests {
         assert!(!base_str.ends_with('\n'));
     }
 
+    // RFC 9421 §2.5: a response base includes the @status derived component.
     #[test]
     fn test_response_base_with_status() {
         let resp = http::Response::builder()
@@ -177,6 +180,7 @@ mod tests {
         assert!(base_str.contains("\"content-type\": application/json\n"));
     }
 
+    // RFC 9421 §2.5: a base covering no components is still well formed.
     #[test]
     fn test_empty_components() {
         let req = make_request("GET", "https://example.com/", &[]);
@@ -195,6 +199,7 @@ mod tests {
         assert!(base_str.starts_with("\"@signature-params\": "));
     }
 
+    // RFC 9421 §2.5: the @query derived component appears verbatim in the base.
     #[test]
     fn test_query_component_in_base() {
         let req = make_request("GET", "https://example.com/path?param=value", &[]);
@@ -214,6 +219,7 @@ mod tests {
         assert!(base_str.contains("\"@query\": ?param=value\n"));
     }
 
+    // RFC 9421 §2.5: a component that cannot be resolved is an error in base generation.
     #[test]
     fn test_missing_component_error() {
         let req = make_request("GET", "https://example.com/", &[]);

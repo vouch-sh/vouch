@@ -297,6 +297,23 @@ covered without hardware through the `CoseVerifier` seam
   doc lists every submodule's scope — put new db tests in the file whose scope matches,
   and add a new file (listed in that doc) when none does.
 
+**Cite the requirement a test pins.** A test that verifies a normative
+statement names the spec and section in a comment above it or in its assertion
+message:
+
+```rust
+// RFC 9421 §2.1.4: trailer fields are only available with the ;tr parameter.
+#[test]
+fn test_tr_returns_error() { ... }
+```
+
+`specs/requirements.tsv` holds every MUST / MUST NOT / SHOULD / SHOULD NOT in
+the cached corpus, and `crates/vouch-tests/tests/spec_coverage.rs` links the
+two. It is a ratchet: the existing backlog in `specs/coverage-baseline.tsv` is
+tolerated, but a statement that loses its citing test fails the build, and one
+that gains a citation fails until the baseline is pruned. See
+`specs/README.md` for the regeneration order.
+
 1. **Don't add dependencies without justification** — Each dep is attack surface
 2. **Don't store secrets in plain types** — Use `SecretString`, `Zeroizing`
 3. **Don't use `unwrap()`, `expect()`, `panic!()`, or `[]` indexing** — These are deny-linted. Use `?`, `.get()`, and proper error propagation

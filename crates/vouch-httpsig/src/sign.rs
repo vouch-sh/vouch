@@ -257,6 +257,7 @@ mod tests {
         builder.body(()).unwrap()
     }
 
+    // RFC 9421 §4.1, §4.2: signing emits both Signature-Input and Signature.
     #[test]
     fn test_sign_request_adds_headers() {
         let key = HmacSha256Key::new(b"test-secret", "test-key-1");
@@ -294,6 +295,7 @@ mod tests {
         assert!(sig_input.contains(";tag=\"test\""));
     }
 
+    // RFC 9421 §4.1, §4.2: a response carries the same two fields.
     #[test]
     fn test_sign_response_adds_headers() {
         let key = HmacSha256Key::new(b"test-secret", "server-key");
@@ -314,6 +316,7 @@ mod tests {
         assert!(resp.headers().contains_key("signature"));
     }
 
+    // RFC 9421 §4.3: several signatures coexist as distinct labels in one Dictionary.
     #[test]
     fn test_multiple_signatures() {
         let key1 = HmacSha256Key::new(b"secret1", "k1");
@@ -342,6 +345,7 @@ mod tests {
         assert_eq!(sigs.len(), 2);
     }
 
+    // RFC 9421 §2.3: the expires signature parameter is emitted.
     #[test]
     fn test_expires_in() {
         let key = HmacSha256Key::new(b"s", "k");
@@ -363,6 +367,7 @@ mod tests {
         assert!(sig_input.contains(";expires=4600"));
     }
 
+    // RFC 9421 §2.3: the nonce signature parameter is emitted.
     #[test]
     fn test_nonce_included() {
         let key = HmacSha256Key::new(b"s", "k");

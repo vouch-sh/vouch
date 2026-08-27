@@ -112,6 +112,7 @@ impl VerifyingAlgorithm for Ed25519Verifier {
 mod tests {
     use super::*;
 
+    // RFC 9421 §3.3.6: ed25519 round trip.
     #[test]
     fn test_sign_verify_roundtrip() {
         let signer = Ed25519Signer::generate("test-ed25519").unwrap();
@@ -124,6 +125,7 @@ mod tests {
         verifier.verify(message, &sig).unwrap();
     }
 
+    // RFC 9421 §3.3.6: an altered signature base fails verification.
     #[test]
     fn test_verify_rejects_tampered() {
         let signer = Ed25519Signer::generate("k").unwrap();
@@ -133,6 +135,7 @@ mod tests {
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
+    // RFC 9421 §3.3.6: Ed25519 signatures are deterministic.
     #[test]
     fn test_deterministic_signatures() {
         let signer = Ed25519Signer::generate("k").unwrap();
@@ -142,6 +145,7 @@ mod tests {
         assert_eq!(sig1, sig2, "Ed25519 signatures should be deterministic");
     }
 
+    // RFC 9421 §3.3.6: the registered algorithm name is ed25519.
     #[test]
     fn test_algorithm_identifier() {
         let signer = Ed25519Signer::generate("k").unwrap();
@@ -149,6 +153,7 @@ mod tests {
         assert_eq!(signer.verifier().algorithm().as_str(), "ed25519");
     }
 
+    // RFC 9421 §3.3.6: a different key does not verify.
     #[test]
     fn test_wrong_key_rejects() {
         let signer1 = Ed25519Signer::generate("k1").unwrap();

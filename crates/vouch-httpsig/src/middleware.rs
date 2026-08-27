@@ -604,6 +604,7 @@ mod tests {
             ))
     }
 
+    // RFC 9421 §3.2: a request with no Signature-Input cannot be verified.
     #[tokio::test]
     async fn test_rejects_unsigned_request() {
         // require_signature must reject a request that carries no
@@ -623,6 +624,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // RFC 9421 §3.2: a keyid the verifier cannot resolve fails verification.
     #[tokio::test]
     async fn test_rejects_unknown_keyid() {
         let resolver = Arc::new(InMemoryKeyResolver::new());
@@ -655,6 +657,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // RFC 9421 §3.2: a well formed signature over resolvable components verifies.
     #[tokio::test]
     async fn test_verifies_valid_signature() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -690,6 +693,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    // RFC 9421 §3.2: an altered Signature value fails verification.
     #[tokio::test]
     async fn test_rejects_tampered_signature() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -729,6 +733,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // RFC 9530 §2: a covered, matching Content-Digest admits the request.
     #[tokio::test]
     async fn test_signed_post_with_valid_digest_succeeds() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -768,6 +773,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    // RFC 9421 §7.2.8: content that no digest binds is not covered by the signature.
     #[tokio::test]
     async fn test_signed_post_without_digest_is_rejected() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -808,6 +814,8 @@ mod tests {
         );
     }
 
+    // RFC 9421 §5.1: Accept-Signature advertises requirements for a coverage
+    // gap, not for a content mismatch.
     #[tokio::test]
     async fn test_signed_post_with_tampered_body_omits_accept_signature() {
         // A signature that DOES cover content-digest, but whose body was altered
@@ -891,6 +899,7 @@ mod tests {
 
     /// Enforce-when-present: a nonce-enforcing resolver still accepts a
     /// signed request that carries no nonce (the client's first request).
+    // RFC 9421 §2.3: the nonce parameter is optional unless the application requires it.
     #[tokio::test]
     async fn test_nonce_absent_is_accepted() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -908,6 +917,7 @@ mod tests {
 
     /// A known nonce is accepted once, then a byte-identical replay is
     /// rejected (single-use), and the rejection carries a fresh nonce.
+    // RFC 9421 §7.2.2: a single-use nonce defeats signature replay.
     #[tokio::test]
     async fn test_nonce_valid_then_replay_rejected() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -944,6 +954,7 @@ mod tests {
     }
 
     /// A nonce the server never issued is rejected.
+    // RFC 9421 §7.2.2: a nonce the server never issued is rejected.
     #[tokio::test]
     async fn test_nonce_unknown_rejected() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -960,6 +971,7 @@ mod tests {
     }
 
     /// A backend failure while checking a nonce is a 500, never a 401.
+    // RFC 9421 §7.2.2: an unavailable nonce store fails closed rather than admitting a replay.
     #[tokio::test]
     async fn test_nonce_backend_error_is_500() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();

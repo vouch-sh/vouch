@@ -373,6 +373,7 @@ mod tests {
         builder.body(()).unwrap()
     }
 
+    // RFC 9421 §3.3.3: hmac-sha256 signs and verifies.
     #[test]
     fn test_hmac_sign_verify_roundtrip() {
         let key = HmacSha256Key::new(b"shared-secret", "test-key");
@@ -395,6 +396,7 @@ mod tests {
         result.unwrap();
     }
 
+    // RFC 9421 §3.3.4: ecdsa-p256-sha256 signs and verifies.
     #[test]
     fn test_ecdsa_sign_verify_roundtrip() {
         let signer = EcdsaP256Signer::generate("ec-key").unwrap();
@@ -418,6 +420,7 @@ mod tests {
         verify_request_signature(&req, "sig1", &verifier, None).unwrap();
     }
 
+    // RFC 9421 §3.3.6: ed25519 signs and verifies.
     #[test]
     fn test_ed25519_sign_verify_roundtrip() {
         let signer = Ed25519Signer::generate("ed-key").unwrap();
@@ -435,6 +438,7 @@ mod tests {
         verify_request_signature(&req, "sig1", &verifier, None).unwrap();
     }
 
+    // RFC 9421 §3.2: verification fails when the key does not match the signature.
     #[test]
     fn test_wrong_key_rejects() {
         let key1 = HmacSha256Key::new(b"secret1", "k1");
@@ -452,6 +456,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §3.2: altering a covered field invalidates the signature.
     #[test]
     fn test_tampered_header_rejects() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -476,6 +481,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §3.2.1: a signature whose expires parameter has passed is rejected.
     #[test]
     fn test_expired_signature_rejects() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -497,6 +503,7 @@ mod tests {
         );
     }
 
+    // RFC 9421 §3.2.1: the application may reject a signature older than its own limit.
     #[test]
     fn test_max_age_rejects_old_signature() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -513,6 +520,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §4.1: a Signature-Input label with no matching Signature entry is an error.
     #[test]
     fn test_missing_label_returns_error() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -528,6 +536,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §4.1: Signature-Input is a Dictionary keyed by signature label.
     #[test]
     fn test_extract_labels() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -543,6 +552,7 @@ mod tests {
         assert!(labels.contains(&"sig1".to_string()));
     }
 
+    // RFC 9421 §2.5: the signature base follows the component order given in Signature-Input.
     #[test]
     fn test_verify_request_uses_signature_input_param_order() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -574,6 +584,7 @@ mod tests {
         verify_request_signature(&req, "sig1", &key, None).unwrap();
     }
 
+    // RFC 9421 §3.2.1: the verifier enforces its own required-component list.
     #[test]
     fn test_validate_coverage_passes() {
         let params = crate::SignatureParams {
@@ -599,6 +610,7 @@ mod tests {
         .unwrap();
     }
 
+    // RFC 9421 §7.2.1: a signature that omits a required component is insufficient coverage.
     #[test]
     fn test_validate_coverage_rejects_missing() {
         let params = crate::SignatureParams {
@@ -620,6 +632,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §3.2.1: an empty requirement list imposes no coverage constraint.
     #[test]
     fn test_validate_coverage_empty_required() {
         let params = crate::SignatureParams {
@@ -661,6 +674,7 @@ mod tests {
             .unwrap()
     }
 
+    // RFC 9421 §7.2.8: with no content there is nothing for a digest to bind.
     #[test]
     fn test_enforce_body_digest_empty_body_is_exempt() {
         let headers = http::HeaderMap::new();
@@ -669,6 +683,7 @@ mod tests {
             .unwrap();
     }
 
+    // RFC 9530 §2: Content-Digest binds the message content the signature covers.
     #[test]
     fn test_enforce_body_digest_valid() {
         let body = b"{\"x\":1}";
@@ -682,6 +697,7 @@ mod tests {
         .unwrap();
     }
 
+    // RFC 9421 §7.2.8: a request with content but no Content-Digest leaves the content unsigned.
     #[test]
     fn test_enforce_body_digest_missing_header() {
         let body = b"body";
@@ -693,6 +709,7 @@ mod tests {
         ));
     }
 
+    // RFC 9421 §7.2.8: a Content-Digest the signature does not cover does not protect the content.
     #[test]
     fn test_enforce_body_digest_not_covered() {
         let body = b"body";
@@ -705,6 +722,7 @@ mod tests {
         ));
     }
 
+    // RFC 9530 §2: a Content-Digest that does not match the content is rejected.
     #[test]
     fn test_enforce_body_digest_mismatch() {
         let mut headers = http::HeaderMap::new();

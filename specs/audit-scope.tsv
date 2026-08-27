@@ -1,0 +1,117 @@
+# Audit scope for the normative-requirement coverage audit.
+#
+# scope:
+#   implements  Vouch speaks this protocol. Requirements addressed to a role
+#               Vouch plays are testable obligations.
+#   consumes    Vouch produces or parses this format but does not implement the
+#               protocol. Obligations are limited to what Vouch emits/validates.
+#   reference   Cached for citation or a constant only. No Vouch obligation.
+#
+# roles: the actor(s) Vouch plays, used to filter requirements addressed to
+# other actors. "-" means the role filter does not apply.
+#
+# Generated rows are checked by crates/vouch-tests/tests/spec_coverage.rs; every
+# spec in specs/manifest.tsv must appear here exactly once.
+#
+spec_id	scope	roles	reason
+ctap-2.0-ps-20190130	implements	client,platform	CLI drives CTAP2 makeCredential/getAssertion over HID.
+draft-ietf-hpke-pq-05	reference	-	Cited in document_crypto.rs only as the source of future hybrid KEM codepoints; no PQ KEM is implemented.
+draft-miller-ssh-agent-17	implements	agent	vouch-agent implements the SSH agent protocol server side.
+fapi-2_0-message-signing	implements	authorization-server	Certified profile; message signing over /oauth and /v1.
+fapi-2_0-security-profile	implements	authorization-server	Certified profile. The primary conformance surface.
+jarm	implements	authorization-server	JWT-secured authorization response mode.
+oauth-form-post-response-mode-1_0	implements	authorization-server	response_mode=form_post at the authorization endpoint.
+oauth-multiple-response-types-1_0	implements	authorization-server	Multiple response_type encodings at the authorization endpoint.
+oidc-backchannel-1_0	implements	openid-provider	Back-channel logout token issuance.
+oidc-core-1_0	implements	openid-provider,relying-party	Server is an OP; the SAML/OIDC upstream IdP client is an RP.
+oidc-discovery-1_0	implements	openid-provider	/.well-known/openid-configuration.
+oidc-frontchannel-1_0	implements	openid-provider	Front-channel logout.
+oidc-registration-1_0	implements	openid-provider	Dynamic client registration.
+oidc-rpinitiated-1_0	implements	openid-provider	RP-initiated logout endpoint.
+oidc-session-1_0	implements	openid-provider	Session management.
+rfc1035	reference	-	Only the 253/63-character name limits are used, in hostname validation.
+rfc1866	reference	-	Cited once in vouch-httpsig as a contrast to RFC 3986 percent-encoding.
+rfc1918	reference	-	Private-address ranges used as SSRF-guard constants.
+rfc2606	reference	-	Reserved names used in test fixtures.
+rfc2617	reference	-	Superseded by RFC 7235/7617; retained for the historical Basic scheme text.
+rfc2730	reference	-	Cached in error: the "RFC 2730/3139" citation in the Cargo credential provider refers to Cargo RFCs, not IETF MADCAP. See the audit report.
+rfc2822	reference	-	Date parsing is delegated to jiff; Vouch emits no RFC 2822 messages.
+rfc3279	consumes	verifier	Algorithm OIDs read when parsing X.509 in mTLS and SAML signing certs.
+rfc3339	consumes	producer	Timestamps emitted in SCIM and JSON APIs.
+rfc3986	consumes	producer,parser	URI construction and comparison across redirect URIs, htu, and issuer.
+rfc4253	consumes	producer	SSH certificate and key wire encoding.
+rfc4343	reference	-	DNS case-insensitivity rule applied in host comparison.
+rfc4514	consumes	parser	Subject DN string form read for mTLS client certificates.
+rfc5280	consumes	verifier	X.509 path and extension checks for mTLS and attestation chains.
+rfc5321	reference	-	Cited only for email local-part parsing rationale; Vouch is not an SMTP implementation.
+rfc5480	consumes	parser	EC SubjectPublicKeyInfo parsing.
+rfc5652	consumes	parser	BER rules for AWS KMS signature responses.
+rfc5915	consumes	parser	EC private key structure.
+rfc6265	implements	server	Session cookie issuance and attributes.
+rfc6454	consumes	verifier	Origin comparison for WebAuthn and CORS.
+rfc6749	implements	authorization-server,client	Server is the AS; the CLI is an OAuth client.
+rfc6750	implements	resource-server,client	Bearer token usage on protected resources.
+rfc6761	reference	-	Special-use names used as validation constants.
+rfc6762	reference	-	mDNS is not implemented; only the .local reservation is used.
+rfc6797	implements	server	HSTS response header.
+rfc6819	implements	authorization-server	Threat-model mitigations for the AS.
+rfc7009	implements	authorization-server	Token revocation endpoint.
+rfc7231	consumes	server	Superseded by RFC 9110; retained for status-code semantics.
+rfc7235	consumes	server	WWW-Authenticate challenge construction.
+rfc7239	consumes	server	Forwarded header parsing behind a proxy.
+rfc7515	consumes	producer,verifier	JWS signing and verification.
+rfc7517	consumes	producer,parser	JWKS publication and client JWKS parsing.
+rfc7518	consumes	producer,verifier	JOSE algorithms.
+rfc7519	consumes	producer,verifier	JWT claims processing.
+rfc7521	implements	authorization-server	Assertion framework underlying JWT client auth.
+rfc7523	implements	authorization-server,client	JWT client authentication and the JWT bearer grant.
+rfc7591	implements	authorization-server	Dynamic client registration endpoint.
+rfc7592	implements	authorization-server	Client configuration management endpoint.
+rfc7617	consumes	server	Basic client authentication decoding.
+rfc7636	implements	authorization-server,client	PKCE.
+rfc7638	consumes	producer	JWK thumbprints for DPoP jkt and key IDs.
+rfc7643	implements	service-provider	SCIM core schema.
+rfc7644	implements	service-provider	SCIM protocol.
+rfc7662	implements	authorization-server	Token introspection endpoint.
+rfc7686	reference	-	.onion reservation used as a validation constant.
+rfc8017	consumes	parser	PKCS#1 DER parsing for GitHub App private keys.
+rfc8032	consumes	producer	Ed25519 signing for the SSH CA.
+rfc8037	consumes	producer,parser	OKP JWK representation.
+rfc8176	implements	openid-provider	amr values in issued tokens.
+rfc8252	implements	client	Native-app redirect behavior in the CLI.
+rfc8410	consumes	parser	Ed25519 algorithm identifiers in X.509.
+rfc8414	implements	authorization-server	AS metadata document.
+rfc8628	implements	authorization-server,client	Device authorization grant.
+rfc8693	implements	authorization-server	Token exchange.
+rfc8705	implements	authorization-server	mTLS client authentication and certificate-bound tokens.
+rfc8707	implements	authorization-server	Resource indicators.
+rfc8725	implements	authorization-server	JWT best current practices.
+rfc8941	consumes	producer,parser	Structured field values used by HTTP message signatures.
+rfc9068	implements	authorization-server	JWT access token profile.
+rfc9101	implements	authorization-server	JWT-secured authorization requests.
+rfc9110	consumes	server	HTTP semantics for the server surface.
+rfc9116	reference	-	security.txt is a published file, not code behavior.
+rfc9126	implements	authorization-server	Pushed authorization requests.
+rfc9180	consumes	producer,recipient	HPKE document encryption.
+rfc9207	implements	authorization-server	iss in the authorization response.
+rfc9230	reference	-	Cited once for a case-insensitivity fact; ODoH is not implemented.
+rfc9325	implements	server	TLS configuration for the listener.
+rfc9396	implements	authorization-server	Rich authorization requests.
+rfc9421	implements	server,client	HTTP message signatures over /v1.
+rfc9449	implements	authorization-server,resource-server,client	DPoP.
+rfc9470	implements	authorization-server,resource-server	Step-up authentication challenge.
+rfc9476	reference	-	.alt reservation used as a validation constant.
+rfc9530	implements	server,client	Content-Digest alongside RFC 9421.
+rfc9562	consumes	producer	UUID generation.
+rfc9700	implements	authorization-server	OAuth security best current practice.
+rfc9701	implements	authorization-server	JWT introspection response.
+rfc9728	implements	resource-server	Protected resource metadata.
+rfc9964	consumes	parser	AKP key type recognized when parsing client JWKS.
+saml-bindings-2.0-os	implements	service-provider	HTTP-Redirect and HTTP-POST bindings for upstream IdP SSO.
+saml-core-2.0-os	implements	service-provider	Assertion and protocol processing as an SP.
+saml-metadata-2.0-os	implements	service-provider	SP metadata publication and IdP metadata consumption.
+saml-profiles-2.0-os	implements	service-provider	Web Browser SSO profile.
+saml-v2.0-errata05-os	implements	service-provider	Errata applied on top of the SAML core documents.
+webauthn-2	implements	relying-party	Server is a WebAuthn Relying Party.
+xml-exc-c14n	implements	producer,verifier	Exclusive canonicalization for SAML signature verification.
+xmldsig-core1	implements	verifier	XML signature verification for SAML assertions.

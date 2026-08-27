@@ -141,12 +141,14 @@ mod tests {
     use super::*;
     use crate::sfv::parse::parse_inner_list;
 
+    // RFC 9421 §2.3: signature parameters serialize as an Inner List with parameters.
     #[test]
     fn test_serialize_empty() {
         let params = SignatureParams::new();
         assert_eq!(params.serialize(), "()");
     }
 
+    // RFC 9421 §2.3: covered component identifiers serialize in order.
     #[test]
     fn test_serialize_with_components() {
         let params = SignatureParams {
@@ -169,6 +171,7 @@ mod tests {
         assert!(s.contains(";keyid=\"test-key-1\""));
     }
 
+    // RFC 9421 §2.3: serialized signature parameters parse back to the same value.
     #[test]
     fn test_roundtrip() {
         let params = SignatureParams {
@@ -198,6 +201,7 @@ mod tests {
         assert_eq!(parsed.tag.as_deref(), Some("vouch-api"));
     }
 
+    // RFC 9421 §2.3: the parameter form given in the specification parses.
     #[test]
     fn test_parse_from_rfc_example() {
         let input = "(\"@method\" \"@authority\" \"content-type\")\

@@ -262,6 +262,7 @@ mod tests {
   </md:IDPSSODescriptor>
 </md:EntityDescriptor>"#;
 
+    // SAML Metadata §2.3.2: an entity descriptor names the entity and its roles.
     #[test]
     fn minimal_valid_metadata() {
         let meta = parse_idp_metadata(MINIMAL_METADATA).unwrap();
@@ -274,6 +275,8 @@ mod tests {
         assert_eq!(meta.signing_certificates.len(), 1);
     }
 
+    // SAML Metadata §2.4.2: an identity provider descriptor advertises its single sign-on
+    // endpoints.
     #[test]
     fn okta_style_metadata() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -309,6 +312,7 @@ mod tests {
         assert_eq!(meta.signing_certificates.len(), 1);
     }
 
+    // SAML Metadata §2.3.2: metadata parses whether or not the namespace is prefixed.
     #[test]
     fn entra_style_metadata_default_namespace() {
         // Entra uses default namespace (no md: prefix).
@@ -349,6 +353,8 @@ mod tests {
         assert_eq!(meta.signing_certificates.len(), 2);
     }
 
+    // SAML Metadata §2.4.2: an identity provider descriptor advertises its single sign-on
+    // endpoints.
     #[test]
     fn google_workspace_metadata() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -389,6 +395,8 @@ mod tests {
 
     /// MockSAML (https://mocksaml.com/) metadata — a real public SAML 2.0 test IdP.
     /// This validates that our parser handles real-world metadata from a live service.
+    // SAML Metadata §2.4.2: an identity provider descriptor advertises its single sign-on
+    // endpoints.
     #[test]
     fn mocksaml_public_idp_metadata() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
@@ -429,6 +437,8 @@ mod tests {
     /// SAMLtest.dev (https://www.samltest.dev/) metadata — a free test IdP service.
     /// Notable: POST and Redirect bindings use different URLs, and
     /// WantAuthnRequestsSigned is false (unlike MockSAML which requires it).
+    // SAML Metadata §2.4.2: an identity provider descriptor advertises its single sign-on
+    // endpoints.
     #[test]
     fn samltest_dev_metadata() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -464,6 +474,7 @@ mod tests {
         assert_eq!(meta.signing_certificates.len(), 1);
     }
 
+    // SAML Metadata §2.4.2: an identity provider without a single sign-on endpoint is unusable.
     #[test]
     fn missing_sso_url_returns_error() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -479,6 +490,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.2.2: an endpoint names the binding it supports.
     #[test]
     fn redirect_only_metadata() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -497,6 +509,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.4.1: a key descriptor with no use attribute serves both purposes.
     #[test]
     fn keydescriptor_no_use_attribute_included() {
         // KeyDescriptor without @use means signing + encryption -- include it.
@@ -524,6 +537,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.4.1: a key descriptor marked for encryption is not a signing key.
     #[test]
     fn keydescriptor_encryption_only_skipped() {
         // KeyDescriptor with @use="encryption" must be skipped.
@@ -551,6 +565,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.1: an entities descriptor wraps one or more entity descriptors.
     #[test]
     fn entities_descriptor_wrapper() {
         // Some IdPs (ADFS, federations) wrap in EntitiesDescriptor.
@@ -570,6 +585,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.2: metadata without an entity descriptor describes nothing.
     #[test]
     fn missing_entity_descriptor_returns_error() {
         let xml = r#"<?xml version="1.0"?><root/>"#;
@@ -580,6 +596,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.2: metadata is an XML document.
     #[test]
     fn invalid_xml_returns_error() {
         let err = parse_idp_metadata("<unclosed>").unwrap_err();
@@ -589,6 +606,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.2: the size of fetched metadata is bounded.
     #[test]
     fn too_large_returns_error() {
         // Create a string larger than 1 MiB.
@@ -601,6 +619,7 @@ mod tests {
     }
 
     /// Empty signing_certificates should trigger a tracing::warn but not fail.
+    // SAML Metadata §2.4.1: a role descriptor may carry no key descriptor.
     #[test]
     fn empty_signing_certificates_is_accepted_with_warning() {
         // No KeyDescriptor elements -- metadata is valid but no certs.
@@ -618,6 +637,7 @@ mod tests {
         assert_eq!(meta.entity_id, "https://idp.example.com");
     }
 
+    // SAML Metadata §2.4.1: a key descriptor carries a base64 X.509 certificate.
     #[test]
     fn invalid_base64_cert_returns_error() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -647,6 +667,8 @@ mod tests {
     // generate_sp_metadata tests
     // =========================================================================
 
+    // SAML Metadata §2.4.4: a service provider descriptor advertises its assertion consumer
+    // service.
     #[test]
     fn sp_metadata_generation_basic() {
         let xml = generate_sp_metadata(
@@ -671,6 +693,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.2: published metadata is a well-formed XML document.
     #[test]
     fn sp_metadata_is_valid_xml() {
         let xml = generate_sp_metadata(
@@ -681,6 +704,7 @@ mod tests {
         assert!(doc.is_ok(), "Generated SP metadata is not valid XML: {xml}");
     }
 
+    // SAML Metadata §2.3.2: values are XML-escaped when published.
     #[test]
     fn sp_metadata_escaping() {
         let xml = generate_sp_metadata(
@@ -703,6 +727,7 @@ mod tests {
         );
     }
 
+    // SAML Metadata §2.3.2: attribute values are XML-escaped when published.
     #[test]
     fn sp_metadata_quote_escaping() {
         let xml = generate_sp_metadata(

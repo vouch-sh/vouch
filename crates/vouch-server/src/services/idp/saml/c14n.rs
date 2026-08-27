@@ -734,6 +734,7 @@ mod tests {
     /// W3C exc-c14n spec Section 2.2 example (same input, partial assertions).
     /// See `w3c_section_2_2_context_independent_output` above for the full
     /// spec-conformant version with both contexts.
+    // XML Signature §4.4.1: exclusive canonicalization matches the published example.
     #[test]
     fn w3c_example_section_2_2_partial() {
         let xml = r#"<n0:local xmlns:n0="foo:bar" xmlns:n3="ftp://example.org">
@@ -777,6 +778,7 @@ mod tests {
     ///
     /// Inclusive c14n of n1:elem1 includes ancestor namespace n0 (undesirable).
     /// Exclusive c14n omits n0 since it's not visibly utilized.
+    // XML Signature §4.4.1: exclusive canonicalization matches the published example.
     #[test]
     fn w3c_section_2_1_simple_enveloping() {
         let xml = r#"<n0:pdu xmlns:n0="http://a.example">
@@ -813,6 +815,7 @@ mod tests {
     /// ```
     ///
     /// This is the definitive test for context-independent canonicalization.
+    // XML Signature §4.4.1: exclusive canonicalization omits context the element does not use.
     #[test]
     fn w3c_section_2_2_context_independent_output() {
         // Original document context
@@ -883,6 +886,7 @@ mod tests {
     /// When n0 is in the PrefixList, it should be included in the output
     /// even though it's not visibly utilized — this is how
     /// InclusiveNamespaces forces namespace inheritance.
+    // XML Signature §4.4.3.4: prefixes named in InclusiveNamespaces are retained.
     #[test]
     fn w3c_section_2_2_with_inclusive_prefixes() {
         let xml = r#"<n0:local xmlns:n0="foo:bar"
@@ -909,6 +913,7 @@ mod tests {
     }
 
     /// Idempotency: c14n(c14n(x)) == c14n(x) for a set of SAML-like inputs.
+    // XML Signature §4.4.1: canonicalizing canonical output changes nothing.
     #[test]
     fn idempotency_simple() {
         let inputs = [
@@ -940,6 +945,7 @@ mod tests {
     }
 
     /// Realistic SAML ds:SignedInfo canonicalization.
+    // XML Signature §4.4.1: the SignedInfo element canonicalizes as the signature requires.
     #[test]
     fn saml_signed_info_realistic() {
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"

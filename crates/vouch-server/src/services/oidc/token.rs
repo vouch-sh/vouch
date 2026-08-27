@@ -1332,6 +1332,7 @@ mod tests {
         }
     }
 
+    // RFC 6749 §4.1.3: redirect_uri must match the one in the authorization request.
     #[test]
     fn test_validate_code_bindings_redirect_uri_match() {
         let auth_code = make_auth_code("https://example.com/callback");
@@ -1343,6 +1344,7 @@ mod tests {
         );
     }
 
+    // RFC 6749 §4.1.3: a redirect_uri that differs is rejected.
     #[test]
     fn test_validate_code_bindings_redirect_uri_mismatch() {
         let auth_code = make_auth_code("https://example.com/callback");
@@ -1351,6 +1353,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
+    // RFC 6749 §4.1.3: redirect_uri is required when it was in the authorization request.
     #[test]
     fn test_validate_code_bindings_redirect_uri_missing_when_required() {
         let auth_code = make_auth_code("https://example.com/callback");
@@ -1358,6 +1361,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
+    // RFC 6749 §3.1.2: with no registered redirection URI there is nothing to compare.
     #[test]
     fn test_validate_code_bindings_empty_redirect_uri_skips_check() {
         // When auth_code.redirect_uri is empty, no redirect_uri check is performed.
@@ -1384,6 +1388,7 @@ mod tests {
         ValidatedDpopProof::for_testing(jkt.to_string(), "jti-value".to_string(), None)
     }
 
+    // RFC 9449 §5: a DPoP-bound code requires a proof at the token endpoint.
     #[test]
     fn test_validate_code_bindings_dpop_bound_no_proof() {
         let auth_code = make_auth_code_with_dpop_jkt("some-key-thumbprint");
@@ -1391,6 +1396,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
+    // RFC 9449 §5: the proof key must be the one the code was bound to.
     #[test]
     fn test_validate_code_bindings_dpop_jkt_mismatch() {
         let auth_code = make_auth_code_with_dpop_jkt("correct-thumbprint");
@@ -1399,6 +1405,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
+    // RFC 9449 §5: a proof for the bound key is accepted.
     #[test]
     fn test_validate_code_bindings_dpop_jkt_match() {
         let auth_code = make_auth_code_with_dpop_jkt("matching-thumbprint");
@@ -1407,6 +1414,7 @@ mod tests {
         assert!(result.is_ok(), "Matching DPoP jkt must succeed: {result:?}");
     }
 
+    // RFC 9449 §5: a proof for an unbound code does not bind it retroactively.
     #[test]
     fn test_validate_code_bindings_dpop_not_bound_but_proof_provided() {
         // Auth code has no dpop_jkt; providing a proof anyway is allowed (bearer fallback).
@@ -1430,6 +1438,7 @@ mod tests {
         }
     }
 
+    // RFC 9470 §4: the acr the client demanded must be the one that was met.
     #[test]
     fn test_validate_code_bindings_acr_contains_aal3() {
         let auth_code = make_auth_code_with_acr("urn:nist:authentication:assurance-level:aal3");
@@ -1437,6 +1446,7 @@ mod tests {
         assert!(result.is_ok(), "AAL3 present must succeed: {result:?}");
     }
 
+    // RFC 9470 §4: one satisfied acr value from the requested set is enough.
     #[test]
     fn test_validate_code_bindings_acr_multiple_values_includes_aal3() {
         let auth_code = make_auth_code_with_acr(
@@ -1449,6 +1459,7 @@ mod tests {
         );
     }
 
+    // RFC 9470 §4: an unmet acr demand fails the exchange.
     #[test]
     fn test_validate_code_bindings_acr_missing_aal3() {
         let auth_code = make_auth_code_with_acr("urn:nist:authentication:assurance-level:aal1");
@@ -1456,6 +1467,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::UnmetAuthenticationRequirements);
     }
 
+    // RFC 9470 §4: no acr demand imposes no acr constraint.
     #[test]
     fn test_validate_code_bindings_no_acr_values() {
         // No acr_values in the code — skip ACR check.
@@ -1467,6 +1479,7 @@ mod tests {
         );
     }
 
+    // RFC 7636 §4.6: the server verifies code_verifier against the stored challenge.
     #[test]
     fn test_pkce_s256_validation() {
         // RFC 7636 Appendix B test vector
@@ -1498,6 +1511,7 @@ mod tests {
         assert!(result.is_ok(), "RFC 7636 test vector should validate");
     }
 
+    // RFC 7636 §4.6: a verifier that does not transform to the challenge is rejected.
     #[test]
     fn test_pkce_invalid_verifier() {
         let auth_code = AuthorizationCode {
@@ -1525,6 +1539,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 7636 §4.6: a stored challenge requires a verifier.
     #[test]
     fn test_pkce_missing_verifier() {
         let auth_code = AuthorizationCode {
@@ -1554,6 +1569,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
+    // RFC 7636 §4.6: with no stored challenge there is nothing to verify.
     #[test]
     fn test_pkce_no_challenge() {
         // No PKCE challenge - should succeed
@@ -1582,6 +1598,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // OIDC Core §3.1.3.6: at_hash is a base64url value derived from the access token.
     #[test]
     fn test_hash_token_produces_consistent_base64url() {
         // Regression test: hash_token must produce base64url-encoded SHA-256 output.
@@ -1609,6 +1626,7 @@ mod tests {
         assert_ne!(hash1.len(), 64, "hash must not be hex-encoded");
     }
 
+    // OIDC Core §3.1.3.6: at_hash is deterministic for a given token.
     #[test]
     fn test_compute_at_hash_deterministic() {
         // at_hash should be deterministic for the same input
@@ -1619,6 +1637,7 @@ mod tests {
         assert_eq!(hash1, hash2);
     }
 
+    // OIDC Core §3.1.3.6: at_hash is the left half of the hash, base64url encoded.
     #[test]
     fn test_compute_at_hash_format() {
         // SHA-256 left half = 16 bytes → base64url-no-pad = 22 characters
@@ -1637,6 +1656,7 @@ mod tests {
         );
     }
 
+    // OIDC Core §3.1.3.6: distinct tokens produce distinct at_hash values.
     #[test]
     fn test_compute_at_hash_different_tokens() {
         let hash1 = compute_at_hash("token-a").expect("hash");
@@ -1675,6 +1695,7 @@ mod tests {
         }
     }
 
+    // OIDC Core §2: nonce is present in the ID Token only if it was in the request.
     #[test]
     fn test_id_token_claims_nonce_none_omitted_from_json() {
         // When nonce is None the field must be absent from the serialized JSON,
@@ -1689,6 +1710,7 @@ mod tests {
         );
     }
 
+    // OIDC Core §2: a requested nonce is returned in the ID Token.
     #[test]
     fn test_id_token_claims_nonce_some_included_in_json() {
         // When nonce is Some the field must be present with the correct value.
@@ -1809,6 +1831,7 @@ mod tests {
     }
 
     /// TlsClientAuth client with matching subject_dn must authenticate successfully.
+    // RFC 8705 §2.1.2: the certificate subject must match the registered value.
     #[tokio::test]
     async fn test_authenticate_client_mtls_tls_client_auth_matching() {
         let state = crate::test_utils::test_app_state().await;
@@ -1824,6 +1847,7 @@ mod tests {
     }
 
     /// TlsClientAuth client with non-matching subject_dn must fail authentication.
+    // RFC 8705 §2.1.2: a certificate naming another subject does not authenticate.
     #[tokio::test]
     async fn test_authenticate_client_mtls_tls_client_auth_mismatch() {
         let state = crate::test_utils::test_app_state().await;
@@ -1845,6 +1869,7 @@ mod tests {
     }
 
     /// Client with ClientSecretBasic auth method cannot use mTLS authentication.
+    // RFC 8705 §2.1.2: the registered authentication method decides how the certificate is checked.
     #[tokio::test]
     async fn test_authenticate_client_mtls_wrong_method() {
         let state = crate::test_utils::test_app_state().await;
@@ -1864,6 +1889,7 @@ mod tests {
 
     /// `SelfSignedTlsClientAuth` succeeds when the client JWKS contains an x5c
     /// entry matching the presented certificate (RFC 8705 Section 2.2).
+    // RFC 8705 §2.2: the certificate must be one of the client's registered keys.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_matching() {
         use base64::Engine;
@@ -1892,6 +1918,7 @@ mod tests {
     }
 
     /// `SelfSignedTlsClientAuth` fails when the client has no JWKS configured.
+    // RFC 8705 §2.2: self-signed authentication needs registered keys.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_no_jwks() {
         let state = crate::test_utils::test_app_state().await;
@@ -1907,6 +1934,7 @@ mod tests {
     }
 
     /// `SelfSignedTlsClientAuth` fails when the JWKS x5c contains a different cert.
+    // RFC 8705 §2.2: a certificate absent from the registered keys does not authenticate.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_mismatch() {
         use base64::Engine;
@@ -1976,6 +2004,7 @@ mod tests {
     /// dialed, and it fails on connection-refused (nothing listens on port 1).
     const UNREACHABLE_JWKS_URI: &str = "https://127.0.0.1:1/jwks.json";
 
+    // RFC 8705 §2.2: registered keys may be held by reference.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_jwks_uri_uses_fresh_cache_without_fetching()
     {
@@ -2000,6 +2029,7 @@ mod tests {
         );
     }
 
+    // RFC 8705 §2.2: an unreachable key set fails authentication rather than admitting it.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_jwks_uri_fetch_failure_is_clean() {
         let state = crate::test_utils::test_app_state().await;
@@ -2018,6 +2048,7 @@ mod tests {
         );
     }
 
+    // RFC 8705 §2.2: a key set with no certificate cannot match one.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_certificate_less_jwks_at_uri_fails_cleanly()
     {
@@ -2052,6 +2083,7 @@ mod tests {
         }
     }
 
+    // RFC 8705 §2.2: a stale cache must not reject a newly registered certificate.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_retries_after_cache_hit_on_certificate_miss()
     {
@@ -2084,6 +2116,7 @@ mod tests {
         );
     }
 
+    // RFC 8705 §2.2: a freshly fetched key set is not fetched twice.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched()
     {
@@ -2195,12 +2228,14 @@ mod tests {
     // verify_client_matches_code
     // =========================================================================
 
+    // RFC 6749 §4.1.3: a code issued without a client imposes no client binding.
     #[test]
     fn test_verify_client_matches_code_no_client_ok() {
         let auth_code = make_auth_code("");
         assert!(verify_client_matches_code(None, &auth_code).is_ok());
     }
 
+    // RFC 6749 §4.1.3: the code must be redeemed by the client it was issued to.
     #[test]
     fn test_verify_client_matches_code_matching_confidential_client_ok() {
         let client = AuthenticatedClient {
@@ -2215,6 +2250,7 @@ mod tests {
         assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
     }
 
+    // RFC 6749 §4.1.3: another client may not redeem the code.
     #[test]
     fn test_verify_client_matches_code_rejects_client_id_mismatch() {
         let client = AuthenticatedClient {
@@ -2227,6 +2263,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
+    // RFC 7636 §4.6: a public client's code is redeemed with a verifier.
     #[test]
     fn test_verify_client_matches_code_public_client_requires_pkce() {
         let client = AuthenticatedClient {
@@ -2241,6 +2278,7 @@ mod tests {
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
+    // RFC 7636 §4.6: a public client presenting a verifier may redeem the code.
     #[test]
     fn test_verify_client_matches_code_public_client_with_pkce_ok() {
         let client = AuthenticatedClient {

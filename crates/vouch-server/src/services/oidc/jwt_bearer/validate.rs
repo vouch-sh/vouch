@@ -341,6 +341,7 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
 mod tests {
     use super::*;
 
+    // RFC 8725 §3.9: the audience claim may be a single string.
     #[test]
     fn test_jwt_audience_single() {
         let aud = JwtAudience::Single("https://example.com/token".to_string());
@@ -348,6 +349,7 @@ mod tests {
         assert!(!aud.contains("https://other.com/token"));
     }
 
+    // RFC 8725 §3.9: the audience claim may be an array.
     #[test]
     fn test_jwt_audience_multiple() {
         let aud = JwtAudience::Multiple(vec![
@@ -359,6 +361,7 @@ mod tests {
         assert!(!aud.contains("https://other.com"));
     }
 
+    // RFC 8725 §3.1: the algorithm is checked against what the client registered.
     #[test]
     fn test_structural_algorithm_gate_matches_client_assertion_allowed() {
         // parse_assertion_header's structural gate accepts exactly the algorithms
@@ -373,12 +376,14 @@ mod tests {
         assert!("none".parse::<JwsAlgorithm>().is_err());
     }
 
+    // RFC 7523 §3: a client assertion is a JWS with three parts.
     #[test]
     fn test_parse_assertion_header_rejects_invalid_format() {
         let result = parse_assertion_header("not.a.valid.jwt");
         assert!(result.is_err());
     }
 
+    // RFC 7523 §3: a client assertion is a JWS with three parts.
     #[test]
     fn test_parse_assertion_header_rejects_two_parts() {
         let result = parse_assertion_header("two.parts");
@@ -412,6 +417,7 @@ mod tests {
         description.as_str()
     }
 
+    // RFC 8725 §3.2: a symmetric algorithm is not accepted for client authentication.
     #[test]
     fn test_parse_assertion_header_rejects_hs256() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "HS256"}));
@@ -425,6 +431,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.2: the none algorithm is not accepted.
     #[test]
     fn test_parse_assertion_header_rejects_none_algorithm() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "none"}));
@@ -432,6 +439,7 @@ mod tests {
         assert!(result.is_err(), "alg=none must be rejected");
     }
 
+    // RFC 7523 §3: an asymmetrically signed assertion is accepted.
     #[test]
     fn test_parse_assertion_header_accepts_eddsa() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "EdDSA"}));
@@ -439,6 +447,7 @@ mod tests {
         assert_eq!(header.alg, "EdDSA");
     }
 
+    // RFC 7523 §3: an asymmetrically signed assertion is accepted.
     #[test]
     fn test_parse_assertion_header_accepts_es256() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
@@ -447,6 +456,7 @@ mod tests {
         assert!(header.kid.is_none());
     }
 
+    // RFC 7523 §3: an asymmetrically signed assertion is accepted.
     #[test]
     fn test_parse_assertion_header_accepts_rs256() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "RS256"}));
@@ -454,6 +464,7 @@ mod tests {
         assert_eq!(header.alg, "RS256");
     }
 
+    // RFC 7517 §4: kid selects the key that verifies the assertion.
     #[test]
     fn test_parse_assertion_header_with_kid() {
         let jwt =
@@ -526,6 +537,7 @@ mod tests {
     // validate_jwt_assertion tests
     // ========================================================================
 
+    // RFC 7523 §3.2: a conformant client assertion authenticates the client.
     #[test]
     fn test_validate_jwt_assertion_valid() {
         let (enc, dec) = test_es256_keys();
@@ -549,6 +561,7 @@ mod tests {
         assert_eq!(validated.alg, "ES256");
     }
 
+    // RFC 7523 §3: an assertion past its exp is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_expired() {
         let (enc, dec) = test_es256_keys();
@@ -579,6 +592,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: a bounded clock skew allowance is applied.
     #[test]
     fn test_validate_jwt_assertion_accepts_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
@@ -607,6 +621,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: an assertion before its nbf is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_future_nbf() {
         let (enc, dec) = test_es256_keys();
@@ -636,6 +651,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: a bounded clock skew allowance is applied to nbf.
     #[test]
     fn test_validate_jwt_assertion_accepts_nbf_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
@@ -663,6 +679,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: an assertion issued in the future is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_future_iat() {
         let (enc, dec) = test_es256_keys();
@@ -693,6 +710,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: an assertion's lifetime is bounded.
     #[test]
     fn test_validate_jwt_assertion_rejects_excessive_lifetime() {
         let (enc, dec) = test_es256_keys();
@@ -724,6 +742,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3: the lifetime boundary is exact.
     #[test]
     fn test_validate_jwt_assertion_accepts_exactly_max_lifetime() {
         let (enc, dec) = test_es256_keys();
@@ -753,6 +772,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.9: an assertion addressed elsewhere is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_wrong_audience() {
         let (enc, dec) = test_es256_keys();
@@ -788,6 +808,8 @@ mod tests {
     // assertion whose aud is the token endpoint URL must be rejected.
     // ========================================================================
 
+    // FAPI 2.0 §5.3.2.1: authorization servers accept only their issuer identifier in the aud claim
+    // of a client authentication assertion.
     #[test]
     fn test_validate_jwt_assertion_fapi_rejects_token_endpoint_audience() {
         let (enc, dec) = test_es256_keys();
@@ -825,6 +847,7 @@ mod tests {
         );
     }
 
+    // FAPI 2.0 §5.3.2.1: the issuer identifier is the accepted audience.
     #[test]
     fn test_validate_jwt_assertion_fapi_accepts_issuer_url_audience() {
         let (enc, dec) = test_es256_keys();
@@ -854,6 +877,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.9: the audience may be an array containing the expected value.
     #[test]
     fn test_validate_jwt_assertion_accepts_audience_as_array() {
         let (enc, dec) = test_es256_keys();
@@ -884,6 +908,7 @@ mod tests {
         );
     }
 
+    // RFC 7523 §3.2: an assertion that does not verify does not authenticate.
     #[test]
     fn test_validate_jwt_assertion_rejects_wrong_signature() {
         let (enc, _dec) = test_es256_keys();
@@ -917,6 +942,7 @@ mod tests {
     // decode_claims_unverified tests
     // ========================================================================
 
+    // RFC 7523 §3: iss and sub identify the client.
     #[test]
     fn test_decode_claims_unverified_extracts_iss_and_sub() {
         let (enc, _dec) = test_es256_keys();
@@ -942,18 +968,21 @@ mod tests {
         assert_eq!(decoded.jti.as_deref(), Some("jti-abc"));
     }
 
+    // RFC 7523 §3: a malformed assertion yields no claims.
     #[test]
     fn test_decode_claims_unverified_rejects_malformed() {
         let result = decode_claims_unverified("not-a-jwt");
         assert!(result.is_err(), "Malformed input must be rejected");
     }
 
+    // RFC 7523 §3: an empty assertion yields no claims.
     #[test]
     fn test_decode_claims_unverified_rejects_empty_string() {
         let result = decode_claims_unverified("");
         assert!(result.is_err(), "Empty string must be rejected");
     }
 
+    // RFC 7523 §3: JWS parts are base64url encoded.
     #[test]
     fn test_decode_claims_unverified_with_invalid_base64_payload() {
         // Valid-looking structure but second segment is not valid base64.
@@ -965,42 +994,49 @@ mod tests {
     // map_algorithm tests
     // ========================================================================
 
+    // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_es256() {
         let alg = map_algorithm("ES256").expect("ES256 should be mapped");
         assert_eq!(alg, jsonwebtoken::Algorithm::ES256);
     }
 
+    // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_rs256() {
         let alg = map_algorithm("RS256").expect("RS256 should be mapped");
         assert_eq!(alg, jsonwebtoken::Algorithm::RS256);
     }
 
+    // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_eddsa() {
         let alg = map_algorithm("EdDSA").expect("EdDSA should be mapped");
         assert_eq!(alg, jsonwebtoken::Algorithm::EdDSA);
     }
 
+    // RFC 8725 §3.2: a symmetric algorithm is not accepted.
     #[test]
     fn test_map_algorithm_rejects_hs256() {
         let result = map_algorithm("HS256");
         assert!(result.is_err(), "HS256 must be rejected by map_algorithm");
     }
 
+    // RFC 8725 §3.1: an unrecognized alg is not resolved to an algorithm.
     #[test]
     fn test_map_algorithm_rejects_unknown() {
         let result = map_algorithm("FOOBAR");
         assert!(result.is_err(), "Unknown algorithm must be rejected");
     }
 
+    // RFC 8725 §3.1: an empty alg is not resolved to an algorithm.
     #[test]
     fn test_map_algorithm_rejects_empty_string() {
         let result = map_algorithm("");
         assert!(result.is_err(), "Empty string must be rejected");
     }
 
+    // RFC 8725 §3.1: algorithm names are matched exactly.
     #[test]
     fn test_map_algorithm_is_case_sensitive() {
         // "es256" (lowercase) is not a valid algorithm identifier.
@@ -1012,6 +1048,7 @@ mod tests {
     // PS256 support (RFC 9101 / FAPI 2.0)
     // ====================================================================
 
+    // RFC 7523 §3: an asymmetrically signed assertion is accepted.
     #[test]
     fn test_parse_assertion_header_accepts_ps256() {
         let header_json = serde_json::json!({"alg": "PS256", "typ": "JWT"});
@@ -1027,6 +1064,7 @@ mod tests {
         assert_eq!(result.unwrap().alg, "PS256");
     }
 
+    // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_ps256() {
         let alg = map_algorithm("PS256").expect("PS256 should be mapped");
@@ -1037,6 +1075,7 @@ mod tests {
     // validate_client_assertion_algorithm tests (#1003)
     // ====================================================================
 
+    // RFC 8725 §3.1: the algorithm must be one the client registered.
     #[test]
     fn test_validate_client_assertion_algorithm_allows_listed() {
         assert!(validate_client_assertion_algorithm("ES256", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
@@ -1044,6 +1083,7 @@ mod tests {
         assert!(validate_client_assertion_algorithm("EdDSA", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
     }
 
+    // RFC 8725 §3.1: an algorithm the client did not register is rejected.
     #[test]
     fn test_validate_client_assertion_algorithm_rejects_unlisted() {
         let result = validate_client_assertion_algorithm("RS256", &JwsAlgorithm::FAPI_ALLOWED);
@@ -1059,6 +1099,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.1: a wider registered set admits more algorithms.
     #[test]
     fn test_validate_client_assertion_algorithm_allows_rs256_in_wider_set() {
         assert!(
@@ -1067,6 +1108,7 @@ mod tests {
         );
     }
 
+    // RFC 8725 §3.1: an unparseable registered algorithm admits nothing.
     #[test]
     fn test_validate_client_assertion_algorithm_rejects_unparseable() {
         let result = validate_client_assertion_algorithm("HS256", &JwsAlgorithm::FAPI_ALLOWED);

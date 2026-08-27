@@ -605,6 +605,8 @@ mod tests {
     // Reference URI validation tests
     // =========================================================================
 
+    // XML Signature §4.4.3.1: an empty reference URI means the whole document, which this profile
+    // does not accept.
     #[test]
     fn empty_ref_uri_is_rejected() {
         // Build minimal XML with empty Reference URI
@@ -631,6 +633,7 @@ mod tests {
         );
     }
 
+    // XML Signature §4.4.3.1: a same-document reference is a bare name fragment.
     #[test]
     fn missing_hash_prefix_is_rejected() {
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
@@ -656,6 +659,7 @@ mod tests {
         );
     }
 
+    // XML Signature §4.4.3.2: the reference must resolve to an element in the document.
     #[test]
     fn referenced_element_not_found_returns_error() {
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
@@ -681,6 +685,7 @@ mod tests {
         );
     }
 
+    // XML Signature §3.2.2: this profile signs exactly one element.
     #[test]
     fn multiple_references_rejected() {
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
@@ -710,6 +715,7 @@ mod tests {
         );
     }
 
+    // XML Signature §3.2.2: an unsigned message has nothing to validate.
     #[test]
     fn no_signature_element_returns_error() {
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
@@ -731,6 +737,7 @@ mod tests {
     // Algorithm parsing tests
     // =========================================================================
 
+    // XML Signature §4.4.2: the signature method must be one the verifier implements.
     #[test]
     fn unsupported_algorithm_returns_error() {
         // Construct a scenario where signature verification is attempted with
@@ -752,6 +759,7 @@ mod tests {
     // Error type construction tests
     // =========================================================================
 
+    // XML Signature §3.2.2: a validation failure names its cause.
     #[test]
     fn error_types_display_correctly() {
         let e = SignatureError::NoSignature;
@@ -780,6 +788,7 @@ mod tests {
     // find_element_by_id tests
     // =========================================================================
 
+    // XML Signature §4.4.3.2: a same-document reference resolves by ID attribute.
     #[test]
     fn find_element_by_id_finds_by_id_attribute() {
         let xml = r##"<root><child ID="_test123"/></root>"##;
@@ -788,6 +797,7 @@ mod tests {
         assert!(elem.is_some(), "Should find element by ID attribute");
     }
 
+    // XML Signature §4.4.3.2: an unresolvable reference is an error, not a skipped one.
     #[test]
     fn find_element_by_id_returns_none_for_missing() {
         let xml = r##"<root><child ID="_test123"/></root>"##;
@@ -800,6 +810,7 @@ mod tests {
     // inclusive prefixes extraction tests
     // =========================================================================
 
+    // XML Signature §4.4.3.4: the transform carries its InclusiveNamespaces prefix list.
     #[test]
     fn extract_inclusive_prefixes_from_transform() {
         let xml = r##"<ds:Transform xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
@@ -813,6 +824,7 @@ mod tests {
         assert_eq!(prefixes, vec!["#default", "saml", "ds", "xs", "xsi"]);
     }
 
+    // XML Signature §4.4.3.4: the prefix list is optional.
     #[test]
     fn extract_inclusive_prefixes_returns_empty_when_absent() {
         let xml = r##"<ds:Transform xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
@@ -911,6 +923,7 @@ mod tests {
     // Scoped signature search tests
     // =========================================================================
 
+    // XML Signature §3.2.2: only a signature in the expected position is used.
     #[test]
     fn deeply_nested_signature_not_found() {
         // Signature inside a nested element (not direct child of Response/Assertion)
