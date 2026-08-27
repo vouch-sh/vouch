@@ -293,14 +293,6 @@ oidc-backchannel-1_0#3#ceaaa78b	MUST	All of these Relying Parties and OpenID Pro
 oidc-core-1_0#1.1#e85dfd06	MUST NOT	When using these values in protocol messages, the quotes MUST NOT be used as part of the value.
 oidc-core-1_0#1.2#0ef90b03	MUST	The UserInfo Endpoint URL MUST use the "https" scheme and MAY contain port, path, and query parameter components.
 oidc-core-1_0#1.2#2106ea6b	MUST	The Request URI contents MUST be retrievable by the Authorization Server.
-oidc-core-1_0#10#c52792e3	MUST	When the message is both signed and encrypted, it MUST be signed first and then encrypted, per Section 16.14, with the result being a Nested JWT, as specified i
-oidc-core-1_0#10.1#0630e96e	MUST NOT	Symmetric signatures MUST NOT be used by public (non-confidential) Clients because of their inability to keep secrets.
-oidc-core-1_0#10.1#0add1e85	MUST	The signing party MUST select a signature algorithm based on the algorithms supported by the recipient.
-oidc-core-1_0#10.1#1818d03e	MUST	Symmetric Signatures When using MAC-based signatures, the "alg" Header Parameter value of the JOSE Header MUST be set to a MAC algorithm, as defined in JSON Web
-oidc-core-1_0#10.1#20989a1f	MUST	Asymmetric Signatures When using RSA or ECDSA Signatures, the "alg" Header Parameter value of the JOSE Header MUST be set to an appropriate algorithm as defined
-oidc-core-1_0#10.1#9df932a6	MUST	The key usage of the respective keys MUST support signing.
-oidc-core-1_0#10.1#b82129a1	MUST	If there are multiple keys in the referenced JWK Set document, a "kid" value MUST be provided in the JOSE Header.
-oidc-core-1_0#10.1#f0dd7c3b	MUST	The private key used to sign the content MUST be associated with a public key used for signature verification published by the sender in its JWK Set document.
 oidc-core-1_0#10.1.1#cca18799	SHOULD	The JWK Set document at the "jwks_uri" SHOULD retain recently decommissioned signing keys for a reasonable period of time to facilitate a smooth transition.
 oidc-core-1_0#10.2#0b1b5068	MUST	The key usage of the respective keys MUST include encryption.
 oidc-core-1_0#10.2#548635ab	MUST	The encrypting party MUST select an encryption algorithm based on the algorithms supported by the recipient.
@@ -461,16 +453,6 @@ oidc-core-1_0#3.3.3.6#2fd5345b	SHOULD	If either ID Token contains Claims about t
 oidc-core-1_0#3.3.3.6#505304aa	MUST	If an ID Token is returned from both the Authorization Endpoint and from the Token Endpoint, which is the case for the "response_type" values "code id_token" an
 oidc-core-1_0#3.3.3.6#dd8e13aa	SHOULD	All Claims about the Authentication event present in either SHOULD be present in both.
 oidc-core-1_0#3.3.3.7#4610cdc8	MUST	When using the Hybrid Flow, the contents of an ID Token returned from the Token Endpoint MUST be validated in the same manner as for the Authorization Code Flow
-oidc-core-1_0#5.1#463b89ed	SHOULD	This Web page SHOULD | | | | contain information published | | | | by the End-User or an | | | | organization that the End-User | | | | is affiliated with. | | 
-oidc-core-1_0#5.1#74b8a3b7	MUST	This URL MUST refer to | | | | an image file (for example, a | | | | PNG, JPEG, or GIF image file), | | | | rather than to a Web page | | | | containing an imag
-oidc-core-1_0#5.1#96e3b632	MUST	Its value MUST conform | | | | to the RFC 5322 [RFC5322] | | | | addr-spec syntax.
-oidc-core-1_0#5.1#9ed5687e	SHOULD	The contents of this Web | | | | page SHOULD be about the | | | | End-User. | | | | | | picture | string | URL of the End-User's profile | | | | picture.
-oidc-core-1_0#5.1#a4912a68	MUST	The RP MUST | | | | NOT rely upon this value being | | | | unique, as discussed in | | | | Section 5.7. | | | | |.
-oidc-core-1_0#5.1#d674029b	MUST	When true, the | | | | "phone_number" Claim MUST be in | | | | E.164 format and any extensions | | | | MUST be represented in RFC 3966 | | | | format. | | | | |
-oidc-core-1_0#5.1#ebaf6786	MUST	The RP MUST | | | | NOT rely upon this value being | | | | unique, as discussed in | | | | Section 5.7. | | | | | | profile | string | URL of the End-User's pro
-oidc-core-1_0#5.1#ed89cd59	SHOULD	Note that | | | | this URL SHOULD specifically | | | | reference a profile photo of | | | | the End-User suitable for | | | | displaying when describing the | |
-oidc-core-1_0#5.1#f36bdcfe	SHOULD	If the phone number | | | | contains an extension, it is | | | | RECOMMENDED that the extension | | | | be represented using the RFC | | | | 3966 [RFC3966] exte
-oidc-core-1_0#5.1#f3a04062	SHOULD	E.164 [E.164] is | | | | RECOMMENDED as the format of | | | | this Claim, for example, "+1 | | | | (425) 555-1212" or "+56 (2) 687 | | | | 2400".
 oidc-core-1_0#5.1.1#7e5119e2	SHOULD	If both variants are returned, they SHOULD represent the same address, with the formatted address indicating how the component fields are combined.
 oidc-core-1_0#5.1.2#dfb1decc	SHOULD	When using such Claims, it is RECOMMENDED that collision-resistant names be used for the Claim Names, as described in the JSON Web Token (JWT) [JWT] specificati
 oidc-core-1_0#5.5#0dc2562c	SHOULD	Should an OP not support this parameter and an RP uses it, the OP SHOULD return a set of Claims to the RP that it believes would be useful to the RP and the End
@@ -568,21 +550,11 @@ oidc-discovery-1_0#2.1#c2e07e77	MUST	The user input Identifier MUST include the 
 oidc-discovery-1_0#2.1#ff3b0530	SHOULD	The user input Identifier SHOULD be a URL or URI relative reference defined in RFC 3986 [RFC3986].
 oidc-discovery-1_0#2.1.1#ac0be443	MUST	All other user input Identifiers MUST be treated as a URI in one of the forms "scheme "://" authority path-abempty [ "?" query ] [ "#" fragment ]" or "authority
 oidc-discovery-1_0#2.1.2#485e5ef7	MUST	If the resulting URI contains a fragment component, it MUST be stripped off, together with the fragment delimiter character "#".
-oidc-discovery-1_0#4.1#a3b4f18d	MUST	If the Issuer value contains a path component, any terminating "/" MUST be removed before appending "/.well-known/openid-configuration".
-oidc-discovery-1_0#4.1#c93f9271	MUST	An OpenID Provider's configuration information MUST be retrieved using an HTTP "GET" request at the previously specified path.
-oidc-discovery-1_0#4.2#5b5db0c1	MUST	Claims with zero elements MUST be omitted from the response.
-oidc-discovery-1_0#4.2#addc3788	MUST	A successful response MUST use the 200 OK HTTP status code and return a JSON object using the "application/json" content type that contains a set of Claims as i
 oidc-discovery-1_0#5#250a7027	MUST NOT	Unicode Normalization [USA15] MUST NOT be applied at any point to either the JSON string or to the string it is to be compared against.
 oidc-discovery-1_0#5#982f7d72	MUST	Therefore, comparisons between JSON strings and other Unicode strings MUST be performed as specified below:
 oidc-discovery-1_0#5#ad4cb0a2	MUST	Therefore, comparisons between JSON strings and other Unicode strings MUST be performed as specified below: 1. Remove any JSON applied escaping to produce an ar
 oidc-discovery-1_0#5#b8a32e4c	MUST	Comparisons between the two strings MUST be performed as a Unicode code point to code point equality comparison.
 oidc-discovery-1_0#6#ceaaa78b	MUST	All of these Relying Parties and OpenID Providers MUST implement the features that are listed in this specification as being "REQUIRED" or are described with a 
-oidc-discovery-1_0#7.1#4ebfe640	MUST	Implementations MUST support TLS.
-oidc-discovery-1_0#7.1#6024787f	SHOULD	Implementations SHOULD follow the guidance in BCP 195 [RFC8996] [RFC9325], which provides recommendations and requirements for improving the security of deploye
-oidc-discovery-1_0#7.1#cebb45a2	MUST	To protect against information disclosure and tampering, confidentiality protection MUST be applied using TLS with a ciphersuite that provides confidentiality a
-oidc-discovery-1_0#7.1#e2c5105b	MUST	Whenever TLS is used, a TLS server certificate check MUST be performed, per RFC 6125 [RFC6125].
-oidc-discovery-1_0#7.2#4351977c	MUST	TLS certificate checking MUST be performed by the RP, as described in Section 7.1, when making an OpenID Provider Configuration Request.
-oidc-discovery-1_0#7.2#bdc19e26	MUST	To prevent this, RPs MUST ensure that the Issuer URL they are using for the Configuration Request exactly matches the value of the "issuer" Claim in the OP Meta
 oidc-frontchannel-1_0#1.1#e85dfd06	MUST NOT	When using these values in protocol messages, the quotes MUST NOT be used as part of the value.
 oidc-frontchannel-1_0#2#4d262848	MUST NOT	The logout URI MUST NOT include a fragment component.
 oidc-frontchannel-1_0#2#59517671	MUST	An "iss" (issuer) query parameter and a "sid" (session ID) query parameter MAY be included by the OP to enable the RP to validate the request and to determine w

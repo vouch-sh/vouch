@@ -11,6 +11,7 @@ use jsonwebtoken::Algorithm;
 
 // ── Issuer host matching (#425) ────────────────────────────────────────
 
+// OIDC Discovery §7.2: the issuer host is matched exactly, not by suffix.
 #[test]
 fn is_entra_host_matches_legitimate_endpoints() {
     assert!(is_entra_host(
@@ -27,6 +28,7 @@ fn is_entra_host_matches_legitimate_endpoints() {
 /// Lookalike host with the target domain as a substring must be
 /// rejected — the entire point of swapping `.contains()` for host-based
 /// matching (#425).
+// OIDC Discovery §7.2: a lookalike host is not the provider.
 #[test]
 fn is_entra_host_rejects_lookalike_domain() {
     assert!(!is_entra_host(
@@ -37,24 +39,28 @@ fn is_entra_host_rejects_lookalike_domain() {
     ));
 }
 
+// OIDC Discovery §7.2: an unparseable issuer identifies no provider.
 #[test]
 fn is_entra_host_rejects_malformed_url() {
     assert!(!is_entra_host("not a url"));
     assert!(!is_entra_host(""));
 }
 
+// OIDC Discovery §7.2: the issuer host is matched exactly, not by suffix.
 #[test]
 fn is_google_host_matches_legitimate_endpoint() {
     assert!(is_google_host("https://accounts.google.com"));
     assert!(is_google_host("https://accounts.google.com/"));
 }
 
+// OIDC Discovery §7.2: a lookalike host is not the provider.
 #[test]
 fn is_google_host_rejects_lookalike_domain() {
     assert!(!is_google_host("https://accounts.google.com.evil.com"));
     assert!(!is_google_host("https://evil.com/accounts.google.com"));
 }
 
+// OIDC Discovery §7.2: an unparseable issuer identifies no provider.
 #[test]
 fn is_google_host_rejects_malformed_url() {
     assert!(!is_google_host("not a url"));
@@ -96,12 +102,14 @@ fn jwks_of(keys: Vec<serde_json::Value>) -> jsonwebtoken::jwk::JwkSet {
     serde_json::from_value(serde_json::json!({ "keys": keys })).expect("JWKS must deserialize")
 }
 
+// OIDC Core §10.1: kid selects the key that verifies the ID Token.
 #[test]
 fn find_decoding_key_matches_by_kid() {
     let jwks = jwks_of(vec![rsa_jwk("other"), rsa_jwk("wanted")]);
     assert!(find_decoding_key(&jwks, Some("wanted"), Algorithm::RS256).is_ok());
 }
 
+// OIDC Core §10.1: a kid absent from the provider's key set resolves no key.
 #[test]
 fn find_decoding_key_reports_missing_kid() {
     let jwks = jwks_of(vec![rsa_jwk("other")]);
@@ -113,6 +121,7 @@ fn find_decoding_key_reports_missing_kid() {
 /// jsonwebtoken 11 keeps unrecognized `kty` values as
 /// `AlgorithmParameters::Other` instead of failing the whole set, so a
 /// JWKS that lists one first must still resolve the usable key behind it.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
 #[test]
 fn find_decoding_key_skips_unusable_key_when_matching_by_algorithm() {
     let mut unusable = unusable_jwk("pq-1");
@@ -121,6 +130,7 @@ fn find_decoding_key_skips_unusable_key_when_matching_by_algorithm() {
     assert!(find_decoding_key(&jwks, None, Algorithm::RS256).is_ok());
 }
 
+// OIDC Core §10.1: an unusable key is skipped even in the fallback path.
 #[test]
 fn find_decoding_key_skips_unusable_key_in_last_resort_fallback() {
     // Neither key advertises `alg`, so selection falls through to the
@@ -131,6 +141,7 @@ fn find_decoding_key_skips_unusable_key_in_last_resort_fallback() {
     assert!(find_decoding_key(&jwks, None, Algorithm::RS256).is_ok());
 }
 
+// OIDC Core §10.1: a key set with no usable key verifies nothing.
 #[test]
 fn find_decoding_key_rejects_jwks_without_a_usable_key() {
     let jwks = jwks_of(vec![unusable_jwk("pq-1")]);
@@ -223,6 +234,7 @@ fn parse_discovery_json(json: &str) -> DiscoveryDocument {
     serde_json::from_str(json).expect("valid JSON")
 }
 
+// OIDC Discovery §4.2: the configuration response is a JSON metadata document.
 #[test]
 fn parse_google_discovery() {
     let json = r#"{
@@ -241,6 +253,7 @@ fn parse_google_discovery() {
     assert_eq!(doc.jwks_uri, "https://www.googleapis.com/oauth2/v3/certs");
 }
 
+// OIDC Discovery §4.2: the configuration response is a JSON metadata document.
 #[test]
 fn parse_okta_discovery() {
     let json = r#"{
@@ -253,6 +266,7 @@ fn parse_okta_discovery() {
     assert_eq!(doc.issuer, "https://dev-123456.okta.com");
 }
 
+// OIDC Discovery §4.2: the configuration response is a JSON metadata document.
 #[test]
 fn parse_azure_ad_discovery() {
     let json = r#"{
@@ -268,6 +282,7 @@ fn parse_azure_ad_discovery() {
     );
 }
 
+// OIDC Discovery §3: the required metadata members must be present.
 #[test]
 fn reject_missing_required_fields() {
     // Missing token_endpoint and jwks_uri
@@ -276,24 +291,28 @@ fn reject_missing_required_fields() {
     assert!(result.is_err());
 }
 
+// OIDC Discovery §7.1: the issuer is an https URL.
 #[test]
 fn reject_http_issuer() {
     let url = Url::parse("http://evil.example.com").unwrap();
     assert!(!is_localhost(&url));
 }
 
+// OIDC Discovery §7.1: loopback is exempted for development only.
 #[test]
 fn allow_http_localhost() {
     let url = Url::parse("http://localhost:8080").unwrap();
     assert!(is_localhost(&url));
 }
 
+// OIDC Discovery §7.1: the loopback exemption covers the IPv6 loopback.
 #[test]
 fn allow_http_ipv6_localhost() {
     let url = Url::parse("http://[::1]:8080").unwrap();
     assert!(is_localhost(&url));
 }
 
+// OIDC Discovery §4.3: the issuer in the document must match the one used to reach it.
 #[test]
 fn issuer_mismatch_detection() {
     let configured = "https://accounts.google.com";
@@ -306,6 +325,7 @@ fn issuer_mismatch_detection() {
 
 // ── Entra /organizations/ issuer template tests ────────────────────────
 
+// OIDC Discovery §4.3: the issuer comparison is exact.
 #[test]
 fn validate_discovered_issuer_exact_match() {
     assert!(
@@ -314,6 +334,7 @@ fn validate_discovered_issuer_exact_match() {
     );
 }
 
+// OIDC Discovery §4.3: a document claiming another issuer is rejected.
 #[test]
 fn validate_discovered_issuer_mismatch_rejected() {
     assert!(
@@ -322,6 +343,7 @@ fn validate_discovered_issuer_mismatch_rejected() {
     );
 }
 
+// OIDC Discovery §4.3: a per-tenant issuer satisfies a multi-tenant configuration.
 #[test]
 fn validate_discovered_issuer_entra_organizations_accepts_tenant_issuer() {
     // /organizations/ configured; discovered issuer is per-tenant
@@ -334,6 +356,7 @@ fn validate_discovered_issuer_entra_organizations_accepts_tenant_issuer() {
     );
 }
 
+// OIDC Discovery §4.3: the templated issuer is accepted unsubstituted.
 #[test]
 fn validate_discovered_issuer_entra_organizations_accepts_literal_placeholder() {
     // Microsoft's discovery doc literally returns the `{tenantid}` placeholder.
@@ -346,6 +369,7 @@ fn validate_discovered_issuer_entra_organizations_accepts_literal_placeholder() 
     );
 }
 
+// OIDC Discovery §4.3: only a well-formed tenant segment satisfies the template.
 #[test]
 fn validate_discovered_issuer_entra_organizations_rejects_non_uuid_path_segment() {
     // The tightened check should reject arbitrary path segments that are
@@ -359,6 +383,7 @@ fn validate_discovered_issuer_entra_organizations_rejects_non_uuid_path_segment(
     );
 }
 
+// OIDC Discovery §4.3: a single-tenant configuration accepts only its own issuer.
 #[test]
 fn validate_discovered_issuer_entra_specific_tenant_rejects_different_tenant() {
     // A tenant-specific configured issuer must match exactly
@@ -373,6 +398,7 @@ fn validate_discovered_issuer_entra_specific_tenant_rejects_different_tenant() {
 
 // ── extract_entra_tenant_from_issuer tests ─────────────────────────────
 
+// OIDC Discovery §4.3: the tenant is read from the issuer identifier.
 #[test]
 fn extract_tenant_from_specific_issuer() {
     let issuer = "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0";
@@ -382,18 +408,21 @@ fn extract_tenant_from_specific_issuer() {
     );
 }
 
+// OIDC Discovery §4.3: a multi-tenant issuer names no single tenant.
 #[test]
 fn extract_tenant_returns_none_for_organizations() {
     let issuer = "https://login.microsoftonline.com/organizations/v2.0";
     assert_eq!(extract_entra_tenant_from_issuer(issuer), None);
 }
 
+// OIDC Discovery §4.3: a multi-tenant issuer names no single tenant.
 #[test]
 fn extract_tenant_returns_none_for_common() {
     let issuer = "https://login.microsoftonline.com/common/v2.0";
     assert_eq!(extract_entra_tenant_from_issuer(issuer), None);
 }
 
+// OIDC Discovery §4.3: another provider's issuer names no tenant.
 #[test]
 fn extract_tenant_returns_none_for_google() {
     assert_eq!(
@@ -404,6 +433,7 @@ fn extract_tenant_returns_none_for_google() {
 
 // ── is_entra_common_issuer tests ───────────────────────────────────────
 
+// OIDC Discovery §4.3: the multi-tenant issuer form is recognized.
 #[test]
 fn is_entra_common_issuer_detects_common() {
     assert!(is_entra_common_issuer(
@@ -414,6 +444,7 @@ fn is_entra_common_issuer_detects_common() {
     ));
 }
 
+// OIDC Discovery §4.3: the issuer forms are distinguished from one another.
 #[test]
 fn is_entra_common_issuer_does_not_match_organizations() {
     assert!(!is_entra_common_issuer(
@@ -421,6 +452,7 @@ fn is_entra_common_issuer_does_not_match_organizations() {
     ));
 }
 
+// OIDC Discovery §4.3: the issuer forms are distinguished from one another.
 #[test]
 fn is_entra_common_issuer_does_not_match_google() {
     assert!(!is_entra_common_issuer("https://accounts.google.com"));
@@ -428,6 +460,7 @@ fn is_entra_common_issuer_does_not_match_google() {
 
 // ── lookalike-domain rejection tests (host-based matching) ─────────────
 
+// OIDC Discovery §7.2: a subdomain of the provider's domain is not the provider.
 #[test]
 fn is_entra_organizations_issuer_rejects_evil_subdomain() {
     // These URLs contain "login.microsoftonline.com" as a substring but the
@@ -445,12 +478,14 @@ fn is_entra_organizations_issuer_rejects_evil_subdomain() {
     ));
 }
 
+// OIDC Discovery §7.2: an unparseable issuer identifies no provider.
 #[test]
 fn is_entra_organizations_issuer_rejects_malformed_urls() {
     assert!(!is_entra_organizations_issuer("not a url"));
     assert!(!is_entra_organizations_issuer(""));
 }
 
+// OIDC Discovery §4.3: a legitimate issuer is recognized.
 #[test]
 fn is_entra_organizations_issuer_accepts_legitimate_microsoft() {
     assert!(is_entra_organizations_issuer(
@@ -461,6 +496,7 @@ fn is_entra_organizations_issuer_accepts_legitimate_microsoft() {
     ));
 }
 
+// OIDC Discovery §7.2: a subdomain of the provider's domain is not the provider.
 #[test]
 fn is_entra_common_issuer_rejects_evil_subdomain() {
     assert!(!is_entra_common_issuer(
@@ -471,6 +507,7 @@ fn is_entra_common_issuer_rejects_evil_subdomain() {
     ));
 }
 
+// OIDC Discovery §7.2: a subdomain of the provider's domain is not the provider.
 #[test]
 fn is_entra_tenant_template_issuer_rejects_evil_subdomain() {
     assert!(!is_entra_tenant_template_issuer(
@@ -478,6 +515,7 @@ fn is_entra_tenant_template_issuer_rejects_evil_subdomain() {
     ));
 }
 
+// OIDC Discovery §7.2: discovery must not be a route around issuer validation.
 #[test]
 fn validate_discovered_issuer_rejects_evil_subdomain_discovery_bypass() {
     // Configured issuer is on an attacker-controlled lookalike subdomain.
@@ -520,6 +558,7 @@ fn discovery_json(issuer: &str) -> String {
     .to_string()
 }
 
+// OIDC Discovery §4.1: the configuration is fetched from the well-known location.
 #[tokio::test]
 async fn fetch_discovery_happy_path() {
     use wiremock::matchers::{method, path};
@@ -546,6 +585,7 @@ async fn fetch_discovery_happy_path() {
     assert_eq!(provider.jwks_uri.as_str(), format!("{issuer}/jwks"),);
 }
 
+// OIDC Discovery §4.3: the issuer of record is the one the document states.
 #[tokio::test]
 async fn fetch_discovery_preserves_canonical_issuer_from_document() {
     use wiremock::matchers::{method, path};
@@ -567,6 +607,7 @@ async fn fetch_discovery_preserves_canonical_issuer_from_document() {
     assert_eq!(provider.issuer, canonical_issuer);
 }
 
+// OIDC Discovery §4.3: a document claiming another issuer is rejected.
 #[tokio::test]
 async fn fetch_discovery_issuer_mismatch() {
     use wiremock::matchers::{method, path};
@@ -593,6 +634,7 @@ async fn fetch_discovery_issuer_mismatch() {
     );
 }
 
+// OIDC Discovery §4.1: a failed configuration request yields no configuration.
 #[tokio::test]
 async fn fetch_discovery_non_200() {
     use wiremock::matchers::{method, path};
@@ -615,6 +657,7 @@ async fn fetch_discovery_non_200() {
     );
 }
 
+// OIDC Discovery §4.2: the configuration response is a JSON document.
 #[tokio::test]
 async fn fetch_discovery_invalid_json() {
     use wiremock::matchers::{method, path};
@@ -637,6 +680,7 @@ async fn fetch_discovery_invalid_json() {
     );
 }
 
+// OIDC Discovery §7.1: configuration is fetched over TLS.
 #[tokio::test]
 async fn fetch_discovery_rejects_http_non_localhost() {
     let client = reqwest::Client::new();
@@ -654,6 +698,7 @@ async fn fetch_discovery_rejects_http_non_localhost() {
 
 /// Happy path: valid ES256 JWT with all required claims returns correct
 /// `IdentityResult`.
+// OIDC Core §3.1.3.7: a conformant ID Token validates.
 #[tokio::test]
 async fn verify_id_token_happy_path() {
     use wiremock::MockServer;
@@ -688,6 +733,7 @@ async fn verify_id_token_happy_path() {
 /// A token missing the required `sub` claim must fail verification
 /// (fail-closed): without a stable subject there is nothing to bind
 /// the account to, so email-only linking must not silently happen.
+// OIDC Core §3.1.3.7: the token must identify a subject.
 #[tokio::test]
 async fn verify_id_token_missing_sub_rejected() {
     use wiremock::MockServer;
@@ -719,6 +765,7 @@ async fn verify_id_token_missing_sub_rejected() {
 
 /// Nonce mismatch: JWT has a nonce that differs from expected → error
 /// message must contain "nonce mismatch".
+// OIDC Core §3.1.3.7: the nonce must be the value sent in the request.
 #[tokio::test]
 async fn verify_id_token_nonce_mismatch() {
     use wiremock::MockServer;
@@ -749,6 +796,7 @@ async fn verify_id_token_nonce_mismatch() {
 
 /// Missing nonce: JWT has no nonce claim but caller expects one → error
 /// message must contain "missing nonce".
+// OIDC Core §3.1.3.7: a token with no nonce does not answer a request that sent one.
 #[tokio::test]
 async fn verify_id_token_missing_nonce() {
     use wiremock::MockServer;
@@ -778,6 +826,7 @@ async fn verify_id_token_missing_nonce() {
 
 /// Empty nonce bypass: device-code flow sends expected_nonce="" and the
 /// token has no nonce claim → should succeed (nonce check is skipped).
+// OIDC Core §3.1.3.7: an empty nonce does not satisfy the nonce check.
 #[tokio::test]
 async fn verify_id_token_empty_nonce_bypass() {
     use wiremock::MockServer;
@@ -804,6 +853,7 @@ async fn verify_id_token_empty_nonce_bypass() {
 
 /// Email not verified: JWT has email_verified=false → error message must
 /// contain "not verified".
+// OIDC Core §5.1: email_verified states whether the address was verified.
 #[tokio::test]
 async fn verify_id_token_email_not_verified() {
     use wiremock::MockServer;
@@ -836,6 +886,7 @@ async fn verify_id_token_email_not_verified() {
 
 /// Domain from hd claim: when `hd` is present, `IdentityResult.domain`
 /// reflects that value.
+// OIDC Core §5.1: a provider claim may carry the hosted domain.
 #[tokio::test]
 async fn verify_id_token_domain_from_hd_claim() {
     use wiremock::MockServer;
@@ -870,6 +921,7 @@ async fn verify_id_token_domain_from_hd_claim() {
 }
 
 /// No hd claim: when `hd` is absent, `IdentityResult.domain` is `None`.
+// OIDC Core §5.1: the domain falls back to the email claim.
 #[tokio::test]
 async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
     use wiremock::MockServer;
@@ -906,6 +958,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
 /// (which match against the lowercase-stored primary/additional domain)
 /// find the right org. Removing the `.to_ascii_lowercase()` call would
 /// silently break login for IdPs that return uppercase domain parts.
+// OIDC Core §5.1: the domain is compared case-insensitively.
 #[tokio::test]
 async fn verify_id_token_lowercases_mixed_case_hd_claim() {
     use wiremock::MockServer;
@@ -940,6 +993,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
 
 /// Regression: when falling back to the email domain for non-Google
 /// issuers, the extracted domain must be lowercased.
+// OIDC Core §5.1: the domain is compared case-insensitively.
 #[tokio::test]
 async fn verify_id_token_lowercases_email_domain_fallback() {
     use wiremock::MockServer;
@@ -971,6 +1025,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
     );
 }
 
+// OIDC Core §5.1: an account with no hosted domain has none to report.
 #[tokio::test]
 async fn verify_id_token_google_consumer_no_hd_returns_none() {
     use wiremock::MockServer;
@@ -1009,6 +1064,7 @@ async fn verify_id_token_google_consumer_no_hd_returns_none() {
 // ── Entra tid claim validation ─────────────────────────────────────────
 
 /// Token tid must match the tenant UUID in the issuer URL.
+// OIDC Core §3.1.3.7: a token issued for another tenant is rejected.
 #[tokio::test]
 async fn verify_id_token_entra_tid_mismatch_rejected() {
     use wiremock::MockServer;
@@ -1045,6 +1101,7 @@ async fn verify_id_token_entra_tid_mismatch_rejected() {
 }
 
 /// Token with matching tid succeeds (tenant-specific issuer in provider).
+// OIDC Core §3.1.3.7: the tenant claim must agree with the issuer.
 #[tokio::test]
 async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
     use wiremock::MockServer;
@@ -1088,6 +1145,7 @@ async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
 /// Microsoft returns from /common/ and /organizations/ discovery), the
 /// library issuer check must be disabled. A token with a real per-tenant
 /// iss and matching tid must succeed.
+// OIDC Core §3.1.3.7: a per-tenant token satisfies a templated issuer.
 #[tokio::test]
 async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() {
     use wiremock::MockServer;
@@ -1133,6 +1191,7 @@ async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() 
 /// When provider.issuer is the `{tenantid}` template, a token whose tid
 /// does not match the per-tenant UUID in its own iss claim must be
 /// rejected as a cross-tenant injection attempt.
+// OIDC Core §3.1.3.7: the tenant claim must agree with the issuer.
 #[tokio::test]
 async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
     use wiremock::MockServer;
@@ -1174,6 +1233,7 @@ async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
 /// provider.issuer is the `{tenantid}` template, a token with an arbitrary
 /// non-Entra issuer must be rejected with the manual Entra check (not pass
 /// through silently because the library check was disabled).
+// OIDC Core §3.1.3.7: the issuer must be the provider that was configured.
 #[tokio::test]
 async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
     use wiremock::MockServer;
@@ -1212,6 +1272,7 @@ async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
 /// `fetch_discovery` must reject `/common/v2.0` outright, before any HTTP
 /// fetch is attempted. Apps with personal-MSA support cannot emit
 /// `xms_edov`, so vouch refuses to start with such an issuer.
+// OIDC Discovery §4.3: a multi-tenant issuer is not a usable issuer of record.
 #[tokio::test]
 async fn fetch_discovery_rejects_entra_common_issuer() {
     let client = reqwest::Client::new();
@@ -1231,6 +1292,7 @@ async fn fetch_discovery_rejects_entra_common_issuer() {
 
 /// Entra tokens lack `email_verified` but include `xms_edov=true` when the
 /// optional claim is configured. Verification must succeed.
+// OIDC Core §5.1: a provider extension may establish that the address was verified.
 #[tokio::test]
 async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
     use wiremock::MockServer;
@@ -1269,6 +1331,7 @@ async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
 /// Entra token with `xms_edov=false` (domain unverified) must be rejected
 /// with an Entra-specific error message that points at the optional claim
 /// configuration.
+// OIDC Core §5.1: an unverified address is not accepted as an identity.
 #[tokio::test]
 async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
     use wiremock::MockServer;
@@ -1312,6 +1375,7 @@ async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
 
 /// Entra token missing both `email_verified` and `xms_edov` (operator did
 /// not configure the optional claim) must be rejected with guidance.
+// OIDC Core §5.1: verification must be positively established, not assumed.
 #[tokio::test]
 async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
     use wiremock::MockServer;
@@ -1355,6 +1419,7 @@ async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
 
 /// `xms_edov` is an Entra-specific signal. A non-Entra token with
 /// `xms_edov=true` and `email_verified=false` must still be rejected.
+// OIDC Core §5.1: another provider's claim does not carry that meaning.
 #[tokio::test]
 async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
     use wiremock::MockServer;
@@ -1392,6 +1457,7 @@ async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
     );
 }
 
+// OIDC Discovery §4.3: the templated issuer form is recognized after discovery.
 #[test]
 fn is_entra_tenant_template_issuer_detects_post_discovery_form() {
     // Both /v2.0 and bare tail variants of the literal placeholder
