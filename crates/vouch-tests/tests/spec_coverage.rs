@@ -4,9 +4,17 @@
 //! `specs/requirements.tsv` lists every MUST / MUST NOT / SHOULD / SHOULD NOT
 //! statement in the cached specification corpus, extracted by
 //! `scripts/audit-normative.py`. `specs/audit-scope.tsv` says which of those
-//! specifications impose obligations on Vouch. This test links the two to the
-//! test suite: a requirement counts as *cited* when some test function names
-//! its specification and section in a comment or assertion message.
+//! specifications impose obligations on Vouch, and
+//! `specs/audit-exclusions.tsv` drops individual sections of an in-scope
+//! specification that are addressed to an actor Vouch is not, or cover a
+//! feature Vouch does not implement by design. This test links what remains to
+//! the test suite: a requirement counts as *cited* when some test function
+//! names its specification and section in a comment or assertion message.
+//!
+//! An excluded statement is not untested, it is not owed: it never reaches the
+//! backlog. Two rules keep that file from becoming a place to hide work -- an
+//! exclusion that matches nothing fails, and an excluded section that a test
+//! cites fails.
 //!
 //! Linkage is section-level and deliberately optimistic. It establishes that a
 //! requirement is untested; it does not prove a cited one is tested well.
@@ -290,6 +298,38 @@ fn read_tsv(path: &Path) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// One row of `specs/audit-exclusions.tsv`.
+struct Exclusion {
+    spec: String,
+    section_prefix: String,
+    reason: String,
+}
+
+impl Exclusion {
+    /// A prefix covers a section and everything beneath it: "4" covers 4, 4.8
+    /// and 4.8.1, but not 40.
+    fn covers(&self, spec: &str, section: &str) -> bool {
+        spec == self.spec
+            && (section == self.section_prefix
+                || section
+                    .strip_prefix(&self.section_prefix)
+                    .is_some_and(|rest| rest.starts_with('.')))
+    }
+}
+
+fn load_exclusions(root: &Path) -> Vec<Exclusion> {
+    read_tsv(&root.join("specs/audit-exclusions.tsv"))
+        .into_iter()
+        .skip(1)
+        .filter(|r| r.len() >= 3)
+        .map(|r| Exclusion {
+            spec: r[0].clone(),
+            section_prefix: r[1].clone(),
+            reason: r[2].clone(),
+        })
+        .collect()
+}
+
 struct Requirement {
     id: String,
     spec: String,
@@ -306,11 +346,14 @@ fn load_requirements(root: &Path) -> Vec<Requirement> {
         .map(|r| (r[0].clone(), r[1].clone()))
         .collect();
 
+    let exclusions = load_exclusions(root);
+
     read_tsv(&root.join("specs/requirements.tsv"))
         .into_iter()
         .skip(1)
         .filter(|r| r.len() >= 7)
         .filter(|r| scope.get(&r[1]).is_some_and(|s| s != "reference"))
+        .filter(|r| !exclusions.iter().any(|e| e.covers(&r[1], &r[2])))
         .map(|r| Requirement {
             id: r[0].clone(),
             spec: r[1].clone(),
@@ -359,6 +402,84 @@ fn is_cited(req: &Requirement, cited: &BTreeSet<(String, String)>) -> bool {
         .any(|(spec, section)| *spec == req.spec && section.starts_with(&prefix))
 }
 
+/// Check `specs/audit-exclusions.tsv` against the corpus and the test suite.
+///
+/// An exclusion asserts that Vouch owes nothing for a section. That claim can
+/// rot in two directions, and both have to fail loudly or the file becomes a
+/// place to quietly park work:
+///
+///   * the section stops existing -- a re-cached spec renumbers its sections,
+///     and the exclusion silently stops covering anything, or
+///   * a test cites the section -- the exclusion says there is no obligation
+///     while a test asserts behavior, so one of the two is wrong.
+fn validate_exclusions(root: &Path, cited: &BTreeSet<(String, String)>) -> String {
+    let exclusions = load_exclusions(root);
+    let corpus = read_tsv(&root.join("specs/requirements.tsv"));
+    let mut failures = String::new();
+
+    let mut stale = Vec::new();
+    let mut contradicted = Vec::new();
+    let mut unexplained = Vec::new();
+
+    for excl in &exclusions {
+        if excl.reason.trim().is_empty() {
+            unexplained.push(format!("{} §{}", excl.spec, excl.section_prefix));
+        }
+
+        let matched: Vec<&Vec<String>> = corpus
+            .iter()
+            .skip(1)
+            .filter(|r| r.len() >= 7 && excl.covers(&r[1], &r[2]))
+            .collect();
+
+        if matched.is_empty() {
+            stale.push(format!("{} §{}", excl.spec, excl.section_prefix));
+            continue;
+        }
+
+        for row in matched {
+            if cited.contains(&(row[1].clone(), row[2].clone())) {
+                contradicted.push(format!("{} §{}", row[1], row[2]));
+            }
+        }
+    }
+
+    contradicted.sort();
+    contradicted.dedup();
+
+    if !unexplained.is_empty() {
+        failures.push_str(&format!(
+            "\n{} exclusion(s) have an empty reason. Say what makes the section \
+             inapplicable, with the evidence:\n  {}\n",
+            unexplained.len(),
+            unexplained.join("\n  ")
+        ));
+    }
+
+    if !stale.is_empty() {
+        failures.push_str(&format!(
+            "\n{} exclusion(s) match no statement in specs/requirements.tsv. The \
+             section was renumbered or the spec was re-cached, so the exclusion now \
+             covers nothing -- repoint it at the current section or drop it:\n  {}\n",
+            stale.len(),
+            stale.join("\n  ")
+        ));
+    }
+
+    if !contradicted.is_empty() {
+        failures.push_str(&format!(
+            "\n{} excluded section(s) are cited by a test. The exclusion claims Vouch \
+             has no obligation there while a test asserts behavior -- drop the \
+             exclusion if the obligation is real, or drop the citation if the test \
+             pins something else:\n  {}\n",
+            contradicted.len(),
+            contradicted.join("\n  ")
+        ));
+    }
+
+    failures
+}
+
 #[test]
 fn normative_coverage_does_not_regress() {
     let root = repo_root();
@@ -370,6 +491,12 @@ fn normative_coverage_does_not_regress() {
     );
 
     let cited = cited_sections(&root);
+
+    // Validated before the baseline branch so regenerating cannot launder a
+    // stale or contradicted exclusion into the corpus.
+    let exclusion_failures = validate_exclusions(&root, &cited);
+    assert!(exclusion_failures.is_empty(), "{exclusion_failures}");
+
     let uncited: BTreeSet<String> = requirements
         .iter()
         .filter(|r| !is_cited(r, &cited))

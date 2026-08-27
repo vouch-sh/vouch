@@ -63,14 +63,15 @@ jq -r '.[] | select(.errata_status_code=="Verified")
 
 ## Normative coverage audit
 
-Three further files turn the corpus into a coverage audit of the test suite:
+Four further files turn the corpus into a coverage audit of the test suite:
 
 | Path | Contents |
 |---|---|
 | `requirements.tsv` | Every MUST / MUST NOT / SHOULD / SHOULD NOT statement, one per row |
 | `audit-scope.tsv` | Whether each spec imposes obligations on Vouch, with a reason |
+| `audit-exclusions.tsv` | Sections of an in-scope spec that Vouch does not owe, with a reason |
 | `coverage-baseline.tsv` | The statements with no citing test -- the accepted backlog |
-| `coverage-report.md` | Per-spec summary rendered from the three above |
+| `coverage-report.md` | Per-spec summary rendered from the four above |
 
 A statement counts as covered when a test function names its spec and section
 in a comment or assertion message, e.g. `// RFC 9421 §2.1.4: ...`. Linkage is
@@ -82,6 +83,37 @@ ratchet -- the existing backlog is tolerated, but a statement that loses its
 citing test fails the build, and a statement that gains one fails until the
 baseline is pruned, so the backlog can only shrink.
 
+### Scope and exclusions
+
+The two scope files answer different questions, and keeping them apart is what
+stops the backlog filling with work nobody owes.
+
+`audit-scope.tsv` is per specification: does this document impose obligations
+on Vouch at all? A `reference` spec is cited for a constant or a definition and
+contributes nothing.
+
+`audit-exclusions.tsv` is per section of a spec that *is* in scope. A section
+is excluded when its requirements are addressed to an actor Vouch is not, or
+cover a feature Vouch does not implement by design -- RFC 6265 section 5 is the
+browser-side cookie algorithm and Vouch is a server; RFC 9700 section 4.14 is
+refresh token replay detection and Vouch issues no refresh tokens. An excluded
+statement is not untested, it is *not owed*, so it never enters the denominator
+and never reaches the backlog.
+
+A prefix covers everything beneath it: `4` covers 4, 4.8 and 4.8.1, but not 40.
+
+Two rules stop the file becoming a place to park work, both enforced by the
+gate:
+
+* an exclusion that matches no statement fails -- a re-cached spec renumbers
+  its sections, and a stale exclusion would silently stop covering anything;
+* an excluded section that a test cites fails -- the exclusion says there is no
+  obligation while a test asserts behavior, so a human has to say which is
+  wrong.
+
+Prefer an exclusion with a reason over a test that pins behavior Vouch does not
+have. Prefer a test over an exclusion whenever the obligation is real.
+
 Regenerate all of it, in this order:
 
 ```sh
@@ -89,6 +121,13 @@ scripts/audit-normative.py
 UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
 scripts/audit-coverage.py
 ```
+
+The extractor skips sections whose title is a reference list, an
+acknowledgements roll or a changelog appendix: they carry no obligation but
+their prose reproduces requirement keywords, and RFC 9325's "Differences from
+RFC 7525" appendix alone contributed 16 statements of the form "Added TLS 1.3
+at a 'SHOULD' level", which describe a requirement level rather than stating
+one.
 
 Known limitation: a nested enumeration collapses to its outer item. FAPI 2.0
 section 5.4.1 lists "1 adhere to [RFC8725]; 2 use PS256, ES256, or EdDSA; 3
