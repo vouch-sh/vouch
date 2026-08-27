@@ -98,6 +98,7 @@ fn sfv_inner_list_strategy() -> impl Strategy<Value = SfvInnerList> {
 }
 
 proptest! {
+    // RFC 8941 §4.1.3, §4.2.3: an Item survives serialize then parse for arbitrary values.
     #[test]
     fn test_item_roundtrip(item in sfv_item_strategy()) {
         let serialized = serialize::serialize_item(&item);
@@ -105,6 +106,7 @@ proptest! {
         prop_assert_eq!(item, parsed);
     }
 
+    // RFC 8941 §3.1.1: an Inner List survives serialize then parse for arbitrary values.
     #[test]
     fn test_inner_list_roundtrip(list in sfv_inner_list_strategy()) {
         let serialized = serialize::serialize_inner_list_to_string(&list);
@@ -112,6 +114,7 @@ proptest! {
         prop_assert_eq!(list, parsed);
     }
 
+    // RFC 8941 §3.2: a Dictionary survives serialize then parse for arbitrary values.
     #[test]
     fn test_dictionary_roundtrip(
         entries in prop::collection::vec(
@@ -128,6 +131,7 @@ proptest! {
         prop_assert_eq!(dict, parsed);
     }
 
+    // RFC 8941 §3.1: a List survives serialize then parse for arbitrary values.
     #[test]
     fn test_list_roundtrip(
         members in prop::collection::vec(
@@ -144,6 +148,7 @@ proptest! {
         prop_assert_eq!(list, parsed);
     }
 
+    // RFC 8941 §3.3.1: Integers outside the permitted range never serialize.
     #[test]
     fn test_integer_range(val in sfv_integer_strategy()) {
         let item = SfvItem {
@@ -155,6 +160,7 @@ proptest! {
         prop_assert_eq!(item, parsed);
     }
 
+    // RFC 8941 §1.1: strict parsing rejects malformed input rather than failing unpredictably.
     #[test]
     fn test_malformed_input_never_panics(s in "[\\x00-\\x7f]{0,300}") {
         let _ = parse::parse_dictionary(&s);
@@ -163,6 +169,7 @@ proptest! {
         let _ = parse::parse_item(&s);
     }
 
+    // RFC 8941 §3.1.2: Parameters are an ordered map.
     #[test]
     fn test_params_preserve_insertion_order(
         entries in prop::collection::vec(

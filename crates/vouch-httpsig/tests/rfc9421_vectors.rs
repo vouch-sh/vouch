@@ -86,6 +86,7 @@ fn build_test_response() -> http::Response<&'static [u8]> {
 // B.2.1 — Minimal Signature Using rsa-pss-sha512
 //   (we skip RSA but verify the signature base construction)
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.1): minimal signature base test vector.
 #[test]
 fn test_b21_minimal_signature_base() {
     let req = build_test_request();
@@ -110,6 +111,7 @@ fn test_b21_minimal_signature_base() {
 // ---------------------------------------------------------------------------
 // B.2.2 — Selective Covered Components Using rsa-pss-sha512
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.2): selective component coverage test vector.
 #[test]
 fn test_b22_selective_components_signature_base() {
     let req = build_test_request();
@@ -146,6 +148,7 @@ fn test_b22_selective_components_signature_base() {
 // ---------------------------------------------------------------------------
 // B.2.3 — Full Coverage Using rsa-pss-sha512
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.3): full coverage test vector.
 #[test]
 fn test_b23_full_coverage_signature_base() {
     let req = build_test_request();
@@ -188,6 +191,7 @@ fn test_b23_full_coverage_signature_base() {
 // ---------------------------------------------------------------------------
 // B.2.4 — Signing a Response Using ecdsa-p256-sha256
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.4): response signature base test vector.
 #[test]
 fn test_b24_response_signature_base() {
     let resp = build_test_response();
@@ -223,6 +227,7 @@ fn test_b24_response_signature_base() {
 }
 
 // Verify ECDSA P-256 signature from Appendix B.2.4
+// RFC 9421 §3.3.4 (Appendix B.2.4): the published ecdsa-p256-sha256 signature verifies.
 #[test]
 fn test_b24_verify_ecdsa_signature() {
     let resp = build_test_response();
@@ -287,6 +292,7 @@ fn test_b24_verify_ecdsa_signature() {
 // B.2.5 — Signing a Request Using hmac-sha256
 //   (deterministic — we can verify the exact signature)
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.5): HMAC test vector signature base.
 #[test]
 fn test_b25_hmac_signature_base() {
     let req = build_test_request();
@@ -318,6 +324,7 @@ fn test_b25_hmac_signature_base() {
     assert_eq!(base_str, expected);
 }
 
+// RFC 9421 §3.3.3 (Appendix B.2.5): the published hmac-sha256 signature verifies.
 #[test]
 fn test_b25_hmac_verify_signature() {
     let req = build_test_request();
@@ -361,6 +368,7 @@ fn test_b25_hmac_verify_signature() {
 // B.2.6 — Signing a Request Using ed25519
 //   (deterministic — we can verify the exact signature)
 // ---------------------------------------------------------------------------
+// RFC 9421 §2.5 (Appendix B.2.6): Ed25519 test vector signature base.
 #[test]
 fn test_b26_ed25519_signature_base() {
     let req = build_test_request();
@@ -398,6 +406,7 @@ fn test_b26_ed25519_signature_base() {
     assert_eq!(base_str, expected);
 }
 
+// RFC 9421 §3.3.6 (Appendix B.2.6): the published ed25519 signature verifies.
 #[test]
 fn test_b26_ed25519_verify_signature() {
     let req = build_test_request();
@@ -464,6 +473,7 @@ fn test_b26_ed25519_verify_signature() {
 // ---------------------------------------------------------------------------
 // B.4 — HTTP Message Transformations (Ed25519)
 // ---------------------------------------------------------------------------
+// RFC 9421 §1.3 (Appendix B.4): the base survives permitted message transformations.
 #[test]
 fn test_b4_transform_signature_base() {
     // The request from B.4 (different from test-request)
@@ -507,6 +517,7 @@ fn test_b4_transform_signature_base() {
     assert_eq!(base_str, expected);
 }
 
+// RFC 9421 §1.3 (Appendix B.4): a signature survives permitted message transformations.
 #[test]
 fn test_b4_transform_verify_ed25519_signature() {
     let req = http::Request::builder()
@@ -554,6 +565,7 @@ fn test_b4_transform_verify_ed25519_signature() {
 }
 
 // Verify that modifying the method/authority invalidates the signature (B.4)
+// RFC 9421 §1.3 (Appendix B.4): changing the method is not a permitted transformation.
 #[test]
 fn test_b4_transform_modified_method_fails() {
     // Same as B.4 but method changed to POST and host to example.com

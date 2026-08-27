@@ -736,6 +736,7 @@ mod tests {
         builder.body(()).unwrap()
     }
 
+    // RFC 9421 §2.2.1: @method is the request method, uppercased.
     #[test]
     fn test_method_resolution() {
         let req = make_request("POST", "https://example.com/path", &[]);
@@ -743,6 +744,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "POST");
     }
 
+    // RFC 9421 §2.2.3: @authority is the request authority.
     #[test]
     fn test_authority_resolution() {
         let req = make_request("GET", "https://example.com/path", &[]);
@@ -750,6 +752,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: a non-default port stays in the authority.
     #[test]
     fn test_authority_with_port() {
         let req = make_request("GET", "https://example.com:8443/path", &[]);
@@ -757,6 +760,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com:8443");
     }
 
+    // RFC 9421 §2.2.3: normalized per HTTP §4.2.3: the default https port is elided.
     #[test]
     fn test_authority_omits_default_https_port() {
         let req = make_request("GET", "https://example.com:443/path", &[]);
@@ -764,6 +768,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: normalized per HTTP §4.2.3: the default http port is elided.
     #[test]
     fn test_authority_omits_default_http_port() {
         let req = make_request("GET", "http://example.com:80/path", &[]);
@@ -771,6 +776,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: origin-form request: authority comes from the Host field.
     #[test]
     fn test_authority_from_host_header() {
         // Path-only URI (HTTP/1.1 origin-form) — falls back to Host header
@@ -779,6 +785,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: Host-derived authority keeps a non-default port.
     #[test]
     fn test_authority_from_host_header_with_port() {
         let req = make_request("POST", "/v1/credentials/ssh", &[("host", "localhost:3000")]);
@@ -786,6 +793,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "localhost:3000");
     }
 
+    // RFC 9421 §2.2.3: Host-derived authority is normalized the same way as the URI-derived one.
     #[test]
     fn test_authority_host_header_strips_default_https_port() {
         // Some HTTP/1.1 clients emit Host with explicit :443. The URI-derived
@@ -801,6 +809,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: the component value MUST be normalized per HTTP §4.2.3 (lowercase host).
     #[test]
     fn test_authority_host_header_lowercase_and_strip() {
         let req = make_request("POST", "/v1/foo", &[("host", "Example.COM:443")]);
@@ -808,6 +817,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
     }
 
+    // RFC 9421 §2.2.3: only the scheme's own default port is elided.
     #[test]
     fn test_authority_host_header_keeps_non_default_port() {
         // Scheme defaults to "https" when URI has none; :80 is not the
@@ -817,6 +827,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com:80");
     }
 
+    // RFC 9421 §2.2.3: an arbitrary port is preserved.
     #[test]
     fn test_authority_host_header_keeps_arbitrary_port() {
         let req = make_request("POST", "/v1/foo", &[("host", "example.com:8443")]);
@@ -824,6 +835,8 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com:8443");
     }
 
+    // RFC 9421 §2.2.3: signer and verifier derive the same authority from
+    // either source.
     #[test]
     fn test_authority_uri_and_host_header_agree_on_default_port() {
         // Cross-check: client signs via URI path with default port stripped,
@@ -842,6 +855,7 @@ mod tests {
         assert_eq!(client_authority, "dev.vouch.sh");
     }
 
+    // RFC 9421 §2.2.3: absolute-form request: the URI supplies the authority.
     #[test]
     fn test_authority_uri_preferred_over_host() {
         // Full URI takes precedence over Host header
@@ -854,6 +868,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "from-uri.com");
     }
 
+    // RFC 9421 §2.2.6: @path is the absolute path portion of the target URI.
     #[test]
     fn test_path_resolution() {
         let req = make_request("GET", "https://example.com/foo/bar", &[]);
@@ -861,6 +876,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "/foo/bar");
     }
 
+    // RFC 9421 §2.2.6: an empty path is normalized to a single slash.
     #[test]
     fn test_path_empty_becomes_slash() {
         let req = make_request("GET", "https://example.com", &[]);
@@ -868,6 +884,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "/");
     }
 
+    // RFC 9421 §2.2.7: @query is the query string including the leading question mark.
     #[test]
     fn test_query_resolution() {
         let req = make_request("GET", "https://example.com/path?a=1&b=2", &[]);
@@ -875,6 +892,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "?a=1&b=2");
     }
 
+    // RFC 9421 §2.2.7: an absent query is represented as a bare question mark.
     #[test]
     fn test_query_absent_becomes_question_mark() {
         let req = make_request("GET", "https://example.com/path", &[]);
@@ -882,6 +900,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "?");
     }
 
+    // RFC 9421 §2.2.4: @scheme MUST be normalized to lowercase for the signature base.
     #[test]
     fn test_scheme_resolution() {
         let req = make_request("GET", "https://example.com/path", &[]);
@@ -889,6 +908,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "https");
     }
 
+    // RFC 9421 §2.2.2: @target-uri is the full absolute target URI.
     #[test]
     fn test_target_uri_resolution() {
         let req = make_request("GET", "https://example.com/path?q=1", &[]);
@@ -899,6 +919,7 @@ mod tests {
         );
     }
 
+    // RFC 9421 §2.2.5: @request-target is the request target as sent on the wire.
     #[test]
     fn test_request_target_resolution() {
         let req = make_request("GET", "https://example.com/path?q=1", &[]);
@@ -906,6 +927,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "/path?q=1");
     }
 
+    // RFC 9421 §2.1: a field component resolves to that field's value.
     #[test]
     fn test_field_resolution() {
         let req = make_request(
@@ -917,6 +939,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "application/json");
     }
 
+    // RFC 9421 §2.1: field names are matched case-insensitively.
     #[test]
     fn test_field_case_insensitive() {
         let req = make_request(
@@ -928,6 +951,8 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "text/plain");
     }
 
+    // RFC 9421 §2.1: a named field absent from the message is an error in
+    // signature base generation.
     #[test]
     fn test_field_missing_returns_error() {
         let req = make_request("GET", "https://example.com/", &[]);
@@ -935,6 +960,7 @@ mod tests {
         assert!(cid.resolve_from_request(&req).is_err());
     }
 
+    // RFC 9421 §2.2.8: @query-param resolves the named query parameter.
     #[test]
     fn test_query_param_resolution() {
         let req = make_request("GET", "https://example.com/path?name=value&other=2", &[]);
@@ -942,6 +968,8 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "value");
     }
 
+    // RFC 9421 §2.2.8: query parameters are parsed per the HTML URL rules,
+    // which leave malformed percent-escapes intact.
     #[test]
     fn test_url_decode_preserves_malformed_percent_encoding() {
         assert_eq!(url_decode("%2G"), "%2G");
@@ -949,11 +977,13 @@ mod tests {
         assert_eq!(url_decode("%ZZhello"), "%ZZhello");
     }
 
+    // RFC 9421 §2.2.8: valid percent-escapes are decoded before inclusion.
     #[test]
     fn test_url_decode_decodes_valid_percent_encoding() {
         assert_eq!(url_decode("name%20with%20space"), "name with space");
     }
 
+    // RFC 9421 §2.2.9: @status is the response status code.
     #[test]
     fn test_status_from_response() {
         let resp = http::Response::builder().status(200).body(()).unwrap();
@@ -986,6 +1016,8 @@ mod tests {
 
     // ;sf tests
 
+    // RFC 9421 §2.1.1: with ;sf the field value MUST be re-serialized using
+    // the strict structured-field rules.
     #[test]
     fn test_sf_canonicalizes_item() {
         // SFV Item with extra whitespace in params gets canonicalized
@@ -1000,6 +1032,7 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "42");
     }
 
+    // RFC 9421 §2.1.1: with ;sf a Dictionary field is re-serialized canonically.
     #[test]
     fn test_sf_canonicalizes_dictionary() {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a=1, b=2")]);
@@ -1015,6 +1048,7 @@ mod tests {
 
     // ;key tests
 
+    // RFC 9421 §2.1.2: with ;key the component value is the named Dictionary member.
     #[test]
     fn test_key_extracts_dict_member() {
         let req = make_request(
@@ -1032,6 +1066,8 @@ mod tests {
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "2");
     }
 
+    // RFC 9421 §2.1.2: a Dictionary key named as a covered component but
+    // absent MUST cause an error.
     #[test]
     fn test_key_missing_returns_error() {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a=1, b=2")]);
@@ -1045,6 +1081,7 @@ mod tests {
         assert!(cid.resolve_from_request(&req).is_err());
     }
 
+    // RFC 9421 §2.1.2: a Boolean-true Dictionary member serializes as the bare key.
     #[test]
     fn test_key_extracts_boolean_true_member() {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a, b=2")]);
@@ -1061,6 +1098,7 @@ mod tests {
 
     // ;bs tests
 
+    // RFC 9421 §2.1.3: with ;bs the component value is the byte-sequence-wrapped field value.
     #[test]
     fn test_bs_encodes_single_value() {
         let req = make_request("GET", "https://example.com/", &[("x-val", "hello")]);
@@ -1076,6 +1114,7 @@ mod tests {
         assert_eq!(result, ":aGVsbG8=:");
     }
 
+    // RFC 9421 §2.1.3: with ;bs each field value is wrapped separately and combined into a List.
     #[test]
     fn test_bs_encodes_multiple_values() {
         let mut req = http::Request::builder()
@@ -1101,6 +1140,7 @@ mod tests {
 
     // ;tr tests
 
+    // RFC 9421 §2.1.4: trailer fields are only available with the ;tr parameter.
     #[test]
     fn test_tr_returns_error() {
         let req = make_request("GET", "https://example.com/", &[("x-val", "1")]);
@@ -1117,6 +1157,7 @@ mod tests {
 
     // ;req on derived components
 
+    // RFC 9421 §2.4: with ;req a response signature covers the request's component value.
     #[test]
     fn test_req_on_derived_in_response() {
         let req = make_request("POST", "https://example.com/foo", &[]);
@@ -1136,6 +1177,7 @@ mod tests {
         );
     }
 
+    // RFC 9421 §2.4: with ;req the request's @authority is covered by the response signature.
     #[test]
     fn test_req_on_authority_in_response() {
         let req = make_request("GET", "https://example.com/path", &[]);

@@ -68,6 +68,7 @@ impl VerifyingAlgorithm for HmacSha256Key {
 mod tests {
     use super::*;
 
+    // RFC 9421 §3.3.3: hmac-sha256 round trip.
     #[test]
     fn test_sign_verify_roundtrip() {
         let key = HmacSha256Key::new(b"test-shared-secret", "test-hmac");
@@ -79,6 +80,7 @@ mod tests {
         key.verify(message, &sig).unwrap();
     }
 
+    // RFC 9421 §3.3.3: an altered signature base fails verification.
     #[test]
     fn test_verify_rejects_tampered() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -86,6 +88,7 @@ mod tests {
         assert!(key.verify(b"tampered", &sig).is_err());
     }
 
+    // RFC 9421 §3.3.3: the MAC is deterministic for a given key and base.
     #[test]
     fn test_deterministic() {
         let key = HmacSha256Key::new(b"secret", "k");
@@ -95,6 +98,7 @@ mod tests {
         assert_eq!(sig1, sig2);
     }
 
+    // RFC 9421 §3.3.3: distinct keys produce distinct MACs.
     #[test]
     fn test_different_keys_different_signatures() {
         let key1 = HmacSha256Key::new(b"secret1", "k1");
@@ -106,6 +110,7 @@ mod tests {
         assert_ne!(sig1, sig2);
     }
 
+    // RFC 9421 §3.3.3: a different key does not verify.
     #[test]
     fn test_wrong_key_rejects() {
         let key1 = HmacSha256Key::new(b"secret1", "k1");
@@ -115,6 +120,7 @@ mod tests {
         assert!(key2.verify(b"message", &sig).is_err());
     }
 
+    // RFC 9421 §3.3.3: the registered algorithm name is hmac-sha256.
     #[test]
     fn test_algorithm_identifier() {
         let key = HmacSha256Key::new(b"s", "k");

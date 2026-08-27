@@ -125,6 +125,7 @@ impl VerifyingAlgorithm for EcdsaP256Verifier {
 mod tests {
     use super::*;
 
+    // RFC 9421 §3.3.4: ecdsa-p256-sha256 round trip.
     #[test]
     fn test_sign_verify_roundtrip() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -136,6 +137,7 @@ mod tests {
         verifier.verify(message, &signature).unwrap();
     }
 
+    // RFC 9421 §3.3.4: an altered signature base fails verification.
     #[test]
     fn test_verify_rejects_tampered() {
         let signer = EcdsaP256Signer::generate("test-key").unwrap();
@@ -146,6 +148,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 9421 §3.3.4: the registered algorithm name is ecdsa-p256-sha256.
     #[test]
     fn test_algorithm_identifier() {
         let signer = EcdsaP256Signer::generate("k1").unwrap();
@@ -153,12 +156,14 @@ mod tests {
         assert_eq!(signer.verifier().algorithm().as_str(), "ecdsa-p256-sha256");
     }
 
+    // RFC 9421 §2.3: keyid identifies the verification key.
     #[test]
     fn test_key_id() {
         let signer = EcdsaP256Signer::generate("my-key-id").unwrap();
         assert_eq!(signer.key_id(), "my-key-id");
     }
 
+    // RFC 9421 §3.3.4: the signature is the raw (r, s) pair, not DER.
     #[test]
     fn test_der_signature_format() {
         let signer = EcdsaP256Signer::generate("k").unwrap();
@@ -173,6 +178,7 @@ mod tests {
         );
     }
 
+    // RFC 9421 §3.3.4: a different key does not verify.
     #[test]
     fn test_wrong_key_rejects() {
         let signer1 = EcdsaP256Signer::generate("k1").unwrap();

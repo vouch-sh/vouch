@@ -63,6 +63,8 @@ ALIASES = {
 
 SECTION = r"(?:§|[Ss]ection[  ]|[Ss]ec\.[  ])[  ]?(\d+(?:\.\d+)*)"
 RFC_CITE = re.compile(r"RFC[  ]?(\d{3,4})[^.\n]{0,12}?" + SECTION)
+# "RFC 9421 §4.1, §4.2" cites two sections against one RFC.
+EXTRA_SECTION = re.compile(r"\s*,\s*§[  ]?(\d+(?:\.\d+)*)")
 ALIAS_CITES = [
     (re.compile(name + r"[^.\n]{0,12}?" + SECTION), spec) for name, spec in ALIASES.items()
 ]
@@ -133,7 +135,12 @@ def test_blocks(text: str) -> list[tuple[str, str]]:
 def citations(source: str, default_spec: str | None) -> set[tuple[str, str]]:
     found: set[tuple[str, str]] = set()
     for m in RFC_CITE.finditer(source):
-        found.add((f"rfc{m.group(1)}", m.group(2)))
+        spec = f"rfc{m.group(1)}"
+        found.add((spec, m.group(2)))
+        pos = m.end()
+        while (extra := EXTRA_SECTION.match(source, pos)) is not None:
+            found.add((spec, extra.group(1)))
+            pos = extra.end()
     for pattern, spec in ALIAS_CITES:
         for m in pattern.finditer(source):
             found.add((spec, m.group(m.lastindex)))

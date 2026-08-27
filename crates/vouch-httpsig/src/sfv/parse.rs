@@ -563,54 +563,63 @@ pub fn parse_item(input: &str) -> Result<SfvItem, HttpSigError> {
 mod tests {
     use super::*;
 
+    // RFC 8941 §4.2.4: parsing an Integer.
     #[test]
     fn test_parse_integer() {
         let item = parse_item("42").unwrap();
         assert_eq!(item.value, SfvBareItem::Integer(42));
     }
 
+    // RFC 8941 §4.2.4: a leading minus sign is part of the Integer.
     #[test]
     fn test_parse_negative_integer() {
         let item = parse_item("-7").unwrap();
         assert_eq!(item.value, SfvBareItem::Integer(-7));
     }
 
+    // RFC 8941 §4.2.5: parsing a String.
     #[test]
     fn test_parse_string() {
         let item = parse_item("\"hello\"").unwrap();
         assert_eq!(item.value, SfvBareItem::String("hello".into()));
     }
 
+    // RFC 8941 §4.2.5: only backslash and double quote may be escaped.
     #[test]
     fn test_parse_string_with_escape() {
         let item = parse_item("\"he\\\"llo\"").unwrap();
         assert_eq!(item.value, SfvBareItem::String("he\"llo".into()));
     }
 
+    // RFC 8941 §4.2.6: parsing a Token.
     #[test]
     fn test_parse_token() {
         let item = parse_item("foo").unwrap();
         assert_eq!(item.value, SfvBareItem::Token("foo".into()));
     }
 
+    // RFC 8941 §4.2.7: a Byte Sequence is base64 delimited by colons.
     #[test]
     fn test_parse_byte_sequence() {
         let item = parse_item(":dGVzdA==:").unwrap();
         assert_eq!(item.value, SfvBareItem::ByteSequence(b"test".to_vec()));
     }
 
+    // RFC 8941 §4.2.8: ?1 parses as Boolean true.
     #[test]
     fn test_parse_boolean_true() {
         let item = parse_item("?1").unwrap();
         assert_eq!(item.value, SfvBareItem::Boolean(true));
     }
 
+    // RFC 8941 §4.2.8: ?0 parses as Boolean false.
     #[test]
     fn test_parse_boolean_false() {
         let item = parse_item("?0").unwrap();
         assert_eq!(item.value, SfvBareItem::Boolean(false));
     }
 
+    // RFC 8941 §3.1.2: an Item carries zero or more Parameters.
     #[test]
     fn test_parse_item_with_params() {
         let item = parse_item("\"val\";key=1;flag").unwrap();
@@ -619,6 +628,7 @@ mod tests {
         assert_eq!(item.params.get("flag"), Some(&None));
     }
 
+    // RFC 8941 §3.1.1: an Inner List is parenthesized and space separated.
     #[test]
     fn test_parse_inner_list() {
         let list = parse_inner_list("(\"a\" \"b\");created=1").unwrap();
@@ -631,6 +641,7 @@ mod tests {
         );
     }
 
+    // RFC 8941 §4.2.2: parsing a single-member Dictionary.
     #[test]
     fn test_parse_dictionary_single() {
         let dict = parse_dictionary("sig1=:dGVzdA==:").unwrap();
@@ -638,6 +649,7 @@ mod tests {
         assert_eq!(dict.entries[0].0, "sig1");
     }
 
+    // RFC 8941 §4.2.2: Dictionary members are comma separated.
     #[test]
     fn test_parse_dictionary_multiple() {
         let dict = parse_dictionary("sig1=:dGVzdA==:, sig2=:YWJj:").unwrap();
@@ -646,6 +658,7 @@ mod tests {
         assert_eq!(dict.entries[1].0, "sig2");
     }
 
+    // RFC 8941 §3.2: a Dictionary value may be an Inner List.
     #[test]
     fn test_parse_dictionary_with_inner_list() {
         let dict = parse_dictionary(
@@ -669,12 +682,14 @@ mod tests {
         }
     }
 
+    // RFC 8941 §3.1.1: an Inner List may be empty.
     #[test]
     fn test_parse_empty_inner_list() {
         let list = parse_inner_list("()").unwrap();
         assert!(list.items.is_empty());
     }
 
+    // RFC 8941 §3.2: a Dictionary member with no value is Boolean true.
     #[test]
     fn test_parse_boolean_dict_member() {
         let dict = parse_dictionary("flag").unwrap();
@@ -689,36 +704,42 @@ mod tests {
 
     // Decimal tests
 
+    // RFC 8941 §4.2.4: parsing a Decimal.
     #[test]
     fn test_parse_decimal() {
         let item = parse_item("3.12").unwrap();
         assert_eq!(item.value, SfvBareItem::Decimal(3.12));
     }
 
+    // RFC 8941 §4.2.4: a leading minus sign is part of the Decimal.
     #[test]
     fn test_parse_negative_decimal() {
         let item = parse_item("-2.5").unwrap();
         assert_eq!(item.value, SfvBareItem::Decimal(-2.5));
     }
 
+    // RFC 8941 §4.2.4: one fractional digit is valid.
     #[test]
     fn test_parse_decimal_one_fractional_digit() {
         let item = parse_item("1.0").unwrap();
         assert_eq!(item.value, SfvBareItem::Decimal(1.0));
     }
 
+    // RFC 8941 §4.2.4: three fractional digits is the maximum.
     #[test]
     fn test_parse_decimal_three_fractional_digits() {
         let item = parse_item("99.123").unwrap();
         assert_eq!(item.value, SfvBareItem::Decimal(99.123));
     }
 
+    // RFC 8941 §4.2.4: more than three fractional digits fails parsing.
     #[test]
     fn test_parse_decimal_four_fractional_digits_rejected() {
         let result = parse_item("1.1234");
         assert!(result.is_err(), "4 fractional digits must be rejected");
     }
 
+    // RFC 8941 §4.2.4: a trailing decimal point with no fraction fails parsing.
     #[test]
     fn test_parse_decimal_no_fractional_digits_rejected() {
         // "1." with no fractional digits is invalid
@@ -728,24 +749,28 @@ mod tests {
 
     // Integer range tests
 
+    // RFC 8941 §3.3.1: the Integer range tops out at 15 digits.
     #[test]
     fn test_parse_integer_max_valid() {
         let item = parse_item("999999999999999").unwrap();
         assert_eq!(item.value, SfvBareItem::Integer(999_999_999_999_999));
     }
 
+    // RFC 8941 §3.3.1: the Integer range bottoms out at 15 digits.
     #[test]
     fn test_parse_integer_min_valid() {
         let item = parse_item("-999999999999999").unwrap();
         assert_eq!(item.value, SfvBareItem::Integer(-999_999_999_999_999));
     }
 
+    // RFC 8941 §3.3.1: an Integer beyond the range fails parsing.
     #[test]
     fn test_parse_integer_over_max_rejected() {
         let result = parse_item("1000000000000000");
         assert!(result.is_err(), "integer above max must be rejected");
     }
 
+    // RFC 8941 §3.3.1: an Integer below the range fails parsing.
     #[test]
     fn test_parse_integer_under_min_rejected() {
         let result = parse_item("-1000000000000000");
@@ -754,6 +779,7 @@ mod tests {
 
     // List tests
 
+    // RFC 8941 §4.2.1: List members are comma separated.
     #[test]
     fn test_parse_list_items() {
         let list = parse_list("\"a\", \"b\", \"c\"").unwrap();
@@ -766,6 +792,7 @@ mod tests {
         }
     }
 
+    // RFC 8941 §3.1.1: a List member may be an Inner List.
     #[test]
     fn test_parse_list_with_inner_list() {
         let list = parse_list("\"a\", (\"b\" \"c\"), \"d\"").unwrap();
@@ -778,18 +805,21 @@ mod tests {
         }
     }
 
+    // RFC 8941 §4.2.1: a List may hold one member.
     #[test]
     fn test_parse_list_single_item() {
         let list = parse_list("42").unwrap();
         assert_eq!(list.members.len(), 1);
     }
 
+    // RFC 8941 §4.2.1: an empty field value is an empty List.
     #[test]
     fn test_parse_list_empty() {
         let list = parse_list("").unwrap();
         assert!(list.members.is_empty());
     }
 
+    // RFC 8941 §3.1.2: List members carry Parameters.
     #[test]
     fn test_parse_list_with_params() {
         let list = parse_list("\"a\";x=1, \"b\";y=2").unwrap();
@@ -798,6 +828,7 @@ mod tests {
 
     // Input length limit
 
+    // RFC 8941 §1.1: parsing is intentionally strict and bounded.
     #[test]
     fn test_parse_dictionary_rejects_oversized_input() {
         let input = "a".repeat(8193);
@@ -805,6 +836,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // RFC 8941 §1.1: parsing is intentionally strict and bounded.
     #[test]
     fn test_parse_list_rejects_oversized_input() {
         let input = "a".repeat(8193);

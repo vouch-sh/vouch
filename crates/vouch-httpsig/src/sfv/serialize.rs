@@ -152,6 +152,7 @@ mod tests {
     use super::*;
     use crate::sfv::parse;
 
+    // RFC 8941 §4.1.4: serializing an Integer.
     #[test]
     fn test_serialize_item_integer() {
         let item = SfvItem {
@@ -161,6 +162,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "42");
     }
 
+    // RFC 8941 §4.1.6: serializing a String.
     #[test]
     fn test_serialize_item_string() {
         let item = SfvItem {
@@ -170,6 +172,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "\"hello\"");
     }
 
+    // RFC 8941 §4.1.8: a Byte Sequence serializes as base64 between colons.
     #[test]
     fn test_serialize_byte_sequence() {
         let item = SfvItem {
@@ -179,6 +182,7 @@ mod tests {
         assert_eq!(serialize_item(&item), ":dGVzdA==:");
     }
 
+    // RFC 8941 §4.1.1.1: serializing an Inner List.
     #[test]
     fn test_serialize_inner_list() {
         let list = SfvInnerList {
@@ -202,6 +206,7 @@ mod tests {
         assert_eq!(s, "(\"@method\" \"@authority\");created=1618884473");
     }
 
+    // RFC 8941 §4.1.2: serializing a Dictionary.
     #[test]
     fn test_serialize_dictionary() {
         let dict = SfvDictionary {
@@ -225,6 +230,7 @@ mod tests {
         assert_eq!(serialize_dictionary(&dict), "sig1=:dGVzdA==:, sig2=:YWJj:");
     }
 
+    // RFC 8941 §4.1.2, §4.2.2: a Dictionary survives serialize then parse.
     #[test]
     fn test_roundtrip_dictionary() {
         let input = "sig1=(\"@method\" \"@authority\");created=1618884473;alg=\"hmac-sha256\"";
@@ -234,6 +240,7 @@ mod tests {
         assert_eq!(dict, dict2);
     }
 
+    // RFC 8941 §4.1.1.1: an Inner List survives serialize then parse.
     #[test]
     fn test_roundtrip_inner_list() {
         let input = "(\"@method\" \"content-type\");created=100;keyid=\"key1\"";
@@ -243,6 +250,7 @@ mod tests {
         assert_eq!(list, list2);
     }
 
+    // RFC 8941 §4.1.6: backslash and double quote are escaped.
     #[test]
     fn test_serialize_string_with_escape() {
         let item = SfvItem {
@@ -252,6 +260,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "\"he\\\"llo\"");
     }
 
+    // RFC 8941 §4.1.9: Boolean true serializes as ?1.
     #[test]
     fn test_serialize_boolean_true() {
         let item = SfvItem {
@@ -261,6 +270,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "?1");
     }
 
+    // RFC 8941 §4.1.2: a Boolean-true Dictionary member serializes as the bare key.
     #[test]
     fn test_serialize_boolean_dict_member() {
         let dict = SfvDictionary {
@@ -275,6 +285,7 @@ mod tests {
         assert_eq!(serialize_dictionary(&dict), "flag");
     }
 
+    // RFC 8941 §4.1.5: serializing a Decimal.
     #[test]
     fn test_serialize_decimal() {
         let item = SfvItem {
@@ -284,6 +295,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "3.12");
     }
 
+    // RFC 8941 §4.1.5: a Decimal always carries at least one fractional digit.
     #[test]
     fn test_serialize_decimal_trailing_zeros() {
         let item = SfvItem {
@@ -293,6 +305,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "1.0");
     }
 
+    // RFC 8941 §4.1.5: a negative Decimal keeps its sign.
     #[test]
     fn test_serialize_negative_decimal() {
         let item = SfvItem {
@@ -302,6 +315,7 @@ mod tests {
         assert_eq!(serialize_item(&item), "-2.5");
     }
 
+    // RFC 8941 §4.1.5, §4.2.4: a Decimal survives serialize then parse.
     #[test]
     fn test_roundtrip_decimal() {
         let input = "3.12";
@@ -311,6 +325,7 @@ mod tests {
         assert_eq!(item, item2);
     }
 
+    // RFC 8941 §4.1.1: serializing a List.
     #[test]
     fn test_serialize_list() {
         let list = SfvList {
@@ -328,6 +343,7 @@ mod tests {
         assert_eq!(serialize_list(&list), "\"a\", 42");
     }
 
+    // RFC 8941 §4.1.1, §4.2.1: a List survives serialize then parse.
     #[test]
     fn test_roundtrip_list() {
         let input = "\"a\", (\"b\" \"c\"), 42";
