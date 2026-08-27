@@ -70,6 +70,15 @@ ISO_CONVENTION_RE = re.compile(
     r"keywords?\s+[\"\u201c\u2018']?shall[\"\u201d\u2019']?\s*,", re.IGNORECASE
 )
 
+# A list item marker.  Converted W3C and OASIS documents delimit numbered steps
+# with tabs ("\t13\tVerify that the rpIdHash in authData ..."), which is how
+# WebAuthn writes the 23 steps of the registration ceremony -- the densest block
+# of relying-party obligations in the document.
+LIST_ITEM_RE = re.compile(
+    r"^[ \t]*(?:\(?\d{1,2}[.)]|[a-z][.)]|[*+o•◦‣–—-])[ \t]+\S"
+    r"|^[ \t]*\d{1,2}[ \t]*\t[ \t]*\S"
+)
+
 # Converted files carry typographic whitespace that regexes for " " miss.
 UNICODE_SPACES = {
     0x00A0: " ", 0x2000: " ", 0x2001: " ", 0x2002: " ", 0x2003: " ", 0x2004: " ",
@@ -257,28 +266,38 @@ def parse_sections(lines: list[str]) -> list[tuple[str, str, list[str]]]:
     return sections
 
 
-def paragraphs(body: list[str]) -> list[str]:
-    """Reflow wrapped lines into paragraphs, keeping list items separate."""
-    paras: list[str] = []
+def paragraphs(body: list[str]) -> list[tuple[bool, str]]:
+    """Reflow wrapped lines into (is_list_item, text) paragraphs.
+
+    Whether a paragraph is a list item has to be decided here, while the raw
+    line is still intact: joining the lines collapses the tab that marks an
+    item in the converted W3C and OASIS documents.
+    """
+    paras: list[tuple[bool, str]] = []
     current: list[str] = []
+    current_is_item = False
 
     def flush_current():
         if current:
             text = " ".join(current)
             text = re.sub(r"\s+", " ", text).strip()
             if text:
-                paras.append(text)
+                paras.append((current_is_item, text))
             current.clear()
 
     for line in body:
         if not line.strip():
             flush_current()
+            current_is_item = False
             continue
-        # A new list item ("1.", "a)", "*", "-", "o ") starts its own paragraph
-        # so that each bullet under a "MUST ensure the following:" stem becomes
-        # its own requirement rather than being glued into one blob.
-        if re.match(r"^\s*(?:\(?\d{1,2}[.)]|[a-z][.)]|[*+o•-])\s+\S", line) and current:
+        # A new list item starts its own paragraph so that each bullet under a
+        # "MUST ensure the following:" stem becomes its own requirement rather
+        # than being glued into one blob.
+        starts_item = bool(LIST_ITEM_RE.match(line))
+        if starts_item and current:
             flush_current()
+        if not current:
+            current_is_item = starts_item
         current.append(line.strip())
     flush_current()
     return paras
@@ -361,12 +380,10 @@ def extract(spec_id: str, path: Path) -> list[dict]:
 
     for number, title, body in parse_sections(lines):
         pending_stem: str | None = None
-        for para in paragraphs(body):
+        for is_item, para in paragraphs(body):
             if BOILERPLATE_RE.search(para):
                 pending_stem = None
                 continue
-
-            is_item = bool(re.match(r"^(?:\(?\d{1,2}[.)]|[a-z][.)]|[*+o•-])\s+", para))
 
             # A bullet under a normative stem ("... MUST ensure the following:")
             # inherits the stem's obligation even though the bullet itself has
