@@ -79,6 +79,9 @@ LIST_ITEM_RE = re.compile(
     r"|^[ \t]*\d{1,2}[ \t]*\t[ \t]*\S"
 )
 
+# The leading number of a list item, once wrapped lines have been joined.
+ITEM_NUMBER_RE = re.compile(r"^\(?(\d{1,2})[.)\s]")
+
 # Converted files carry typographic whitespace that regexes for " " miss.
 UNICODE_SPACES = {
     0x00A0: " ", 0x2000: " ", 0x2001: " ", 0x2002: " ", 0x2003: " ", 0x2004: " ",
@@ -266,23 +269,36 @@ def parse_sections(lines: list[str]) -> list[tuple[str, str, list[str]]]:
     return sections
 
 
-def paragraphs(body: list[str]) -> list[tuple[bool, str]]:
-    """Reflow wrapped lines into (is_list_item, text) paragraphs.
+def indent_width(line: str) -> int:
+    width = 0
+    for ch in line:
+        if ch == "\t":
+            width += 4
+        elif ch == " ":
+            width += 1
+        else:
+            break
+    return width
+
+
+def paragraphs(body: list[str]) -> list[tuple[bool, int, str]]:
+    """Reflow wrapped lines into (is_list_item, indent, text) paragraphs.
 
     Whether a paragraph is a list item has to be decided here, while the raw
     line is still intact: joining the lines collapses the tab that marks an
     item in the converted W3C and OASIS documents.
     """
-    paras: list[tuple[bool, str]] = []
+    paras: list[tuple[bool, int, str]] = []
     current: list[str] = []
     current_is_item = False
+    current_indent = 0
 
     def flush_current():
         if current:
             text = " ".join(current)
             text = re.sub(r"\s+", " ", text).strip()
             if text:
-                paras.append((current_is_item, text))
+                paras.append((current_is_item, current_indent, text))
             current.clear()
 
     for line in body:
@@ -298,6 +314,7 @@ def paragraphs(body: list[str]) -> list[tuple[bool, str]]:
             flush_current()
         if not current:
             current_is_item = starts_item
+            current_indent = indent_width(line)
         current.append(line.strip())
     flush_current()
     return paras
@@ -380,7 +397,8 @@ def extract(spec_id: str, path: Path) -> list[dict]:
 
     for number, title, body in parse_sections(lines):
         pending_stem: str | None = None
-        for is_item, para in paragraphs(body):
+        stem_next = 1
+        for is_item, indent, para in paragraphs(body):
             if BOILERPLATE_RE.search(para):
                 pending_stem = None
                 continue
@@ -388,7 +406,29 @@ def extract(spec_id: str, path: Path) -> list[dict]:
             # A bullet under a normative stem ("... MUST ensure the following:")
             # inherits the stem's obligation even though the bullet itself has
             # no keyword.  Each such bullet is a separately testable condition.
-            if is_item and pending_stem and not keyword_re.search(para):
+            #
+            # Membership is decided by the item numbering rather than by
+            # position, because the conversion to text flattens away the
+            # indentation that nests an explanatory note under a step: WebAuthn
+            # puts one under step 6 of the authentication ceremony, and treating
+            # it as the end of the list dropped steps 7 through 24.  A bullet
+            # with no number is a sub-bullet of the current step; an item whose
+            # number does not continue the sequence starts an unrelated list.
+            in_sequence = False
+            if is_item and pending_stem is not None:
+                item_number = ITEM_NUMBER_RE.match(para)
+                if item_number is None:
+                    in_sequence = True
+                elif stem_next <= int(item_number.group(1)) <= stem_next + 2:
+                    # Tolerate a small gap: a step whose marker the conversion
+                    # dropped leaves a hole in the numbering, and breaking the
+                    # sequence there would discard every step after it.
+                    in_sequence = True
+                    stem_next = int(item_number.group(1)) + 1
+                else:
+                    pending_stem = None
+
+            if in_sequence and not keyword_re.search(para):
                 text = f"{pending_stem} {para}"
                 inherited = True
             else:
@@ -396,8 +436,6 @@ def extract(spec_id: str, path: Path) -> list[dict]:
                 inherited = False
 
             if not keyword_re.search(text):
-                if not is_item:
-                    pending_stem = None
                 continue
 
             units = [text] if inherited else split_sentences(text)
@@ -432,8 +470,7 @@ def extract(spec_id: str, path: Path) -> list[dict]:
             # Remember a normative stem that introduces a list.
             if para.rstrip().endswith(":") and keyword_re.search(para) and not is_item:
                 pending_stem = normalize(para)
-            elif not is_item:
-                pending_stem = None
+                stem_next = 1
 
     return results
 
