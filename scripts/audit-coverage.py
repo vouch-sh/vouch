@@ -36,6 +36,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 REQUIREMENTS = REPO / "specs" / "requirements.tsv"
 SCOPE = REPO / "specs" / "audit-scope.tsv"
+EXCLUSIONS = REPO / "specs" / "audit-exclusions.tsv"
 BASELINE = REPO / "specs" / "coverage-baseline.tsv"
 REPORT = REPO / "specs" / "coverage-report.md"
 
@@ -61,7 +62,27 @@ def main() -> int:
         return 1
 
     scope = {r["spec_id"]: r for r in load_rows(SCOPE)}
-    reqs = [r for r in load_rows(REQUIREMENTS) if scope.get(r["spec"], {}).get("scope") != "reference"]
+    exclusions = load_rows(EXCLUSIONS)
+
+    def excluded(req: dict) -> bool:
+        """True when a section-level exclusion covers this statement.
+
+        A prefix covers a section and everything beneath it: "4" covers 4, 4.8
+        and 4.8.1, but not 40.
+        """
+        for e in exclusions:
+            if e["spec_id"] != req["spec"]:
+                continue
+            prefix, section = e["section_prefix"], req["section"]
+            if section == prefix or section.startswith(prefix + "."):
+                return True
+        return False
+
+    in_scope = [
+        r for r in load_rows(REQUIREMENTS) if scope.get(r["spec"], {}).get("scope") != "reference"
+    ]
+    reqs = [r for r in in_scope if not excluded(r)]
+    n_excluded = len(in_scope) - len(reqs)
     uncited = {r["req_id"] for r in load_rows(BASELINE)}
 
     stale = uncited - {r["req_id"] for r in reqs}
@@ -108,6 +129,12 @@ def main() -> int:
         f"With at least one citing test: **{cited}** ({cited * 100 // max(total, 1)}%)  ",
         f"With no citing test: **{total - cited}**",
         "",
+        f"A further **{n_excluded}** statements of in-scope specifications are excluded",
+        "by `specs/audit-exclusions.tsv` as addressed to an actor Vouch is not, or",
+        "covering a feature Vouch does not implement by design. They are not counted",
+        "above: they are not owed, so they are not a gap. Each carries its reason in",
+        "that file.",
+        "",
         "A statement counts as cited when some test function names its specification",
         "and section. Linkage is section-level and deliberately optimistic: it",
         "establishes that a statement is untested, not that a cited one is tested",
@@ -123,7 +150,7 @@ def main() -> int:
             f"| {s['must']} | {s['must_gap']} |"
         )
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"in-scope: {total}   cited: {cited}   uncited: {total - cited}")
+    print(f"in-scope: {total}   cited: {cited}   uncited: {total - cited}   excluded: {n_excluded}")
     print(f"wrote {REPORT.relative_to(REPO)}")
     return 0
 

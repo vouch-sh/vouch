@@ -126,7 +126,6 @@ draft-miller-ssh-agent-17#5.1.1#b7916ee1	MUST NOT	These message numbers MAY be u
 draft-miller-ssh-agent-17#5.1.1#e5b3c511	MUST NOT	The range of message numbers 240-255 are reserved for organization- local extensions to the agent protocol and MUST NOT be used by generic implementations.
 draft-miller-ssh-agent-17#7#56dda116	SHOULD	While a full treatment of side-channel attacks is beyond the scope of this specification, agents SHOULD use cryptographic implementations that are resistant to 
 draft-miller-ssh-agent-17#7#8d974984	SHOULD NOT	SSH implementations SHOULD NOT forward use of an agent by default and MAY implement additional controls over key visibility and use for forwarded agent connecti
-fapi-2_0-message-signing#11#c3d22f42	MUST	OpenID invites any interested party to bring to its attention any copyrights, patents, patent applications, or other proprietary rights that may cover technolog
 fapi-2_0-message-signing#5.3.2#53e126d0	MUST	3 shall send a nbf claim in the request object;
 fapi-2_0-message-signing#5.3.2#568fde4f	MUST	4 shall send an exp claim in the request object that has a lifetime of no longer than 60 minutes;
 fapi-2_0-message-signing#5.3.2#9b32af15	MUST	2 shall send the aud claim in the request object as the authorization server's issuer identifier URL;
@@ -146,7 +145,6 @@ fapi-2_0-message-signing#7#1809c712	MUST	If they are stored then adequate access
 fapi-2_0-message-signing#7#2ba9a32d	SHOULD	Such controls should follow data minimisation principles and ensure that there are tamper-proof audit logs.
 fapi-2_0-message-signing#7#8336a9b1	SHOULD	Such messages may well contain personally identifiable information and implementers should evaluate whether such messages need to be stored.
 fapi-2_0-message-signing#7#e354f15f	SHOULD	In addition to the privacy considerations detailed in [FAPI2_Security_Profile] implementers should consider the privacy implications of storing messages for the
-fapi-2_0-security-profile#10#c3d22f42	MUST	OpenID invites any interested party to bring to its attention any copyrights, patents, patent applications, or other proprietary rights that may cover technolog
 fapi-2_0-security-profile#5.1.2#f5f2f0da	MUST NOT	However, for a profile to be compliant with this document, the profile shall not remove or override mandatory behaviors, as doing so is likely to invalidate the
 fapi-2_0-security-profile#5.2.1#57834899	SHOULD	4 should use DNSSEC to protect against DNS spoofing attacks that can lead to the issuance of rogue domain-validated TLS certificates; and.
 fapi-2_0-security-profile#5.2.1#958df66b	MUST	1 shall only offer TLS protected endpoints and shall establish connections to other servers using TLS;
@@ -860,29 +858,8 @@ rfc4514#3#10bc3561	MUST	Implementations MUST recognize AttributeType name string
 rfc4514#3#b8ea25a2	SHOULD	However, as there is no requirement that alternative DN string representations be recognized (and, if so, how), implementations SHOULD only generate DN strings 
 rfc4514#5.2#82e9888b	SHOULD	Instead, they SHOULD use the hexadecimal form prefixed by the number sign ('#' U+0023) as described in the first paragraph of Section 2.4.
 rfc4514#5.2#fe81fcbd	SHOULD NOT	Applications that require the reconstruction of the DER form of the value SHOULD NOT use the string representation of attribute syntaxes when converting a disti
-rfc4514#7.2#6a4d0e88	SHOULD	- Clarified that Section 2 describes the RECOMMENDED encoding algorithm and that alternative algorithms are allowed.
 rfc5280#1#0bb4236c	MUST	Implementations are REQUIRED to derive the same results but are not required to use the specified procedures.
 rfc5280#1#43735cdd	MUST	However, conforming implementations that use the algorithms identified in [RFC3279], [RFC4055], and [RFC4491] MUST identify and encode the public key materials 
-rfc5280#11.2#0caacca2	MUST	Such addresses MUST be encoded using an ASN.1 type that supports them.
-rfc5280#11.2#1a787447	MUST	Certificate users MUST be able to handle serialNumber values up to 20 octets in length.
-rfc5280#11.2#26a95abd	MUST	CAs MUST force the serialNumber to be a non-negative integer, that is, the sign bit in the DER encoding of the INTEGER value MUST be zero.
-rfc5280#11.2#3023bbd8	MUST	CRL validators MUST be able to handle cRLNumber values up to 20 octets in length.
-rfc5280#11.2#3fed6d4c	SHOULD NOT	CAs SHOULD NOT issue certificates that contain OIDs that exceed these requirements.
-rfc5280#11.2#471f0519	MUST	TBSCertificate ::= SEQUENCE { version [0] Version DEFAULT v1, serialNumber CertificateSerialNumber, signature AlgorithmIdentifier, issuer Name, validity Validit
-rfc5280#11.2#745f70ef	MUST NOT	Conforming implementations MUST NOT encode strings that include either the at sign or underscore character as PrintableString.
-rfc5280#11.2#80f9cc4e	MUST	This specification mandates support for OIDs that have arc elements with values that are less than 2^28, that is, they MUST be between 0 and 268,435,455, inclus
-rfc5280#11.2#8be21f73	MUST	-- specifications of Upper Bounds MUST be regarded as mandatory -- from Annex B of ITU-T X.411 Reference Definition of MTS Parameter -- Upper Bounds.
-rfc5280#11.2#902ba109	MUST	Implementations MUST be able to handle OIDs with up to 20 elements (inclusive).
-rfc5280#11.2#952747f6	MUST	-- Implementations that recognize additional policy qualifiers MUST -- augment the following definition for PolicyQualifierId.
-rfc5280#11.2#9c38c994	MUST	TBSCertList ::= SEQUENCE { version Version OPTIONAL, -- if present, MUST be v2 signature AlgorithmIdentifier, issuer Name, thisUpdate Time, nextUpdate Time OPTI
-rfc5280#11.2#a47fdc41	MUST	AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] KeyIdentifier OPTIONAL, authorityCertIssuer [1] GeneralNames OPTIONAL, authorityCertSerialNumber [2] Cer
-rfc5280#11.2#aaa3a0a3	MUST NOT	Conforming CAs MUST NOT use serialNumber values longer than 20 octets.
-rfc5280#11.2#b36036aa	SHOULD NOT	Likewise, CRL issuers SHOULD NOT issue CRLs that contain OIDs that exceed these requirements.
-rfc5280#11.2#b8acda55	MUST	When DER encoding a named bit list, trailing zeros MUST be omitted.
-rfc5280#11.2#bcf74454	MUST NOT	Conforming CRL issuers MUST NOT use cRLNumber values longer than 20 octets.
-rfc5280#11.2#bf136c70	MUST	Implementations MUST also support OIDs where the length of the dotted decimal (see Section 1.4 of [RFC4512]) string representation can be up to 100 bytes (inclu
-rfc5280#11.2#eea68b8c	MUST	PrivateKeyUsagePeriod ::= SEQUENCE { notBefore [0] GeneralizedTime OPTIONAL, notAfter [1] GeneralizedTime OPTIONAL } -- either notBefore or notAfter MUST be pre
-rfc5280#11.2#fe51f29c	MUST	If an extension containing unexpected values is marked as critical, the implementation MUST reject the certificate or CRL containing the unrecognized extension.
 rfc5280#3.3#737479b0	MUST NOT	An entry MUST NOT be removed from the CRL until it appears on one regularly scheduled CRL issued beyond the revoked certificate's validity period.
 rfc5280#4.1#09d36fbd	MUST	subjectUniqueID [2] IMPLICIT UniqueIdentifier OPTIONAL, -- If present, version MUST be v2 or v3 extensions [3] EXPLICIT Extensions OPTIONAL -- If present, versi
 rfc5280#4.1#a382d334	MUST	TBSCertificate ::= SEQUENCE { version [0] EXPLICIT Version DEFAULT v1, serialNumber CertificateSerialNumber, signature AlgorithmIdentifier, issuer Name, validit
@@ -1247,7 +1224,6 @@ rfc5480#3#4f2f6823	SHOULD NOT	However, this specification RECOMMENDS that if key
 rfc5480#3#b92d92f7	MUST NOT	If the keyUsage extension is present in a certificate that indicates id-ecDH or id-ecMQV in SubjectPublicKeyInfo, then the following values MUST NOT be present:
 rfc5480#3#bb824987	MUST	If the keyUsage extension is present in a certificate that indicates id-ecDH or id-ecMQV in SubjectPublicKeyInfo, then the following MUST be present:
 rfc5480#4#f1367113	SHOULD	To promote interoperability, the following choices are RECOMMENDED:
-rfc5480#8.2#1bbf3424	MUST NOT	-- specifiedCurve SpecifiedECDomain } -- implicitCurve and specifiedCurve MUST NOT be used in PKIX. -- Details for SpecifiedECDomain can be found in [X9.62]. --
 rfc5652#10.2.2#a9137d36	SHOULD NOT	The PKCS #6 certificate is included for backward compatibility, and PKCS #6 certificates SHOULD NOT be used.
 rfc5652#10.2.2#e2d32589	SHOULD NOT	ACv1 is included for backward compatibility, and ACv1 SHOULD NOT be used.
 rfc5652#11.1#1833b59f	MUST	The content-type attribute MUST be a signed attribute or an authenticated attribute; it MUST NOT be an unsigned attribute, unauthenticated attribute, or unprote
@@ -1355,71 +1331,6 @@ rfc6265#4.1.1#b374d22f	SHOULD NOT	Servers SHOULD NOT include more than one Set-C
 rfc6265#4.1.1#bb52138c	SHOULD	To maximize compatibility with user agents, servers that wish to store arbitrary data in a cookie-value SHOULD encode that data, for example, using Base64 [RFC4
 rfc6265#4.2.2#7d3a288f	SHOULD NOT	Although cookies are serialized linearly in the Cookie header, servers SHOULD NOT rely upon the serialization order.
 rfc6265#4.2.2#7e8253bf	SHOULD NOT	In particular, if the Cookie header contains two cookies with the same name (e.g., that were set with different Path or Domain attributes), servers SHOULD NOT r
-rfc6265#5.1.1#19fd52ac	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse a cookie-date.
-rfc6265#5.1.4#10e40ccd	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: 2. If the uri-path is empty or if the first 
-rfc6265#5.1.4#1aee8df5	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: o The cookie-path and the request-path are i
-rfc6265#5.1.4#47ff62a2	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: 1. Let uri-path be the path portion of the r
-rfc6265#5.1.4#52b7078f	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie:
-rfc6265#5.1.4#723ac054	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: 3. If the uri-path contains no more than one
-rfc6265#5.1.4#83dd4eae	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: o The cookie-path is a prefix of the request
-rfc6265#5.1.4#e80f5f52	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: o The cookie-path is a prefix of the request
-rfc6265#5.1.4#ffc49b2b	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the default-path of a cookie: 4. Output the characters of the uri-path fro
-rfc6265#5.2#2520a171	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes:
-rfc6265#5.2#2dbc4b29	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 5. If the name string is empty, ignore the set-cookie-s
-rfc6265#5.2#2e9e3344	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 1. If the unparsed-attributes string is empty, skip
-rfc6265#5.2#37288c75	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 1. If the set-cookie-string contains a %x3B (";") chara
-rfc6265#5.2#55237ca8	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 5. Remove any leading or trailing WSP characters fr
-rfc6265#5.2#6f5270f5	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 3. If the remaining unparsed-attributes contains a 
-rfc6265#5.2#75f7a46f	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 6. Process the attribute-name and attribute-value a
-rfc6265#5.2#9e69c839	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 6. The cookie-name is the name string, and the cookie-v
-rfc6265#5.2#a66be4b1	MUST	If the user agent does not ignore the Set-Cookie header field in its entirety, the user agent MUST parse the field-value of the Set-Cookie header field as a set
-rfc6265#5.2#c33c4185	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 2. If the name-value-pair string lacks a %x3D ("=") cha
-rfc6265#5.2#c6922135	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 4. Remove any leading or trailing WSP characters from t
-rfc6265#5.2#ce3308bf	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 4. If the cookie-av string contains a %x3D ("=") ch
-rfc6265#5.2#de74517d	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string": 3. The (possibly empty) name string consists of the cha
-rfc6265#5.2#dedddb47	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 7. Return to Step 1 of this algorithm.
-rfc6265#5.2#e0059eac	MUST	A user agent MUST use an algorithm equivalent to the following algorithm to parse a "set-cookie-string":
-rfc6265#5.2#f472d55a	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to parse the unparsed-attributes: 2. Discard the first character of the unparsed-attr
-rfc6265#5.2.1#b7f4cb90	MUST	If the attribute-name case-insensitively matches the string "Expires", the user agent MUST process the cookie-av as follows.
-rfc6265#5.2.2#1eb25823	MUST	If the attribute-name case-insensitively matches the string "Max- Age", the user agent MUST process the cookie-av as follows.
-rfc6265#5.2.3#1b79270c	MUST	If the attribute-name case-insensitively matches the string "Domain", the user agent MUST process the cookie-av as follows.
-rfc6265#5.2.3#1fcfae0b	SHOULD	However, the user agent SHOULD ignore the cookie-av entirely.
-rfc6265#5.2.4#e31f30bb	MUST	If the attribute-name case-insensitively matches the string "Path", the user agent MUST process the cookie-av as follows.
-rfc6265#5.2.5#26b5d000	MUST	If the attribute-name case-insensitively matches the string "Secure", the user agent MUST append an attribute to the cookie-attribute-list with an attribute-nam
-rfc6265#5.2.6#dc232546	MUST	If the attribute-name case-insensitively matches the string "HttpOnly", the user agent MUST append an attribute to the cookie- attribute-list with an attribute-
-rfc6265#5.3#010be332	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#18dd97de	MUST	When "the current session is over" (as defined by the user agent), the user agent MUST remove from the cookie store all cookies with the persistent-flag set to 
-rfc6265#5.3#2f36b086	SHOULD	If feasible, user agents SHOULD use an up-to-date public suffix list, such as the one maintained by the Mozilla project at <http://publicsuffix.org/>.
-rfc6265#5.3#308780d6	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#4138ed29	MUST	If two cookies have the same removal priority, the user agent MUST evict the cookie with the earliest last-access date first.
-rfc6265#5.3#4ddaf2d9	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#50b19e28	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#599c6f84	MUST	When the user agent removes excess cookies from the cookie store, the user agent MUST evict cookies in the following priority order: 2. Cookies that share a dom
-rfc6265#5.3#63c8c889	MUST	When the user agent removes excess cookies from the cookie store, the user agent MUST evict cookies in the following priority order:
-rfc6265#5.3#7c89a547	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#885ee9d9	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#94d453d3	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#a4375b2b	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#d5271c20	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#d9b4ceff	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#d9d7e8bb	MUST	The user agent MUST evict all expired cookies from the cookie store if, at any time, an expired cookie exists in the cookie store.
-rfc6265#5.3#e5d2db2f	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#e6a400b0	MUST	When the user agent removes excess cookies from the cookie store, the user agent MUST evict cookies in the following priority order: 1. Expired cookies.
-rfc6265#5.3#ea867667	MUST	When the user agent "receives a cookie" from a request-uri with name cookie-name, value cookie-value, and attributes cookie-attribute- list, the user agent MUST
-rfc6265#5.3#ecee26c5	MUST	When the user agent removes excess cookies from the cookie store, the user agent MUST evict cookies in the following priority order: 3. All cookies.
-rfc6265#5.4#1b3b8388	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri:
-rfc6265#5.4#294c8cfa	MUST	If the user agent does attach a Cookie header field to an HTTP request, the user agent MUST send the cookie-string (defined below) as the value of the header fi
-rfc6265#5.4#667ac3f5	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * The request-u
-rfc6265#5.4#6fa8669a	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: 3. Update the l
-rfc6265#5.4#774491ed	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * If the cookie
-rfc6265#5.4#878f2702	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: 1. Let cookie-l
-rfc6265#5.4#916c6cfc	SHOULD	The user agent SHOULD sort the cookie-list in the following order:
-rfc6265#5.4#a2da1c99	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * Cookies with 
-rfc6265#5.4#b3b6b766	MUST NOT	When the user agent generates an HTTP request, the user agent MUST NOT attach more than one Cookie header field.
-rfc6265#5.4#b4e009c0	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: 4. Serialize th
-rfc6265#5.4#b55d5d00	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * Either:
-rfc6265#5.4#eabb4cb1	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * Among cookies
-rfc6265#5.4#eca68cfb	MUST	The user agent MUST use an algorithm equivalent to the following algorithm to compute the "cookie-string" from a cookie store and a request-uri: * If the cookie
 rfc6265#6.1#32078a41	SHOULD	Practical user agent implementations have limits on the number and size of cookies that they can store. General-use user agents SHOULD provide each of the follo
 rfc6265#6.1#8a0c5ddc	SHOULD	General-use user agents SHOULD provide each of the following minimum capabilities:
 rfc6265#6.1#9f15a12c	SHOULD	Servers SHOULD use as few and as small cookies as possible to avoid reaching these implementation limits and to minimize network bandwidth due to the Cookie hea
@@ -1488,7 +1399,6 @@ rfc6749#10.9#6433ab1f	MUST	In order to prevent man-in-the-middle attacks, the au
 rfc6749#10.9#d1846b5e	MUST	The client MUST validate the authorization server's TLS certificate as defined by [RFC6125] and in accordance with its requirements for server identity authenti
 rfc6749#11.1.1#f23e105e	MUST	New parameters MUST be separately registered in the OAuth Parameters registry as described by Section 11.2.
 rfc6749#11.4.1#8637ceb8	MUST NOT	Values for the error name MUST NOT include characters outside the set %x20-21 / %x23-5B / %x5D-7E.
-rfc6749#12.2#5ede9bf3	MUST	To address this shortcoming when generating payloads using this media type, names and values MUST be encoded using the UTF-8 character encoding scheme [RFC3629]
 rfc6749#2.1#032a38cf	SHOULD NOT	The authorization server SHOULD NOT make assumptions about the client type.
 rfc6749#2.1#8262ae8b	SHOULD	If the authorization server does not provide support for such clients or does not provide guidance with regard to their registration, the client SHOULD register
 rfc6749#2.2#064c509f	MUST NOT	The client identifier is not a secret; it is exposed to the resource owner and MUST NOT be used alone for client authentication.
@@ -1811,15 +1721,6 @@ rfc7515#5.2#b7a1579e	MUST	If none of the validations in step 9 succeeded, then t
 rfc7515#5.3#281e5f86	MUST	These comparison rules MUST be used for all JSON string comparisons except in cases where the definition of the member explicitly calls out that a different com
 rfc7515#6#32f96dbe	SHOULD	The producer SHOULD include sufficient information in the Header Parameters to identify the key used, unless the application uses another means or convention to
 rfc7515#6#c25f5d76	MUST	These Header Parameters MUST be integrity protected if the information that they convey is to be utilized in a trust decision; however, if the only information 
-rfc7515#7.2.1#20bc7ddc	MUST	payload The "payload" member MUST be present and contain the value BASE64URL(JWS Payload).
-rfc7515#7.2.1#27571c8d	MUST	header The "header" member MUST be present and contain the value JWS Unprotected Header when the JWS Unprotected Header value is non- empty; otherwise, it MUST 
-rfc7515#7.2.1#693f0d41	MUST	Additional members can be present in both the JSON objects defined above; if not understood by implementations encountering them, they MUST be ignored.
-rfc7515#7.2.1#6a0aa395	MUST	The Header Parameter names in the two locations MUST be disjoint.
-rfc7515#7.2.1#bfcafdfb	MUST	signatures The "signatures" member value MUST be an array of JSON objects.
-rfc7515#7.2.1#e99ff5cf	MUST	signature The "signature" member MUST be present and contain the value BASE64URL(JWS Signature).
-rfc7515#7.2.1#eed59c4f	MUST	protected The "protected" member MUST be present and contain the value BASE64URL(UTF8(JWS Protected Header)) when the JWS Protected Header value is non-empty; o
-rfc7515#7.2.1#f10b27a9	MUST	At least one of the "protected" and "header" members MUST be present for each signature/MAC computation so that an "alg" Header Parameter value is conveyed.
-rfc7515#7.2.2#c988caef	MUST NOT	The "signatures" member MUST NOT be present when using this syntax.
 rfc7515#8#894f57a7	MUST	Implementations supporting the "jku" and/or "x5u" Header Parameters MUST support TLS.
 rfc7515#8#b1c439a0	MUST	Whenever TLS is used, the identity of the service provider encoded in the TLS server certificate MUST be verified using the procedures described in Section 6 of
 rfc7515#8#cebb45a2	MUST	To protect against information disclosure and tampering, confidentiality protection MUST be applied using TLS with a ciphersuite that provides confidentiality a
@@ -1848,29 +1749,6 @@ rfc7518#3.6#3d9ad7dc	MUST NOT	Implementations MUST NOT accept Unsecured JWSs by 
 rfc7518#3.6#438e25f9	MUST	An Unsecured JWS uses the "alg" value "none" and is formatted identically to other JWSs, but MUST use the empty octet sequence as its JWS Signature value.
 rfc7518#3.6#cdc9ffbe	MUST NOT	Implementations that support Unsecured JWSs MUST NOT accept such objects as valid unless the application specifies that it is acceptable for a specific object t
 rfc7518#3.6#ef5e4732	MUST NOT	In order to mitigate downgrade attacks, applications MUST NOT signal acceptance of Unsecured JWSs at a global level, and SHOULD signal acceptance on a per-objec
-rfc7518#4.2#289487ce	MUST	A key of size 2048 bits or larger MUST be used with this algorithm.
-rfc7518#4.3#40227ea4	MUST	A key of size 2048 bits or larger MUST be used with these algorithms.
-rfc7518#4.5#5dbd2da6	MUST	In Direct Key Agreement mode, the output of the Concat KDF MUST be a key of the same length as that used by the "enc" algorithm.
-rfc7518#4.5#6d22fd6d	MUST	In Key Agreement with Key Wrapping mode, the output of the Concat KDF MUST be a key of the length needed for the specified key wrapping algorithm.
-rfc7518#4.5#ce5c3bcd	MUST	A new ephemeral public key value MUST be generated for each key agreement operation.
-rfc7518#4.6.1#884067ca	MUST	This Header Parameter MUST be present and MUST be understood and processed by implementations when these algorithms are used.
-rfc7518#4.6.1#aabad3f6	MUST	It MUST contain only public key parameters and SHOULD contain only the minimum JWK parameters necessary to represent the key; other JWK parameters included can 
-rfc7518#4.6.1#badcb7c2	MUST	This Header Parameter MUST be understood and processed by implementations when these algorithms are used.
-rfc7518#4.6.2#469eb36b	MUST	The "apu" and "apv" values MUST be distinct, when used.
-rfc7518#4.6.2#46d1f7d2	SHOULD NOT	Alternatively, applications MAY conduct key derivation in a manner similar to "Diffie-Hellman Key Agreement Method" [RFC2631]: in that case, the "apu" parameter
-rfc7518#4.7#b4ff93f1	MUST	The requested size of the Authentication Tag output MUST be 128 bits, regardless of the key size.
-rfc7518#4.7#b6bbf1e3	MUST	Use of an Initialization Vector (IV) of size 96 bits is REQUIRED with this algorithm.
-rfc7518#4.7.1#884067ca	MUST	This Header Parameter MUST be present and MUST be understood and processed by implementations when these algorithms are used.
-rfc7518#4.8#4d0eaa03	MUST	The iteration count parameter MUST be provided as the "p2c" (PBES2 count) Header Parameter value.
-rfc7518#4.8#59167fdf	MUST	The salt parameter MUST be computed from the "p2s" (PBES2 salt input) Header Parameter value and the "alg" (algorithm) Header Parameter value as specified in th
-rfc7518#4.8#7c465997	MUST	The PBES2 password input is an octet sequence; if the password to be used is represented as a text string rather than an octet sequence, the UTF-8 encoding of t
-rfc7518#4.8.1#78fb5817	MUST	A Salt Input value containing 8 or more octets MUST be used.
-rfc7518#4.8.1#884067ca	MUST	This Header Parameter MUST be present and MUST be understood and processed by implementations when these algorithms are used.
-rfc7518#4.8.1#a2dc1271	MUST	A new Salt Input value MUST be generated randomly for every encryption operation; see RFC 4086 [RFC4086] for considerations on generating random values.
-rfc7518#4.8.1#e9d53113	SHOULD	A minimum iteration count of 1000 is RECOMMENDED.
-rfc7518#5.2.2.1#27b6f8a2	MUST	The number of octets in the input key K MUST be the sum of MAC_KEY_LEN and ENC_KEY_LEN.
-rfc7518#5.3#1f073a47	MUST	Use of an IV of size 96 bits is REQUIRED with this algorithm.
-rfc7518#5.3#b4ff93f1	MUST	The requested size of the Authentication Tag output MUST be 128 bits, regardless of the key size.
 rfc7518#6.2.1#3926881d	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "P-256"
 rfc7518#6.2.1#3fd50df7	MUST	An Elliptic Curve public key is represented by a pair of coordinates drawn from a finite field, which together define a point on an Elliptic Curve. The followin
 rfc7518#6.2.1#4537de62	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "P-521"
@@ -1963,14 +1841,6 @@ rfc7592#5#a41ac113	MUST	Since requests to the client configuration endpoint resu
 rfc7592#5#b14b62a2	MUST	The server MUST support TLS 1.2 [RFC5246] and MAY support additional transport-layer security mechanisms meeting its security requirements.
 rfc7592#5#bb368785	SHOULD NOT	While the client secret can expire, the registration access token SHOULD NOT expire while a client is still actively registered.
 rfc7592#5#da65d890	MUST	Since possession of the registration access token authorizes the holder to potentially read, modify, or delete a client's registration (including its credential
-rfc7592#7#2160225a	MUST	At this point, the new registration access token is returned to the client, the old registration access token MUST be discarded by the client, and it SHOULD be 
-rfc7592#7#2937affa	MUST	The client's current registration access token and client credentials (if applicable) MUST be included in the client information response.
-rfc7592#7#3d9e3866	SHOULD	The registration access token SHOULD be rotated only in response to a read or update request to the client configuration endpoint.
-rfc7592#7#4bb34797	MUST	These common patterns can help the server to more easily determine the client to which the request pertains, which MUST be matched against the client to which t
-rfc7592#7#565fb2dc	MUST NOT	The authorization server MUST NOT expect the client to construct or discover this URL on its own.
-rfc7592#7#9bb43294	SHOULD	It is RECOMMENDED that this endpoint URL be formed through the use of a server-constructed URL string that combines the client registration endpoint's URL and t
-rfc7592#7#b57a634f	MUST	The authorization server MUST provide the client with the fully qualified URL in the "registration_client_uri" element of the Client Information Response, as sp
-rfc7592#7#dc917cd9	MUST	The client MUST use the URL as given by the server and MUST NOT construct this URL from component pieces.
 rfc7617#2.1#ac61c9b6	MUST	For the password, recipients MUST support all characters defined in the "OpaqueString" profile defined in Section 4.2 of [RFC7613].
 rfc7617#2.1#f5b6336e	MUST	For the user-id, recipients MUST support all characters defined in the "UsernameCasePreserved" profile defined in Section 3.3 of [RFC7613], with the exception o
 rfc7617#2.2#6aa53f19	SHOULD	A client SHOULD assume that resources identified by URIs with a prefix-match of the authentication scope are also within the protection space specified by the r
@@ -2186,42 +2056,6 @@ rfc7662#2.3#a673ea46	MUST	In these cases, the authorization server MUST instead 
 rfc7662#3.1.1#2af4eae2	SHOULD NOT	Names that match other registered names in a case insensitive manner SHOULD NOT be accepted.
 rfc7662#3.1.1#8250fada	SHOULD	Names that match claims registered in the "JSON Web Token Claims" registry established by [RFC7519] SHOULD have comparable definitions and semantics.
 rfc7662#5#ac4cd509	MUST	When this is the case, measures MUST be taken to prevent disclosure of this information to unintended parties.
-rfc8017#11.2#0b88d50a	SHOULD	For the EMSA- PKCS1-v1_5 encoding method, SHA-224, SHA-256, SHA-384, SHA-512, SHA- 512/224, and SHA-512/256 are RECOMMENDED for new applications.
-rfc8017#11.2#1f98bdc3	SHOULD	The same rule of thumb can be applied to RSAES-OAEP; it is RECOMMENDED that the bit length of the seed (which is equal to the bit length of the hash output) be 
-rfc8017#11.2#237b2847	MUST	The parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type RSAES-OAEP-params:
-rfc8017#11.2#2b4282cf	MUST	-- -- When the following OIDs are used in an AlgorithmIdentifier, -- the parameters MUST be present and MUST be NULL. -- md2WithRSAEncryption OBJECT IDENTIFIER 
-rfc8017#11.2#2ca2bb05	MUST	digestAlgorithm identifies the hash function and SHALL be an algorithm ID with an OID in the set PKCS1-v1-5DigestAlgorithms.
-rfc8017#11.2#35ee35b9	MUST	The object identifier for RSASSA-PKCS1-v1_5 SHALL be one of the following.
-rfc8017#11.2#3829d977	MUST	It SHALL be an algorithm ID with an OID in the set OAEP-PSSDigestAlgorithms (see Appendix A.2.1).
-rfc8017#11.2#39264002	MUST	The parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type RSAES-OAEP-params: o The default mask generation
-rfc8017#11.2#4016a7fa	MUST	The parameters field associated with these OIDs in a value of type AlgorithmIdentifier SHALL have a value of type NULL.
-rfc8017#11.2#4673ca1e	MUST	-- -- When id-mgf1 is used in an AlgorithmIdentifier, the parameters -- MUST be present and MUST be a HashAlgorithm, for example, sha1. -- id-mgf1 OBJECT IDENTI
-rfc8017#11.2#46f587a9	MUST	It SHALL be 0 for this version of the document, unless multi-prime is used; in which case, it SHALL be 1.
-rfc8017#11.2#5f3e3439	MUST	It SHALL be an algorithm ID with an OID in the set OAEP-PSSDigestAlgorithms.
-rfc8017#11.2#6bdf63bf	MUST	It SHALL be omitted if version is 0 and SHALL contain at least one instance of OtherPrimeInfo if version is 1.
-rfc8017#11.2#7103a77b	MUST	-- When id-sha1, id-sha224, id-sha256, id-sha384, id-sha512, -- id-sha512-224, and id-sha512-256 are used in an -- AlgorithmIdentifier, the parameters (which ar
-rfc8017#11.2#879ee246	MUST	For each OID, the parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type NULL.
-rfc8017#11.2#95585086	MUST	Version ::= INTEGER { two-prime(0), multi(1) } (CONSTRAINED BY {-- version MUST be multi if otherPrimeInfos present --}).
-rfc8017#11.2#99522cf7	MUST	-- the parameters MUST be present and MUST be NULL. -- rsaEncryption OBJECT IDENTIFIER ::= { pkcs-1 1 }.
-rfc8017#11.2#9bf3bffe	MUST	It SHALL be an algorithm ID with an OID in the set PKCS1PSourceAlgorithms, which for this version SHALL consist of id-pSpecified, indicating that the label is s
-rfc8017#11.2#a28024f9	MUST	For the SHA algorithms, implementations MUST accept AlgorithmIdentifier values both without parameters and with NULL parameters.
-rfc8017#11.2#a3bc12b3	SHOULD	For the RSAES-OAEP encryption scheme and EMSA-PSS encoding method, only SHA-1, SHA-224, SHA-256, SHA-384, SHA- 512, SHA-512/224, and SHA-512/256 are RECOMMENDED
-rfc8017#11.2#a4fbe4f4	MUST	The parameters field associated with id-mgf1 SHALL be an algorithm ID with an OID in the set OAEP-PSSDigestAlgorithms, identifying the hash function on which MG
-rfc8017#11.2#a741e680	MUST	-- -- When id-RSASSA-PSS is used in an AlgorithmIdentifier, the -- parameters MUST be present and MUST be RSASSA-PSS-params. -- id-RSASSA-PSS OBJECT IDENTIFIER 
-rfc8017#11.2#ad3a346c	MUST	It SHALL be 1 for this version of the document, which represents the trailer field with hexadecimal value 0xbc.
-rfc8017#11.2#b0ff2f80	MUST	The parameters field associated with id-pSpecified SHALL have a value of type OCTET STRING, containing the label.
-rfc8017#11.2#b4a57c2f	MUST	-- -- When id-pSpecified is used in an AlgorithmIdentifier, the -- parameters MUST be an OCTET STRING. -- id-pSpecified OBJECT IDENTIFIER ::= { pkcs-1 9 }.
-rfc8017#11.2#c721278c	SHOULD NOT	Because of these results and others (e.g., [MD4LAST]), MD4 is NOT RECOMMENDED.
-rfc8017#11.2#c95b4dbd	MUST	The parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type RSASSA-PSS-params:
-rfc8017#11.2#d085f950	MUST	The parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type RSAES-OAEP-params: o The default label is an emp
-rfc8017#11.2#d2ed0d26	SHOULD	For MGF1 (and more generally, for other mask generation functions based on a hash function), it is RECOMMENDED that the underlying hash function be the same as 
-rfc8017#11.2#d65da160	MUST	The parameters field has associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type NULL.
-rfc8017#11.2#d9bf046b	MUST	It SHALL be an algorithm ID with an OID in the set PKCS1MGFAlgorithms (see Appendix A.2.1).
-rfc8017#11.2#da6d2452	MUST	The parameters field associated with this OID in a value of type AlgorithmIdentifier SHALL have a value of type NULL.
-rfc8017#11.2#dd577c0c	MUST	It SHALL be an algorithm ID with an OID in the set PKCS1MGFAlgorithms, which for this version SHALL consist of id-mgf1, identifying the MGF1 mask generation fun
-rfc8017#11.2#dda5057e	MUST	-- Exception: When formatting the DigestInfoValue in EMSA-PKCS1-v1_5 -- (see Section 9.2), the parameters field associated with id-sha1, -- id-sha224, id-sha256
-rfc8017#11.2#e1ea0c36	MUST	-- -- When id-RSAES-OAEP is used in an AlgorithmIdentifier, the -- parameters MUST be present and MUST be RSAES-OAEP-params. -- id-RSAES-OAEP OBJECT IDENTIFIER 
-rfc8017#11.2#e329ba5f	SHOULD	To address these concerns, only SHA-224, SHA-256, SHA-384, SHA-512, SHA-512/224, and SHA-512/256 are RECOMMENDED for new applications.
 rfc8017#6#7e49f144	SHOULD NOT	(Section 7.2) and RSASSA-PKCS1-v1_5 (Section 8.2) have traditionally been employed together without any known bad interactions (indeed, this is the model introd
 rfc8017#7#6fd0cea8	MUST	Two encryption schemes are specified in this document: RSAES-OAEP and RSAES-PKCS1-v1_5. RSAES-OAEP is REQUIRED to be supported for new applications; RSAES-PKCS1
 rfc8017#7.2#0f8aa977	SHOULD NOT	As a general rule, the use of this scheme for encrypting an arbitrary message, as opposed to a randomly generated key, is NOT RECOMMENDED.
@@ -2249,9 +2083,6 @@ rfc8037#3.2#03bfecd0	MUST NOT	These subtypes MUST NOT be used for signing.
 rfc8037#4#44565ba9	MUST	If key generation or batch signature verification is performed, a well-seeded cryptographic random number generator is REQUIRED.
 rfc8037#4#a42ff868	SHOULD	Therefore, using 256-bit symmetric encryption (especially key wrapping and encryption) with X448 is RECOMMENDED.
 rfc8176#6.1.1#a9558b3f	SHOULD	Because a core goal of this specification is for the resulting representations to be compact, it is RECOMMENDED that the name be short -- that is, not to exceed
-rfc8252#10.2#27ddbbc7	SHOULD	When creating the loopback network socket, apps SHOULD set the "SO_EXCLUSIVEADDRUSE" socket option to prevent other apps binding to the same socket.
-rfc8252#10.2#80755dd3	MUST	To qualify as an external user-agent, the broker MUST be used in SSO mode.
-rfc8252#10.2#8903cb80	SHOULD NOT	Apps SHOULD NOT set the "SO_REUSEPORT" or "SO_REUSEADDR" socket options in order to prevent other apps binding to the same socket.
 rfc8252#5#63691217	MUST	To conform to this best practice, native apps MUST use an external user-agent to perform OAuth authorization requests.
 rfc8252#6#1b963095	SHOULD	On platforms where they are supported, it is RECOMMENDED, for usability reasons, that apps use in-app browser tabs for the authorization request.
 rfc8252#6#ac861722	MUST	Public native app clients MUST implement the Proof Key for Code Exchange (PKCE [RFC7636]) extension to OAuth, and authorization servers MUST support PKCE for su
@@ -2877,22 +2708,6 @@ rfc9325#7.4#99deca45	SHOULD	* Server implementations that want to reuse Elliptic
 rfc9325#7.4#da2a4093	SHOULD NOT	* TLS implementations SHOULD NOT use static finite-field DH keys and SHOULD NOT reuse ephemeral finite-field DH keys across multiple connections.
 rfc9325#7.5#12f74774	SHOULD	For the common use cases of public key certificates in TLS, servers SHOULD support the following as a best practice given the current state of the art and as a 
 rfc9325#7.5#498b79e7	MUST	TLS implementations MUST implement a strategy to distrust revoked certificates.
-rfc9325#8.2#0ca96760	MUST	- Support for extended_master_secret is now a "MUST" (previously it was a soft recommendation, as the RFC had not been published at the time).
-rfc9325#8.2#3d180411	SHOULD NOT	- SHOULD NOT use (static or ephemeral) finite-field DH key agreement.
-rfc9325#8.2#4ab59b98	MUST	- MUST-level implementation requirement for ALPN and more specific SHOULD-level guidance for ALPN and SNI.
-rfc9325#8.2#527898b4	SHOULD	- Added TLS 1.3 at a "SHOULD" level.
-rfc9325#8.2#6f61da53	MUST	- 2048-bit DH is now a "MUST" and ECDH minimal curve size is 224 (vs. 192 previously).
-rfc9325#8.2#7a4cb7a2	SHOULD	- SHOULD-level guidance on AES-GCM nonce generation.
-rfc9325#8.2#7abab9b0	MUST	- Generic MUST-level guidance to avoid 0-RTT unless it is documented for the particular protocol.
-rfc9325#8.2#937152fd	SHOULD	- SHOULD-level requirement for forward secrecy in TLS 1.3 session resumption.
-rfc9325#8.2#93d37e8c	SHOULD	- SHOULD-level restriction on the TLS session duration, depending on the rotation period of an [RFC5077] ticket key.
-rfc9325#8.2#c399ae17	MUST	- Clarified discussion of strict TLS policies, including MUST- level recommendations.
-rfc9325#8.2#cbfa4fae	SHOULD NOT	- SHOULD NOT reuse ephemeral finite-field DH keys across multiple connections.
-rfc9325#8.2#e08e1027	MUST	- MUST-level requirement for server-side RSA certificates to have a 2048-bit modulus at a minimum, replacing a "SHOULD".
-rfc9325#8.2#e0f4fb82	MUST NOT	- Changed the status of TLS 1.0 and 1.1 from "SHOULD NOT" to "MUST NOT".
-rfc9325#8.2#ee070b51	SHOULD NOT	- SHOULD NOT use static Elliptic Curve DH key exchange.
-rfc9325#8.2#f34cfc17	MUST	- MUST-level restriction on session ticket validity, replacing a "SHOULD".
-rfc9325#8.2#f4903322	SHOULD NOT	- SHOULD NOT use the old MTI cipher suite, TLS_RSA_WITH_AES_128_CBC_SHA.
 rfc9396#12#cd7d7fae	MUST	The AS MUST properly sanitize and handle the data passed in the authorization_details in order to prevent injection attacks.
 rfc9396#12#d8be210f	MUST	If the integrity of the authorization_details is a concern, clients MUST protect authorization_details against tampering and swapping.
 rfc9396#2.1#4b61de0c	SHOULD	It is RECOMMENDED that API designers choose type values that are easily copied without ambiguity.
@@ -2946,7 +2761,6 @@ rfc9421#6.4.1#af4dfdc9	MUST	MUST be one of the values "Request", "Response", or 
 rfc9421#6.4.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
 rfc9421#6.5.1#b52445d6	MUST	The name MUST be an ASCII string that conforms to the key ABNF rule defined in Section 3.1.2 of [STRUCTURED-FIELDS] and SHOULD NOT exceed 20 characters in lengt
 rfc9421#6.5.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
-rfc9421#9.2#89c51115	MUST NOT	These keys MUST NOT be used for any purpose other than testing.
 rfc9449#11.1#98fa6e38	MUST	To limit this, servers MUST only accept DPoP proofs for a limited time after their creation (preferably only for a relatively brief period on the order of secon
 rfc9449#11.2#9b6c65b3	SHOULD NOT	Deployments that do not utilize the nonce mechanism SHOULD NOT issue long-lived DPoP constrained access tokens, preferring instead to use short-lived access tok
 rfc9449#11.3#39a4c7a6	MUST NOT	A server MUST NOT accept any DPoP proofs without the nonce claim when a DPoP nonce has been provided to the client.
@@ -3010,13 +2824,10 @@ rfc9562#8#6ccf1e3b	SHOULD NOT	MAC addresses pose inherent security risks around 
 rfc9562#8#932f3c7c	SHOULD	If UUIDs are required for use with any security operation within an application context in any shape or form, then UUIDv4 (Section 5.4) SHOULD be utilized.
 rfc9562#8#a70b079c	MUST NOT	Implementations MUST NOT assume that it is easy to determine if a UUID has been slightly modified in order to redirect a reference to another object.
 rfc9562#8#b9602fce	SHOULD NOT	Implementations SHOULD NOT assume that UUIDs are hard to guess.
-rfc9562#9.2#9ab0f4a0	MUST	As per Section 5.5, name-based UUIDs that want to use modern hashing algorithms MUST be created within the UUIDv8 space.
-rfc9562#9.2#c8b97ae4	MUST	An important note for secure hashing algorithms that produce outputs of an arbitrary size, such as those found in SHAKE, is that the output hash MUST be 128 bit
 rfc9700#0#194aec1f	SHOULD	Nonetheless, it is RECOMMENDED that implementers upgrade their implementations and ecosystems as soon as feasible.
 rfc9700#2.1.2#a40a2cf3	SHOULD	Clients SHOULD instead use the response type code (i.e., authorization code grant type) as specified in Section 2.1.1 or any other response type that causes the
 rfc9700#2.1.2#cd5bcdc9	SHOULD NOT	In order to avoid these issues, clients SHOULD NOT use the implicit grant (response type token) or other response types issuing access tokens in the authorizati
 rfc9700#2.2.1#0f575b33	SHOULD	Authorization and resource servers SHOULD use mechanisms for sender- constraining access tokens, such as mutual TLS for OAuth 2.0 [RFC8705] or OAuth 2.0 Demonst
-rfc9700#2.2.2#34074bc7	MUST	Refresh tokens for public clients MUST be sender-constrained or use refresh token rotation as described in Section 4.14. [RFC6749] already mandates that refresh
 rfc9700#2.3#114c8cac	SHOULD	The privileges associated with an access token SHOULD be restricted to the minimum required for the particular application or use case.
 rfc9700#2.3#1d6e2d17	MUST	If it was not, the resource server MUST refuse to serve the respective request.
 rfc9700#2.3#9ec71a05	SHOULD	Additionally, access tokens SHOULD be restricted to certain resources and actions on resource servers or resources.
@@ -3024,13 +2835,6 @@ rfc9700#2.3#acd9c5a9	SHOULD	In particular, access tokens SHOULD be audience-rest
 rfc9700#2.4#ecef679b	MUST NOT	The resource owner password credentials grant [RFC6749] MUST NOT be used.
 rfc9700#2.5#2c04593c	SHOULD	It is RECOMMENDED to use asymmetric cryptography for client authentication, such as mutual TLS for OAuth 2.0 [RFC8705] or signed JWTs ("Private Key JWT") in acc
 rfc9700#2.5#d7c5d384	SHOULD	Authorization servers SHOULD enforce client authentication if it is feasible, in the particular deployment, to establish a process for issuance/registration of 
-rfc9700#2.6#08e01b41	MUST NOT	However, CORS MUST NOT be supported at the authorization endpoint, as the client does not access this endpoint directly; instead, the client redirects the user 
-rfc9700#2.6#199f76a0	MUST NOT	To this end, authorization servers MUST NOT allow redirection URIs that use the http scheme except for native clients that use loopback interface redirection as
-rfc9700#2.6#291323b6	SHOULD	It is RECOMMENDED to use end-to-end TLS according to [BCP195] between the client and the resource server.
-rfc9700#2.6#7cba388a	SHOULD	It is therefore RECOMMENDED that authorization servers publish OAuth Authorization Server Metadata according to [RFC8414] and that clients make use of this Auth
-rfc9700#2.6#bb578de1	MUST NOT	Authorization responses MUST NOT be transmitted over unencrypted network connections.
-rfc9700#2.6#dfefe2dc	SHOULD NOT	Under the conditions described in Section 4.15.1, authorization servers SHOULD NOT allow clients to influence their client_id or any other claim that could caus
-rfc9700#2.6#ed22df96	MUST	If the authorization response is sent with in-browser communication techniques like postMessage [WHATWG.postmessage_api] instead of HTTP redirects, both the ini
 rfc9700#3#3f0de433	MUST	Implementers MUST take into account all possible types of attackers in the environment of their OAuth implementations.
 rfc9700#4.1.3#162b72ca	MUST	This means the authorization server MUST ensure that the two URIs are equal; see Section 6.2.1 of [RFC3986], Simple String Comparison, for details.
 rfc9700#4.1.3#55a30c4e	MUST	The only exception is native apps using a localhost URI: In this case, the authorization server MUST allow variable port numbers as described in Section 7.3 of 
@@ -3046,15 +2850,6 @@ rfc9700#4.11.2#dd219018	MUST	The authorization server MUST take precautions to p
 rfc9700#4.11.2#e5762b61	MUST NOT	Authorization servers that redirect a request that potentially contains the user's credentials therefore MUST NOT use the HTTP 307 status code for redirection.
 rfc9700#4.13#ac9eb9bb	MUST	Furthermore, the communication link between the reverse proxy and application server MUST be protected against eavesdropping, injection, and replay of messages.
 rfc9700#4.13#cd633d15	MUST	A reverse proxy MUST therefore sanitize any inbound requests to ensure the authenticity and integrity of all header values relevant for the security of the appl
-rfc9700#4.14.2#2c1c8bef	MUST	Authorization servers MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients: * logout at the authorization ser
-rfc9700#4.14.2#4ee11d86	MUST	Authorization servers MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients:
-rfc9700#4.14.2#55cd4a95	MUST	Authorization servers MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients: * *Refresh token rotation:* the a
-rfc9700#4.14.2#c59091c8	MUST	If refresh tokens are issued, those refresh tokens MUST be bound to the scope and resource servers as consented by the resource owner.
-rfc9700#4.14.2#d339a718	SHOULD	Refresh tokens SHOULD expire if the client has been inactive for some time, i.e., the refresh token has not been used to obtain fresh access tokens for some tim
-rfc9700#4.14.2#e50d8fc7	MUST	Authorization servers MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients: * password change or
-rfc9700#4.14.2#ef7c3304	MUST	Authorization servers MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients: * *Sender-constrained refresh tok
-rfc9700#4.14.2#f7645160	MUST	Authorization servers MUST ensure the integrity of the refresh token value in this case, for example, using signatures.
-rfc9700#4.14.2#fac13875	MUST	Authorization servers MUST determine, based on a risk assessment, whether to issue refresh tokens to a certain client.
 rfc9700#4.15#229ac7b1	SHOULD	In cases of access tokens obtained through grants | where no resource owner is involved, such as the client | credentials grant, the value of "sub" SHOULD corre
 rfc9700#4.15#99d4f508	SHOULD	| In cases of access tokens obtained through grants where a resource | owner is involved, such as the authorization code grant, the value | of "sub" SHOULD corr
 rfc9700#4.15.1#4a79a5f3	MUST	Where this cannot be avoided, authorization servers MUST provide other means for the resource server to distinguish between the two types of access tokens.
@@ -3469,9 +3264,6 @@ saml-core-2.0-os#4.2.1#7182db06	SHOULD	Implementations SHOULD expect and be prep
 saml-core-2.0-os#4.2.1#ba7f31b7	SHOULD	Older implementations SHOULD reject such extensions gracefully when they are encountered in contexts that dictate mandatory semantics.
 saml-core-2.0-os#5.4.1#4662badd	MUST	SAML assertions and protocols MUST use enveloped signatures when signing assertions and protocol messages.
 saml-core-2.0-os#5.4.1#b50ea4e7	SHOULD	SAML processors SHOULD support the use of RSA signing and verification for public key operations in accordance with the algorithm identified by http://www.w3.or
-saml-core-2.0-os#5.4.2#028403fa	MUST	SAML assertions and protocol messages MUST supply a value for the ID attribute on the root element of the assertion or protocol message being signed.
-saml-core-2.0-os#5.4.2#1af1b48c	MUST	For example, if the ID attribute value is "foo", then the URI attribute in the <ds:Reference> element MUST be "#foo".
-saml-core-2.0-os#5.4.2#7dc454b4	MUST	Signatures MUST contain a single <ds:Reference> containing a same-document reference to the ID attribute value of the root element of the assertion or protocol 
 saml-core-2.0-os#5.4.3#e99520f2	SHOULD	SAML implementations SHOULD use Exclusive Canonicalization [Excl-C14N], with or without comments, both in the <ds:CanonicalizationMethod> element of <ds:SignedI
 saml-core-2.0-os#5.4.4#1ba3ad2a	MUST	If they do not, verifiers MUST ensure that no content of the SAML message is excluded from the signature.
 saml-core-2.0-os#5.4.4#5de99f72	SHOULD NOT	Signatures in SAML messages SHOULD NOT contain transforms other than the enveloped signature transform (with the identifier http://www.w3.org/2000/09/xmldsig#en
@@ -3508,10 +3300,6 @@ saml-metadata-2.0-os#2.5#53ddcf3e	MUST	Extension elements MUST be namespace-qual
 saml-metadata-2.0-os#3#96593f78	SHOULD	In the absence of such context, it is RECOMMENDED that at least the root element of a metadata instance be signed.
 saml-metadata-2.0-os#3.1.1#b50ea4e7	SHOULD	SAML processors SHOULD support the use of RSA signing and verification for public key operations in accordance with the algorithm identified by http://www.w3.or
 saml-metadata-2.0-os#3.1.1#e594572f	MUST	SAML metadata MUST use enveloped signatures when signing the elements defined in this specification.
-saml-metadata-2.0-os#3.1.2#36803efd	MUST	Signatures MUST contain a single <ds:Reference> containing a URI reference to the identifier attribute value of the metadata element being signed.
-saml-metadata-2.0-os#3.1.2#d4970c4d	MUST	Signed metadata elements MUST supply a value for the identifier attribute on the signed element.
-saml-metadata-2.0-os#3.1.2#f64d1072	MUST	As a consequence, a metadata element's signature MUST apply to the content of the signed element and any child elements it contains.
-saml-metadata-2.0-os#3.1.2#fc950fc3	MUST	For example, if the identifier attribute value is "foo", then the URI attribute in the <ds:Reference> element MUST be "#foo".
 saml-metadata-2.0-os#3.1.3#0743caba	SHOULD	SAML implementations SHOULD use Exclusive Canonicalization, with or without comments, both in the <ds:CanonicalizationMethod> element of <ds:SignedInfo>, and as
 saml-metadata-2.0-os#3.1.4#77834927	SHOULD NOT	Signatures in SAML metadata SHOULD NOT contain transforms other than the enveloped signature transform (with the identifier http://www.w3.org/2000/09/xmldsig#en
 saml-metadata-2.0-os#3.1.4#c8cfdd44	MUST	If they do not, verifiers MUST ensure that no content of the signed metadata element is excluded from the signature.
@@ -3910,30 +3698,6 @@ webauthn-2#2.4#cc1be0a5	SHOULD	All decoders of the above conformance classes SHO
 webauthn-2#4#28ed19b0	MUST	Communication between the two components MUST use HTTPS or equivalent transport security, but is otherwise beyond the scope of this specification.
 webauthn-2#4#6ed5bed9	SHOULD NOT	For example, this might include the user’s displayName. otherUI is a mutable item and SHOULD NOT be bound to the public key credential source in a way that prev
 webauthn-2#4#71c29f33	MUST	Though, the RP ID syntaxes MUST conform to either valid domain strings or URIs [RFC3986] [URL].
-webauthn-2#5.1.2#1e5daa07	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#336fcb90	MUST	This argument is a CredentialRequestOptions object whose options.publicKey member contains a PublicKeyCredentialRequestOptions object specifying the desired att
-webauthn-2#5.1.2#3d00db9c	MUST	This argument is a CredentialRequestOptions object whose options.publicKey member contains a PublicKeyCredentialRequestOptions object specifying the desired att
-webauthn-2#5.1.2#5cf3d212	MUST NOT	In order to prevent information leak that could identify the user without consent, this step MUST NOT be executed before lifetimeTimer has expired.
-webauthn-2#5.1.2#63e5142f	MUST	This argument is a CredentialRequestOptions object whose options.publicKey member contains a PublicKeyCredentialRequestOptions object specifying the desired att
-webauthn-2#5.1.2#67a75be3	SHOULD	During the above process, the user agent SHOULD show some UI to the user to guide them in the process of selecting and authorizing an authenticator. 5.1.4.
-webauthn-2#5.1.2#6c99878c	MUST	This argument is a CredentialRequestOptions object whose options.publicKey member contains a PublicKeyCredentialRequestOptions object specifying the desired att
-webauthn-2#5.1.2#7bb9e49e	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#87f92e09	SHOULD	During the above process, the user agent SHOULD show some UI to the user to guide them in the process of selecting and authorizing an authenticator with which t
-webauthn-2#5.1.2#976cc18a	MUST	This sequence MUST still be valid, i.e. lexicographically sorted and free of duplicates.
-webauthn-2#5.1.2#a9e9b518	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#ac31859d	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#ae81b54f	MUST	When this method is invoked, the user agent MUST execute the following algorithm:
-webauthn-2#5.1.2#af788e88	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#b1598245	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#b350861f	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#bc0ded70	MUST	The values SHOULD be members of AuthenticatorTransport, but client platforms MUST ignore unknown values.
-webauthn-2#5.1.2#c8408376	SHOULD	If the user agent does not have any transport information, it SHOULD set this field to the empty sequence.
-webauthn-2#5.1.2#d3aed157	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#e6046b95	MUST	This argument is a CredentialRequestOptions object whose options.publicKey member contains a PublicKeyCredentialRequestOptions object specifying the desired att
-webauthn-2#5.1.2#ef41ee8a	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#f34ff841	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#f3d864f7	MUST	This argument is a CredentialCreationOptions object whose options.publicKey member contains a PublicKeyCredentialCreationOptions object specifying the desired a
-webauthn-2#5.1.2#f9118cc2	MUST	This argument is a Boolean value which is true if and only if the caller’s environment settings object is same-origin with its ancestors. When this method is in
 webauthn-2#5.2#40501b10	MUST	Every user of the [[Create]](origin, options, sameOriginWithAncestors) method will need to parse and store the returned credential public key in order to verify
 webauthn-2#5.2#4569b6a7	MUST	Every user of the [[Create]](origin, options, sameOriginWithAncestors) method will need to parse and store the returned credential public key in order to verify
 webauthn-2#5.2#5275cac3	MUST	The exact JSON serialization MUST be preserved, as the hash of the serialized client data has been computed over it. ✔MDN authenticatorData, of type ArrayBuffer
@@ -3976,15 +3740,6 @@ webauthn-2#5.8.5#8588aa98	MUST	2 Keys with algorithm ES384 (-35) MUST specify P-
 webauthn-2#5.8.5#acec7fa3	MUST	1 Keys with algorithm ES256 (-7) MUST specify P-256 (1) as the crv parameter and MUST NOT use the compressed point form.
 webauthn-2#5.8.5#c747ef90	MUST	4 Keys with algorithm EdDSA (-8) MUST specify Ed25519 (6) as the crv parameter.
 webauthn-2#6.3#7577fbe6	MUST	A WebAuthn Client MUST connect to an authenticator in order to invoke any of the operations of that authenticator.
-webauthn-2#6.3.2#1a44f8c1	MUST	It takes the following input parameters: hash The hash of the serialized client data, provided by the client. rpEntity The Relying Party's PublicKeyCredentialRp
-webauthn-2#6.3.2#48320371	MUST	If requireUserVerification is true, the authorization gesture MUST include user verification.
-webauthn-2#6.3.2#4b2baef8	MUST	The authorization gesture MUST include a test of user presence.
-webauthn-2#6.3.2#52a7455b	MUST	When this operation is invoked, the authenticator MUST perform the following procedure:
-webauthn-2#6.3.2#872d6036	MUST	It takes the following input parameters: hash The hash of the serialized client data, provided by the client. rpEntity The Relying Party's PublicKeyCredentialRp
-webauthn-2#6.3.2#9eaac240	MUST	If requireUserPresence is true, the authorization gesture MUST include a test of user presence.
-webauthn-2#6.3.2#a9fe621f	SHOULD NOT	The authenticator makes a best-effort to create the most preferred credential that it can. excludeCredentialDescriptorList An OPTIONAL list of PublicKeyCredenti
-webauthn-2#6.3.2#cd423f64	MUST	It takes the following input parameters: hash The hash of the serialized client data, provided by the client. rpEntity The Relying Party's PublicKeyCredentialRp
-webauthn-2#6.3.2#fc4baf84	SHOULD	The prompt SHOULD display rpEntity.id, rpEntity.name, userEntity.name and userEntity.displayName, if possible.
 webauthn-2#6.3.3#374c1d72	MUST	When this method is invoked, the authenticator MUST perform the following procedure:
 webauthn-2#6.3.3#3daa39a8	MUST	It takes the following input parameters: rpId The caller’s RP ID, as determined by the user agent and the client. hash The hash of the serialized client data, p
 webauthn-2#6.3.3#48320371	MUST	If requireUserVerification is true, the authorization gesture MUST include user verification.

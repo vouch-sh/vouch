@@ -45,7 +45,10 @@ To add a spec, append a manifest row with `id`, `title`, `url`, `fidelity` and
 
 ### `audit-normative.py` and `audit-coverage.py`
 
-`audit-normative.py` reflows the cached prose and emits one row per normative
+`audit-normative.py` skips sections whose title is a reference list,
+acknowledgements or a changelog appendix — they carry no obligation but their
+prose reproduces requirement keywords — then reflows the cached prose and emits
+one row per normative
 statement (MUST / MUST NOT / SHOULD / SHOULD NOT — `MAY` and `OPTIONAL` are
 excluded by design, since the audit tracks obligations).
 
@@ -55,8 +58,9 @@ scripts/audit-normative.py --check         # exit 1 if the committed TSV is stal
 scripts/audit-normative.py --spec rfc9449  # print one spec's requirements
 ```
 
-`audit-coverage.py` renders `specs/coverage-report.md` from three committed
-files — `requirements.tsv`, `audit-scope.tsv`, and `coverage-baseline.tsv`. It
+`audit-coverage.py` renders `specs/coverage-report.md` from four committed
+files — `requirements.tsv`, `audit-scope.tsv`, `audit-exclusions.tsv`, and
+`coverage-baseline.tsv`. It
 does **not** scan the test suite: the scan and the ratchet live in
 `crates/vouch-tests/tests/spec_coverage.rs`, which owns the baseline it checks.
 A second implementation here drifted from it by 627 statements before the two

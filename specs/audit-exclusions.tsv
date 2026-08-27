@@ -1,0 +1,36 @@
+# Section-level exclusions for the normative-requirement coverage audit.
+#
+# specs/audit-scope.tsv decides whether a specification imposes obligations at
+# all. This file is finer grained: it drops individual sections of an in-scope
+# specification whose requirements are addressed to an actor Vouch is not, or
+# cover a feature Vouch does not implement by design.
+#
+# An excluded statement is not "untested" -- it is not owed. It never enters the
+# in-scope denominator and never lands in specs/coverage-baseline.tsv, so the
+# backlog stays a list of real work.
+#
+# section_prefix matches a section and everything beneath it: "4" excludes 4,
+# 4.8 and 4.8.1, but not 40. The reason column is required and must say what
+# makes the section inapplicable, with the evidence -- the next person to read
+# it needs to be able to check the claim, not just take it.
+#
+# crates/vouch-tests/tests/spec_coverage.rs enforces two rules that keep this
+# file honest:
+#
+#   1. An exclusion matching no statement fails the build. Sections get
+#      renumbered when a spec is re-cached, and a stale exclusion would
+#      silently stop covering anything.
+#   2. An excluded section that a test cites fails the build. The exclusion
+#      claims Vouch has no obligation there while a test asserts behavior, so
+#      one of the two is wrong and a human has to say which.
+#
+spec_id	section_prefix	reason
+rfc6265	5	Section 5 is "User Agent Requirements" -- the browser-side cookie storage and parsing algorithm. Vouch is a server (Section 4); the CLI writes a Netscape cookie file for curl interop and implements no part of the UA algorithm.
+rfc7515	7.2	JWS JSON Serialization. Vouch uses compact serialization throughout; no code path produces or parses the general or flattened JSON forms.
+rfc7518	4	JWE key management algorithms (RSAES, ECDH-ES, AES-KW, PBES2). Vouch implements no JWE: services/oidc/jar.rs rejects five-part tokens, and the only algorithms produced or verified anywhere are ES256, RS256, PS256, EdDSA and HS256.
+rfc7518	5	JWE content encryption algorithms (AES-CBC-HMAC, AES-GCM). Same reason as section 4 -- no JWE support.
+rfc9700	2.2.2	Refresh token guidance. Vouch issues no refresh tokens by design; see the section 4.14 row.
+rfc9700	2.6	Authorization responses delivered by in-browser communication (postMessage). Not implemented: no occurrence of postMessage or web_message in the workspace.
+rfc9700	4.14	Refresh token replay detection, rotation and binding. Vouch issues no refresh tokens by design -- services/oidc/grant_type.rs has no refresh grant, and services/oidc/registration.rs treats refresh_token as registration-only ("accepted in registration, though never issued"). The underlying threat is answered by short-lived DPoP-bound access tokens with no long-lived credential to replay.
+webauthn-2	5.1.2	CredentialRequestOptions dictionary extension -- addressed to the client, not the Relying Party.
+webauthn-2	6.3.2	The authenticatorMakeCredential operation -- addressed to the authenticator, not the Relying Party.

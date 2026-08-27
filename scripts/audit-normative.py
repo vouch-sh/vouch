@@ -113,6 +113,22 @@ PAGE_RE = re.compile(r"\[Page \d+\]\s*$|^\f")
 RFC_HEADER_RE = re.compile(r"^RFC \d+\s{2,}.*\s{2,}\w+ \d{4}\s*$")
 
 # Boilerplate paragraphs that mention the keywords without imposing anything.
+# A reference list, an acknowledgements roll or a changelog appendix carries no
+# obligation, but its prose reproduces requirement keywords: RFC 9325's
+# "Differences from RFC 7525" appendix contributed 16 statements of the form
+# "Added TLS 1.3 at a 'SHOULD' level", which describe a requirement level rather
+# than stating one.  Matched against the whole title, not a prefix, so a real
+# section like "Changes to Resource Metadata" is not caught.
+NON_NORMATIVE_SECTION_RE = re.compile(
+    r"^(?:normative |informative )?references$"
+    r"|^acknowledge?ments?$"
+    r"|^(?:document )?(?:change ?log|revision history)$"
+    r"|^differences from "
+    r"|^contributors$"
+    r"|^index$",
+    re.IGNORECASE,
+)
+
 BOILERPLATE_RE = re.compile(
     r"key ?words? .{0,80}(are to be interpreted|MUST NOT.{0,40}SHOULD)"
     r"|BCP ?14|RFC ?2119.{0,60}RFC ?8174"
@@ -404,6 +420,8 @@ def extract(spec_id: str, path: Path) -> list[dict]:
     seen: set[str] = set()
 
     for number, title, body in parse_sections(lines):
+        if NON_NORMATIVE_SECTION_RE.match(normalize(title)):
+            continue
         pending_stem: str | None = None
         stem_next = 1
         for is_item, indent, para in paragraphs(body):
