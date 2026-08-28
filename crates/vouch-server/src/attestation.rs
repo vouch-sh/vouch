@@ -321,6 +321,71 @@ mod tests {
         ));
     }
 
+    /// WebAuthn L2 §8.1: "Implementations MUST match WebAuthn attestation
+    /// statement format identifiers in a case-sensitive fashion."
+    ///
+    /// The registered identifiers are lowercase, so a case variant is a
+    /// different identifier and resolves to `Unknown` — which
+    /// `validate_hardware_attestation` refuses, rather than admitting a
+    /// credential on a spelling the registry does not define.
+    #[test]
+    fn test_format_identifiers_are_matched_case_sensitively() {
+        for spelling in ["Packed", "PACKED", "Fido-U2F", "None", "TPM"] {
+            assert!(
+                matches!(
+                    AttestationFormat::parse(spelling),
+                    AttestationFormat::Unknown(_)
+                ),
+                "{spelling} must not match a registered identifier"
+            );
+        }
+    }
+
+    /// WebAuthn L2 §8.1: "All attestation statement format identifiers MUST be
+    /// a maximum of 32 octets in length and MUST consist only of printable
+    /// USASCII characters, excluding backslash and doublequote, i.e., VCHAR as
+    /// defined in [RFC5234] but without %x22 and %x5c."
+    ///
+    /// Every registered identifier this server accepts satisfies both bounds,
+    /// and an identifier that violates either cannot be one of them — so it
+    /// resolves to `Unknown` and the registration is refused.
+    #[test]
+    fn test_format_identifiers_outside_the_permitted_syntax_are_unknown() {
+        for known in [
+            AttestationFormat::Packed,
+            AttestationFormat::Tpm,
+            AttestationFormat::AndroidKey,
+            AttestationFormat::AndroidSafetynet,
+            AttestationFormat::FidoU2f,
+            AttestationFormat::None,
+            AttestationFormat::Apple,
+        ] {
+            let id = known.as_str();
+            assert!(id.len() <= 32, "{id} is longer than 32 octets");
+            assert!(
+                id.bytes()
+                    .all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\'),
+                "{id} contains a character outside the permitted set"
+            );
+        }
+
+        for outside in [
+            "p".repeat(33).as_str(),
+            "pac\"ked",
+            "pac\\ked",
+            "pac ked",
+            "pac\u{7f}ked",
+        ] {
+            assert!(
+                matches!(
+                    AttestationFormat::parse(outside),
+                    AttestationFormat::Unknown(_)
+                ),
+                "an identifier outside the permitted syntax must not match"
+            );
+        }
+    }
+
     #[test]
     fn test_as_str() {
         assert_eq!(AttestationFormat::Packed.as_str(), "packed");

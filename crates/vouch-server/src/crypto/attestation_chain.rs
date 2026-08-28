@@ -12,7 +12,7 @@ use aws_lc_rs::signature;
 use const_oid::ObjectIdentifier;
 use der::{Decode, DecodePem};
 use thiserror::Error;
-use x509_cert::Certificate;
+use x509_cert::{Certificate, certificate::Version, ext::pkix::BasicConstraints};
 
 // ============================================================================
 // Pinned Root CA Certificates (PEM, embedded at compile time)
@@ -43,6 +43,9 @@ const YUBICO_CA_1_PEM: &str = include_str!("../../root_certs/yubico-ca-1.pem");
 /// FIDO2 AAGUID extension OID (WebAuthn Level 2 Section 8.2.1).
 const OID_FIDO_AAGUID: ObjectIdentifier = oid::extension::FIDO_GEN_CE_AAGUID;
 
+/// Basic Constraints extension OID (RFC 5280 Section 4.2.1.9).
+const OID_BASIC_CONSTRAINTS: ObjectIdentifier = oid::extension::BASIC_CONSTRAINTS;
+
 // ============================================================================
 // Error & Result Types
 // ============================================================================
@@ -62,6 +65,8 @@ pub enum AttestationChainError {
     AaguidMismatch { cert: String, auth_data: String },
     #[error("Unsupported signature algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    #[error("Attestation certificate does not meet WebAuthn Section 8.2.1: {0}")]
+    CertRequirements(String),
 }
 
 /// Evidence that an attestation certificate chain was validated.
@@ -156,9 +161,16 @@ pub fn validate_attestation_chain(
         return Err(AttestationChainError::UntrustedRoot);
     }
 
-    // Extract AAGUID from the leaf certificate
+    // WebAuthn Level 2 Section 8.2: "Verify that attestnCert meets the
+    // requirements in Section 8.2.1 Packed Attestation Statement Certificate
+    // Requirements." The leaf is attestnCert -- Section 8.2 fixes its position:
+    // "The attestation certificate attestnCert MUST be the first element in
+    // the array."
     let leaf = certs.first().ok_or(AttestationChainError::EmptyChain)?;
-    let cert_aaguid = extract_aaguid_from_cert(leaf);
+    check_attestation_cert_requirements(leaf)?;
+
+    // Extract AAGUID from the leaf certificate
+    let cert_aaguid = extract_aaguid_from_cert(leaf)?;
 
     tracing::trace!(
         leaf = %leaf.tbs_certificate.subject,
@@ -284,38 +296,101 @@ fn verify_rsa_signature(
         .map_err(|e| AttestationChainError::SignatureInvalid(format!("RSA: {e}")))
 }
 
-/// Extract AAGUID from a certificate's FIDO extension.
+/// Check the leaf against WebAuthn Level 2 Section 8.2.1.
 ///
-/// The extension value is an OCTET STRING containing another OCTET STRING
-/// wrapping the 16-byte AAGUID.
-fn extract_aaguid_from_cert(cert: &Certificate) -> Option<String> {
-    let extensions = cert.tbs_certificate.extensions.as_ref()?;
-    for ext in extensions.iter() {
-        if ext.extn_id == OID_FIDO_AAGUID {
-            let value = ext.extn_value.as_bytes();
-            // The extension value is an OCTET STRING wrapping
-            // the 16-byte AAGUID. The outer OCTET STRING is the
-            // DER encoding, so we need to strip the tag+length.
-            // DER: 04 10 <16 bytes>
-            let aaguid_bytes = if value.len() == 18
-                && value.first().copied() == Some(0x04)
-                && value.get(1).copied() == Some(0x10)
-            {
-                value.get(2..18)?
-            } else if value.len() == 16 {
-                value
-            } else {
-                tracing::debug!("Unexpected AAGUID extension length: {}", value.len());
-                return None;
-            };
+/// Section 8.2.1 lists what an attestation certificate "MUST have"; the
+/// packed verification procedure in Section 8.2 makes checking them the
+/// Relying Party's job. Three of those requirements are checked here:
+///
+/// * "Version MUST be set to 3 (which is indicated by an ASN.1 INTEGER with
+///   value 2)."
+/// * "The Basic Constraints extension MUST have the CA component set to
+///   false." An absent extension is accepted: RFC 5280 Section 4.2.1.9
+///   defines `cA` as `BOOLEAN DEFAULT FALSE`, so absence already means false,
+///   and Yubico's older U2F end-entity certificates omit the extension.
+/// * "The extension MUST NOT be marked as critical", of the
+///   `id-fido-gen-ce-aaguid` extension — checked in
+///   [`extract_aaguid_from_cert`], which is where that extension is read.
+///
+/// The Subject requirement (`Subject-C` / `-O` / `-OU` / `-CN`) is not
+/// checked. Yubico's U2F end-entity certificates, which chain to two of the
+/// three pinned roots, carry a `CN` alone, so enforcing it would reject
+/// hardware Vouch is built around. The chain must still terminate at a pinned
+/// Yubico root, which is the stronger constraint.
+fn check_attestation_cert_requirements(leaf: &Certificate) -> Result<(), AttestationChainError> {
+    if leaf.tbs_certificate.version != Version::V3 {
+        return Err(AttestationChainError::CertRequirements(format!(
+            "attestation certificate version is {:?}, must be V3",
+            leaf.tbs_certificate.version
+        )));
+    }
 
-            if aaguid_bytes.len() != 16 {
-                return None;
+    if let Some(extensions) = leaf.tbs_certificate.extensions.as_ref() {
+        for ext in extensions.iter() {
+            if ext.extn_id != OID_BASIC_CONSTRAINTS {
+                continue;
             }
-            return Some(format_aaguid(aaguid_bytes));
+            let constraints =
+                BasicConstraints::from_der(ext.extn_value.as_bytes()).map_err(|e| {
+                    AttestationChainError::CertRequirements(format!(
+                        "Basic Constraints extension is not parseable: {e}"
+                    ))
+                })?;
+            if constraints.ca {
+                return Err(AttestationChainError::CertRequirements(
+                    "Basic Constraints has the CA component set to true".to_string(),
+                ));
+            }
         }
     }
-    None
+
+    Ok(())
+}
+
+/// Extract AAGUID from a certificate's FIDO extension.
+///
+/// WebAuthn Level 2 Section 8.2.1: "Note that an X.509 Extension encodes the
+/// DER-encoding of the value in an OCTET STRING. Thus, the AAGUID MUST be
+/// wrapped in two OCTET STRINGS to be valid." `extn_value` is the outer OCTET
+/// STRING, so its contents must be `04 10` followed by the 16 AAGUID bytes.
+///
+/// Returns `Ok(None)` when the certificate carries no such extension, which is
+/// permitted: the extension is required only "if the related attestation root
+/// certificate is used for multiple authenticator models". A present but
+/// malformed extension is an error rather than a silent `None`, because a
+/// `None` would skip the AAGUID cross-check in
+/// [`validate_attestation_chain`] instead of failing it.
+fn extract_aaguid_from_cert(cert: &Certificate) -> Result<Option<String>, AttestationChainError> {
+    let Some(extensions) = cert.tbs_certificate.extensions.as_ref() else {
+        return Ok(None);
+    };
+    for ext in extensions.iter() {
+        if ext.extn_id != OID_FIDO_AAGUID {
+            continue;
+        }
+
+        // WebAuthn Level 2 Section 8.2.1: "The extension MUST NOT be marked
+        // as critical."
+        if ext.critical {
+            return Err(AttestationChainError::CertRequirements(
+                "id-fido-gen-ce-aaguid extension is marked critical".to_string(),
+            ));
+        }
+
+        let value = ext.extn_value.as_bytes();
+        let inner = value
+            .strip_prefix(&[0x04, 0x10])
+            .filter(|rest| rest.len() == 16)
+            .ok_or_else(|| {
+                AttestationChainError::CertRequirements(format!(
+                    "id-fido-gen-ce-aaguid value is not an OCTET STRING wrapping \
+                     16 bytes ({} bytes)",
+                    value.len()
+                ))
+            })?;
+        return Ok(Some(format_aaguid(inner)));
+    }
+    Ok(None)
 }
 
 /// Format 16 raw bytes as a UUID string.
@@ -327,183 +402,5 @@ fn format_aaguid(bytes: &[u8]) -> String {
     uuid::Uuid::from_bytes(arr).as_hyphenated().to_string()
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
-)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_empty_chain() {
-        let result = validate_attestation_chain(&[], None);
-        assert!(
-            matches!(result, Err(AttestationChainError::EmptyChain)),
-            "Expected EmptyChain, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_self_signed_rejected() {
-        // A self-signed certificate not from Yubico should be rejected
-        // Use one of the pinned roots itself — it is self-signed but
-        // would need to be IN the chain AND trusted. A single cert
-        // that isn't signed by a pinned root should fail.
-        let bogus_cert = generate_self_signed_cert();
-        let result = validate_attestation_chain(&[bogus_cert], None);
-        assert!(
-            matches!(
-                result,
-                Err(AttestationChainError::UntrustedRoot)
-                    | Err(AttestationChainError::SignatureInvalid(_))
-            ),
-            "Expected UntrustedRoot or SignatureInvalid, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_pinned_roots_parse() {
-        assert_eq!(PINNED_ROOTS.len(), 3, "Should parse all three root CAs");
-    }
-
-    #[test]
-    fn test_format_aaguid() {
-        let bytes = [
-            0xcb, 0x69, 0x48, 0x1e, 0x8f, 0xf7, 0x40, 0x39, 0x93, 0xec, 0x0a, 0x27, 0x29, 0xa1,
-            0x54, 0xa8,
-        ];
-        let result = format_aaguid(&bytes);
-        assert_eq!(result, "cb69481e-8ff7-4039-93ec-0a2729a154a8");
-    }
-
-    #[test]
-    fn test_format_aaguid_wrong_length() {
-        let result = format_aaguid(&[0u8; 8]);
-        assert!(result.is_empty());
-    }
-
-    /// Generate a minimal self-signed certificate for testing.
-    /// Uses RSA-2048 + SHA-256.
-    fn generate_self_signed_cert() -> Vec<u8> {
-        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)
-            .expect("RSA keygen");
-
-        build_self_signed_der(&key_pair)
-    }
-
-    /// Build a minimal self-signed X.509 v3 DER certificate.
-    fn build_self_signed_der(key_pair: &aws_lc_rs::rsa::KeyPair) -> Vec<u8> {
-        use aws_lc_rs::signature::KeyPair;
-
-        // RSA-SHA256 OID
-        let alg_oid = &[
-            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
-        ];
-        // NULL parameters
-        let alg_params = &[0x05, 0x00];
-
-        // AlgorithmIdentifier SEQUENCE
-        let alg_id = der_sequence(&[alg_oid, alg_params]);
-
-        // Version (v3 = 2, explicit tag [0])
-        let version = &[0xa0, 0x03, 0x02, 0x01, 0x02];
-
-        // Serial number
-        let serial = der_integer(&[0x01]);
-
-        // Issuer/Subject: CN=Test
-        let cn_oid = &[0x06, 0x03, 0x55, 0x04, 0x03];
-        let cn_value = &[0x0c, 0x04, b'T', b'e', b's', b't'];
-        let attr_type_and_value = der_sequence(&[cn_oid, cn_value]);
-        let rdn_set = der_set(&[&attr_type_and_value]);
-        let name = der_sequence(&[&rdn_set]);
-
-        // Validity: not before/not after (UTCTime)
-        // UTCTime: years 00-49 → 2000-2049, years 50-99 → 1950-1999
-        let not_before: &[u8] = b"\x17\x0d240101000000Z";
-        let not_after: &[u8] = b"\x17\x0d490101000000Z";
-        let validity = der_sequence(&[not_before, not_after]);
-
-        // SubjectPublicKeyInfo (from the key pair)
-        let pk_der = key_pair.public_key().as_ref();
-        // Wrap in SEQUENCE with algorithm
-        let spki = der_sequence(&[&alg_id, &der_bit_string(pk_der)]);
-
-        // TBSCertificate
-        let tbs = der_sequence(&[
-            version, &serial, &alg_id, &name, // issuer
-            &validity, &name, // subject
-            &spki,
-        ]);
-
-        // Sign the TBS
-        let mut sig_buf = vec![0u8; key_pair.public_modulus_len()];
-        let rng = aws_lc_rs::rand::SystemRandom::new();
-        key_pair
-            .sign(
-                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
-                &rng,
-                &tbs,
-                &mut sig_buf,
-            )
-            .expect("sign");
-
-        let sig_bit_string = der_bit_string(&sig_buf);
-
-        // Certificate SEQUENCE
-        der_sequence(&[&tbs, &alg_id, &sig_bit_string])
-    }
-
-    fn der_sequence(items: &[&[u8]]) -> Vec<u8> {
-        let mut content = Vec::new();
-        for item in items {
-            content.extend_from_slice(item);
-        }
-        der_wrap(0x30, &content)
-    }
-
-    fn der_set(items: &[&[u8]]) -> Vec<u8> {
-        let mut content = Vec::new();
-        for item in items {
-            content.extend_from_slice(item);
-        }
-        der_wrap(0x31, &content)
-    }
-
-    fn der_integer(value: &[u8]) -> Vec<u8> {
-        der_wrap(0x02, value)
-    }
-
-    fn der_bit_string(value: &[u8]) -> Vec<u8> {
-        // BIT STRING: tag 0x03, length, 0x00 (no unused bits), value
-        let mut content = vec![0x00];
-        content.extend_from_slice(value);
-        der_wrap(0x03, &content)
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "DER short-form length: each `as u8` is guarded by an explicit branch bound"
-    )]
-    fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
-        let len = content.len();
-        let mut out = vec![tag];
-        if len < 0x80 {
-            out.push(len as u8);
-        } else if len < 0x100 {
-            out.push(0x81);
-            out.push(len as u8);
-        } else {
-            out.push(0x82);
-            out.push((len >> 8) as u8);
-            out.push((len & 0xff) as u8);
-        }
-        out.extend_from_slice(content);
-        out
-    }
-}
+mod tests;

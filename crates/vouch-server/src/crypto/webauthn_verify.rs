@@ -185,6 +185,13 @@ pub enum VerifyError {
 
     #[error("Attestation certificate chain invalid: {0}")]
     AttestationChainInvalid(String),
+
+    #[error("Attestation statement declares alg {declared}, but {subject} is {actual}")]
+    AttestationAlgMismatch {
+        declared: i64,
+        subject: &'static str,
+        actual: String,
+    },
 }
 
 /// Result of successful assertion verification.
@@ -703,6 +710,13 @@ fn verify_packed_attestation<V: CoseVerifier>(
     // Extract x5c certificate chain if present
     let x5c_certs = extract_x5c_certs(stmt_map);
 
+    // WebAuthn Level 2 Section 8.2 gives `alg` as a mandatory member of both
+    // arms of the packed CDDL, and step 1 of the verification procedure is
+    // "Verify that attStmt is valid CBOR conforming to the syntax defined
+    // above", so a statement without it is rejected here rather than verified
+    // against an algorithm nobody declared.
+    let declared_alg = cbor_map_get_int_by_text(stmt_map, "alg")?;
+
     if let Some(certs) = x5c_certs {
         // Full attestation with x5c certificate chain
 
@@ -720,6 +734,7 @@ fn verify_packed_attestation<V: CoseVerifier>(
             })?,
             &signed_data,
             &sig,
+            declared_alg,
         )?;
 
         // Validate the certificate chain against pinned Yubico roots
@@ -739,6 +754,19 @@ fn verify_packed_attestation<V: CoseVerifier>(
     // Self-attestation: extract sig from attStmt
     let sig = cbor_map_get_bytes_by_text(stmt_map, "sig")?;
 
+    // WebAuthn Level 2 Section 8.2, verification procedure step 3: "If x5c is
+    // not present, self attestation is in use." Its first sub-step is
+    // "Validate that alg matches the algorithm of the credentialPublicKey in
+    // authenticatorData."
+    let credential_alg = cose_key_alg(cose_key_bytes)?;
+    if declared_alg != credential_alg {
+        return Err(VerifyError::AttestationAlgMismatch {
+            declared: declared_alg,
+            subject: "the credential public key",
+            actual: credential_alg.to_string(),
+        });
+    }
+
     // Build signed data: authData || SHA-256(clientDataJSON)
     let client_data_hash = digest::digest(&SHA256, client_data_json);
     let mut signed_data = Vec::with_capacity(auth_data_bytes.len().saturating_add(32));
@@ -748,6 +776,16 @@ fn verify_packed_attestation<V: CoseVerifier>(
     // Verify signature using the credential's own public key (self-attestation)
     verifier.verify(cose_key_bytes, &signed_data, &sig)?;
     Ok(None)
+}
+
+/// Read the `alg` label (3) of a CBOR-encoded COSE key.
+fn cose_key_alg(cose_key: &[u8]) -> Result<i64, VerifyError> {
+    let parsed: ciborium::Value =
+        ciborium::from_reader(cose_key).map_err(|e| VerifyError::InvalidCoseKey(e.to_string()))?;
+    let ciborium::Value::Map(map) = parsed else {
+        return Err(VerifyError::InvalidCoseKey("Expected COSE map".to_string()));
+    };
+    get_cose_int(&map, 3)
 }
 
 /// Extract x5c DER certificate arrays from a CBOR attStmt map.
@@ -780,10 +818,18 @@ fn extract_x5c_certs(stmt_map: &[(ciborium::Value, ciborium::Value)]) -> Option<
 ///
 /// Parses the DER certificate to extract the public key, determines the
 /// algorithm, and verifies the signature.
+///
+/// WebAuthn Level 2 Section 8.2, verification procedure step 2: "Verify that
+/// sig is a valid signature over the concatenation of authenticatorData and
+/// clientDataHash using the attestation public key in attestnCert with the
+/// algorithm specified in alg." `declared_alg` is that `alg`; a value naming a
+/// different key family than attestnCert carries is rejected rather than
+/// silently overridden by the certificate.
 fn verify_attestation_sig_with_leaf_cert(
     leaf_der: &[u8],
     message: &[u8],
     sig: &[u8],
+    declared_alg: i64,
 ) -> Result<(), VerifyError> {
     let cert = x509_cert::Certificate::from_der(leaf_der).map_err(|e| {
         VerifyError::AttestationChainInvalid(format!("Failed to parse leaf cert: {e}"))
@@ -794,6 +840,19 @@ fn verify_attestation_sig_with_leaf_cert(
 
     // Determine algorithm from the certificate's public key algorithm OID
     let pk_alg_oid = spki.algorithm.oid;
+
+    let expected_oid = match declared_alg {
+        cose::alg::ES256 => oid::public_key::EC,
+        cose::alg::RS256 => oid::public_key::RSA,
+        other => return Err(VerifyError::UnsupportedAlgorithm(other)),
+    };
+    if pk_alg_oid != expected_oid {
+        return Err(VerifyError::AttestationAlgMismatch {
+            declared: declared_alg,
+            subject: "the attestation certificate key",
+            actual: pk_alg_oid.to_string(),
+        });
+    }
 
     if pk_alg_oid == oid::public_key::EC {
         let pk = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, pk_bytes);
@@ -878,6 +937,27 @@ fn cbor_map_get_bytes_by_text(
             && let ciborium::Value::Bytes(bytes) = v
         {
             return Ok(bytes.clone());
+        }
+    }
+    Err(VerifyError::InvalidClientData(format!(
+        "Missing field '{key}' in attestation statement"
+    )))
+}
+
+/// Get an integer from a CBOR map by text key.
+fn cbor_map_get_int_by_text(
+    map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<i64, VerifyError> {
+    for (k, v) in map {
+        if let ciborium::Value::Text(s) = k
+            && s == key
+            && let ciborium::Value::Integer(i) = v
+        {
+            let value: i128 = (*i).into();
+            return i64::try_from(value).map_err(|_| {
+                VerifyError::InvalidClientData(format!("Field '{key}' is out of range"))
+            });
         }
     }
     Err(VerifyError::InvalidClientData(format!(

@@ -1382,7 +1382,7 @@ fn es256_fixture(message: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 /// WebAuthn Level 2 Section 6.5.5: "the sig value MUST be encoded as an
 /// ASN.1 DER Ecdsa-Sig-Value". Both browsers and CTAP2 authenticators emit
 /// this encoding, so it is the only one a conformant client produces.
-// WebAuthn L2 §7.2 step 20: an ES256 signature in the encoding WebAuthn specifies verifies.
+// WebAuthn L2 §6.5.5, §7.2 step 20: an ES256 signature in the encoding WebAuthn specifies verifies.
 #[test]
 fn test_es256_der_signature_is_accepted() {
     let message = b"webauthn assertion signing input";
@@ -1394,7 +1394,7 @@ fn test_es256_der_signature_is_accepted() {
 /// A raw r||s pair is a valid signature over the same message, but not a
 /// conformant encoding. Accepting it on the strength of its 64-byte length
 /// was the heuristic this replaces, so rejection is the property under test.
-// WebAuthn L2 §7.2 step 20: a raw (r, s) pair is not the ES256 signature encoding.
+// WebAuthn L2 §6.5.5, §7.2 step 20: a raw (r, s) pair is not the ES256 signature encoding.
 #[test]
 fn test_es256_raw_rs_signature_is_rejected() {
     let message = b"webauthn assertion signing input";
@@ -1566,5 +1566,136 @@ fn test_ec2_key_without_curve_is_rejected() {
     assert!(
         matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("crv")),
         "a curveless EC2 key must be rejected for the missing crv, got: {err:?}"
+    );
+}
+
+// =========================================================================
+// WebAuthn L2 §8.2 — packed attestation statement format
+// =========================================================================
+
+/// Wrap auth_data into a CBOR attestation object with an arbitrary `fmt` and
+/// attestation statement.
+fn make_attestation_object(
+    fmt: &str,
+    att_stmt: Vec<(ciborium::Value, ciborium::Value)>,
+    auth_data: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text(fmt.to_string()),
+        ),
+        (
+            ciborium::Value::Text("attStmt".to_string()),
+            ciborium::Value::Map(att_stmt),
+        ),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data.to_vec()),
+        ),
+    ]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    buf
+}
+
+/// A self-attestation `attStmt`: `alg` plus `sig`, and no `x5c`.
+fn self_att_stmt(alg: Option<i64>) -> Vec<(ciborium::Value, ciborium::Value)> {
+    let mut entries = vec![(
+        ciborium::Value::Text("sig".to_string()),
+        ciborium::Value::Bytes(vec![0u8; 64]),
+    )];
+    if let Some(alg) = alg {
+        entries.push((
+            ciborium::Value::Text("alg".to_string()),
+            ciborium::Value::Integer(alg.into()),
+        ));
+    }
+    entries
+}
+
+/// Run registration over a packed self-attestation carrying `alg`, against a
+/// credential public key that is EdDSA (COSE alg -8).
+fn verify_self_attestation(fmt: &str, alg: Option<i64>) -> Result<(), VerifyError> {
+    let rp_id = "example.com";
+    let challenge = "test-challenge";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+    let attestation = make_attestation_object(fmt, self_att_stmt(alg), &auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .map(|_| ())
+}
+
+/// WebAuthn L2 §8.2, verification procedure step 3: "If x5c is not present,
+/// self attestation is in use." Its first sub-step is "Validate that alg
+/// matches the algorithm of the credentialPublicKey in authenticatorData."
+///
+/// The credential key here is EdDSA (-8), so a statement declaring ES256 (-7)
+/// fails that step. Nothing downstream catches it: the signature is verified
+/// with the algorithm the *key* names, so without this check the declared
+/// value simply goes unread.
+#[test]
+fn test_packed_self_attestation_rejects_alg_mismatch() {
+    let err = verify_self_attestation("packed", Some(-7)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            VerifyError::AttestationAlgMismatch { declared: -7, .. }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The matching half of §8.2 step 3: `alg` equal to the credential public
+/// key's algorithm passes the check and the statement verifies.
+#[test]
+fn test_packed_self_attestation_accepts_matching_alg() {
+    assert!(verify_self_attestation("packed", Some(-8)).is_ok());
+}
+
+/// WebAuthn L2 §8.2 gives the packed syntax in CDDL, where `alg:
+/// COSEAlgorithmIdentifier` is a member of both arms — the one with `x5c` and
+/// the self-attestation one. Step 1 of the verification procedure is "Verify
+/// that attStmt is valid CBOR conforming to the syntax defined above and
+/// perform CBOR decoding on it to extract the contained fields", so a
+/// statement missing `alg` does not conform.
+#[test]
+fn test_packed_attestation_requires_alg() {
+    let err = verify_self_attestation("packed", None).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(ref m) if m.contains("alg")),
+        "got {err:?}"
+    );
+}
+
+/// WebAuthn L2 §8.1: "Implementations MUST match WebAuthn attestation
+/// statement format identifiers in a case-sensitive fashion."
+///
+/// `Packed` is not `packed`, so the packed verification procedure — and the
+/// `alg` check that rejects the statement above — must not run for it.
+#[test]
+fn test_attestation_format_identifiers_match_case_sensitively() {
+    // The identical statement, rejected under the registered identifier.
+    assert!(verify_self_attestation("packed", Some(-7)).is_err());
+
+    // Under a differently-cased identifier it is not a packed statement at
+    // all, so no packed rule is applied to it.
+    assert!(
+        verify_self_attestation("Packed", Some(-7)).is_ok(),
+        "a case variant must not be treated as the packed format"
     );
 }
