@@ -725,13 +725,39 @@ mod tests {
         assert!(result.is_err(), "HS256 must be rejected");
     }
 
-    // RFC 8725 §3.2: the none algorithm is not accepted.
+    // RFC 8725 §3.2 and RFC 7518 §3.6: the none algorithm is not accepted.
+    //
+    // RFC 7518 §3.6: "Implementations MUST NOT accept Unsecured JWSs by
+    // default." A Request Object arrives from the client, so this is one of
+    // the three places an attacker can present an Unsecured JWS.
     #[test]
     fn test_jar_parse_header_rejects_none_algorithm() {
         let jwt =
             make_jwt_with_header(&serde_json::json!({"alg": "none", "typ": "oauth-authz-req+jwt"}));
         let result = parse_request_object_header(&jwt);
         assert!(result.is_err(), "alg=none must be rejected");
+    }
+
+    // RFC 7518 §3.6: an Unsecured JWS "MUST use the empty octet sequence as
+    // its JWS Signature value", so the well-formed unsecured Request Object is
+    // the one with a third segment that is empty. It is rejected on the
+    // algorithm, before the signature is ever looked at — Vouch never accepts
+    // an Unsecured JWS, well-formed or not.
+    #[test]
+    fn test_jar_parse_header_rejects_well_formed_unsecured_jws() {
+        let header_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "none", "typ": "oauth-authz-req+jwt"}))
+                .unwrap(),
+        );
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        // Empty signature segment: the empty octet sequence.
+        let unsecured = format!("{header_b64}.{payload_b64}.");
+
+        let result = parse_request_object_header(&unsecured);
+        assert!(
+            result.is_err(),
+            "an Unsecured JWS with an empty signature must still be rejected"
+        );
     }
 
     // RFC 9101 §10.1: a symmetric algorithm is not acceptable for a request object.

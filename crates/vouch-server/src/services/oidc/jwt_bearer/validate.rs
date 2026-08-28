@@ -362,6 +362,13 @@ mod tests {
     }
 
     // RFC 8725 §3.1: the algorithm is checked against what the client registered.
+    //
+    // RFC 7518 §3.6: "In order to mitigate downgrade attacks, applications
+    // MUST NOT signal acceptance of Unsecured JWSs at a global level."
+    // `JwsAlgorithm` has no `none` variant, so the wire string never parses
+    // and no advertised algorithm list (discovery's
+    // `*_signing_alg_values_supported`, all typed `Vec<JwsAlgorithm>`) can
+    // name it.
     #[test]
     fn test_structural_algorithm_gate_matches_client_assertion_allowed() {
         // parse_assertion_header's structural gate accepts exactly the algorithms
@@ -431,12 +438,34 @@ mod tests {
         );
     }
 
-    // RFC 8725 §3.2: the none algorithm is not accepted.
+    // RFC 8725 §3.2 and RFC 7518 §3.6: the none algorithm is not accepted.
+    //
+    // RFC 7518 §3.6: "Implementations MUST NOT accept Unsecured JWSs by
+    // default." A client assertion authenticates the client, so accepting an
+    // Unsecured JWS here would let anyone authenticate as any client.
     #[test]
     fn test_parse_assertion_header_rejects_none_algorithm() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "none"}));
         let result = parse_assertion_header(&jwt);
         assert!(result.is_err(), "alg=none must be rejected");
+    }
+
+    // RFC 7518 §3.6: an Unsecured JWS "MUST use the empty octet sequence as
+    // its JWS Signature value". The well-formed unsecured assertion is
+    // rejected on its algorithm, before the empty signature is examined.
+    #[test]
+    fn test_parse_assertion_header_rejects_well_formed_unsecured_jws() {
+        let header_b64 = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&serde_json::json!({"alg": "none"})).unwrap());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        // Empty signature segment: the empty octet sequence.
+        let unsecured = format!("{header_b64}.{payload_b64}.");
+
+        let result = parse_assertion_header(&unsecured);
+        assert!(
+            result.is_err(),
+            "an Unsecured JWS with an empty signature must still be rejected"
+        );
     }
 
     // RFC 7523 §3: an asymmetrically signed assertion is accepted.

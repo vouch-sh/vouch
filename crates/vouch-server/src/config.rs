@@ -1492,6 +1492,10 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    // RFC 7518 §3.2: "A key of the same size as the hash output (for instance,
+    // 256 bits for "HS256") or larger MUST be used with this algorithm."
+    // State tokens are signed HS256 with this secret, so the 32-character
+    // floor is that 256-bit minimum.
     #[test]
     fn test_validate_short_secret_without_kms_fails() {
         let mut config = test_config();
