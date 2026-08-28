@@ -360,11 +360,9 @@ pub(crate) async fn verify_id_token(
 ) -> Result<IdentityResult, anyhow::Error> {
     // RFC 7515 Section 4.1.11: "If any of the listed extension Header
     // Parameters are not understood and supported by the recipient, then the
-    // JWS is invalid." Vouch supports no `crit` extension, and
-    // `jsonwebtoken::decode_header` does not surface the parameter, so the
-    // header is parsed here — the typed `Algorithm` still comes from
-    // `decode_header` below, which is why this path decodes twice.
-    crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
+    // JWS is invalid." Vouch supports no `crit` extension, so a `crit`-bearing
+    // ID token never yields a header at all.
+    let jws = crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
         crate::crypto::jwt::JwsError::Critical => {
             anyhow::anyhow!("ID token header carries an unsupported 'crit' extension")
         }
@@ -373,11 +371,12 @@ pub(crate) async fn verify_id_token(
         }
     })?;
 
-    // Decode the JWT header to determine algorithm and key ID
-    let header = jsonwebtoken::decode_header(id_token)
-        .map_err(|e| anyhow::anyhow!("Invalid ID token header: {e}"))?;
-
-    let alg = header.alg;
+    // The signing algorithm, from the header already decoded above.
+    let alg: jsonwebtoken::Algorithm = jws
+        .header()
+        .alg
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Unsupported ID token algorithm: {}", jws.header().alg))?;
 
     // Fetch JWKS from the upstream IdP
     let jwks_response = http_client
@@ -400,7 +399,7 @@ pub(crate) async fn verify_id_token(
         .map_err(|e| anyhow::anyhow!("Failed to parse JWKS: {e}"))?;
 
     // Find matching key by kid, then by algorithm
-    let decoding_key = find_decoding_key(&jwks, header.kid.as_deref(), alg)?;
+    let decoding_key = find_decoding_key(&jwks, jws.header().kid.as_deref(), alg)?;
 
     // Entra `/organizations/v2.0` discovery stores the literal `{tenantid}`
     // placeholder in `provider.issuer`; real tokens carry a concrete tenant

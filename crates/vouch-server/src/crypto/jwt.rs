@@ -367,8 +367,7 @@ pub(crate) enum JwsError {
 /// struct rather than a JSON object. What a caller can reach is decided here,
 /// once, and two of those decisions are load-bearing in opposite directions:
 ///
-/// * `crit` is **present** in the struct so it cannot be forgotten.
-///   `jsonwebtoken::decode_header` does not surface it at all, and a header
+/// * `crit` is **present** in the struct so it cannot be forgotten. A header
 ///   view that omitted the field would silently reopen Section 4.1.11.
 /// * `jku`, `x5u`, and `x5c` are **absent** from the struct so they cannot be
 ///   used. Section 4 requires unrecognized parameters be ignored, which is
@@ -378,10 +377,22 @@ pub(crate) enum JwsError {
 ///   pins that. `cty` is absent for the same reason — nothing reads it, so
 ///   declaring it would be surface without a use.
 ///
-/// `alg` is not an [`JwsAlgorithm`]: which algorithms are acceptable differs by
-/// caller (a FAPI client assertion excludes RS256 where a Request Object may
-/// not), and that is a policy question, not a well-formedness one. Parsing
-/// keeps the string; callers apply their own allowlist.
+/// `alg` is a `String`, not an algorithm enum. Which algorithms are acceptable
+/// differs by caller (a FAPI client assertion excludes RS256 where a Request
+/// Object may not), so that is a policy question, not a well-formedness one:
+/// parsing keeps the string and callers apply their own allowlist, which is
+/// also what lets them name the offending algorithm in the error.
+///
+/// `jsonwebtoken::Header` covers the same registered parameters, `crit`
+/// included, and rejects a duplicate name and a missing `alg` just as this
+/// does. It is not used here because its `alg` is a closed `Algorithm` enum:
+/// an unrecognized algorithm fails deserialization, which would collapse
+/// "algorithm we do not allow" into "header we could not parse" and lose the
+/// name from the message. Two smaller differences follow from its typing:
+/// `crit: null` deserializes to `None` there, indistinguishable from absent,
+/// and a non-array `crit` fails as a type error rather than as a critical
+/// extension. It also exposes `jku`, `x5u`, and `x5c`, which this deliberately
+/// does not.
 #[derive(Debug, Deserialize)]
 pub(crate) struct JoseHeader {
     /// RFC 7515 Section 4.1.1. Required: Section 5.1 says the `alg` Header
