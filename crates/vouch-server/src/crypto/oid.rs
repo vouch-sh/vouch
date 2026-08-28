@@ -80,6 +80,14 @@ pub(crate) mod extension {
     /// Carries the authenticator's AAGUID, wrapped in two OCTET STRINGs.
     pub(crate) const FIDO_GEN_CE_AAGUID: ObjectIdentifier =
         ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
+
+    /// `id-ce-basicConstraints` — RFC 5280 Section 4.2.1.9.
+    ///
+    /// WebAuthn Level 2 Section 8.2.1 requires a packed attestation
+    /// certificate to carry `cA` set to false, so the attestation path reads
+    /// this extension to reject a CA certificate presented as a leaf.
+    pub(crate) const BASIC_CONSTRAINTS: ObjectIdentifier =
+        ObjectIdentifier::new_unwrap("2.5.29.19");
 }
 
 #[cfg(test)]
@@ -102,6 +110,7 @@ mod tests {
             extension::FIDO_GEN_CE_AAGUID.to_string(),
             "1.3.6.1.4.1.45724.1.1.4"
         );
+        assert_eq!(extension::BASIC_CONSTRAINTS.to_string(), "2.5.29.19");
     }
 
     /// Public-key and signature OIDs are different namespaces. Matching a

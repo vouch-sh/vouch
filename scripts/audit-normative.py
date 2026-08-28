@@ -273,7 +273,12 @@ def parse_sections(lines: list[str]) -> list[tuple[str, str, list[str]]]:
         if index <= toc_end or is_toc_line(line):
             continue
         m = HEADING.match(line)
-        if m and len(line) < 90 and not line.rstrip().endswith((",", ";", ":", ".")):
+        # The length cap rejects prose that happens to start with a number.
+        # It has to clear the longest real heading in the corpus: WebAuthn
+        # Level 2 section 6.5.5, "Signature Formats for Packed Attestation,
+        # FIDO U2F Attestation, and Assertion Signatures", is 95 characters,
+        # and at a cap of 90 its four statements were folded into 6.5.4.
+        if m and len(line) < 100 and not line.rstrip().endswith((",", ";", ":", ".")):
             number, title = m.group(1), m.group(2)
             parsed = parse_number(number)
             if parsed is not None and 1 <= len(title.split()) <= 14 and title[0].isupper():

@@ -7,9 +7,12 @@ describe controls you must opt into: authenticator policy and trusted proxies.
 ## Authenticator policy
 
 By default Vouch accepts **any hardware FIDO2 authenticator**. What it enforces is the
-*attestation format*: `packed` and `fido-u2f` (hardware), plus TPM, Apple, and Android platform
-formats. The `none` format — software authenticators and browser-synced passkeys — is rejected, so
-the hardware guarantee holds without any configuration.
+*attestation format*, and only two are accepted: `packed` and `fido-u2f`. Everything else is
+rejected at registration with a 400 — `none` (software authenticators and browser-synced
+passkeys), the platform formats `tpm`, `apple`, `android-key` and `android-safetynet`
+(Windows Hello, Touch ID, Android), and any identifier not on that list. Format identifiers are
+matched case-sensitively, so `Packed` is not `packed`. The hardware guarantee therefore holds
+without any configuration.
 
 Two settings tighten it further.
 
@@ -50,6 +53,19 @@ Rejects self-attestation, requiring authenticators to present a full attestation
 This is what makes the AAGUID trustworthy rather than self-asserted, so enable it alongside
 `VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction for compliance. Some authenticators
 only self-attest, so test with your fleet's hardware before enabling it broadly.
+
+Whenever a `packed` statement does carry a chain, the leaf is checked against the certificate
+requirements in WebAuthn Level 2 section 8.2.1 before its AAGUID is trusted, in addition to the
+chain terminating at a pinned Yubico root:
+
+- the certificate is X.509 version 3;
+- if it carries a Basic Constraints extension, `cA` is false;
+- if it carries the `id-fido-gen-ce-aaguid` extension, that extension is not marked critical and
+  its value is the AAGUID wrapped in two OCTET STRINGs.
+
+A malformed AAGUID extension fails the registration rather than being skipped, so the
+certificate AAGUID is always cross-checked against the one in `authData`. There is no setting
+for any of this — the checks always run on the chain path.
 
 ## Rate limiting
 
