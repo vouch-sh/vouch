@@ -50,6 +50,25 @@
             "retention_in_days": 3
           }
         ]
+      },
+      "journald": {
+        "collect_list": [
+          {
+            "log_group_name": "/vouch-server/system",
+            "log_stream_name": "{instance_id}",
+            "priority": "warning",
+            "retention_in_days": 3
+          },
+          {
+            "log_group_name": "/vouch-server/units",
+            "log_stream_name": "{instance_id}",
+            "units": [
+              "vouch-server.service",
+              "amazon-cloudwatch-agent.service"
+            ],
+            "retention_in_days": 3
+          }
+        ]
       }
     },
     "force_flush_interval": 5

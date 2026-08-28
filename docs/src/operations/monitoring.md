@@ -126,6 +126,25 @@ Security-relevant conditions are logged to a `security` target — certification
 active, a loopback `rp_id` combined with TLS, and rejected `Host` headers on the redirect
 listener.
 
+### CloudWatch log groups on the appliance AMI
+
+The attestable AMI has no SSH, no SSM agent, and no console, so CloudWatch Logs is the only way
+to see what an instance is doing. The bundled CloudWatch agent ships three groups, all with a
+3-day retention and one stream per instance ID:
+
+| Log group | Source | Contents |
+|-----------|--------|----------|
+| `/vouch-server/vouch-server` | `/var/log/vouch-server/output.log` | Everything the server writes to stdout and stderr |
+| `/vouch-server/units` | journald, `vouch-server.service` and `amazon-cloudwatch-agent.service` | Unit start, stop, and restart transitions |
+| `/vouch-server/system` | journald, all units at `warning` and above | Kernel messages, OOM kills, dm-verity failures, service failures |
+
+Look in `/vouch-server/units` first when an instance goes quiet. The server unit writes its own
+output straight to a file, so if the process fails before it execs, `/vouch-server/vouch-server`
+stays empty and the only record of the failure is systemd's message in `/vouch-server/units`.
+
+The writable layer is a RAM overlay, so none of this survives a reboot on the instance itself.
+Anything not already shipped to CloudWatch when an instance restarts is gone.
+
 ### Correlating requests
 
 Every request is assigned an interaction ID, exposed and accepted as the FAPI header
