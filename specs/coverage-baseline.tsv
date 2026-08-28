@@ -1737,31 +1737,8 @@ rfc7517#8.4.1#4bea5d8f	SHOULD	Because a core goal of this specification is for t
 rfc7517#8.5.1#4e6ffadb	SHOULD	o Encoding considerations: 8bit; application/jwk+json values are represented as a JSON object; UTF-8 encoding SHOULD be employed for the JSON object.
 rfc7517#8.5.1#e4bfceb7	SHOULD	o Encoding considerations: 8bit; application/jwk-set+json values are represented as a JSON Object; UTF-8 encoding SHOULD be employed for the JSON object.
 rfc7517#9.2#b25ebd9c	MUST	Private and symmetric keys MUST be protected from disclosure to unintended parties.
-rfc7518#2#ef44fa46	MUST	The octet sequence MUST utilize the minimum number of octets needed to represent the value.
-rfc7518#3.2#4ae29dbf	MUST	The comparison of the computed HMAC value to the JWS Signature value MUST be done in a constant-time manner to thwart timing attacks.
-rfc7518#3.2#b51e9aa3	MUST	A key of the same size as the hash output (for instance, 256 bits for "HS256") or larger MUST be used with this algorithm.
-rfc7518#3.3#40227ea4	MUST	A key of size 2048 bits or larger MUST be used with these algorithms.
-rfc7518#3.4#07157ccc	MUST	The JWS Signature value MUST be a 64-octet sequence.
-rfc7518#3.4#d38ba4cc	MUST NOT	The octet sequence representations MUST NOT be shortened to omit any leading zero octets contained in the values.
-rfc7518#3.5#289487ce	MUST	A key of size 2048 bits or larger MUST be used with this algorithm.
-rfc7518#3.6#018bac80	MUST	Recipients MUST verify that the JWS Signature value is the empty octet sequence.
-rfc7518#3.6#3d9ad7dc	MUST NOT	Implementations MUST NOT accept Unsecured JWSs by default.
-rfc7518#3.6#438e25f9	MUST	An Unsecured JWS uses the "alg" value "none" and is formatted identically to other JWSs, but MUST use the empty octet sequence as its JWS Signature value.
-rfc7518#3.6#cdc9ffbe	MUST NOT	Implementations that support Unsecured JWSs MUST NOT accept such objects as valid unless the application specifies that it is acceptable for a specific object t
-rfc7518#3.6#ef5e4732	MUST NOT	In order to mitigate downgrade attacks, applications MUST NOT signal acceptance of Unsecured JWSs at a global level, and SHOULD signal acceptance on a per-objec
-rfc7518#6.2.1#3926881d	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "P-256"
-rfc7518#6.2.1#3fd50df7	MUST	An Elliptic Curve public key is represented by a pair of coordinates drawn from a finite field, which together define a point on an Elliptic Curve. The followin
-rfc7518#6.2.1#4537de62	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "P-521"
-rfc7518#6.2.1#723e74d2	MUST	An Elliptic Curve public key is represented by a pair of coordinates drawn from a finite field, which together define a point on an Elliptic Curve. The followin
-rfc7518#6.2.1#7fdb5fc6	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "P-384"
-rfc7518#6.2.1#b2b63c88	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section: o "y"
-rfc7518#6.2.1#da0f667d	MUST	The following members MUST be present for all Elliptic Curve public keys:
-rfc7518#6.2.1#e0f26ac1	MUST	The length of this octet string MUST be the full size of a coordinate for the curve specified in the "crv" parameter.
-rfc7518#6.2.1#e349d2c6	MUST	The following member MUST also be present for Elliptic Curve public keys for the three curves defined in the following section:
 rfc7518#6.2.2#cd1a23b5	MUST	The length of this octet string MUST be ceiling(log-base-2(n)/8) octets (where n is the order of the curve).
 rfc7518#6.2.2#d6820e1b	MUST	In addition to the members used to represent Elliptic Curve public keys, the following member MUST be present to represent Elliptic Curve private keys.
-rfc7518#6.3.1#a37875ff	MUST	The following members MUST be present for RSA public keys.
-rfc7518#6.3.1#f3f4737e	MUST	For instance, when representing the value 65537, the octet sequence to be base64url-encoded MUST consist of the three octets [1, 0, 1]; the resulting representa
 rfc7518#6.3.2#0eb253b0	MUST	When three or more primes have been used, the number of array elements MUST be the number of primes used minus two.
 rfc7518#6.3.2#122155cd	MUST NOT	If the consumer of a JWK does not support private keys with more than two primes and it encounters a private key that includes the "oth" parameter, then it MUST
 rfc7518#6.3.2#236e8fd3	SHOULD	The others enable optimizations and SHOULD be included by producers of JWKs representing RSA private keys.

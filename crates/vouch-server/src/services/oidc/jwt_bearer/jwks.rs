@@ -295,10 +295,13 @@ fn build_decoding_key_from_jwk(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     // -----------------------------------------------------------------------
     // Well-known test vectors for JWK components
@@ -645,7 +648,74 @@ mod tests {
         assert!(result.is_ok(), "should build valid EC decoding key");
     }
 
-    // RFC 7517 §4: an EC key without x is incomplete.
+    // RFC 7518 §6.2.1.2: "The length of this octet string MUST be the full
+    // size of a coordinate for the curve specified in the "crv" parameter."
+    // For P-256 that is 32 octets. A coordinate one octet short names a
+    // different point (or none at all), so a signature made with the real key
+    // does not verify under it — checked end to end, because the length is
+    // enforced by the ECDSA verification, not at key construction.
+    #[tokio::test]
+    async fn test_ec_coordinate_shorter_than_the_curve_size_does_not_verify() {
+        let (token, jwk) = es256_token_and_jwk().await;
+
+        // The full-size coordinates verify the token: the control case, without
+        // which a truncated coordinate failing would prove nothing.
+        let full = ec_entry_from_coordinates(&jwk.x, &jwk.y);
+        let key = build_decoding_key_from_jwk(&full, "ES256").expect("full-size EC key builds");
+        assert!(
+            verify_es256(&token, &key),
+            "a P-256 key with full-size coordinates must verify its own token"
+        );
+
+        // Drop the last octet of x: 31 octets where the curve requires 32.
+        let short_x = URL_SAFE_NO_PAD.encode(
+            URL_SAFE_NO_PAD
+                .decode(&jwk.x)
+                .expect("x is base64url")
+                .get(..31)
+                .expect("P-256 x is 32 octets"),
+        );
+        let truncated = ec_entry_from_coordinates(&short_x, &jwk.y);
+
+        let verified = build_decoding_key_from_jwk(&truncated, "ES256")
+            .is_ok_and(|key| verify_es256(&token, &key));
+        assert!(
+            !verified,
+            "a coordinate shorter than the full curve size must not verify a signature"
+        );
+    }
+
+    /// Sign an ES256 JWT and return it with the public JWK that verifies it.
+    async fn es256_token_and_jwk() -> (String, crate::crypto::keys::EcJwk) {
+        let key = crate::test_utils::make_test_oidc_key();
+        let token = key
+            .sign_jwt(&serde_json::json!({ "sub": "subject", "exp": 9_999_999_999i64 }))
+            .await
+            .expect("sign ES256 JWT");
+        let jwk = key.public_key_jwk().expect("public JWK");
+        (token, jwk)
+    }
+
+    /// A P-256 `JwkEntry` carrying the given base64url coordinates.
+    fn ec_entry_from_coordinates(x: &str, y: &str) -> JwkEntry {
+        JwkEntry {
+            x: Some(x.to_string()),
+            y: Some(y.to_string()),
+            ..ec_jwk_entry(None, None, None)
+        }
+    }
+
+    /// Whether `token` verifies as ES256 under `key`.
+    fn verify_es256(token: &str, key: &jsonwebtoken::DecodingKey) -> bool {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<serde_json::Value>(token, key, &validation).is_ok()
+    }
+
+    // RFC 7518 §6.2.1: "The following members MUST be present for all
+    // Elliptic Curve public keys: o "crv" o "x"". A client's registered JWKS
+    // is attacker-influenced input via RFC 7591 dynamic registration, so an
+    // EC key missing `x` has to be refused rather than defaulted.
     #[test]
     fn test_build_decoding_key_ec_missing_x() {
         let mut key = ec_jwk_entry(None, None, None);
@@ -661,7 +731,10 @@ mod tests {
         );
     }
 
-    // RFC 7517 §4: an EC key without y is incomplete.
+    // RFC 7518 §6.2.1: "The following member MUST also be present for
+    // Elliptic Curve public keys for the three curves defined in the following
+    // section: o "y"". P-256 is one of those three, so `y` is required for
+    // every EC key Vouch can verify with.
     #[test]
     fn test_build_decoding_key_ec_missing_y() {
         let mut key = ec_jwk_entry(None, None, None);
@@ -693,7 +766,8 @@ mod tests {
         );
     }
 
-    // RFC 7517 §4: an RSA key is built from its n and e parameters.
+    // RFC 7518 §6.3.1: "The following members MUST be present for RSA public
+    // keys" — the modulus `n` and the exponent `e`.
     #[test]
     fn test_build_decoding_key_rsa_valid() {
         let key = rsa_jwk_entry(None, None, None);
@@ -701,7 +775,8 @@ mod tests {
         assert!(result.is_ok(), "should build valid RSA decoding key");
     }
 
-    // RFC 7517 §4: an RSA key without n is incomplete.
+    // RFC 7518 §6.3.1.1: the "n" (modulus) parameter is one of the members
+    // that MUST be present for an RSA public key (§6.3.1).
     #[test]
     fn test_build_decoding_key_rsa_missing_n() {
         let mut key = rsa_jwk_entry(None, None, None);
@@ -717,7 +792,8 @@ mod tests {
         );
     }
 
-    // RFC 7517 §4: an RSA key without e is incomplete.
+    // RFC 7518 §6.3.1.2: the "e" (exponent) parameter is one of the members
+    // that MUST be present for an RSA public key (§6.3.1).
     #[test]
     fn test_build_decoding_key_rsa_missing_e() {
         let mut key = rsa_jwk_entry(None, None, None);

@@ -746,6 +746,10 @@ mod tests {
         assert!(der_ecdsa_to_jwt(&[]).is_err());
     }
 
+    // RFC 7518 §3.3, §3.5 — RS256 and PS256 alike: "A key of size 2048 bits
+    // or larger MUST be used with these algorithms." Vouch generates RSA-3072,
+    // and the modulus length asserted below is what makes that checkable:
+    // 383-385 octets is 3064-3080 bits, comfortably above the floor.
     #[test]
     fn test_parse_spki_rsa_generated() {
         use aws_lc_rs::encoding::AsDer;
@@ -794,6 +798,104 @@ mod tests {
         assert!(
             msg.contains("rsaEncryption") || msg.contains("1.2.840.113549.1.1.1"),
             "got: {msg}"
+        );
+    }
+
+    // =======================================================================
+    // RFC 7518 §3.4 — ECDSA signature encoding
+    //
+    // KMS returns ECDSA signatures DER-encoded; JWS requires the fixed-width
+    // R || S form. `der_ecdsa_to_jwt` is the only conversion, so it is where
+    // both of the section's requirements are met or missed.
+    // =======================================================================
+
+    /// A DER ECDSA signature whose r and s are both the single octet 0x01.
+    ///
+    /// `SEQUENCE { INTEGER 1, INTEGER 1 }` — the smallest legal encoding of a
+    /// structurally valid P-256 signature, and the widest possible gap between
+    /// the DER form (1 octet per scalar) and the JWS form (32 octets per
+    /// scalar), which is exactly what section 3.4 step 2 is about.
+    const DER_SIG_R1_S1: [u8; 8] = [
+        0x30, 0x06, // SEQUENCE (6 bytes)
+        0x02, 0x01, 0x01, // INTEGER 1 (r)
+        0x02, 0x01, 0x01, // INTEGER 1 (s)
+    ];
+
+    // RFC 7518 §3.4: "The resulting 64-octet sequence is the JWS Signature
+    // value." A DER signature is variable-length, so the conversion must pad,
+    // not copy.
+    #[test]
+    fn test_der_ecdsa_to_jwt_is_always_64_octets() {
+        let jwt = der_ecdsa_to_jwt(&DER_SIG_R1_S1).expect("r=1,s=1 is a well-formed DER signature");
+        assert_eq!(
+            jwt.len(),
+            64,
+            "JWS Signature value must be a 64-octet sequence"
+        );
+    }
+
+    // RFC 7518 §3.4: "Turn R and S into octet sequences in big-endian order,
+    // with each array being be 32 octets long. The octet sequence
+    // representations MUST NOT be shortened to omit any leading zero octets
+    // contained in the values."
+    #[test]
+    fn test_der_ecdsa_to_jwt_preserves_leading_zero_octets() {
+        let jwt = der_ecdsa_to_jwt(&DER_SIG_R1_S1).expect("r=1,s=1 is a well-formed DER signature");
+
+        // r = 1 occupies one octet in DER and 32 in JWS: 31 leading zeros then 0x01.
+        let mut expected = [0u8; 64];
+        expected[31] = 0x01;
+        expected[63] = 0x01;
+        assert_eq!(
+            jwt, expected,
+            "leading zero octets must be preserved, not shortened away"
+        );
+    }
+
+    // =======================================================================
+    // RFC 7518 §2 and §6.3.1 — Base64urlUInt encoding of RSA parameters
+    //
+    // `parse_spki_rsa` feeds the `n` and `e` members of the published JWKS
+    // (crypto/keys.rs), so the DER sign octet has to come off here or the
+    // published key is not a Base64urlUInt.
+    // =======================================================================
+
+    /// `SEQUENCE { INTEGER 0x00D3, INTEGER 65537 }` — a minimal RSAPublicKey
+    /// whose modulus carries a DER sign octet (0xD3 has its high bit set) and
+    /// whose exponent is the near-universal 65537.
+    const RSA_PUBLIC_KEY_DER: [u8; 11] = [
+        0x30, 0x09, // SEQUENCE (9 bytes)
+        0x02, 0x02, 0x00, 0xD3, // INTEGER 0x00 0xD3 (n, with DER sign padding)
+        0x02, 0x03, 0x01, 0x00, 0x01, // INTEGER 0x01 0x00 0x01 (e = 65537)
+    ];
+
+    // RFC 7518 §2, Base64urlUInt: "The octet sequence MUST utilize the minimum
+    // number of octets needed to represent the value." DER prefixes a 0x00
+    // sign octet when the high bit is set; carrying it into the JWK would use
+    // one octet more than the minimum.
+    #[test]
+    fn test_rsa_modulus_uses_minimum_octets() {
+        let (n, _e) = parse_rsa_public_key_der(&RSA_PUBLIC_KEY_DER)
+            .expect("hand-built RSAPublicKey should parse");
+        assert_eq!(
+            n,
+            vec![0xD3],
+            "the DER sign octet must not survive into the Base64urlUInt value"
+        );
+    }
+
+    // RFC 7518 §6.3.1.2: "For instance, when representing the value 65537, the
+    // octet sequence to be base64url-encoded MUST consist of the three octets
+    // [1, 0, 1]; the resulting representation for this value is \"AQAB\"."
+    #[test]
+    fn test_rsa_exponent_65537_is_the_three_octets_1_0_1() {
+        let (_n, e) = parse_rsa_public_key_der(&RSA_PUBLIC_KEY_DER)
+            .expect("hand-built RSAPublicKey should parse");
+        assert_eq!(e, vec![1, 0, 1], "65537 is the three octets [1, 0, 1]");
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(&e),
+            "AQAB",
+            "the base64url representation of 65537 is \"AQAB\""
         );
     }
 }

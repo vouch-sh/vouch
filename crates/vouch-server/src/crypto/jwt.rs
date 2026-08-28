@@ -940,4 +940,108 @@ mod tests {
         let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(decoded.is_none(), "HS256 tokens must be rejected");
     }
+
+    // ========================================================================
+    // RFC 7518 §3.6 — the Unsecured JWS ("alg": "none")
+    //
+    // The classic JWT forgery vector: strip the signature, set the algorithm
+    // to "none", and the token verifies against nothing. Both of Vouch's own
+    // token decoders are checked here; the three decoders for client-supplied
+    // JWTs are covered where they live (services/oidc/jar.rs,
+    // services/oidc/dpop.rs, services/oidc/jwt_bearer/validate.rs).
+    // ========================================================================
+
+    /// Build an Unsecured JWS: the given header and claims, and the empty
+    /// octet sequence as the signature — the form RFC 7518 §3.6 describes.
+    fn make_unsecured_jws(typ: &str, claims: &serde_json::Value) -> String {
+        let header = serde_json::json!({ "alg": "none", "typ": typ });
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
+        format!("{header_b64}.{claims_b64}.")
+    }
+
+    // RFC 7518 §3.6: "Implementations MUST NOT accept Unsecured JWSs by
+    // default." An access token is the credential Vouch's resource endpoints
+    // trust, so an accepted Unsecured JWS here is a total authentication
+    // bypass — any claims an attacker cares to write.
+    #[test]
+    fn test_decode_es256_token_rejects_unsecured_jws() {
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+
+        let token = make_unsecured_jws(
+            JwtType::AccessToken.as_header_str(),
+            &serde_json::json!({
+                "iss": TEST_ISSUER,
+                "sub": "attacker",
+                "aud": "client-abc",
+                "exp": 9_999_999_999i64,
+                "iat": 1_000_000_000i64,
+                "client_id": "client-abc",
+                "hardware_verified": true,
+            }),
+        );
+
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        assert!(
+            decoded.is_none(),
+            "an Unsecured JWS must never be accepted as an access token"
+        );
+    }
+
+    // RFC 7518 §3.6: "Recipients MUST verify that the JWS Signature value is
+    // the empty octet sequence." Vouch does not implement Unsecured JWSs at
+    // all, so it never reaches that check — a `none` token is refused whether
+    // its signature is the empty octet sequence or a forgery. Both forms are
+    // pinned so a future decoder cannot start distinguishing them.
+    #[test]
+    fn test_decode_es256_token_rejects_alg_none_with_non_empty_signature() {
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+
+        let unsecured = make_unsecured_jws(
+            JwtType::AccessToken.as_header_str(),
+            &serde_json::json!({
+                "iss": TEST_ISSUER,
+                "sub": "attacker",
+                "aud": "client-abc",
+                "exp": 9_999_999_999i64,
+                "iat": 1_000_000_000i64,
+                "client_id": "client-abc",
+            }),
+        );
+        // Same token, but with a non-empty signature segment appended.
+        let forged = format!("{unsecured}{}", URL_SAFE_NO_PAD.encode(b"not-a-signature"));
+
+        let decoded = decode_es256_token::<AccessTokenClaims>(&forged, &ctx);
+        assert!(
+            decoded.is_none(),
+            "alg=none with a non-empty signature must be rejected too"
+        );
+    }
+
+    // RFC 7518 §3.6: "Implementations MUST NOT accept Unsecured JWSs by
+    // default." State tokens carry the WebAuthn challenge and registration
+    // state across the browser round trip, so an unsecured one is a forged
+    // enrollment.
+    #[test]
+    fn test_decode_state_token_rejects_unsecured_jws() {
+        #[derive(serde::Deserialize)]
+        struct StateClaims {
+            #[expect(dead_code, reason = "decode must fail before the field is read")]
+            sub: String,
+        }
+
+        let token = make_unsecured_jws(
+            JwtType::RegistrationState.as_header_str(),
+            &serde_json::json!({ "sub": "attacker", "exp": 9_999_999_999i64 }),
+        );
+
+        let decoded =
+            decode_state_token::<StateClaims>(&token, JwtType::RegistrationState, TEST_JWT_SECRET);
+        assert!(
+            decoded.is_err(),
+            "an Unsecured JWS must never be accepted as a state token"
+        );
+    }
 }

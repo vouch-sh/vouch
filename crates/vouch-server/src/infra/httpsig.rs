@@ -321,6 +321,8 @@ mod tests {
         assert!(jwk_to_p256_public_key(&jwk).is_none());
     }
 
+    // RFC 7518 §6.2.1: "The following members MUST be present for all
+    // Elliptic Curve public keys: o "crv" o "x"".
     #[test]
     fn test_jwk_to_p256_public_key_missing_x() {
         let jwk = serde_json::json!({
@@ -331,6 +333,10 @@ mod tests {
         assert!(jwk_to_p256_public_key(&jwk).is_none());
     }
 
+    // RFC 7518 §6.2.1.2: "The length of this octet string MUST be the full
+    // size of a coordinate for the curve specified in the "crv" parameter."
+    // A 16-octet x is half a P-256 coordinate, so the key is refused rather
+    // than zero-extended into a different point.
     #[test]
     fn test_jwk_to_p256_public_key_wrong_coordinate_length() {
         let jwk = serde_json::json!({

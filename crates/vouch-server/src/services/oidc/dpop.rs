@@ -1154,6 +1154,64 @@ mod tests {
         );
     }
 
+    // RFC 7518 §3.6: "Implementations MUST NOT accept Unsecured JWSs by
+    // default." A DPoP proof is presented by the client on every
+    // sender-constrained request; an accepted `alg: none` proof would let any
+    // holder of a stolen access token mint a matching proof.
+    #[test]
+    fn test_parse_dpop_header_rejects_alg_none() {
+        let header_json = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "none",
+            "jwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+            }
+        });
+        let jwt = make_dpop_jwt_with_header(&header_json);
+
+        let result = parse_dpop_header(&jwt);
+
+        assert!(
+            matches!(result, Err(DpopError::UnsupportedAlgorithm(ref alg)) if alg == "none"),
+            "alg=none must be rejected as an unsupported algorithm, got: {result:?}"
+        );
+    }
+
+    // RFC 7518 §3.6: an Unsecured JWS "MUST use the empty octet sequence as
+    // its JWS Signature value", and "Recipients MUST verify that the JWS
+    // Signature value is the empty octet sequence". Vouch never reaches that
+    // check: the proof is rejected on its algorithm whether the signature
+    // segment is empty or forged.
+    #[test]
+    fn test_parse_dpop_header_rejects_unsecured_jws_with_empty_signature() {
+        let header_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "typ": "dpop+jwt",
+                "alg": "none",
+                "jwk": {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                    "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+                }
+            }))
+            .unwrap(),
+        );
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        // Empty signature segment: the empty octet sequence.
+        let unsecured = format!("{header_b64}.{payload_b64}.");
+
+        let result = parse_dpop_header(&unsecured);
+
+        assert!(
+            matches!(result, Err(DpopError::UnsupportedAlgorithm(_))),
+            "an Unsecured JWS with an empty signature must still be rejected, got: {result:?}"
+        );
+    }
+
     #[test]
     fn test_parse_dpop_header_accepts_public_ec_jwk() {
         // A public EC JWK (no 'd' field) in the header must be accepted.
