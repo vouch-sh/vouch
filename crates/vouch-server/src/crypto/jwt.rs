@@ -15,8 +15,10 @@ use crate::crypto::keys::OidcSigningKey;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::de::IgnoredAny;
 use std::collections::HashSet;
 use std::fmt;
 use zeroize::Zeroizing;
@@ -358,17 +360,54 @@ pub(crate) enum JwsError {
     Critical,
 }
 
-/// A parsed compact JWS (RFC 7515 Section 7.1).
+/// The JOSE header of a compact JWS: the registered Header Parameters of
+/// RFC 7515 Section 4.1 that Vouch reads.
 ///
-/// Every path that accepts a JWS Vouch did not sign goes through
-/// [`Jws::parse`], which is the one place the three segments are split and the
-/// protected header is decoded. Two properties follow from that:
+/// The set of Header Parameters is fixed by the specification, so this is a
+/// struct rather than a JSON object. What a caller can reach is decided here,
+/// once, and two of those decisions are load-bearing in opposite directions:
 ///
-/// * The `crit` refusal below cannot drift from what callers actually read.
-///   It is not a predicate a caller has to remember to invoke — holding a
-///   `Jws` is itself proof that the header declared no critical extension.
-/// * A caller cannot see a header member, or a payload byte, that the parse
-///   did not.
+/// * `crit` is **present** in the struct so it cannot be forgotten.
+///   `jsonwebtoken::decode_header` does not surface it at all, and a header
+///   view that omitted the field would silently reopen Section 4.1.11.
+/// * `jku`, `x5u`, and `x5c` are **absent** from the struct so they cannot be
+///   used. Section 4 requires unrecognized parameters be ignored, which is
+///   exactly what serde does with a field this struct does not declare; a
+///   parameter no caller can name is a parameter no caller can turn into a key
+///   source. `test_rfc7515_header_supplied_key_material_is_not_a_key_source`
+///   pins that. `cty` is absent for the same reason — nothing reads it, so
+///   declaring it would be surface without a use.
+///
+/// `alg` is not an [`JwsAlgorithm`]: which algorithms are acceptable differs by
+/// caller (a FAPI client assertion excludes RS256 where a Request Object may
+/// not), and that is a policy question, not a well-formedness one. Parsing
+/// keeps the string; callers apply their own allowlist.
+#[derive(Debug, Deserialize)]
+pub(crate) struct JoseHeader {
+    /// RFC 7515 Section 4.1.1. Required: Section 5.1 says the `alg` Header
+    /// Parameter "MUST be present in the JOSE Header", so a header without one
+    /// is not a well-formed JWS and never reaches a caller.
+    pub(crate) alg: String,
+    /// RFC 7515 Section 4.1.9 — the media type of the JWS.
+    #[serde(default)]
+    pub(crate) typ: Option<String>,
+    /// RFC 7515 Section 4.1.4 — the hint used to select a verification key
+    /// from a key set the *recipient* already trusts.
+    #[serde(default)]
+    pub(crate) kid: Option<String>,
+    /// RFC 7515 Section 4.1.3 — the embedded public key.
+    ///
+    /// Kept as raw JSON: a JWK's members depend on its key type (RFC 7517),
+    /// so there is no one struct for it, and DPoP scans it for private-key
+    /// members that a typed view would discard before it could look.
+    #[serde(default)]
+    pub(crate) jwk: Option<serde_json::Value>,
+    /// RFC 7515 Section 4.1.11. Presence only — see [`CritPresence`].
+    #[serde(default)]
+    crit: CritPresence,
+}
+
+/// Whether the header carried `crit`, without recording what it held.
 ///
 /// RFC 7515 Section 4.1.11: "The \"crit\" (critical) Header Parameter indicates
 /// that extensions to this specification and/or [JWA] are being used that MUST
@@ -378,15 +417,43 @@ pub(crate) enum JwsError {
 /// understood and processed by implementations."
 ///
 /// Vouch implements no `crit` extension, so every name a client could list is
-/// one it does not understand and the rejection is unconditional. The contents
-/// are never inspected, because there is no value they could hold that Vouch
-/// supports; an empty list is refused on the same path, which is also what
-/// Section 4.1.11 requires of the producer: "Producers MUST NOT use the empty
-/// list \"[]\" as the \"crit\" value."
+/// one it does not understand and the rejection is unconditional. Deserializing
+/// the value into [`IgnoredAny`] rather than a `Vec<String>` makes that a
+/// property of the type: there is no value to inspect, so no shape of `crit`
+/// can be handled differently from any other. That covers the empty list the
+/// same section forbids a producer from sending ("Producers MUST NOT use the
+/// empty list \"[]\" as the \"crit\" value"), a `crit` that is not an array at
+/// all, and an explicit `null` — each is the parameter being present.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum CritPresence {
+    /// No `crit` member in the header.
+    #[default]
+    Absent,
+    /// A `crit` member was present, whatever it held.
+    Present,
+}
+
+impl<'de> Deserialize<'de> for CritPresence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        IgnoredAny::deserialize(deserializer)?;
+        Ok(Self::Present)
+    }
+}
+
+/// A parsed compact JWS (RFC 7515 Section 7.1).
+///
+/// Every path that accepts a JWS Vouch did not sign goes through
+/// [`Jws::parse`], which is the one place the three segments are split and the
+/// protected header is decoded. Two properties follow from that:
+///
+/// * The `crit` refusal cannot drift from what callers actually read. It is
+///   not a predicate a caller has to remember to invoke — holding a `Jws` is
+///   itself proof that the header declared no critical extension.
+/// * A caller cannot see a header member, or a payload byte, that the parse
+///   did not.
 pub(crate) struct Jws {
-    /// The decoded protected header, guaranteed to be a JSON object and
-    /// guaranteed not to carry `crit`.
-    header: serde_json::Value,
+    /// The decoded protected header, guaranteed not to have carried `crit`.
+    header: JoseHeader,
     /// The undecoded payload segment. Decoded on demand: a caller that only
     /// needs the header should not fail on someone else's payload.
     payload_b64: String,
@@ -398,7 +465,7 @@ impl Jws {
     /// # Errors
     /// [`JwsError::Critical`] when the header carries `crit`;
     /// [`JwsError::Malformed`] when the token is not three segments whose
-    /// header decodes to a JSON object.
+    /// header decodes to a JOSE header.
     pub(crate) fn parse(token: &str) -> Result<Self, JwsError> {
         let mut segments = token.split('.');
         // The signature segment must be present for this to be a compact
@@ -415,15 +482,17 @@ impl Jws {
 
         let header_bytes =
             decode_segment(header_b64).ok_or(JwsError::Malformed("header is not valid base64"))?;
-        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
-            .map_err(|_| JwsError::Malformed("header is not valid JSON"))?;
-        if !header.is_object() {
-            return Err(JwsError::Malformed("header is not a JSON object"));
-        }
+        // Deserialized straight from the bytes rather than by way of a
+        // `serde_json::Value`. RFC 7515 Section 10.12 warns that a duplicate
+        // Header Parameter name is resolved differently by different parsers;
+        // a `Value` would silently keep one of them, while the derived parser
+        // refuses the header outright.
+        let header: JoseHeader = serde_json::from_slice(&header_bytes)
+            .map_err(|_| JwsError::Malformed("header is not a well-formed JOSE header"))?;
 
         // RFC 7515 Section 4.1.11. Refused before any segment is handed out,
         // so no caller can act on a JWS it should have rejected.
-        if header.get("crit").is_some() {
+        if header.crit == CritPresence::Present {
             return Err(JwsError::Critical);
         }
 
@@ -433,18 +502,9 @@ impl Jws {
         })
     }
 
-    /// Borrow a protected header parameter by name.
-    pub(crate) fn header_parameter(&self, name: &str) -> Option<&serde_json::Value> {
-        self.header.get(name)
-    }
-
-    /// Deserialize the protected header into a caller-owned view of the
-    /// parameters it cares about.
-    ///
-    /// # Errors
-    /// Returns the `serde_json` error when the header does not match `T`.
-    pub(crate) fn header_as<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        T::deserialize(&self.header)
+    /// The protected header.
+    pub(crate) fn header(&self) -> &JoseHeader {
+        &self.header
     }
 
     /// Decode the payload and deserialize it as JSON.
@@ -1178,6 +1238,15 @@ mod tests {
     }
 
     // ========================================================================
+    /// Build a compact JWS around a protected header written out verbatim.
+    ///
+    /// Raw text rather than `serde_json::json!`, because two of the headers
+    /// below are ones a `Value` cannot hold: a duplicate member name is
+    /// collapsed by any JSON object model before a parser could reject it.
+    fn token_with_raw_header(raw_header: &str) -> String {
+        format!("{}.e30.c2ln", URL_SAFE_NO_PAD.encode(raw_header))
+    }
+
     // RFC 7515 §4.1.11 — Jws::parse
     //
     // The endpoint-level behavior lives in handlers/oidc/tests/rfc7515.rs;
@@ -1233,6 +1302,54 @@ mod tests {
 
     // `crit` is refused before any segment is handed out, so a caller cannot
     // read claims off a JWS it should have rejected.
+    // RFC 7515 §4.1.11: the refusal is on the parameter being *present*, not on
+    // what it holds, so an explicit null is a `crit` like any other. This is
+    // the property `CritPresence` exists to make structural — a plain
+    // `Option<Value>` field would read JSON null as an absent member.
+    #[test]
+    fn test_jws_parse_rejects_null_crit() {
+        let token = token_with_raw_header(r#"{"alg":"ES256","crit":null}"#);
+        assert!(matches!(Jws::parse(&token), Err(JwsError::Critical)));
+    }
+
+    // RFC 7515 §4.1.1: "This Header Parameter MUST be present and MUST be
+    // understood and processed by implementations." Enforced at the parse, so
+    // a header without `alg` never reaches a caller.
+    //
+    // The producer-side statement in §5.1 step 5 is a different requirement
+    // about what Vouch emits, and is not what this pins.
+    #[test]
+    fn test_jws_parse_requires_alg_header_parameter() {
+        let token = token_with_raw_header(r#"{"typ":"JWT","kid":"k"}"#);
+        assert!(
+            matches!(Jws::parse(&token), Err(JwsError::Malformed(_))),
+            "a JOSE header without 'alg' is not well formed"
+        );
+    }
+
+    // RFC 7515 §10.12: "The Header Parameter names within the JOSE Header MUST
+    // be unique; JWS parsers MUST either reject JWSs with duplicate Header
+    // Parameter names or use a JSON parser that returns only the lexically last
+    // duplicate member name". Vouch takes the first branch, and takes it here,
+    // so every caller of `Jws::parse` gets it rather than each reaching the
+    // outcome by its own route.
+    //
+    // Both orderings are pinned: a rule that held in only one of them would be
+    // an algorithm-confusion vulnerability.
+    #[test]
+    fn test_jws_parse_rejects_duplicate_header_parameter_name() {
+        for raw in [
+            r#"{"alg":"ES256","alg":"HS256"}"#,
+            r#"{"alg":"HS256","alg":"ES256"}"#,
+        ] {
+            let token = token_with_raw_header(raw);
+            assert!(
+                matches!(Jws::parse(&token), Err(JwsError::Malformed(_))),
+                "duplicate 'alg' must be refused, ordering: {raw}"
+            );
+        }
+    }
+
     #[test]
     fn test_jws_parse_refuses_crit_before_yielding_claims() {
         let header = serde_json::json!({ "alg": "ES256", "crit": ["exp"] });
@@ -1263,21 +1380,16 @@ mod tests {
             padded.contains('='),
             "test needs a header whose standard-base64 form is padded, got {padded}"
         );
-        let jws = Jws::parse(&format!("{padded}.e30.c2ln")).ok();
+        let jws = Jws::parse(&format!("{padded}.e30.c2ln"));
         assert_eq!(
-            jws.as_ref().and_then(|j| j.header_parameter("alg")),
-            Some(&serde_json::json!("ES256")),
+            jws.ok().map(|j| j.header().alg.clone()).as_deref(),
+            Some("ES256"),
             "a padded header must decode"
         );
     }
 
     #[test]
     fn test_jws_parse_yields_header_and_claims() {
-        #[derive(serde::Deserialize)]
-        struct Header {
-            alg: String,
-            typ: String,
-        }
         #[derive(serde::Deserialize)]
         struct Claims {
             sub: String,
@@ -1290,9 +1402,8 @@ mod tests {
         let token = format!("{header_b64}.{payload_b64}.c2ln");
 
         let jws = Jws::parse(&token).ok().expect("token parses");
-        let typed: Header = jws.header_as().expect("header matches");
-        assert_eq!(typed.alg, "ES256");
-        assert_eq!(typed.typ, "at+jwt");
+        assert_eq!(jws.header().alg, "ES256");
+        assert_eq!(jws.header().typ.as_deref(), Some("at+jwt"));
 
         let claims: Claims = jws.claims_as().ok().expect("claims match");
         assert_eq!(claims.sub, "alice");
@@ -1332,10 +1443,7 @@ mod tests {
         let jws = Jws::parse(&format!("{header_b64}.!!!.c2ln"))
             .ok()
             .expect("a bad payload must not fail the header parse");
-        assert_eq!(
-            jws.header_parameter("alg"),
-            Some(&serde_json::json!("ES256"))
-        );
+        assert_eq!(jws.header().alg, "ES256");
         assert!(jws.claims_as::<serde_json::Value>().is_err());
     }
 }

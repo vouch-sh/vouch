@@ -107,13 +107,19 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
     // One decode of the protected header, which also enforces RFC 7515
     // Section 4.1.11: a `crit`-bearing assertion never yields a header at all.
     let jws = Jws::parse(assertion).map_err(assertion_jws_error)?;
+    assertion_header_from(&jws)
+}
 
-    let header: JwtAssertionHeader = jws.header_as().map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Invalid JWT assertion header JSON",
-        )
-    })?;
+/// Build the assertion header view from an already-parsed JWS.
+///
+/// Split out so a caller that has already parsed the token — the Request
+/// Object path, which parses first to report `invalid_request_object` — does
+/// not decode the same protected header a second time.
+pub(crate) fn assertion_header_from(jws: &Jws) -> ServiceResult<JwtAssertionHeader> {
+    let header = JwtAssertionHeader {
+        alg: jws.header().alg.clone(),
+        kid: jws.header().kid.clone(),
+    };
 
     // Structural algorithm check: only asymmetric algorithms are ever accepted.
     // HS* and "none" are unconditionally rejected to prevent symmetric key

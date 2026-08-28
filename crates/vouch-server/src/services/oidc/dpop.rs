@@ -278,7 +278,7 @@ fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopErro
     // Check for private key fields (`d`, `p`, `q`, `dp`, `dq`, `qi`) in the
     // raw header before deserializing (our structs intentionally omit these
     // fields so serde would silently ignore them).
-    if let Some(jwk_value) = jws.header_parameter("jwk") {
+    if let Some(jwk_value) = jws.header().jwk.as_ref() {
         for private_field in ["d", "p", "q", "dp", "dq", "qi"] {
             if jwk_value.get(private_field).is_some() {
                 return Err(DpopError::InvalidFormat(
@@ -288,9 +288,15 @@ fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopErro
         }
     }
 
-    let header: DpopHeader = jws
-        .header_as()
-        .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
+    let jwk_value = jws.header().jwk.as_ref().ok_or_else(|| {
+        DpopError::InvalidFormat("DPoP proof header must carry 'jwk'".to_string())
+    })?;
+    let header = DpopHeader {
+        typ: jws.header().typ.clone().unwrap_or_default(),
+        alg: jws.header().alg.clone(),
+        jwk: serde_json::from_value(jwk_value.clone())
+            .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?,
+    };
 
     // Validate header
     if header.typ != "dpop+jwt" {
