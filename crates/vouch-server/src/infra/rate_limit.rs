@@ -240,6 +240,15 @@ mod tests {
         assert_eq!(resolve_client_ip(peer, &headers, &[]), peer);
     }
 
+    // RFC 9700 §4.13 describes exactly this attack on a TLS-terminating
+    // reverse proxy deployment: "it is standard practice of reverse proxies to
+    // accept X-Forwarded-For headers and just add the origin of the inbound
+    // request (making it a list). Depending on the logic performed in the
+    // application server, the attacker could simply add an allowed IP address
+    // to the header and render the protection useless." The section addresses
+    // its "A reverse proxy MUST therefore sanitize any inbound requests" to
+    // the proxy; the application-side half is that a header arriving from an
+    // untrusted peer carries no weight at all.
     #[test]
     fn test_resolve_untrusted_peer_ignores_xff() {
         let trusted = cidrs(&["10.0.0.0/8"]);

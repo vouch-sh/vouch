@@ -729,9 +729,23 @@ impl AuthorizationCode {
     /// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
     ///
     /// Uses constant-time comparison to prevent timing side-channel attacks.
+    ///
+    /// RFC 9700 §4.8.2: "Beyond this, to prevent PKCE downgrade attacks, the
+    /// authorization server MUST ensure that if there was no code_challenge in
+    /// the authorization request, a request to the token endpoint containing a
+    /// code_verifier is rejected." A `code_verifier` the client believes it
+    /// sent a challenge for, arriving against a code that carries none, is the
+    /// observable signature of the stripped-parameter attack in §4.8.1 — so it
+    /// fails rather than being ignored.
     fn validate_pkce(&self, code_verifier: Option<&str>) -> ServiceResult<()> {
         let Some(code_challenge) = &self.code_challenge else {
-            // No PKCE challenge in authorization code
+            if code_verifier.is_some() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "code_verifier was sent but the authorization request \
+                     carried no code_challenge",
+                ));
+            }
             return Ok(());
         };
 

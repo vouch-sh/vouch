@@ -117,6 +117,11 @@ on restart.
   headers and bodies, never cookies.
 - **UI routes** are same-origin by default. `VOUCH_CORS_ORIGINS` opts in specific origins with
   credentials enabled.
+- **`/oauth/authorize` and `/oauth/logout` send no CORS headers at all**, under either setting.
+  RFC 9700 §2.6: "CORS MUST NOT be supported at the authorization endpoint, as the client does
+  not access this endpoint directly; instead, the client redirects the user agent to it." Both
+  are reached by top-level browser navigation, which does not consult CORS, so nothing that
+  worked before stops working.
 
 `VOUCH_CORS_ORIGINS=*` is a **fatal startup error**. UI routes use credentialed cookie sessions,
 and the CORS specification forbids combining wildcard origins with credentials. List origins
