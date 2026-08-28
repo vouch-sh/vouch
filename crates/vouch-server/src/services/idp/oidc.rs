@@ -362,10 +362,16 @@ pub(crate) async fn verify_id_token(
     // Parameters are not understood and supported by the recipient, then the
     // JWS is invalid." Vouch supports no `crit` extension, and
     // `jsonwebtoken::decode_header` does not surface the parameter, so the
-    // raw header is checked before anything is read out of it.
-    if crate::crypto::jwt::has_critical_header(id_token) {
-        anyhow::bail!("ID token header carries an unsupported 'crit' extension");
-    }
+    // header is parsed here — the typed `Algorithm` still comes from
+    // `decode_header` below, which is why this path decodes twice.
+    crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
+        crate::crypto::jwt::JwsError::Critical => {
+            anyhow::anyhow!("ID token header carries an unsupported 'crit' extension")
+        }
+        crate::crypto::jwt::JwsError::Malformed(reason) => {
+            anyhow::anyhow!("Invalid ID token: {reason}")
+        }
+    })?;
 
     // Decode the JWT header to determine algorithm and key ID
     let header = jsonwebtoken::decode_header(id_token)

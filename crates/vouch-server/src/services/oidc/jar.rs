@@ -13,6 +13,7 @@
 //! - FAPI 2.0 parameter consistency: query params must match JWT values
 
 use crate::AppState;
+use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
@@ -22,8 +23,6 @@ use crate::services::oidc::jwt_bearer::validate::{
 use crate::services::oidc::jwt_bearer::{
     find_matching_key_with_refresh_client, resolve_client_jwks,
 };
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -269,46 +268,31 @@ pub(crate) fn validate_request_object_header(jwt: &str) -> ServiceResult<()> {
 fn parse_request_object_header(
     jwt: &str,
 ) -> ServiceResult<(RequestObjectHeader, JwtAssertionHeader)> {
-    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
-    // Parameters are not understood and supported by the recipient, then the
-    // JWS is invalid." Vouch supports no `crit` extension. Checked here rather
-    // than relying on `parse_assertion_header`'s identical check so the client
-    // is told the Request Object is at fault (`invalid_request_object`) and
-    // not its authentication (`invalid_client`).
-    if crate::crypto::jwt::has_critical_header(jwt) {
-        return Err(ServiceError::oauth(
+    // One decode of the protected header, which also enforces RFC 7515
+    // Section 4.1.11. Parsed here rather than relying on the identical check
+    // inside `parse_assertion_header` so the client is told the Request Object
+    // is at fault (`invalid_request_object`) and not its authentication
+    // (`invalid_client`).
+    let jws = Jws::parse(jwt).map_err(|e| match e {
+        JwsError::Critical => ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Request Object header carries an unsupported 'crit' extension",
-        ));
-    }
-
-    // First validate the basic structure and algorithm via the shared parser
-    let assertion_header = parse_assertion_header(jwt)?;
-
-    // Re-decode the header to get the `typ` field
-    let header_part = jwt.split('.').next().ok_or_else(|| {
-        ServiceError::oauth(
+        ),
+        JwsError::Malformed(reason) => ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
-            "Invalid Request Object format",
-        )
+            format!("Invalid Request Object: {reason}"),
+        ),
     })?;
 
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_part)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(header_part))
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                "Invalid Request Object header encoding",
-            )
-        })?;
-
-    let full_header: RequestObjectHeader = serde_json::from_slice(&header_bytes).map_err(|_| {
+    let full_header: RequestObjectHeader = jws.header_as().map_err(|_| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Invalid Request Object header JSON",
         )
     })?;
+
+    // Validate the algorithm through the shared assertion parser.
+    let assertion_header = parse_assertion_header(jwt)?;
 
     // RFC 9101 Section 10.2: typ SHOULD be "oauth-authz-req+jwt".
     // Accept case-insensitively per MIME type rules, and also accept
@@ -699,6 +683,8 @@ fn validate_temporal_claims(
 mod tests {
     use super::*;
     use crate::db::JwsAlgorithm;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.

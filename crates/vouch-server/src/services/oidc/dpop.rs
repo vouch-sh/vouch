@@ -16,6 +16,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
+use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::{self, JwsAlgorithm, store::DocumentStore};
 use vouch_common::jwk::JwkThumbprintKey;
 
@@ -264,29 +265,20 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
 /// `parse_and_verify_dpop_proof` to build the decoding key before
 /// performing combined signature verification + claims extraction.
 fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopError> {
-    let header_part = proof
-        .split('.')
-        .next()
-        .ok_or_else(|| DpopError::InvalidFormat("JWT must have 3 parts".to_string()))?;
-
-    // Verify the JWT has exactly 3 parts
-    if proof.split('.').count() != 3 {
-        return Err(DpopError::InvalidFormat(
-            "JWT must have 3 parts".to_string(),
-        ));
-    }
-
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_part)
-        .map_err(|e| DpopError::InvalidFormat(format!("invalid header encoding: {e}")))?;
+    // One decode of the protected header, which also enforces RFC 7515
+    // Section 4.1.11: a `crit`-bearing proof never yields a header at all.
+    let jws = Jws::parse(proof).map_err(|e| match e {
+        JwsError::Critical => DpopError::InvalidFormat(
+            "DPoP proof header carries an unsupported 'crit' extension".to_string(),
+        ),
+        JwsError::Malformed(reason) => DpopError::InvalidFormat(reason.to_string()),
+    })?;
 
     // RFC 9449 Section 4.3: The JWK MUST NOT contain a private key.
     // Check for private key fields (`d`, `p`, `q`, `dp`, `dq`, `qi`) in the
-    // raw JSON before deserializing (our structs intentionally omit these fields
-    // so serde would silently ignore them).
-    let header_json: serde_json::Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
-    if let Some(jwk_value) = header_json.get("jwk") {
+    // raw header before deserializing (our structs intentionally omit these
+    // fields so serde would silently ignore them).
+    if let Some(jwk_value) = jws.header_parameter("jwk") {
         for private_field in ["d", "p", "q", "dp", "dq", "qi"] {
             if jwk_value.get(private_field).is_some() {
                 return Err(DpopError::InvalidFormat(
@@ -296,18 +288,9 @@ fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopErro
         }
     }
 
-    let header: DpopHeader = serde_json::from_value(header_json)
+    let header: DpopHeader = jws
+        .header_as()
         .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
-
-    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
-    // Parameters are not understood and supported by the recipient, then the
-    // JWS is invalid." Vouch supports no `crit` extension, so a proof that
-    // lists one is invalid whatever it lists.
-    if crate::crypto::jwt::has_critical_header(proof) {
-        return Err(DpopError::InvalidFormat(
-            "DPoP proof header carries an unsupported 'crit' extension".to_string(),
-        ));
-    }
 
     // Validate header
     if header.typ != "dpop+jwt" {

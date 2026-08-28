@@ -4,10 +4,9 @@
 //! Provides shared validation logic used by both JWT client authentication
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
+use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::JwsAlgorithm;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use vouch_common::protocol;
@@ -89,52 +88,32 @@ pub struct ValidatedJwtAssertion {
 /// Parse a JWT assertion header without signature verification.
 ///
 /// Extracts the algorithm and optional key ID for key resolution.
-pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHeader> {
-    let header_part = assertion.split('.').next().ok_or_else(|| {
-        ServiceError::oauth(
+/// Map a compact-JWS parse failure onto the `invalid_client` error a client
+/// assertion reports, keeping the reason the parse gave.
+fn assertion_jws_error(e: JwsError) -> ServiceError {
+    match e {
+        JwsError::Critical => ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
-            "Invalid JWT assertion format",
-        )
-    })?;
-
-    // Verify the JWT has exactly 3 parts
-    if assertion.split('.').count() != 3 {
-        return Err(ServiceError::oauth(
+            "JWT assertion header carries an unsupported 'crit' extension",
+        ),
+        JwsError::Malformed(reason) => ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
-            "JWT assertion must have 3 parts",
-        ));
+            format!("Invalid JWT assertion: {reason}"),
+        ),
     }
+}
 
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_part)
-        .or_else(|_| {
-            // Try with padding
-            base64::engine::general_purpose::STANDARD.decode(header_part)
-        })
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "Invalid JWT assertion header encoding",
-            )
-        })?;
+pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHeader> {
+    // One decode of the protected header, which also enforces RFC 7515
+    // Section 4.1.11: a `crit`-bearing assertion never yields a header at all.
+    let jws = Jws::parse(assertion).map_err(assertion_jws_error)?;
 
-    let header: JwtAssertionHeader = serde_json::from_slice(&header_bytes).map_err(|_| {
+    let header: JwtAssertionHeader = jws.header_as().map_err(|_| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "Invalid JWT assertion header JSON",
         )
     })?;
-
-    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
-    // Parameters are not understood and supported by the recipient, then the
-    // JWS is invalid." Vouch supports no `crit` extension, so any `crit`
-    // member makes the assertion invalid.
-    if crate::crypto::jwt::has_critical_header(assertion) {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWT assertion header carries an unsupported 'crit' extension",
-        ));
-    }
 
     // Structural algorithm check: only asymmetric algorithms are ever accepted.
     // HS* and "none" are unconditionally rejected to prevent symmetric key
@@ -301,30 +280,9 @@ pub fn validate_jwt_assertion(
 /// Only used to extract iss/sub before we have the verification key.
 /// Both client auth and grant flows need this for key/issuer lookup.
 pub fn decode_claims_unverified(assertion: &str) -> ServiceResult<JwtAssertionClaims> {
-    let parts: Vec<&str> = assertion.split('.').collect();
-    let payload = parts.get(1).ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Invalid JWT assertion format",
-        )
-    })?;
-
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload))
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "Invalid JWT assertion payload encoding",
-            )
-        })?;
-
-    serde_json::from_slice(&payload_bytes).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Invalid JWT assertion payload JSON",
-        )
-    })
+    Jws::parse(assertion)
+        .and_then(|jws| jws.claims_as())
+        .map_err(assertion_jws_error)
 }
 
 /// Map a JWT algorithm string to a `jsonwebtoken::Algorithm`.
@@ -351,6 +309,8 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
 )]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     // RFC 8725 §3.9: the audience claim may be a single string.
     #[test]
