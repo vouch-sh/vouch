@@ -103,6 +103,9 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
     let api_routes = build_api_routes(&state, config, Arc::clone(&httpsig_resolver))?;
     let ui_routes = build_ui_routes(config)?;
+    // Merged here rather than inside either group so that neither CORS layer
+    // reaches the authorization endpoint -- see RFC 9700 §2.6 on the builder.
+    let authorization_endpoint_routes = build_authorization_endpoint_routes(config)?;
 
     // Install Prometheus metrics recorder and optionally expose /metrics endpoint.
     // The endpoint is only registered when VOUCH_METRICS_BEARER_TOKEN is set.
@@ -167,6 +170,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     Ok(security_headers::apply_security_layers(
         api_routes
             .merge(ui_routes)
+            .merge(authorization_endpoint_routes)
             .merge(metrics_route)
             .merge(certification_route),
         config,
@@ -329,12 +333,58 @@ fn build_credential_routes(
         .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT)))
 }
 
-/// Rate-limited general routes (SCIM, admin API, authorize).
+/// The authorization endpoint and the RP-initiated logout endpoint.
+///
+/// Kept in their own router, merged in [`build_app`] outside both CORS
+/// layers. RFC 9700 §2.6: "However, CORS MUST NOT be supported at the
+/// authorization endpoint, as the client does not access this endpoint
+/// directly; instead, the client redirects the user agent to it." Both
+/// endpoints are reached by top-level browser navigation, which does not
+/// consult CORS, so no client loses anything by their absence — while under
+/// [`security_headers::build_api_cors_layer`] they answered every origin with
+/// `Access-Control-Allow-Origin: *`.
+///
+/// They keep the same rate limiter and body limit they had inside
+/// [`build_general_limited_routes`]; the limiter is a separate instance with
+/// the same configuration, so the two groups no longer share one quota. The
+/// no-store cache headers are repeated here for the same reason — leaving the
+/// API group is not a reason to start letting an authorization response, which
+/// can carry a code in its `Location`, be cached.
+fn build_authorization_endpoint_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
+        .route(
+            "/oauth/authorize",
+            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
+        )
+        .route(
+            "/oauth/logout",
+            get(handlers::oidc::logout).post(handlers::oidc::logout_post),
+        )
+        .layer(maybe_rate_limit!(
+            rate_limit::build_general_rate_limiter,
+            config
+        ))
+        .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::EXPIRES,
+            HeaderValue::from_static("0"),
+        )))
+}
+
+/// Rate-limited general routes (SCIM, admin API).
 ///
 /// `/api/v1/org/*` and `/scim/v2/*` are OAuth 2.0 protected resources
-/// and get the RFC 9728 `resource_metadata` middleware. `/oauth/authorize`
-/// is the AS authorization endpoint (not a resource) and therefore
-/// stays outside the wrapped group.
+/// and get the RFC 9728 `resource_metadata` middleware.
 fn build_general_limited_routes(
     state: &Arc<AppState>,
     config: &config::ServerConfig,
@@ -394,16 +444,7 @@ fn build_general_limited_routes(
             resource_metadata::layer,
         ));
 
-    Ok(Router::new()
-        .route(
-            "/oauth/authorize",
-            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
-        )
-        .route(
-            "/oauth/logout",
-            get(handlers::oidc::logout).post(handlers::oidc::logout_post),
-        )
-        .merge(protected_api_routes)
+    Ok(protected_api_routes
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
             config

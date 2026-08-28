@@ -46,6 +46,12 @@ async fn test_narrowed_token_accepted_at_named_resource() {
 
 /// The issue's exact complaint: a token audience-scoped to resource A must
 /// be rejected at resource B with a spec-conformant 401.
+///
+/// RFC 9700 §2.3 states the resource server's half of audience restriction:
+/// "every resource server is obliged to verify, for every request, whether
+/// the access token sent with that request was meant to be used for that
+/// particular resource server. If it was not, the resource server MUST refuse
+/// to serve the respective request."
 #[tokio::test]
 async fn test_narrowed_token_rejected_at_other_resource() {
     let (app, state) = test_app().await;

@@ -2758,51 +2758,7 @@ rfc9562#8#932f3c7c	SHOULD	If UUIDs are required for use with any security operat
 rfc9562#8#a70b079c	MUST NOT	Implementations MUST NOT assume that it is easy to determine if a UUID has been slightly modified in order to redirect a reference to another object.
 rfc9562#8#b9602fce	SHOULD NOT	Implementations SHOULD NOT assume that UUIDs are hard to guess.
 rfc9700#0#194aec1f	SHOULD	Nonetheless, it is RECOMMENDED that implementers upgrade their implementations and ecosystems as soon as feasible.
-rfc9700#2.1.2#a40a2cf3	SHOULD	Clients SHOULD instead use the response type code (i.e., authorization code grant type) as specified in Section 2.1.1 or any other response type that causes the
-rfc9700#2.1.2#cd5bcdc9	SHOULD NOT	In order to avoid these issues, clients SHOULD NOT use the implicit grant (response type token) or other response types issuing access tokens in the authorizati
-rfc9700#2.2.1#0f575b33	SHOULD	Authorization and resource servers SHOULD use mechanisms for sender- constraining access tokens, such as mutual TLS for OAuth 2.0 [RFC8705] or OAuth 2.0 Demonst
-rfc9700#2.3#114c8cac	SHOULD	The privileges associated with an access token SHOULD be restricted to the minimum required for the particular application or use case.
-rfc9700#2.3#1d6e2d17	MUST	If it was not, the resource server MUST refuse to serve the respective request.
-rfc9700#2.3#9ec71a05	SHOULD	Additionally, access tokens SHOULD be restricted to certain resources and actions on resource servers or resources.
-rfc9700#2.3#acd9c5a9	SHOULD	In particular, access tokens SHOULD be audience-restricted to a specific resource server or, if that is not feasible, to a small set of resource servers.
-rfc9700#2.4#ecef679b	MUST NOT	The resource owner password credentials grant [RFC6749] MUST NOT be used.
-rfc9700#2.5#2c04593c	SHOULD	It is RECOMMENDED to use asymmetric cryptography for client authentication, such as mutual TLS for OAuth 2.0 [RFC8705] or signed JWTs ("Private Key JWT") in acc
-rfc9700#2.5#d7c5d384	SHOULD	Authorization servers SHOULD enforce client authentication if it is feasible, in the particular deployment, to establish a process for issuance/registration of 
-rfc9700#3#3f0de433	MUST	Implementers MUST take into account all possible types of attackers in the environment of their OAuth implementations.
-rfc9700#4.1.3#162b72ca	MUST	This means the authorization server MUST ensure that the two URIs are equal; see Section 6.2.1 of [RFC3986], Simple String Comparison, for details.
-rfc9700#4.1.3#55a30c4e	MUST	The only exception is native apps using a localhost URI: In this case, the authorization server MUST allow variable port numbers as described in Section 7.3 of 
-rfc9700#4.1.3#6d2c8a17	SHOULD	* Clients SHOULD use the authorization code response type instead of response types that cause access token issuance at the authorization endpoint.
-rfc9700#4.1.3#d899fb0b	MUST NOT	* Web servers on which redirection URIs are hosted MUST NOT expose open redirectors (see Section 4.11).
-rfc9700#4.10#51806c17	SHOULD	Authorization servers therefore SHOULD ensure that access tokens are sender-constrained and audience-restricted as described in the following.
 rfc9700#4.11.1#74dc9200	MUST NOT	Clients MUST NOT expose open redirectors.
-rfc9700#4.11.2#386dd197	SHOULD	If an HTTP redirection (and not, for example, JavaScript) is used for such a request, the authorization server SHOULD use HTTP status code 303 (See Other).
-rfc9700#4.11.2#4235e96d	MUST NOT	Section 4.1.2.1 of [RFC6749] already prevents open redirects by stating that the authorization server MUST NOT automatically redirect the user agent in case of 
-rfc9700#4.11.2#45f094c9	MUST	The authorization server MUST always authenticate the user first and, with the exception of the silent authentication use case, prompt the user for credentials 
-rfc9700#4.11.2#a8ce40a4	SHOULD	The authorization server SHOULD only automatically redirect the user agent if it trusts the redirection URI.
-rfc9700#4.11.2#dd219018	MUST	The authorization server MUST take precautions to prevent these threats.
-rfc9700#4.11.2#e5762b61	MUST NOT	Authorization servers that redirect a request that potentially contains the user's credentials therefore MUST NOT use the HTTP 307 status code for redirection.
-rfc9700#4.13#ac9eb9bb	MUST	Furthermore, the communication link between the reverse proxy and application server MUST be protected against eavesdropping, injection, and replay of messages.
-rfc9700#4.13#cd633d15	MUST	A reverse proxy MUST therefore sanitize any inbound requests to ensure the authenticity and integrity of all header values relevant for the security of the appl
-rfc9700#4.15#229ac7b1	SHOULD	In cases of access tokens obtained through grants | where no resource owner is involved, such as the client | credentials grant, the value of "sub" SHOULD corre
-rfc9700#4.15#99d4f508	SHOULD	| In cases of access tokens obtained through grants where a resource | owner is involved, such as the authorization code grant, the value | of "sub" SHOULD corr
-rfc9700#4.15.1#4a79a5f3	MUST	Where this cannot be avoided, authorization servers MUST provide other means for the resource server to distinguish between the two types of access tokens.
-rfc9700#4.15.1#7f600334	SHOULD NOT	Authorization servers SHOULD NOT allow clients to influence their client_id or any other claim that could cause confusion with a genuine resource owner if a com
-rfc9700#4.16#2b7da054	SHOULD	In addition to those, authorization servers SHOULD also use Content Security Policy (CSP) level 2 [W3C.CSP-2] or greater.
-rfc9700#4.16#553cc799	MUST	Authorization servers MUST prevent clickjacking attacks.
-rfc9700#4.16#b63b4909	SHOULD	Because some user agents do not support [W3C.CSP-2], this technique SHOULD be combined with others, including those described in [RFC6819], unless such legacy u
-rfc9700#4.16#ec74a6bb	SHOULD	For this reason, authorization servers SHOULD allow administrators to configure allowed origins for particular clients and/or for clients to register these dyna
-rfc9700#4.16#f8b1c2c6	SHOULD	Even in such cases, additional countermeasures SHOULD still be employed.
-rfc9700#4.17.2#60e922ba	MUST	Clients MUST utilize exact string matching to compare the initiator origin of an in-browser message with the authorization server origin, as shown in the follow
-rfc9700#4.17.2#63dab4a6	MUST	Since in-browser communication flows only apply a different communication technique (i.e., postMessage instead of HTTP redirect), all measures protecting the au
-rfc9700#4.17.2#75104921	MUST	When comparing client receiver origins against pre-registered origins, authorization servers MUST utilize exact string matching as described in Section 4.1.3.
-rfc9700#4.17.2#818053bb	MUST NOT	Wildcard origins like "*" in postMessage MUST NOT be used, as attackers can use them to leak a victim's in-browser message to malicious origins.
-rfc9700#4.17.2#d22f9932	MUST	Authorization servers MUST send postMessages to trusted client receiver origins, as shown in the following, non-normative example:
-rfc9700#4.17.2#f75f391a	MUST	Clients MUST prevent injection of in-browser messages on the client receiver endpoint.
-rfc9700#4.2.4#72a097d0	SHOULD	Therefore, [RFC6749] further recommends that, when an attempt is made to redeem a code twice, the authorization server SHOULD revoke all tokens issued previousl
-rfc9700#4.2.4#739d7a29	MUST	* As described in Section 4.1.2 of [RFC6749], authorization codes MUST be invalidated by the authorization server after their first use at the token endpoint.
-rfc9700#4.2.4#94b7f899	SHOULD NOT	The page rendered as a result of the OAuth authorization response and the authorization endpoint SHOULD NOT include third-party resources or links to external s
-rfc9700#4.2.4#9c60316f	SHOULD	* The state value SHOULD be invalidated by the client after its first use at the redirection endpoint.
-rfc9700#4.3.2#19b5571a	MUST NOT	* Clients MUST NOT pass access tokens in a URI query parameter in the way described in Section 2.3 of [RFC6750].
 rfc9700#4.4.2#2039eb7b	MUST	For both defenses, clients MUST store, for each authorization request, the issuer they sent the authorization request to and bind this information to the user a
 rfc9700#4.4.2#feb5ed9d	MUST	In scenarios where an OAuth client interacts with two or more authorization servers, however, clients MUST prevent mix-up attacks.
 rfc9700#4.4.2.1#215dc7c2	MUST	In both cases, the iss value MUST be evaluated according to [RFC9207].
@@ -2814,17 +2770,6 @@ rfc9700#4.4.2.2#d16069cc	MUST	For this defense, clients MUST use a distinct redi
 rfc9700#4.4.2.2#f5249236	SHOULD	This defense SHOULD therefore only be used if other options are not available.
 rfc9700#4.5.3.2#824d003d	MUST	1. MUST validate the nonce in the ID Token obtained from the token endpoint, even if another ID Token was obtained from the authorization response (e.g., respon
 rfc9700#4.5.3.2#f43ae8d4	MUST	2. MUST ensure that, unless and until that check succeeds, all tokens (ID Tokens and the access token) are disregarded and not used for any other purpose.
-rfc9700#4.7.1#33f13c11	SHOULD	Using Authorization Server Metadata according to [RFC8414] is RECOMMENDED, but authorization servers MAY instead provide a deployment-specific way to ensure or 
-rfc9700#4.7.1#473eecb4	MUST	* Clients MUST ensure that the authorization server supports PKCE before using PKCE for CSRF protection.
-rfc9700#4.7.1#69c8304d	MUST	* If state is used for carrying application state, and the integrity of its contents is a concern, clients MUST protect state against tampering and swapping.
-rfc9700#4.7.1#7a174198	MUST	The authorization server therefore MUST provide a way to detect their support for PKCE.
-rfc9700#4.7.1#cadefbfe	MUST	If an authorization server does not support PKCE, state or nonce MUST be used for CSRF protection.
-rfc9700#4.8.2#0cd3013e	MUST	* an authorization server that supports PKCE MUST check whether a code challenge is contained in the authorization request and bind this information to the code
-rfc9700#4.8.2#43cad03e	MUST	Therefore, authorization servers MUST mitigate this attack.
-rfc9700#4.8.2#cc735096	MUST	Beyond this, to prevent PKCE downgrade attacks, the authorization server MUST ensure that if there was no code_challenge in the authorization request, a request
-rfc9700#4.9.3#c4fb3e5d	MUST	* The resource server MUST treat access tokens like other sensitive secrets and not store or transfer them in plaintext.
-rfc9700#4.9.3#e508d4e5	SHOULD	* Audience restriction as described in Section 4.10.2 SHOULD be used to prevent replay of captured access tokens on other resource servers.
-rfc9700#4.9.3#f25367e6	SHOULD	* Sender-constrained access tokens, as described in Section 4.10.1, SHOULD be used to prevent the attacker from replaying the access tokens on other resource se
 rfc9701#3#041fa716	MUST	The AS MUST be able to determine whether an RS is the audience for a particular access token and what data it is entitled to receive; otherwise, the RS is not a
 rfc9701#3#854af77a	MUST	In order to process the introspection requests in a secure and privacy-preserving manner, the authorization server MUST be able to identify, authenticate, and a
 rfc9701#3#bb67a8bb	MUST	The AS MUST restrict the use of client credentials by an RS to the calls it requires, e.g., the AS MAY restrict such a client to call the token introspection en
