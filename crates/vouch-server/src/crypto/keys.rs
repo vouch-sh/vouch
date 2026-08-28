@@ -24,6 +24,7 @@ use serde::Serialize;
 use vouch_common::protocol;
 use zeroize::Zeroizing;
 
+use crate::crypto::jwk::{EcJwk, RsaJwk};
 use crate::crypto::kms_signer::{KmsSignerP256, KmsSignerRsa3072, parse_spki_rsa};
 
 /// OIDC signing key using P-256 ECDSA (ES256).
@@ -220,25 +221,13 @@ impl OidcSigningKey {
                 key_pair, key_id, ..
             } => {
                 let (x, y) = extract_ec_coordinates(key_pair)?;
-                Ok(EcJwk {
-                    kty: "EC".to_string(),
-                    crv: "P-256".to_string(),
-                    alg: protocol::JWS_ALG_ES256.to_string(),
-                    kid: key_id.clone(),
-                    key_use: "sig".to_string(),
-                    x,
-                    y,
-                })
+                Ok(EcJwk::for_jwks(key_id.clone(), x, y))
             }
-            Self::Kms { signer, key_id, .. } => Ok(EcJwk {
-                kty: "EC".to_string(),
-                crv: "P-256".to_string(),
-                alg: protocol::JWS_ALG_ES256.to_string(),
-                kid: key_id.clone(),
-                key_use: "sig".to_string(),
-                x: signer.x_b64(),
-                y: signer.y_b64(),
-            }),
+            Self::Kms { signer, key_id, .. } => Ok(EcJwk::for_jwks(
+                key_id.clone(),
+                signer.x_b64(),
+                signer.y_b64(),
+            )),
         }
     }
 
@@ -404,58 +393,6 @@ fn build_decoding_key_from_pair(key_pair: &EcdsaKeyPair) -> Result<DecodingKey> 
     let (x, y) = extract_ec_coordinates(key_pair)?;
     DecodingKey::from_ec_components(&x, &y)
         .map_err(|e| anyhow::anyhow!("Failed to build decoding key: {e}"))
-}
-
-/// EC JWK (JSON Web Key) for P-256 keys (RFC 7517 Section 4, RFC 7518 Section 6.2).
-#[derive(Debug, Clone, Serialize)]
-pub struct EcJwk {
-    /// RFC 7517 Section 4.1: Key Type — "EC" for Elliptic Curve.
-    pub kty: String,
-    /// RFC 7518 Section 6.2.1.1: Curve — "P-256" for NIST P-256.
-    pub crv: String,
-    /// RFC 7517 Section 4.4: Algorithm — [`protocol::JWS_ALG_ES256`].
-    pub alg: String,
-    /// RFC 7517 Section 4.5: Key ID.
-    pub kid: String,
-    /// RFC 7517 Section 4.2: Public Key Use — "sig" for signature.
-    #[serde(rename = "use")]
-    pub key_use: String,
-    /// RFC 7518 Section 6.2.1.2: X Coordinate (base64url encoded).
-    pub x: String,
-    /// RFC 7518 Section 6.2.1.3: Y Coordinate (base64url encoded).
-    pub y: String,
-}
-
-/// RSA JWK (JSON Web Key) for RSA-3072 keys (RFC 7517 Section 4, RFC 7518 Section 6.3).
-#[derive(Debug, Clone, Serialize)]
-pub struct RsaJwk {
-    /// RFC 7517 Section 4.1: Key Type — "RSA".
-    pub kty: String,
-    /// RFC 7517 Section 4.4: Algorithm — "RS256" (RSASSA-PKCS1-v1_5 using SHA-256).
-    pub alg: String,
-    /// RFC 7517 Section 4.5: Key ID.
-    pub kid: String,
-    /// RFC 7517 Section 4.2: Public Key Use — "sig" for signature.
-    #[serde(rename = "use")]
-    pub key_use: String,
-    /// RFC 7518 Section 6.3.1.1: RSA modulus (base64url, no padding).
-    pub n: String,
-    /// RFC 7518 Section 6.3.1.2: RSA public exponent (base64url, no padding).
-    pub e: String,
-}
-
-/// Polymorphic JWK for JWKS responses containing mixed key types.
-///
-/// Only `Serialize` is derived — `Deserialize` is intentionally omitted because
-/// `#[serde(untagged)]` produces poor, ambiguous error messages on deserialization
-/// failure, and the server never needs to deserialize its own JWKS response.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum Jwk {
-    /// P-256 EC key (ES256).
-    Ec(EcJwk),
-    /// RSA-3072 key (RS256).
-    Rsa(RsaJwk),
 }
 
 /// OIDC signing key using RSA-3072 (RS256).
@@ -699,23 +636,17 @@ impl OidcRsaSigningKey {
             } => {
                 let (n_bytes, e_bytes) = parse_spki_rsa(spki_der)
                     .context("Failed to extract RSA public key components from SPKI")?;
-                Ok(RsaJwk {
-                    kty: "RSA".to_string(),
-                    alg: "RS256".to_string(),
-                    kid: key_id.clone(),
-                    key_use: "sig".to_string(),
-                    n: URL_SAFE_NO_PAD.encode(&n_bytes),
-                    e: URL_SAFE_NO_PAD.encode(&e_bytes),
-                })
+                Ok(RsaJwk::for_jwks(
+                    key_id.clone(),
+                    URL_SAFE_NO_PAD.encode(&n_bytes),
+                    URL_SAFE_NO_PAD.encode(&e_bytes),
+                ))
             }
-            Self::Kms { signer, key_id, .. } => Ok(RsaJwk {
-                kty: "RSA".to_string(),
-                alg: "RS256".to_string(),
-                kid: key_id.clone(),
-                key_use: "sig".to_string(),
-                n: signer.n_b64().to_string(),
-                e: signer.e_b64().to_string(),
-            }),
+            Self::Kms { signer, key_id, .. } => Ok(RsaJwk::for_jwks(
+                key_id.clone(),
+                signer.n_b64().to_string(),
+                signer.e_b64().to_string(),
+            )),
         }
     }
 
@@ -856,6 +787,7 @@ async fn sign_jwt_rsa_with_kms<T: Serialize>(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::jwk::Jwk;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -872,18 +804,34 @@ mod tests {
         assert!(key.key_id().starts_with("vouch-oidc-"));
     }
 
+    /// RFC 7517 Section 4 and RFC 7518 Section 6.2: the exact entry the JWKS
+    /// endpoint publishes for an ES256 key. Asserted on the serialized form
+    /// rather than the fields, because the wire shape is the contract a
+    /// relying party reads — and the member count catches an accidental
+    /// addition as well as a removal.
     #[test]
     fn test_public_key_jwk() {
         let key = OidcSigningKey::generate().expect("Should generate key");
         let jwk = key.public_key_jwk().expect("Should create JWK");
+        let x = jwk.x().to_string();
+        let y = jwk.y().to_string();
+        let value = serde_json::to_value(Jwk::Ec(jwk)).expect("JWK serializes");
 
-        assert_eq!(jwk.kty, "EC");
-        assert_eq!(jwk.crv, "P-256");
-        assert_eq!(jwk.alg, "ES256");
-        assert_eq!(jwk.key_use, "sig");
-        assert!(!jwk.x.is_empty());
-        assert!(!jwk.y.is_empty());
-        assert_eq!(jwk.kid, key.key_id());
+        assert_eq!(value["kty"], "EC");
+        assert_eq!(value["crv"], "P-256");
+        assert_eq!(value["alg"], "ES256");
+        assert_eq!(value["use"], "sig");
+        assert_eq!(value["kid"], key.key_id());
+        assert_eq!(value["x"], x);
+        assert_eq!(value["y"], y);
+        assert!(!x.is_empty() && !y.is_empty());
+        // A published key is a public key: no `d`.
+        assert!(value.get("d").is_none(), "published JWK must not carry `d`");
+        assert_eq!(
+            value.as_object().expect("JWK is an object").len(),
+            7,
+            "published EC entry is exactly kty, crv, x, y, kid, alg, use: {value}"
+        );
     }
 
     #[tokio::test]
@@ -1011,8 +959,8 @@ mod tests {
         let jwk2 = key2.public_key_jwk().expect("Should create JWK");
 
         // Public keys should match
-        assert_eq!(jwk1.x, jwk2.x);
-        assert_eq!(jwk1.y, jwk2.y);
+        assert_eq!(jwk1.x(), jwk2.x());
+        assert_eq!(jwk1.y(), jwk2.y());
     }
 
     /// Convert PKCS#8 DER to PEM format for testing.
@@ -1044,17 +992,36 @@ mod tests {
         );
     }
 
+    /// RFC 7517 Section 4 and RFC 7518 Section 6.3: the published RS256 entry.
+    /// See `test_public_key_jwk` for why this asserts the serialized form.
     #[test]
     fn test_rsa_public_key_jwk() {
         let key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
         let jwk = key.public_key_jwk().expect("public_key_jwk failed");
+        let n = jwk.n().to_string();
+        let e = jwk.e().to_string();
+        let value = serde_json::to_value(Jwk::Rsa(jwk)).expect("JWK serializes");
 
-        assert_eq!(jwk.kty, "RSA");
-        assert_eq!(jwk.alg, "RS256");
-        assert_eq!(jwk.key_use, "sig");
-        assert_eq!(jwk.kid, key.key_id());
-        assert!(!jwk.n.is_empty(), "modulus must not be empty");
-        assert!(!jwk.e.is_empty(), "exponent must not be empty");
+        assert_eq!(value["kty"], "RSA");
+        assert_eq!(value["alg"], "RS256");
+        assert_eq!(value["use"], "sig");
+        assert_eq!(value["kid"], key.key_id());
+        assert_eq!(value["n"], n);
+        assert_eq!(value["e"], e);
+        assert!(!n.is_empty(), "modulus must not be empty");
+        assert!(!e.is_empty(), "exponent must not be empty");
+        // A published key is a public key: no private members.
+        for private in ["d", "p", "q", "dp", "dq", "qi"] {
+            assert!(
+                value.get(private).is_none(),
+                "published JWK must not carry `{private}`"
+            );
+        }
+        assert_eq!(
+            value.as_object().expect("JWK is an object").len(),
+            6,
+            "published RSA entry is exactly kty, n, e, kid, alg, use: {value}"
+        );
     }
 
     #[tokio::test]
@@ -1135,8 +1102,16 @@ mod tests {
         let jwk2 = key2.public_key_jwk().expect("jwk2 failed");
 
         // Same key → same modulus and exponent
-        assert_eq!(jwk1.n, jwk2.n, "modulus must match after PEM round-trip");
-        assert_eq!(jwk1.e, jwk2.e, "exponent must match after PEM round-trip");
+        assert_eq!(
+            jwk1.n(),
+            jwk2.n(),
+            "modulus must match after PEM round-trip"
+        );
+        assert_eq!(
+            jwk1.e(),
+            jwk2.e(),
+            "exponent must match after PEM round-trip"
+        );
     }
 
     #[test]

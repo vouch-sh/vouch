@@ -12,6 +12,7 @@
 //! substitution attacks.
 
 use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwk::Jwk;
 use crate::crypto::keys::OidcSigningKey;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -22,7 +23,6 @@ use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
 use std::collections::HashSet;
 use std::fmt;
-use vouch_common::jwk::JwkThumbprintKey;
 use zeroize::Zeroizing;
 
 /// JWT token types used in the vouch system.
@@ -361,7 +361,7 @@ pub(crate) enum JwsError {
     /// RFC 7515 Section 4.1.11: the protected header carries `crit`.
     Critical,
     /// RFC 9449 Section 4.3 item 7: the `jwk` Header Parameter carries private
-    /// key material. See [`PrivateKeyMaterial`].
+    /// key material. See [`crate::crypto::jwk::PrivateKeyMaterial`].
     PrivateKey,
 }
 
@@ -398,7 +398,8 @@ pub(crate) enum JwsError {
 /// server MUST ensure the following: ... 7. The jwk JOSE Header Parameter does
 /// not contain a private key." A proof carrying its own private key still
 /// verifies against the public half, so a header that discards the members
-/// turns that check into one that always passes. [`PrivateKeyMaterial`] refuses
+/// turns that check into one that always passes. [`PrivateKeyMaterial`](crate::crypto::jwk::PrivateKeyMaterial)
+/// refuses
 /// them instead. Its `alg` is also a closed `Algorithm` enum, which would
 /// collapse "an algorithm we do not allow" into "a header we could not parse"
 /// and lose the name; and it exposes `jku`, `x5u`, and `x5c`, which this
@@ -418,7 +419,7 @@ pub(crate) struct JoseHeader {
     pub(crate) kid: Option<String>,
     /// RFC 7515 Section 4.1.3 — the embedded public key.
     #[serde(default)]
-    pub(crate) jwk: Option<JoseJwk>,
+    pub(crate) jwk: Option<Jwk>,
     /// RFC 7515 Section 4.1.11. Presence only — see [`CritPresence`].
     #[serde(default)]
     crit: CritPresence,
@@ -457,181 +458,6 @@ impl<'de> Deserialize<'de> for HeaderAlg {
         Ok(name
             .parse::<JwsAlgorithm>()
             .map_or(Self::Other(name), Self::Known))
-    }
-}
-
-/// The `jwk` Header Parameter (RFC 7515 Section 4.1.3), tagged by `kty`.
-///
-/// Only the three key types Vouch verifies with are representable, so an
-/// unusable key is refused by the parse rather than by a check further in.
-/// Each variant declares the private members RFC 9449 Section 4.3 forbids, so
-/// a `JoseJwk` in hand carries none of them; see [`PrivateKeyMaterial`].
-///
-/// Members beyond those declared here are ignored, which RFC 7517 Section 4
-/// requires: "Additional members can be present in the JWK; if not understood
-/// by implementations encountering them, they MUST be ignored." That is why
-/// the forbidden members are named individually rather than the structs
-/// carrying `deny_unknown_fields`, which would also reject a JWK for carrying
-/// a legitimate `kid` or `use`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kty")]
-pub(crate) enum JoseJwk {
-    /// RFC 7518 Section 6.2 — an EC public key.
-    #[serde(rename = "EC")]
-    Ec(EcJwk),
-    /// RFC 7518 Section 6.3 — an RSA public key.
-    #[serde(rename = "RSA")]
-    Rsa(RsaJwk),
-    /// RFC 8037 Section 2 — an octet key pair.
-    #[serde(rename = "OKP")]
-    Okp(OkpJwk),
-}
-
-/// An EC public key on the one curve Vouch verifies with (RFC 7518 Section 6.2).
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct EcJwk {
-    /// RFC 7518 Section 6.2.1.1.
-    pub(crate) crv: EcCurve,
-    /// RFC 7518 Section 6.2.1.2 — the base64url X coordinate.
-    pub(crate) x: String,
-    /// RFC 7518 Section 6.2.1.3 — the base64url Y coordinate.
-    pub(crate) y: String,
-    /// RFC 7518 Section 6.2.2.1 — the private key. Forbidden here.
-    #[serde(default)]
-    d: PrivateKeyMaterial,
-}
-
-/// An RSA public key (RFC 7518 Section 6.3).
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RsaJwk {
-    /// RFC 7518 Section 6.3.1.1 — the base64url modulus.
-    pub(crate) n: String,
-    /// RFC 7518 Section 6.3.1.2 — the base64url public exponent.
-    pub(crate) e: String,
-    /// RFC 7518 Section 6.3.2 — the private key members. All forbidden here.
-    #[serde(default)]
-    d: PrivateKeyMaterial,
-    #[serde(default)]
-    p: PrivateKeyMaterial,
-    #[serde(default)]
-    q: PrivateKeyMaterial,
-    #[serde(default)]
-    dp: PrivateKeyMaterial,
-    #[serde(default)]
-    dq: PrivateKeyMaterial,
-    #[serde(default)]
-    qi: PrivateKeyMaterial,
-}
-
-/// An octet key pair on the one curve Vouch verifies with (RFC 8037 Section 2).
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct OkpJwk {
-    /// RFC 8037 Section 2 — the subtype of the key pair.
-    pub(crate) crv: OkpCurve,
-    /// RFC 8037 Section 2 — the base64url public key.
-    pub(crate) x: String,
-    /// RFC 8037 Section 2 — the private key. Forbidden here.
-    #[serde(default)]
-    d: PrivateKeyMaterial,
-}
-
-/// The EC curve of an [`EcJwk`].
-///
-/// P-256 is the only one, because ES256 is the only EC algorithm in
-/// [`JwsAlgorithm`]. A curve the signature could not be verified on is
-/// therefore not representable, rather than checked for after the fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) enum EcCurve {
-    /// RFC 7518 Section 6.2.1.1.
-    #[serde(rename = "P-256")]
-    P256,
-}
-
-impl EcCurve {
-    /// The `crv` value as RFC 7638 Section 3.2 hashes it.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::P256 => "P-256",
-        }
-    }
-}
-
-/// The curve of an [`OkpJwk`]. Ed25519 for the same reason [`EcCurve`] has one
-/// variant: FAPI 2.0 Section 5.4.1 admits `EdDSA` only in its Ed25519 variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) enum OkpCurve {
-    /// RFC 8037 Section 3.1.
-    #[serde(rename = "Ed25519")]
-    Ed25519,
-}
-
-impl OkpCurve {
-    /// The `crv` value as RFC 7638 Section 3.2 hashes it.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ed25519 => "Ed25519",
-        }
-    }
-}
-
-/// Whether a JWK carried a member holding private key material.
-///
-/// RFC 9449 Section 4.3 lists what "the receiving server MUST ensure" of a
-/// DPoP proof, item 7 being "The jwk JOSE Header Parameter does not contain a
-/// private key." Recording presence rather than the value makes that a
-/// property of the type: [`Jws::parse`] refuses any header whose JWK reports
-/// [`Present`](Self::Present), so no caller can hold a [`JoseJwk`] that
-/// carried one and no caller has to remember to look.
-///
-/// The alternative — a typed key struct that simply omits `d` and friends —
-/// silently discards them instead, which reduces the check to one that always
-/// passes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum PrivateKeyMaterial {
-    /// The member was not in the JWK.
-    #[default]
-    Absent,
-    /// The member was present, whatever it held.
-    Present,
-}
-
-impl<'de> Deserialize<'de> for PrivateKeyMaterial {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        IgnoredAny::deserialize(deserializer)?;
-        Ok(Self::Present)
-    }
-}
-
-impl JoseJwk {
-    /// Whether any forbidden private member was present.
-    fn carries_private_key(&self) -> bool {
-        let members: &[&PrivateKeyMaterial] = match self {
-            Self::Ec(ec) => &[&ec.d],
-            Self::Rsa(rsa) => &[&rsa.d, &rsa.p, &rsa.q, &rsa.dp, &rsa.dq, &rsa.qi],
-            Self::Okp(okp) => &[&okp.d],
-        };
-        members.contains(&&PrivateKeyMaterial::Present)
-    }
-
-    /// The RFC 7638 thumbprint of this key, as used for the DPoP `jkt`
-    /// confirmation claim (RFC 9449 Section 6.1).
-    pub(crate) fn thumbprint(&self) -> String {
-        match self {
-            Self::Ec(ec) => JwkThumbprintKey::Ec {
-                crv: ec.crv.as_str(),
-                x: &ec.x,
-                y: &ec.y,
-            },
-            Self::Rsa(rsa) => JwkThumbprintKey::Rsa {
-                e: &rsa.e,
-                n: &rsa.n,
-            },
-            Self::Okp(okp) => JwkThumbprintKey::Okp {
-                crv: okp.crv.as_str(),
-                x: &okp.x,
-            },
-        }
-        .thumbprint()
     }
 }
 
@@ -727,11 +553,7 @@ impl Jws {
         // RFC 9449 Section 4.3 item 7. Refused here rather than in `dpop` so
         // that holding a `Jws` is proof of it for every caller, not just the
         // one that remembered to check.
-        if header
-            .jwk
-            .as_ref()
-            .is_some_and(JoseJwk::carries_private_key)
-        {
+        if header.jwk.as_ref().is_some_and(Jwk::carries_private_key) {
             return Err(JwsError::PrivateKey);
         }
 

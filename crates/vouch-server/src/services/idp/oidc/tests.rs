@@ -172,18 +172,7 @@ fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> Strin
         .public_key_jwk()
         .expect("public_key_jwk should succeed");
 
-    serde_json::json!({
-        "keys": [{
-            "kty": jwk.kty,
-            "crv": jwk.crv,
-            "alg": jwk.alg,
-            "kid": jwk.kid,
-            "use": jwk.key_use,
-            "x": jwk.x,
-            "y": jwk.y,
-        }]
-    })
-    .to_string()
+    serde_json::json!({ "keys": [crate::crypto::jwk::Jwk::Ec(jwk)] }).to_string()
 }
 
 /// Sign a JWT with the given custom claims using ES256.

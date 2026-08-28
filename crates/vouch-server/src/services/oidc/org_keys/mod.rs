@@ -75,7 +75,8 @@ use crate::db::store::DocumentStore;
 use crate::db::{self, Organization};
 use crate::error::ServiceError;
 
-use crate::crypto::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
 
 mod resolve;
 mod rotation;

@@ -11,6 +11,7 @@ pub mod ber;
 pub(crate) mod cose;
 pub(crate) mod document_crypto;
 pub mod hash;
+pub mod jwk;
 pub(crate) mod jwt;
 pub mod keys;
 pub(crate) mod kms_signer;

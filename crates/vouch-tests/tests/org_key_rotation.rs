@@ -29,7 +29,7 @@ use std::sync::Arc;
 use jiff::{Span, Timestamp};
 use proptest::prelude::*;
 use vouch_server::crypto::alg::JwsAlgorithm;
-use vouch_server::crypto::keys::Jwk;
+use vouch_server::crypto::jwk::Jwk;
 use vouch_server::db::{AuditEventFilter, SigningKeyState};
 use vouch_server::services::oidc::{
     Operator, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_jwks, resolve_org_keys,
@@ -121,8 +121,15 @@ async fn age_previous_keys(state: &vouch_server::AppState, org_id: &str) {
 fn kids(jwks: &[Jwk]) -> Vec<String> {
     jwks.iter()
         .map(|j| match j {
-            Jwk::Rsa(rsa) => rsa.kid.clone(),
-            Jwk::Ec(ec) => ec.kid.clone(),
+            Jwk::Rsa(rsa) => rsa.kid(),
+            Jwk::Ec(ec) => ec.kid(),
+            // Vouch signs with no OKP key, so `for_jwks` builds none and a
+            // published set cannot contain one.
+            Jwk::Okp(_) => panic!("Vouch publishes no OKP signing key"),
+        })
+        .map(|kid| {
+            // `for_jwks` is the only constructor and it always sets `kid`.
+            kid.expect("a published JWK carries a kid").to_string()
         })
         .collect()
 }
@@ -164,6 +171,7 @@ async fn first_use_publishes_current_and_next_for_both_algorithms() {
         match jwk {
             Jwk::Rsa(_) => assert!(!saw_ec, "RSA JWK after an EC JWK"),
             Jwk::Ec(_) => saw_ec = true,
+            Jwk::Okp(_) => panic!("Vouch publishes no OKP signing key"),
         }
     }
     let all = kids(&jwks.keys);

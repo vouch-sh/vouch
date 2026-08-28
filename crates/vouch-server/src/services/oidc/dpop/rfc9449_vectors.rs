@@ -24,7 +24,7 @@ use super::{
     validate_dpop_claims,
 };
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::jwt::JoseJwk;
+use crate::crypto::jwk::Jwk;
 
 /// The DPoP proof from RFC 9449 Figure 2, reused verbatim in Figure 5.
 ///
@@ -79,7 +79,7 @@ const FIGURE_14_ATH: &str = "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo";
 /// self-signed test cannot detect any of them.
 #[test]
 fn thumbprint_matches_published_jkt() {
-    let jwk: JoseJwk = serde_json::from_str(FIGURE_4_JWK).expect("Figure 4 JWK parses");
+    let jwk: Jwk = serde_json::from_str(FIGURE_4_JWK).expect("Figure 4 JWK parses");
     assert_eq!(
         jwk.thumbprint(),
         FIGURE_9_JKT,

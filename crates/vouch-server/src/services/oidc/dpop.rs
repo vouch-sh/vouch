@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::jwt::{HeaderAlg, JoseJwk, Jws, JwsError};
+use crate::crypto::jwk::Jwk;
+use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::db::{self, store::DocumentStore};
 
 /// Nonce validity in seconds (5 minutes).
@@ -40,7 +41,7 @@ pub(crate) struct DpopHeader {
     /// Algorithm used for signing.
     pub(crate) alg: JwsAlgorithm,
     /// JSON Web Key (embedded public key).
-    pub(crate) jwk: JoseJwk,
+    pub(crate) jwk: Jwk,
 }
 
 /// DPoP JWT claims.
@@ -400,37 +401,37 @@ pub fn normalize_uri(uri: &str) -> String {
 
 /// Build a `DecodingKey` from a DPoP JWK.
 fn build_decoding_key(
-    jwk: &JoseJwk,
+    jwk: &Jwk,
     alg: JwsAlgorithm,
 ) -> Result<jsonwebtoken::DecodingKey, DpopError> {
     match alg {
         JwsAlgorithm::Es256 => match jwk {
-            JoseJwk::Ec(ec) => {
+            Jwk::Ec(ec) => {
                 // jsonwebtoken expects base64url-encoded strings
-                jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y)
+                jsonwebtoken::DecodingKey::from_ec_components(ec.x(), ec.y())
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid EC key: {e}")))
             }
-            JoseJwk::Rsa(_) | JoseJwk::Okp(_) => {
+            Jwk::Rsa(_) | Jwk::Okp(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
         JwsAlgorithm::Ps256 => match jwk {
-            JoseJwk::Rsa(rsa) => {
+            Jwk::Rsa(rsa) => {
                 // jsonwebtoken expects base64url-encoded strings
-                jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
+                jsonwebtoken::DecodingKey::from_rsa_components(rsa.n(), rsa.e())
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid RSA key: {e}")))
             }
-            JoseJwk::Ec(_) | JoseJwk::Okp(_) => {
+            Jwk::Ec(_) | Jwk::Okp(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
         JwsAlgorithm::EdDsa => match jwk {
-            JoseJwk::Okp(okp) => {
+            Jwk::Okp(okp) => {
                 // jsonwebtoken expects base64url-encoded string
-                jsonwebtoken::DecodingKey::from_ed_components(&okp.x)
+                jsonwebtoken::DecodingKey::from_ed_components(okp.x())
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid Ed25519 key: {e}")))
             }
-            JoseJwk::Ec(_) | JoseJwk::Rsa(_) => {
+            Jwk::Ec(_) | Jwk::Rsa(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn test_ec_jwk_thumbprint() {
         // Test vector from RFC 7638
-        let jwk: JoseJwk = serde_json::from_value(serde_json::json!({
+        let jwk: Jwk = serde_json::from_value(serde_json::json!({
             "kty": "EC",
             "crv": "P-256",
             "x": "test_x",

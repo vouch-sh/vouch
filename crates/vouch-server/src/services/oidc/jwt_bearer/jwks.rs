@@ -655,7 +655,7 @@ mod tests {
 
         // The full-size coordinates verify the token: the control case, without
         // which a truncated coordinate failing would prove nothing.
-        let full = ec_entry_from_coordinates(&jwk.x, &jwk.y);
+        let full = ec_entry_from_coordinates(jwk.x(), jwk.y());
         let key = build_decoding_key_from_jwk(&full, JwsAlgorithm::Es256)
             .expect("full-size EC key builds");
         assert!(
@@ -666,12 +666,12 @@ mod tests {
         // Drop the last octet of x: 31 octets where the curve requires 32.
         let short_x = URL_SAFE_NO_PAD.encode(
             URL_SAFE_NO_PAD
-                .decode(&jwk.x)
+                .decode(jwk.x())
                 .expect("x is base64url")
                 .get(..31)
                 .expect("P-256 x is 32 octets"),
         );
-        let truncated = ec_entry_from_coordinates(&short_x, &jwk.y);
+        let truncated = ec_entry_from_coordinates(&short_x, jwk.y());
 
         let verified = build_decoding_key_from_jwk(&truncated, JwsAlgorithm::Es256)
             .is_ok_and(|key| verify_es256(&token, &key));
@@ -682,7 +682,7 @@ mod tests {
     }
 
     /// Sign an ES256 JWT and return it with the public JWK that verifies it.
-    async fn es256_token_and_jwk() -> (String, crate::crypto::keys::EcJwk) {
+    async fn es256_token_and_jwk() -> (String, crate::crypto::jwk::EcJwk) {
         let key = crate::test_utils::make_test_oidc_key();
         let token = key
             .sign_jwt(&serde_json::json!({ "sub": "subject", "exp": 9_999_999_999i64 }))
