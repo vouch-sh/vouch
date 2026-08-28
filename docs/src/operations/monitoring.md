@@ -126,24 +126,35 @@ Security-relevant conditions are logged to a `security` target — certification
 active, a loopback `rp_id` combined with TLS, and rejected `Host` headers on the redirect
 listener.
 
-### CloudWatch log groups on the appliance AMI
+### CloudWatch logs on the appliance AMI
 
 The attestable AMI has no SSH, no SSM agent, and no console, so CloudWatch Logs is the only way
-to see what an instance is doing. The bundled CloudWatch agent ships three groups, all with a
-3-day retention and one stream per instance ID:
+to see what an instance is doing.
 
-| Log group | Source | Contents |
-|-----------|--------|----------|
-| `/vouch-server/vouch-server` | `/var/log/vouch-server/output.log` | Everything the server writes to stdout and stderr |
-| `/vouch-server/units` | journald, `vouch-server.service` and `amazon-cloudwatch-agent.service` | Unit start, stop, and restart transitions |
-| `/vouch-server/system` | journald, all units at `warning` and above | Kernel messages, OOM kills, dm-verity failures, service failures |
+Nothing on the image logs to a file. `vouch-server` writes to stdout, systemd captures that into
+the journal, and the bundled CloudWatch agent streams the whole journal into a single log group,
+`/vouch-server/vouch-server`, with one stream per instance ID and a 3-day retention. Everything
+lands in one place: the server's own output, systemd unit transitions, kernel messages, OOM kills,
+and dm-verity failures. Filter by the `_SYSTEMD_UNIT` value in a Logs Insights query when you want
+one service.
 
-Look in `/vouch-server/units` first when an instance goes quiet. The server unit writes its own
-output straight to a file, so if the process fails before it execs, `/vouch-server/vouch-server`
-stays empty and the only record of the failure is systemd's message in `/vouch-server/units`.
+That single group is also the only record of a server that fails before it starts. If
+`vouch-server.service` cannot exec, systemd's failure message is the only evidence, and it is in
+the journal like everything else.
 
-The writable layer is a RAM overlay, so none of this survives a reboot on the instance itself.
-Anything not already shipped to CloudWatch when an instance restarts is gone.
+Two journald settings in `/etc/systemd/journald.conf.d/10-vouch.conf` back this up:
+
+- **`Storage=volatile`** keeps the journal in `/run/log/journal`, in memory. journald's built-in
+  default is `persistent`, which would create `/var/log/journal` and grow it on a root filesystem
+  with no operator to clean up. Memory use is bounded by `RuntimeMaxUse`, which defaults to a
+  fraction of `/run`; when it fills, journald discards the oldest entries.
+- **`RateLimitIntervalSec=0`** turns off journald's default limit of 10000 messages per 30 seconds
+  per service. Past that limit journald drops messages and records only a count, which would lose
+  authentication log lines during exactly the burst worth reading.
+
+Because the journal is in memory and the writable layer is a RAM overlay, nothing survives a
+reboot on the instance. Anything not already shipped to CloudWatch when an instance restarts is
+gone.
 
 ### Correlating requests
 
