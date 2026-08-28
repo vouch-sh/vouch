@@ -1881,7 +1881,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
             "discovery advertises a DPoP algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }
@@ -1924,7 +1924,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
             "discovery advertises a token endpoint auth algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }

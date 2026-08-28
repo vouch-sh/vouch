@@ -135,7 +135,8 @@ mod tests {
     /// `mtls_cert_thumbprint` is supplied to `exchange_client_credentials`.
     #[tokio::test]
     async fn test_client_credentials_with_mtls_thumbprint() {
-        use crate::db::{CreateOAuthClientParams, JwsAlgorithm, RegistrationSource};
+        use crate::crypto::alg::JwsAlgorithm;
+        use crate::db::{CreateOAuthClientParams, RegistrationSource};
         use crate::test_utils::test_app_state;
 
         let state = test_app_state().await;

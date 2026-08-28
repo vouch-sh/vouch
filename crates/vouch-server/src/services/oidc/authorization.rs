@@ -877,7 +877,8 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 )]
 mod tests {
     use super::*;
-    use crate::db::{FapiProfile, JwsAlgorithm, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::crypto::alg::JwsAlgorithm;
+    use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,

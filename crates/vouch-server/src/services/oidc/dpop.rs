@@ -16,9 +16,9 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::crypto::jwt::{Jws, JwsError};
-use crate::db::{self, JwsAlgorithm, store::DocumentStore};
-use vouch_common::jwk::JwkThumbprintKey;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwt::{HeaderAlg, JoseJwk, Jws, JwsError};
+use crate::db::{self, store::DocumentStore};
 
 /// Nonce validity in seconds (5 minutes).
 const NONCE_VALIDITY_SECONDS: i64 = 300;
@@ -29,14 +29,18 @@ const NONCE_VALIDITY_SECONDS: i64 = 300;
 pub const SUPPORTED_ALGORITHMS: &[JwsAlgorithm] = &JwsAlgorithm::FAPI_ALLOWED;
 
 /// DPoP JWT header.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpopHeader {
-    /// Type must be "dpop+jwt".
-    pub typ: String,
-    /// Algorithm used for signing (ES256, PS256, EdDSA).
-    pub alg: String,
+///
+/// Built from a [`JoseHeader`](crate::crypto::jwt::JoseHeader) that has
+/// already been through [`Jws::parse`], so `jwk` carries no private key
+/// material (RFC 9449 Section 4.3 item 7) and `alg` is one of
+/// [`SUPPORTED_ALGORITHMS`]. `typ` is not carried: it is checked against
+/// `dpop+jwt` during the parse and nothing downstream reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct DpopHeader {
+    /// Algorithm used for signing.
+    pub(crate) alg: JwsAlgorithm,
     /// JSON Web Key (embedded public key).
-    pub jwk: DpopJwk,
+    pub(crate) jwk: JoseJwk,
 }
 
 /// DPoP JWT claims.
@@ -60,70 +64,6 @@ pub struct DpopClaims {
     /// When present, the server adds AI-specific session tags to issued tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-}
-
-/// JSON Web Key for DPoP.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DpopJwk {
-    /// Elliptic Curve key (P-256).
-    Ec(EcJwk),
-    /// RSA key.
-    Rsa(RsaJwk),
-    /// Octet Key Pair (Ed25519).
-    Okp(OkpJwk),
-}
-
-/// EC JWK (P-256 / ES256).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EcJwk {
-    pub kty: String,
-    pub crv: String,
-    pub x: String,
-    pub y: String,
-}
-
-/// RSA JWK.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RsaJwk {
-    pub kty: String,
-    pub n: String,
-    pub e: String,
-}
-
-/// OKP JWK (Ed25519).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OkpJwk {
-    pub kty: String,
-    pub crv: String,
-    pub x: String,
-}
-
-impl DpopJwk {
-    /// Compute the JWK thumbprint (RFC 7638) of this key.
-    ///
-    /// `kty` is taken from the variant rather than the declared member;
-    /// `build_decoding_key` rejects a key whose declared `kty` disagrees, and
-    /// runs before any caller reaches this.
-    #[must_use]
-    pub fn thumbprint(&self) -> String {
-        let key = match self {
-            DpopJwk::Ec(ec) => JwkThumbprintKey::Ec {
-                crv: &ec.crv,
-                x: &ec.x,
-                y: &ec.y,
-            },
-            DpopJwk::Rsa(rsa) => JwkThumbprintKey::Rsa {
-                e: &rsa.e,
-                n: &rsa.n,
-            },
-            DpopJwk::Okp(okp) => JwkThumbprintKey::Okp {
-                crv: &okp.crv,
-                x: &okp.x,
-            },
-        };
-        key.thumbprint()
-    }
 }
 
 // CnfClaim is defined in claims.rs (used for both DPoP and mTLS binding).
@@ -258,63 +198,51 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
 
 /// Parse a DPoP proof JWT header (without signature verification or claims parsing).
 ///
-/// Extracts the header to obtain the JWK and algorithm, parsing the `alg`
-/// wire string into a [`JwsAlgorithm`] exactly once. The typed value is
-/// threaded onward to `build_decoding_key` and the `jsonwebtoken::Algorithm`
-/// mapping in `parse_and_verify_dpop_proof`. Used internally by
-/// `parse_and_verify_dpop_proof` to build the decoding key before
-/// performing combined signature verification + claims extraction.
-fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopError> {
-    // One decode of the protected header, which also enforces RFC 7515
-    // Section 4.1.11: a `crit`-bearing proof never yields a header at all.
+/// Used internally by `parse_and_verify_dpop_proof` to obtain the JWK and
+/// algorithm before combined signature verification and claims extraction.
+///
+/// Three of the checks RFC 9449 Section 4.3 requires are discharged by
+/// [`Jws::parse`] and the types it yields rather than here: item 2 (a
+/// well-formed JWT), item 7 (no private key in the `jwk`), and the RFC 7515
+/// Section 4.1.11 `crit` refusal. What remains is what is specific to DPoP —
+/// the `typ`, the presence of a `jwk`, and the local algorithm policy.
+fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
     let jws = Jws::parse(proof).map_err(|e| match e {
         JwsError::Critical => DpopError::InvalidFormat(
             "DPoP proof header carries an unsupported 'crit' extension".to_string(),
         ),
+        JwsError::PrivateKey => DpopError::InvalidFormat(
+            "JWK in DPoP proof header must not contain private key material".to_string(),
+        ),
         JwsError::Malformed(reason) => DpopError::InvalidFormat(reason.to_string()),
     })?;
 
-    // RFC 9449 Section 4.3: The JWK MUST NOT contain a private key.
-    // Check for private key fields (`d`, `p`, `q`, `dp`, `dq`, `qi`) in the
-    // raw header before deserializing (our structs intentionally omit these
-    // fields so serde would silently ignore them).
-    if let Some(jwk_value) = jws.header().jwk.as_ref() {
-        for private_field in ["d", "p", "q", "dp", "dq", "qi"] {
-            if jwk_value.get(private_field).is_some() {
-                return Err(DpopError::InvalidFormat(
-                    "JWK in DPoP proof header must not contain private key material".to_string(),
-                ));
-            }
-        }
-    }
-
-    let jwk_value = jws.header().jwk.as_ref().ok_or_else(|| {
+    let jwk = jws.header().jwk.clone().ok_or_else(|| {
         DpopError::InvalidFormat("DPoP proof header must carry 'jwk'".to_string())
     })?;
-    let header = DpopHeader {
-        typ: jws.header().typ.clone().unwrap_or_default(),
-        alg: jws.header().alg.clone(),
-        jwk: serde_json::from_value(jwk_value.clone())
-            .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?,
-    };
 
-    // Validate header
-    if header.typ != "dpop+jwt" {
+    // RFC 9449 Section 4.3 item 4.
+    let typ = jws.header().typ.clone().unwrap_or_default();
+    if typ != "dpop+jwt" {
         return Err(DpopError::InvalidFormat(format!(
-            "typ must be 'dpop+jwt', got '{}'",
-            header.typ
+            "typ must be 'dpop+jwt', got '{typ}'"
         )));
     }
 
-    let alg: JwsAlgorithm = header
-        .alg
-        .parse()
-        .map_err(|_| DpopError::UnsupportedAlgorithm(header.alg.clone()))?;
+    // RFC 9449 Section 4.3 item 5: the `alg` must be "a registered asymmetric
+    // digital signature algorithm ..., is not none, is supported by the
+    // application, and is acceptable per local policy". `HeaderAlg::Other`
+    // covers the first two; `SUPPORTED_ALGORITHMS` is the local policy.
+    let HeaderAlg::Known(alg) = jws.header().alg else {
+        return Err(DpopError::UnsupportedAlgorithm(
+            jws.header().alg.as_str().to_string(),
+        ));
+    };
     if !SUPPORTED_ALGORITHMS.contains(&alg) {
-        return Err(DpopError::UnsupportedAlgorithm(header.alg.clone()));
+        return Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()));
     }
 
-    Ok((header, alg))
+    Ok(DpopHeader { alg, jwk })
 }
 
 /// Parse and verify a DPoP proof in a single pass.
@@ -326,18 +254,23 @@ fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopErro
 ///
 /// Returns the parsed header and verified claims.
 fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopError> {
-    let (header, alg) = parse_dpop_header(proof)?;
+    let header = parse_dpop_header(proof)?;
 
     // Build decoding key from JWK
-    let decoding_key = build_decoding_key(&header.jwk, alg)?;
+    let decoding_key = build_decoding_key(&header.jwk, header.alg)?;
 
-    // Map the typed algorithm to jsonwebtoken's Algorithm enum.
-    let algorithm = match alg {
+    // Map the typed algorithm to jsonwebtoken's Algorithm enum. RS256 is
+    // unreachable — `parse_dpop_header` admits only `SUPPORTED_ALGORITHMS`,
+    // which is `FAPI_ALLOWED` — but stays an arm so adding an algorithm to
+    // `JwsAlgorithm` fails to compile here rather than silently mapping.
+    let algorithm = match header.alg {
         JwsAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
         JwsAlgorithm::Ps256 => jsonwebtoken::Algorithm::PS256,
         JwsAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
         JwsAlgorithm::Rs256 => {
-            return Err(DpopError::UnsupportedAlgorithm(header.alg.clone()));
+            return Err(DpopError::UnsupportedAlgorithm(
+                header.alg.as_str().to_string(),
+            ));
         }
     };
 
@@ -467,52 +400,37 @@ pub fn normalize_uri(uri: &str) -> String {
 
 /// Build a `DecodingKey` from a DPoP JWK.
 fn build_decoding_key(
-    jwk: &DpopJwk,
+    jwk: &JoseJwk,
     alg: JwsAlgorithm,
 ) -> Result<jsonwebtoken::DecodingKey, DpopError> {
     match alg {
         JwsAlgorithm::Es256 => match jwk {
-            DpopJwk::Ec(ec) => {
-                if ec.kty != "EC" || ec.crv != "P-256" {
-                    return Err(DpopError::InvalidFormat(
-                        "ES256 requires EC key with P-256 curve".to_string(),
-                    ));
-                }
+            JoseJwk::Ec(ec) => {
                 // jsonwebtoken expects base64url-encoded strings
                 jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y)
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid EC key: {e}")))
             }
-            DpopJwk::Rsa(_) | DpopJwk::Okp(_) => {
+            JoseJwk::Rsa(_) | JoseJwk::Okp(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
         JwsAlgorithm::Ps256 => match jwk {
-            DpopJwk::Rsa(rsa) => {
-                if rsa.kty != "RSA" {
-                    return Err(DpopError::InvalidFormat(
-                        "PS256 requires RSA key".to_string(),
-                    ));
-                }
+            JoseJwk::Rsa(rsa) => {
                 // jsonwebtoken expects base64url-encoded strings
                 jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid RSA key: {e}")))
             }
-            DpopJwk::Ec(_) | DpopJwk::Okp(_) => {
+            JoseJwk::Ec(_) | JoseJwk::Okp(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
         JwsAlgorithm::EdDsa => match jwk {
-            DpopJwk::Okp(okp) => {
-                if okp.kty != "OKP" || okp.crv != "Ed25519" {
-                    return Err(DpopError::InvalidFormat(
-                        "EdDSA requires OKP key with Ed25519 curve".to_string(),
-                    ));
-                }
+            JoseJwk::Okp(okp) => {
                 // jsonwebtoken expects base64url-encoded string
                 jsonwebtoken::DecodingKey::from_ed_components(&okp.x)
                     .map_err(|e| DpopError::InvalidFormat(format!("Invalid Ed25519 key: {e}")))
             }
-            DpopJwk::Ec(_) | DpopJwk::Rsa(_) => {
+            JoseJwk::Ec(_) | JoseJwk::Rsa(_) => {
                 Err(DpopError::UnsupportedAlgorithm(alg.as_str().to_string()))
             }
         },
@@ -710,12 +628,13 @@ mod tests {
     #[test]
     fn test_ec_jwk_thumbprint() {
         // Test vector from RFC 7638
-        let jwk = DpopJwk::Ec(EcJwk {
-            kty: "EC".to_string(),
-            crv: "P-256".to_string(),
-            x: "test_x".to_string(),
-            y: "test_y".to_string(),
-        });
+        let jwk: JoseJwk = serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "test_x",
+            "y": "test_y",
+        }))
+        .expect("EC JWK parses");
 
         let thumbprint = jwk.thumbprint();
         assert!(!thumbprint.is_empty());
@@ -1040,6 +959,33 @@ mod tests {
             matches!(result, Err(DpopError::InvalidFormat(_))),
             "a crit-bearing DPoP header must be rejected, got: {result:?}"
         );
+    }
+
+    // RFC 9449 Section 4.3 item 4: "The typ JOSE Header Parameter has the
+    // value dpop+jwt." RFC 8725 Section 3.11 is the reason it matters — an
+    // explicit typ is what stops another kind of signed JWT being replayed
+    // here as a proof.
+    #[test]
+    fn test_parse_dpop_header_rejects_wrong_typ() {
+        for typ in ["at+jwt", "JWT", "oauth-authz-req+jwt", ""] {
+            let jwt = make_dpop_jwt_with_header(&serde_json::json!({
+                "typ": typ,
+                "alg": "ES256",
+                "jwk": {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                    "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+                }
+            }));
+
+            let result = parse_dpop_header(&jwt);
+
+            assert!(
+                matches!(result, Err(DpopError::InvalidFormat(_))),
+                "typ '{typ}' must be rejected, got: {result:?}"
+            );
+        }
     }
 
     #[test]

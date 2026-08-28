@@ -369,14 +369,22 @@ pub(crate) async fn verify_id_token(
         crate::crypto::jwt::JwsError::Malformed(reason) => {
             anyhow::anyhow!("Invalid ID token: {reason}")
         }
+        crate::crypto::jwt::JwsError::PrivateKey => {
+            anyhow::anyhow!("ID token header JWK contains private key material")
+        }
     })?;
 
-    // The signing algorithm, from the header already decoded above.
-    let alg: jsonwebtoken::Algorithm = jws
-        .header()
-        .alg
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Unsupported ID token algorithm: {}", jws.header().alg))?;
+    // The signing algorithm, from the header already decoded above. Parsed
+    // from the wire string rather than through `HeaderAlg::Known`, because an
+    // upstream IdP is not held to Vouch's own signing policy: RS384, RS512,
+    // ES384, PS384 and PS512 are all algorithms `jsonwebtoken` can verify and
+    // an OP may legitimately use, and none of them are in `JwsAlgorithm`.
+    let alg: jsonwebtoken::Algorithm = jws.header().alg.as_str().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Unsupported ID token algorithm: {}",
+            jws.header().alg.as_str()
+        )
+    })?;
 
     // Fetch JWKS from the upstream IdP
     let jwks_response = http_client

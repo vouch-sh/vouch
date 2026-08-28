@@ -1785,9 +1785,8 @@ async fn issue_code_and_redirect(
 )]
 mod tests {
     use super::*;
-    use crate::db::{
-        AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, TokenEndpointAuthMethod,
-    };
+    use crate::crypto::alg::JwsAlgorithm;
+    use crate::db::{AccessScope, FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
 
     fn make_client(redirect_uris: Vec<String>) -> OAuthClient {
         OAuthClient {

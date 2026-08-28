@@ -916,7 +916,7 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(db::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },
@@ -988,7 +988,7 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(db::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },

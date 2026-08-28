@@ -2695,7 +2695,7 @@ mod httpsig {
                 ),
                 jwks: TestJwks::Custom(jwks),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },
@@ -2809,7 +2809,7 @@ mod httpsig {
                 jwks: TestJwks::None,
                 jwks_uri: Some("https://client.example/jwks.json".to_string()),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },

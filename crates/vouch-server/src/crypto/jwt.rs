@@ -11,6 +11,7 @@
 //! the `typ` header (RFC 7515 Section 4.1.9), preventing cross-type token
 //! substitution attacks.
 
+use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::keys::OidcSigningKey;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -21,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
 use std::collections::HashSet;
 use std::fmt;
+use vouch_common::jwk::JwkThumbprintKey;
 use zeroize::Zeroizing;
 
 /// JWT token types used in the vouch system.
@@ -358,6 +360,9 @@ pub(crate) enum JwsError {
     Malformed(&'static str),
     /// RFC 7515 Section 4.1.11: the protected header carries `crit`.
     Critical,
+    /// RFC 9449 Section 4.3 item 7: the `jwk` Header Parameter carries private
+    /// key material. See [`PrivateKeyMaterial`].
+    PrivateKey,
 }
 
 /// The JOSE header of a compact JWS: the registered Header Parameters of
@@ -377,28 +382,33 @@ pub(crate) enum JwsError {
 ///   pins that. `cty` is absent for the same reason — nothing reads it, so
 ///   declaring it would be surface without a use.
 ///
-/// `alg` is a `String`, not an algorithm enum. Which algorithms are acceptable
-/// differs by caller (a FAPI client assertion excludes RS256 where a Request
-/// Object may not), so that is a policy question, not a well-formedness one:
-/// parsing keeps the string and callers apply their own allowlist, which is
-/// also what lets them name the offending algorithm in the error.
+/// `alg` is [`HeaderAlg`] rather than [`JwsAlgorithm`] directly, because which
+/// algorithms are acceptable differs by caller (a FAPI client assertion
+/// excludes RS256 where a Request Object may not). That is a policy question,
+/// not a well-formedness one, so an unrecognized name parses and is carried
+/// verbatim for the caller's allowlist to refuse and name.
 ///
-/// `jsonwebtoken::Header` covers the same registered parameters, `crit`
-/// included, and rejects a duplicate name and a missing `alg` just as this
-/// does. It is not used here because its `alg` is a closed `Algorithm` enum:
-/// an unrecognized algorithm fails deserialization, which would collapse
-/// "algorithm we do not allow" into "header we could not parse" and lose the
-/// name from the message. Two smaller differences follow from its typing:
-/// `crit: null` deserializes to `None` there, indistinguishable from absent,
-/// and a non-array `crit` fails as a type error rather than as a critical
-/// extension. It also exposes `jku`, `x5u`, and `x5c`, which this deliberately
-/// does not.
+/// `jsonwebtoken::Header` covers the same registered parameters and refuses the
+/// same malformed headers. It is not used here because its `jwk` is a typed
+/// `Jwk` that keeps only the members its key type declares public: an EC key's
+/// `d` and an RSA key's `d`, `p`, `q`, `dp`, `dq`, and `qi` are dropped during
+/// deserialization. Dropping them is the correct reading of a JWK, and it is
+/// what makes the type unusable here, because RFC 9449 Section 4.3 makes
+/// finding them the recipient's job — "To validate a DPoP proof, the receiving
+/// server MUST ensure the following: ... 7. The jwk JOSE Header Parameter does
+/// not contain a private key." A proof carrying its own private key still
+/// verifies against the public half, so a header that discards the members
+/// turns that check into one that always passes. [`PrivateKeyMaterial`] refuses
+/// them instead. Its `alg` is also a closed `Algorithm` enum, which would
+/// collapse "an algorithm we do not allow" into "a header we could not parse"
+/// and lose the name; and it exposes `jku`, `x5u`, and `x5c`, which this
+/// deliberately does not.
 #[derive(Debug, Deserialize)]
 pub(crate) struct JoseHeader {
     /// RFC 7515 Section 4.1.1. Required: Section 5.1 says the `alg` Header
     /// Parameter "MUST be present in the JOSE Header", so a header without one
     /// is not a well-formed JWS and never reaches a caller.
-    pub(crate) alg: String,
+    pub(crate) alg: HeaderAlg,
     /// RFC 7515 Section 4.1.9 — the media type of the JWS.
     #[serde(default)]
     pub(crate) typ: Option<String>,
@@ -407,15 +417,222 @@ pub(crate) struct JoseHeader {
     #[serde(default)]
     pub(crate) kid: Option<String>,
     /// RFC 7515 Section 4.1.3 — the embedded public key.
-    ///
-    /// Kept as raw JSON: a JWK's members depend on its key type (RFC 7517),
-    /// so there is no one struct for it, and DPoP scans it for private-key
-    /// members that a typed view would discard before it could look.
     #[serde(default)]
-    pub(crate) jwk: Option<serde_json::Value>,
+    pub(crate) jwk: Option<JoseJwk>,
     /// RFC 7515 Section 4.1.11. Presence only — see [`CritPresence`].
     #[serde(default)]
     crit: CritPresence,
+}
+
+/// The `alg` Header Parameter: an algorithm Vouch can verify with, or any
+/// other name kept verbatim.
+///
+/// RFC 7515 Section 4.1.1 requires `alg` be present and registered, but says
+/// nothing about which registered algorithms a given recipient accepts — that
+/// is per-caller policy. Modelling the two cases as variants keeps the refusal
+/// exhaustive at the match while leaving the rejected name available to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeaderAlg {
+    /// An algorithm Vouch signs or verifies with. Still subject to the
+    /// caller's allowlist — [`JwsAlgorithm::FAPI_ALLOWED`] and
+    /// [`JwsAlgorithm::CLIENT_ASSERTION_ALLOWED`] are narrower than this.
+    Known(JwsAlgorithm),
+    /// Any other `alg` value, including `none` and the symmetric families.
+    Other(String),
+}
+
+impl HeaderAlg {
+    /// The `alg` as it appeared on the wire.
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Known(alg) => alg.as_str(),
+            Self::Other(name) => name,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HeaderAlg {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(name
+            .parse::<JwsAlgorithm>()
+            .map_or(Self::Other(name), Self::Known))
+    }
+}
+
+/// The `jwk` Header Parameter (RFC 7515 Section 4.1.3), tagged by `kty`.
+///
+/// Only the three key types Vouch verifies with are representable, so an
+/// unusable key is refused by the parse rather than by a check further in.
+/// Each variant declares the private members RFC 9449 Section 4.3 forbids, so
+/// a `JoseJwk` in hand carries none of them; see [`PrivateKeyMaterial`].
+///
+/// Members beyond those declared here are ignored, which RFC 7517 Section 4
+/// requires: "Additional members can be present in the JWK; if not understood
+/// by implementations encountering them, they MUST be ignored." That is why
+/// the forbidden members are named individually rather than the structs
+/// carrying `deny_unknown_fields`, which would also reject a JWK for carrying
+/// a legitimate `kid` or `use`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kty")]
+pub(crate) enum JoseJwk {
+    /// RFC 7518 Section 6.2 — an EC public key.
+    #[serde(rename = "EC")]
+    Ec(EcJwk),
+    /// RFC 7518 Section 6.3 — an RSA public key.
+    #[serde(rename = "RSA")]
+    Rsa(RsaJwk),
+    /// RFC 8037 Section 2 — an octet key pair.
+    #[serde(rename = "OKP")]
+    Okp(OkpJwk),
+}
+
+/// An EC public key on the one curve Vouch verifies with (RFC 7518 Section 6.2).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct EcJwk {
+    /// RFC 7518 Section 6.2.1.1.
+    pub(crate) crv: EcCurve,
+    /// RFC 7518 Section 6.2.1.2 — the base64url X coordinate.
+    pub(crate) x: String,
+    /// RFC 7518 Section 6.2.1.3 — the base64url Y coordinate.
+    pub(crate) y: String,
+    /// RFC 7518 Section 6.2.2.1 — the private key. Forbidden here.
+    #[serde(default)]
+    d: PrivateKeyMaterial,
+}
+
+/// An RSA public key (RFC 7518 Section 6.3).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RsaJwk {
+    /// RFC 7518 Section 6.3.1.1 — the base64url modulus.
+    pub(crate) n: String,
+    /// RFC 7518 Section 6.3.1.2 — the base64url public exponent.
+    pub(crate) e: String,
+    /// RFC 7518 Section 6.3.2 — the private key members. All forbidden here.
+    #[serde(default)]
+    d: PrivateKeyMaterial,
+    #[serde(default)]
+    p: PrivateKeyMaterial,
+    #[serde(default)]
+    q: PrivateKeyMaterial,
+    #[serde(default)]
+    dp: PrivateKeyMaterial,
+    #[serde(default)]
+    dq: PrivateKeyMaterial,
+    #[serde(default)]
+    qi: PrivateKeyMaterial,
+}
+
+/// An octet key pair on the one curve Vouch verifies with (RFC 8037 Section 2).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct OkpJwk {
+    /// RFC 8037 Section 2 — the subtype of the key pair.
+    pub(crate) crv: OkpCurve,
+    /// RFC 8037 Section 2 — the base64url public key.
+    pub(crate) x: String,
+    /// RFC 8037 Section 2 — the private key. Forbidden here.
+    #[serde(default)]
+    d: PrivateKeyMaterial,
+}
+
+/// The EC curve of an [`EcJwk`].
+///
+/// P-256 is the only one, because ES256 is the only EC algorithm in
+/// [`JwsAlgorithm`]. A curve the signature could not be verified on is
+/// therefore not representable, rather than checked for after the fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) enum EcCurve {
+    /// RFC 7518 Section 6.2.1.1.
+    #[serde(rename = "P-256")]
+    P256,
+}
+
+impl EcCurve {
+    /// The `crv` value as RFC 7638 Section 3.2 hashes it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::P256 => "P-256",
+        }
+    }
+}
+
+/// The curve of an [`OkpJwk`]. Ed25519 for the same reason [`EcCurve`] has one
+/// variant: FAPI 2.0 Section 5.4.1 admits `EdDSA` only in its Ed25519 variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) enum OkpCurve {
+    /// RFC 8037 Section 3.1.
+    #[serde(rename = "Ed25519")]
+    Ed25519,
+}
+
+impl OkpCurve {
+    /// The `crv` value as RFC 7638 Section 3.2 hashes it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "Ed25519",
+        }
+    }
+}
+
+/// Whether a JWK carried a member holding private key material.
+///
+/// RFC 9449 Section 4.3 lists what "the receiving server MUST ensure" of a
+/// DPoP proof, item 7 being "The jwk JOSE Header Parameter does not contain a
+/// private key." Recording presence rather than the value makes that a
+/// property of the type: [`Jws::parse`] refuses any header whose JWK reports
+/// [`Present`](Self::Present), so no caller can hold a [`JoseJwk`] that
+/// carried one and no caller has to remember to look.
+///
+/// The alternative — a typed key struct that simply omits `d` and friends —
+/// silently discards them instead, which reduces the check to one that always
+/// passes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum PrivateKeyMaterial {
+    /// The member was not in the JWK.
+    #[default]
+    Absent,
+    /// The member was present, whatever it held.
+    Present,
+}
+
+impl<'de> Deserialize<'de> for PrivateKeyMaterial {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        IgnoredAny::deserialize(deserializer)?;
+        Ok(Self::Present)
+    }
+}
+
+impl JoseJwk {
+    /// Whether any forbidden private member was present.
+    fn carries_private_key(&self) -> bool {
+        let members: &[&PrivateKeyMaterial] = match self {
+            Self::Ec(ec) => &[&ec.d],
+            Self::Rsa(rsa) => &[&rsa.d, &rsa.p, &rsa.q, &rsa.dp, &rsa.dq, &rsa.qi],
+            Self::Okp(okp) => &[&okp.d],
+        };
+        members.contains(&&PrivateKeyMaterial::Present)
+    }
+
+    /// The RFC 7638 thumbprint of this key, as used for the DPoP `jkt`
+    /// confirmation claim (RFC 9449 Section 6.1).
+    pub(crate) fn thumbprint(&self) -> String {
+        match self {
+            Self::Ec(ec) => JwkThumbprintKey::Ec {
+                crv: ec.crv.as_str(),
+                x: &ec.x,
+                y: &ec.y,
+            },
+            Self::Rsa(rsa) => JwkThumbprintKey::Rsa {
+                e: &rsa.e,
+                n: &rsa.n,
+            },
+            Self::Okp(okp) => JwkThumbprintKey::Okp {
+                crv: okp.crv.as_str(),
+                x: &okp.x,
+            },
+        }
+        .thumbprint()
+    }
 }
 
 /// Whether the header carried `crit`, without recording what it held.
@@ -505,6 +722,17 @@ impl Jws {
         // so no caller can act on a JWS it should have rejected.
         if header.crit == CritPresence::Present {
             return Err(JwsError::Critical);
+        }
+
+        // RFC 9449 Section 4.3 item 7. Refused here rather than in `dpop` so
+        // that holding a `Jws` is proof of it for every caller, not just the
+        // one that remembered to check.
+        if header
+            .jwk
+            .as_ref()
+            .is_some_and(JoseJwk::carries_private_key)
+        {
+            return Err(JwsError::PrivateKey);
         }
 
         Ok(Self {
@@ -1393,8 +1621,8 @@ mod tests {
         );
         let jws = Jws::parse(&format!("{padded}.e30.c2ln"));
         assert_eq!(
-            jws.ok().map(|j| j.header().alg.clone()).as_deref(),
-            Some("ES256"),
+            jws.ok().map(|j| j.header().alg.clone()),
+            Some(HeaderAlg::Known(JwsAlgorithm::Es256)),
             "a padded header must decode"
         );
     }
@@ -1413,7 +1641,7 @@ mod tests {
         let token = format!("{header_b64}.{payload_b64}.c2ln");
 
         let jws = Jws::parse(&token).ok().expect("token parses");
-        assert_eq!(jws.header().alg, "ES256");
+        assert_eq!(jws.header().alg, HeaderAlg::Known(JwsAlgorithm::Es256));
         assert_eq!(jws.header().typ.as_deref(), Some("at+jwt"));
 
         let claims: Claims = jws.claims_as().ok().expect("claims match");
@@ -1454,7 +1682,7 @@ mod tests {
         let jws = Jws::parse(&format!("{header_b64}.!!!.c2ln"))
             .ok()
             .expect("a bad payload must not fail the header parse");
-        assert_eq!(jws.header().alg, "ES256");
+        assert_eq!(jws.header().alg, HeaderAlg::Known(JwsAlgorithm::Es256));
         assert!(jws.claims_as::<serde_json::Value>().is_err());
     }
 }

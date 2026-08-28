@@ -265,6 +265,10 @@ fn parse_request_object_header(jwt: &str) -> ServiceResult<(Option<String>, JwtA
             OAuthErrorCode::InvalidRequestObject,
             format!("Invalid Request Object: {reason}"),
         ),
+        JwsError::PrivateKey => ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            "Request Object header JWK contains private key material",
+        ),
     })?;
 
     let typ = jws.header().typ.clone();
@@ -307,7 +311,7 @@ pub async fn validate_request_object(
 
     // 2. Enforce client's preferred signing algorithm if configured
     if let Some(required_alg) = client.request_object_signing_alg
-        && assertion_header.alg != required_alg.as_str()
+        && assertion_header.alg != required_alg
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -321,7 +325,7 @@ pub async fn validate_request_object(
     // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
     // RS256 is excluded per FAPI 2.0 Section 5.4.1 — use PS256, ES256, or EdDSA.
     if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_algorithm(client, &assertion_header.alg)
+        crate::services::oidc::fapi::validate_fapi_algorithm(client, assertion_header.alg)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -399,12 +403,7 @@ pub async fn validate_request_object(
     })?;
 
     // 4. Verify signature and extract claims
-    let algorithm = map_algorithm(&assertion_header.alg).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
-            format!("Unsupported algorithm: {}", assertion_header.alg),
-        )
-    })?;
+    let algorithm = map_algorithm(assertion_header.alg);
 
     let mut validation = jsonwebtoken::Validation::new(algorithm);
     validation.required_spec_claims.clear();
@@ -661,7 +660,7 @@ fn validate_temporal_claims(
 )]
 mod tests {
     use super::*;
-    use crate::db::JwsAlgorithm;
+    use crate::crypto::alg::JwsAlgorithm;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -755,7 +754,7 @@ mod tests {
             &serde_json::json!({"alg": "ES256", "typ": "oauth-authz-req+jwt"}),
         );
         let (typ, assertion) = parse_request_object_header(&jwt).expect("ES256 should be accepted");
-        assert_eq!(assertion.alg, "ES256");
+        assert_eq!(assertion.alg, JwsAlgorithm::Es256);
         assert_eq!(typ.as_deref(), Some("oauth-authz-req+jwt"));
     }
 
@@ -767,7 +766,7 @@ mod tests {
         );
         let (_full, assertion) =
             parse_request_object_header(&jwt).expect("RS256 should be accepted");
-        assert_eq!(assertion.alg, "RS256");
+        assert_eq!(assertion.alg, JwsAlgorithm::Rs256);
     }
 
     // FAPI 2.0 Message Signing §5.3.1: request objects carry typ oauth-authz-req+jwt.

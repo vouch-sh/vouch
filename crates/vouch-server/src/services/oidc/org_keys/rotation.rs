@@ -11,8 +11,8 @@ use jiff::{Span, Timestamp};
 
 use super::{KeyMaterial, ensure_key, generate_key_material, state_priority};
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::audit::AuditStore;
-use crate::db::documents::oauth::JwsAlgorithm;
 use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
 use crate::db::store::StoreTransaction;
 use crate::db::{self};
@@ -840,10 +840,10 @@ mod tests {
 
     use super::super::test_support::{NO_OPERATOR, backdate, setup};
     use super::*;
+    use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
     use crate::db::{
-        JwsAlgorithm, OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key,
-        release_subdomain,
+        OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key, release_subdomain,
     };
     use crate::services::oidc::resolve_org_keys;
 

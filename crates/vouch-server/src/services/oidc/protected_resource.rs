@@ -63,7 +63,7 @@
 //! in [`PROTECTED_RESOURCE_PREFIXES`]. Unknown sub-paths return 404.
 
 use crate::AppState;
-use crate::db::JwsAlgorithm;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::error::ServiceError;
 use crate::services::oidc::OAuthScope;
 use serde::Serialize;

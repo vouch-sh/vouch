@@ -4,12 +4,11 @@
 //! Provides shared validation logic used by both JWT client authentication
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
-use crate::crypto::jwt::{Jws, JwsError};
-use crate::db::JwsAlgorithm;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use vouch_common::protocol;
 
 /// Clock skew tolerance in seconds.
 ///
@@ -65,10 +64,15 @@ impl JwtAudience {
 }
 
 /// Decoded JWT header fields we need for validation.
+///
+/// `alg` is a [`JwsAlgorithm`] rather than the wire string because
+/// [`assertion_header_from`] is the only constructor and it refuses anything
+/// else: RFC 7523 Section 3 requires an asymmetric algorithm, so `none` and
+/// the HS* family are not representable here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtAssertionHeader {
     /// Algorithm used for signing.
-    pub alg: String,
+    pub alg: JwsAlgorithm,
     /// Key ID (optional, used to select the verification key from JWKS).
     #[serde(default)]
     pub kid: Option<String>,
@@ -82,7 +86,7 @@ pub struct ValidatedJwtAssertion {
     /// Key ID from the header (if present).
     pub kid: Option<String>,
     /// Algorithm from the header.
-    pub alg: String,
+    pub alg: JwsAlgorithm,
 }
 
 /// Parse a JWT assertion header without signature verification.
@@ -100,6 +104,10 @@ fn assertion_jws_error(e: JwsError) -> ServiceError {
             OAuthErrorCode::InvalidClient,
             format!("Invalid JWT assertion: {reason}"),
         ),
+        JwsError::PrivateKey => ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "JWT assertion header JWK contains private key material",
+        ),
     }
 }
 
@@ -116,18 +124,13 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
 /// Object path, which parses first to report `invalid_request_object` — does
 /// not decode the same protected header a second time.
 pub(crate) fn assertion_header_from(jws: &Jws) -> ServiceResult<JwtAssertionHeader> {
-    let header = JwtAssertionHeader {
-        alg: jws.header().alg.clone(),
-        kid: jws.header().kid.clone(),
-    };
-
     // Structural algorithm check: only asymmetric algorithms are ever accepted.
     // HS* and "none" are unconditionally rejected to prevent symmetric key
     // confusion attacks (RFC 7523 Section 3). This does not consider the
     // presenting client — the per-client-profile allowlist (e.g. excluding
     // RS256 for FAPI clients) is applied later via
     // `validate_client_assertion_algorithm`, once the client is resolved.
-    if header.alg.parse::<JwsAlgorithm>().is_err() {
+    let HeaderAlg::Known(alg) = jws.header().alg else {
         let supported = JwsAlgorithm::CLIENT_ASSERTION_ALLOWED
             .iter()
             .map(JwsAlgorithm::as_str)
@@ -137,12 +140,15 @@ pub(crate) fn assertion_header_from(jws: &Jws) -> ServiceResult<JwtAssertionHead
             OAuthErrorCode::InvalidClient,
             format!(
                 "Unsupported JWT assertion algorithm: {}. Supported: {supported}",
-                header.alg
+                jws.header().alg.as_str()
             ),
         ));
-    }
+    };
 
-    Ok(header)
+    Ok(JwtAssertionHeader {
+        alg,
+        kid: jws.header().kid.clone(),
+    })
 }
 
 /// Validate that a client assertion's algorithm is permitted for the presenting
@@ -157,13 +163,10 @@ pub(crate) fn assertion_header_from(jws: &Jws) -> ServiceResult<JwtAssertionHead
 /// # Errors
 /// Returns `ServiceError::OAuth` with `invalid_client` if `alg` is not in `allowed`.
 pub fn validate_client_assertion_algorithm(
-    alg: &str,
+    alg: JwsAlgorithm,
     allowed: &[JwsAlgorithm],
 ) -> ServiceResult<()> {
-    let permitted = alg
-        .parse::<JwsAlgorithm>()
-        .is_ok_and(|parsed| allowed.contains(&parsed));
-    if !permitted {
+    if !allowed.contains(&alg) {
         let allowed_list = allowed
             .iter()
             .map(JwsAlgorithm::as_str)
@@ -277,7 +280,7 @@ pub fn validate_jwt_assertion(
     Ok(ValidatedJwtAssertion {
         claims,
         kid: header.kid.clone(),
-        alg: header.alg.clone(),
+        alg: header.alg,
     })
 }
 
@@ -292,16 +295,12 @@ pub fn decode_claims_unverified(assertion: &str) -> ServiceResult<JwtAssertionCl
 }
 
 /// Map a JWT algorithm string to a `jsonwebtoken::Algorithm`.
-pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
+pub fn map_algorithm(alg: JwsAlgorithm) -> jsonwebtoken::Algorithm {
     match alg {
-        protocol::JWS_ALG_ES256 => Ok(jsonwebtoken::Algorithm::ES256),
-        "RS256" => Ok(jsonwebtoken::Algorithm::RS256),
-        "PS256" => Ok(jsonwebtoken::Algorithm::PS256),
-        "EdDSA" => Ok(jsonwebtoken::Algorithm::EdDSA),
-        _ => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            format!("Unsupported algorithm: {alg}"),
-        )),
+        JwsAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
+        JwsAlgorithm::Rs256 => jsonwebtoken::Algorithm::RS256,
+        JwsAlgorithm::Ps256 => jsonwebtoken::Algorithm::PS256,
+        JwsAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
     }
 }
 
@@ -356,8 +355,15 @@ mod tests {
                 "{alg} must be structurally accepted"
             );
         }
-        assert!("HS256".parse::<JwsAlgorithm>().is_err());
-        assert!("none".parse::<JwsAlgorithm>().is_err());
+        // Rejected at this gate rather than by any per-client policy: `none`
+        // and the symmetric families, and the registered asymmetric
+        // algorithms Vouch does not implement.
+        for rejected in ["HS256", "HS384", "HS512", "none", "RS384", "RS512", "ES384"] {
+            assert!(
+                rejected.parse::<JwsAlgorithm>().is_err(),
+                "{rejected} must be structurally rejected"
+            );
+        }
     }
 
     // RFC 7523 §3: a client assertion is a JWS with three parts.
@@ -480,7 +486,7 @@ mod tests {
     fn test_parse_assertion_header_accepts_eddsa() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "EdDSA"}));
         let header = parse_assertion_header(&jwt).expect("EdDSA should be accepted");
-        assert_eq!(header.alg, "EdDSA");
+        assert_eq!(header.alg, JwsAlgorithm::EdDsa);
     }
 
     // RFC 7523 §3: an asymmetrically signed assertion is accepted.
@@ -488,7 +494,7 @@ mod tests {
     fn test_parse_assertion_header_accepts_es256() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
         let header = parse_assertion_header(&jwt).expect("ES256 should be accepted");
-        assert_eq!(header.alg, "ES256");
+        assert_eq!(header.alg, JwsAlgorithm::Es256);
         assert!(header.kid.is_none());
     }
 
@@ -497,7 +503,7 @@ mod tests {
     fn test_parse_assertion_header_accepts_rs256() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "RS256"}));
         let header = parse_assertion_header(&jwt).expect("RS256 should be accepted");
-        assert_eq!(header.alg, "RS256");
+        assert_eq!(header.alg, JwsAlgorithm::Rs256);
     }
 
     // RFC 7517 §4: kid selects the key that verifies the assertion.
@@ -506,7 +512,7 @@ mod tests {
         let jwt =
             make_jwt_with_header(&serde_json::json!({"alg": "ES256", "kid": "my-key-id-123"}));
         let header = parse_assertion_header(&jwt).expect("Should parse header with kid");
-        assert_eq!(header.alg, "ES256");
+        assert_eq!(header.alg, JwsAlgorithm::Es256);
         assert_eq!(header.kid.as_deref(), Some("my-key-id-123"));
     }
 
@@ -594,7 +600,7 @@ mod tests {
         let validated = result.expect("valid JWT assertion should pass");
         assert_eq!(validated.claims.iss, "https://client.example.com");
         assert_eq!(validated.claims.sub, "https://client.example.com");
-        assert_eq!(validated.alg, "ES256");
+        assert_eq!(validated.alg, JwsAlgorithm::Es256);
     }
 
     // RFC 7523 §3: an assertion past its exp is rejected.
@@ -1033,51 +1039,22 @@ mod tests {
     // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_es256() {
-        let alg = map_algorithm("ES256").expect("ES256 should be mapped");
+        let alg = map_algorithm(JwsAlgorithm::Es256);
         assert_eq!(alg, jsonwebtoken::Algorithm::ES256);
     }
 
     // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_rs256() {
-        let alg = map_algorithm("RS256").expect("RS256 should be mapped");
+        let alg = map_algorithm(JwsAlgorithm::Rs256);
         assert_eq!(alg, jsonwebtoken::Algorithm::RS256);
     }
 
     // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_eddsa() {
-        let alg = map_algorithm("EdDSA").expect("EdDSA should be mapped");
+        let alg = map_algorithm(JwsAlgorithm::EdDsa);
         assert_eq!(alg, jsonwebtoken::Algorithm::EdDSA);
-    }
-
-    // RFC 8725 §3.2: a symmetric algorithm is not accepted.
-    #[test]
-    fn test_map_algorithm_rejects_hs256() {
-        let result = map_algorithm("HS256");
-        assert!(result.is_err(), "HS256 must be rejected by map_algorithm");
-    }
-
-    // RFC 8725 §3.1: an unrecognized alg is not resolved to an algorithm.
-    #[test]
-    fn test_map_algorithm_rejects_unknown() {
-        let result = map_algorithm("FOOBAR");
-        assert!(result.is_err(), "Unknown algorithm must be rejected");
-    }
-
-    // RFC 8725 §3.1: an empty alg is not resolved to an algorithm.
-    #[test]
-    fn test_map_algorithm_rejects_empty_string() {
-        let result = map_algorithm("");
-        assert!(result.is_err(), "Empty string must be rejected");
-    }
-
-    // RFC 8725 §3.1: algorithm names are matched exactly.
-    #[test]
-    fn test_map_algorithm_is_case_sensitive() {
-        // "es256" (lowercase) is not a valid algorithm identifier.
-        let result = map_algorithm("es256");
-        assert!(result.is_err(), "Algorithm matching must be case-sensitive");
     }
 
     // ====================================================================
@@ -1097,13 +1074,13 @@ mod tests {
         );
         let result = parse_assertion_header(&jwt);
         assert!(result.is_ok(), "PS256 should be accepted: {result:?}");
-        assert_eq!(result.unwrap().alg, "PS256");
+        assert_eq!(result.unwrap().alg, JwsAlgorithm::Ps256);
     }
 
     // RFC 8725 §3.1: the alg header names the verification algorithm.
     #[test]
     fn test_map_algorithm_ps256() {
-        let alg = map_algorithm("PS256").expect("PS256 should be mapped");
+        let alg = map_algorithm(JwsAlgorithm::Ps256);
         assert_eq!(alg, jsonwebtoken::Algorithm::PS256);
     }
 
@@ -1114,15 +1091,25 @@ mod tests {
     // RFC 8725 §3.1: the algorithm must be one the client registered.
     #[test]
     fn test_validate_client_assertion_algorithm_allows_listed() {
-        assert!(validate_client_assertion_algorithm("ES256", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
-        assert!(validate_client_assertion_algorithm("PS256", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
-        assert!(validate_client_assertion_algorithm("EdDSA", &JwsAlgorithm::FAPI_ALLOWED).is_ok());
+        assert!(
+            validate_client_assertion_algorithm(JwsAlgorithm::Es256, &JwsAlgorithm::FAPI_ALLOWED)
+                .is_ok()
+        );
+        assert!(
+            validate_client_assertion_algorithm(JwsAlgorithm::Ps256, &JwsAlgorithm::FAPI_ALLOWED)
+                .is_ok()
+        );
+        assert!(
+            validate_client_assertion_algorithm(JwsAlgorithm::EdDsa, &JwsAlgorithm::FAPI_ALLOWED)
+                .is_ok()
+        );
     }
 
     // RFC 8725 §3.1: an algorithm the client did not register is rejected.
     #[test]
     fn test_validate_client_assertion_algorithm_rejects_unlisted() {
-        let result = validate_client_assertion_algorithm("RS256", &JwsAlgorithm::FAPI_ALLOWED);
+        let result =
+            validate_client_assertion_algorithm(JwsAlgorithm::Rs256, &JwsAlgorithm::FAPI_ALLOWED);
         assert!(
             result.is_err(),
             "RS256 must be rejected against FAPI_ALLOWED"
@@ -1139,15 +1126,11 @@ mod tests {
     #[test]
     fn test_validate_client_assertion_algorithm_allows_rs256_in_wider_set() {
         assert!(
-            validate_client_assertion_algorithm("RS256", &JwsAlgorithm::CLIENT_ASSERTION_ALLOWED)
-                .is_ok()
+            validate_client_assertion_algorithm(
+                JwsAlgorithm::Rs256,
+                &JwsAlgorithm::CLIENT_ASSERTION_ALLOWED
+            )
+            .is_ok()
         );
-    }
-
-    // RFC 8725 §3.1: an unparseable registered algorithm admits nothing.
-    #[test]
-    fn test_validate_client_assertion_algorithm_rejects_unparseable() {
-        let result = validate_client_assertion_algorithm("HS256", &JwsAlgorithm::FAPI_ALLOWED);
-        assert!(result.is_err(), "HS256 must be rejected outright");
     }
 }

@@ -13,8 +13,8 @@ use super::validation::{
     validate_subdomain_label,
 };
 use super::{ORG_SCAN_PAGE_SIZE, Organization};
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::document_type::Document;
-use crate::db::documents::oauth::JwsAlgorithm;
 use crate::db::documents::organization::{
     OrgSigningKeyDoc, OrganizationDoc, SigningKeyState, SubdomainClaimDoc,
 };

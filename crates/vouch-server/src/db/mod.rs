@@ -131,7 +131,7 @@ pub use documents::audit::{
     GitHubCredentialDetails, SshCredentialDetails, TokenExchangeDetails,
 };
 pub use documents::oauth::{
-    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource, ResponseMode,
+    AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode,
     TokenEndpointAuthMethod,
 };
 

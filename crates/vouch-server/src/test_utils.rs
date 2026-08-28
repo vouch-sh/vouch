@@ -21,10 +21,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::document_crypto::{HpkeDocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
-use crate::db::{CreateOAuthClientParams, JwsAlgorithm, Pool, RegistrationSource};
+use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
 use crate::AppState;
@@ -1479,21 +1480,21 @@ pub struct TestClientSpec {
     /// FAPI security profile. Default: `None` (→ FapiProfile::None).
     pub fapi_profile: Option<crate::db::FapiProfile>,
     /// ID-token signing algorithm. Default: `JwsAlgorithm::Rs256`.
-    pub id_token_signed_response_alg: crate::db::JwsAlgorithm,
+    pub id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm,
     /// mTLS subject DN for `tls_client_auth`. Default: `None`.
     pub tls_client_auth_subject_dn: Option<String>,
     /// Bind issued tokens to the mTLS certificate. Default: `false`.
     pub tls_client_certificate_bound_access_tokens: bool,
     /// UserInfo JWT signing algorithm override. Default: `None`.
-    pub userinfo_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    pub userinfo_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
     /// Introspection JWT signing algorithm override. Default: `None`.
-    pub introspection_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    pub introspection_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
     /// JARM response signing algorithm override. Default: `None` (ES256).
-    pub authorization_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    pub authorization_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
     /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
     pub with_secret: bool,
     /// Restrict request-object signing algorithm. Default: `None`.
-    pub request_object_signing_alg: Option<crate::db::JwsAlgorithm>,
+    pub request_object_signing_alg: Option<crate::crypto::alg::JwsAlgorithm>,
     /// Require a signed request object (JAR). Default: `None`.
     pub require_signed_request_object: Option<bool>,
     /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
@@ -1516,7 +1517,7 @@ impl Default for TestClientSpec {
             dpop_bound_access_tokens: false,
             grant_types: Option::None,
             fapi_profile: Option::None,
-            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: Option::None,
             tls_client_certificate_bound_access_tokens: false,
             userinfo_signed_response_alg: Option::None,

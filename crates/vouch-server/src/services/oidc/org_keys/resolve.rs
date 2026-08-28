@@ -10,7 +10,7 @@ use anyhow::Result;
 
 use super::{OrgKeySetSnapshot, build_snapshot, ensure_key};
 use crate::AppState;
-use crate::db::documents::oauth::JwsAlgorithm;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::organization::SigningKeyState;
 use crate::db::{self, Organization};
 use crate::error::ServiceError;

@@ -631,7 +631,7 @@ pub(crate) async fn admin_emergency_rotate_keys(
     match db::get_org_signing_key(
         &state.store,
         &org_id,
-        db::JwsAlgorithm::Es256,
+        crate::crypto::alg::JwsAlgorithm::Es256,
         SigningKeyState::Current,
     )
     .await

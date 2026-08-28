@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::crypto::alg::JwsAlgorithm;
 
 // ========================================================================
 // OAuth Client Application Tests (Phase 7)

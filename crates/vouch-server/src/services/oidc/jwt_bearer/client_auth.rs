@@ -173,7 +173,7 @@ pub async fn authenticate_client_jwt(
     // client's profile. See JwsAlgorithm::FAPI_ALLOWED. Checked before JWKS
     // resolution so a disallowed algorithm never triggers a JWKS fetch.
     let allowed_algorithms = client.fapi_profile.client_assertion_algorithms();
-    if let Err(e) = validate_client_assertion_algorithm(&header.alg, allowed_algorithms) {
+    if let Err(e) = validate_client_assertion_algorithm(header.alg, allowed_algorithms) {
         tracing::warn!(
             "Client {} used disallowed client-assertion algorithm '{}': {e}",
             client.client_id,
@@ -186,7 +186,7 @@ pub async fn authenticate_client_jwt(
     let decoding_key = resolve_client_decoding_key(state, &client, &header).await?;
 
     // 7. Validate JWT assertion (signature + claims)
-    let algorithm = map_algorithm(&header.alg).map_err(|_| ClientAuthError::InvalidCredentials)?;
+    let algorithm = map_algorithm(header.alg);
     let base_url = &state.config().base_url;
     let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
 
@@ -399,6 +399,7 @@ mod tests {
     use super::*;
     use crate::config::ServerConfig;
     use crate::crypto;
+    use crate::crypto::alg::JwsAlgorithm;
     use crate::crypto::keys::OidcSigningKey;
     use crate::db::{self, Pool};
     use arc_swap::ArcSwap;
@@ -705,7 +706,7 @@ mod tests {
         let (client, kid) = make_client_with_jwks(&state).await;
 
         let header = JwtAssertionHeader {
-            alg: "ES256".to_string(),
+            alg: JwsAlgorithm::Es256,
             kid: Some(kid),
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;
@@ -719,7 +720,7 @@ mod tests {
 
         // No kid: single EC key in the JWKS matches the ES256 algorithm.
         let header = JwtAssertionHeader {
-            alg: "ES256".to_string(),
+            alg: JwsAlgorithm::Es256,
             kid: None,
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;
@@ -734,7 +735,7 @@ mod tests {
         // Inline-JWKS client (no jwks_uri): a kid miss cannot force-refresh
         // and must fail closed.
         let header = JwtAssertionHeader {
-            alg: "ES256".to_string(),
+            alg: JwsAlgorithm::Es256,
             kid: Some("no-such-key".to_string()),
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;
@@ -774,7 +775,7 @@ mod tests {
         }
 
         let header = JwtAssertionHeader {
-            alg: "ES256".to_string(),
+            alg: JwsAlgorithm::Es256,
             kid: Some("no-such-key".to_string()),
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;
@@ -824,7 +825,7 @@ mod tests {
         );
 
         let header = JwtAssertionHeader {
-            alg: "ES256".to_string(),
+            alg: JwsAlgorithm::Es256,
             kid: Some(kid),
         };
         let result = resolve_client_decoding_key(&state, &client, &header).await;

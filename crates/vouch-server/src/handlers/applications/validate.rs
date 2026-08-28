@@ -10,9 +10,10 @@
 
 use axum::http::StatusCode;
 
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::{
-    AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, KeyType, OAuthClient,
-    OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
+    AccessScope, CreateOAuthClientParams, FapiProfile, KeyType, OAuthClient, OAuthClientType,
+    RegistrationSource, TokenEndpointAuthMethod,
 };
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
