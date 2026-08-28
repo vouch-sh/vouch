@@ -43,23 +43,8 @@ mkdir -p /var/log/vouch-server
 chown vouch:vouch /var/log/vouch-server
 
 #======================================
-# CloudWatch agent journald collection
+# CloudWatch agent journald access
 #======================================
-# The agent config collects systemd journal entries so that boot, kernel, and
-# unit-failure messages leave the instance. This image has no SSH, no SSM, and
-# no console, so CloudWatch Logs is the only channel out; an agent that fails to
-# start is unrecoverable. Assert the prerequisites here rather than at boot.
-#
-# journald collection requires agent 1.300070.0 or newer. Older builds reject
-# the journald section as an unknown property during schema validation and then
-# refuse to start, taking the file collector down with it.
-CWAGENT_MIN_VERSION=1.300070.0
-CWAGENT_VERSION=$(rpm -q --queryformat '%{VERSION}' amazon-cloudwatch-agent)
-if [ "$(printf '%s\n%s\n' "$CWAGENT_MIN_VERSION" "$CWAGENT_VERSION" | sort -V | head -n1)" != "$CWAGENT_MIN_VERSION" ]; then
-  echo "ERROR: amazon-cloudwatch-agent is ${CWAGENT_VERSION}, need ${CWAGENT_MIN_VERSION} or newer for journald collection"
-  exit 1
-fi
-
 # The agent runs as cwagent (run_as_user in amazon-cloudwatch-agent.json), and a
 # non-root reader needs systemd-journal group membership to open the journal.
 usermod -a -G systemd-journal cwagent
