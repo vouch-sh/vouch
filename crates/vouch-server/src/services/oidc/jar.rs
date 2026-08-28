@@ -269,6 +269,19 @@ pub(crate) fn validate_request_object_header(jwt: &str) -> ServiceResult<()> {
 fn parse_request_object_header(
     jwt: &str,
 ) -> ServiceResult<(RequestObjectHeader, JwtAssertionHeader)> {
+    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
+    // Parameters are not understood and supported by the recipient, then the
+    // JWS is invalid." Vouch supports no `crit` extension. Checked here rather
+    // than relying on `parse_assertion_header`'s identical check so the client
+    // is told the Request Object is at fault (`invalid_request_object`) and
+    // not its authentication (`invalid_client`).
+    if crate::crypto::jwt::has_critical_header(jwt) {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            "Request Object header carries an unsupported 'crit' extension",
+        ));
+    }
+
     // First validate the basic structure and algorithm via the shared parser
     let assertion_header = parse_assertion_header(jwt)?;
 

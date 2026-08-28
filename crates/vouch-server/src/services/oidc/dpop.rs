@@ -299,6 +299,16 @@ fn parse_dpop_header(proof: &str) -> Result<(DpopHeader, JwsAlgorithm), DpopErro
     let header: DpopHeader = serde_json::from_value(header_json)
         .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
 
+    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
+    // Parameters are not understood and supported by the recipient, then the
+    // JWS is invalid." Vouch supports no `crit` extension, so a proof that
+    // lists one is invalid whatever it lists.
+    if crate::crypto::jwt::has_critical_header(proof) {
+        return Err(DpopError::InvalidFormat(
+            "DPoP proof header carries an unsupported 'crit' extension".to_string(),
+        ));
+    }
+
     // Validate header
     if header.typ != "dpop+jwt" {
         return Err(DpopError::InvalidFormat(format!(
@@ -1012,6 +1022,35 @@ mod tests {
         let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         format!("{header_b64}.{payload_b64}.{sig_b64}")
+    }
+
+    // RFC 7515 §4.1.11: "If any of the listed extension Header Parameters are
+    // not understood and supported by the recipient, then the JWS is invalid."
+    // Vouch implements no crit extension. Before this check existed, a proof
+    // with this header was accepted at /oauth/token and a DPoP-bound access
+    // token was issued for it (issue #1094).
+    #[test]
+    fn test_parse_dpop_header_rejects_crit() {
+        let header_json = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "ES256",
+            "jwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+            },
+            "crit": ["exp"],
+            "exp": 1_363_284_000
+        });
+        let jwt = make_dpop_jwt_with_header(&header_json);
+
+        let result = parse_dpop_header(&jwt);
+
+        assert!(
+            matches!(result, Err(DpopError::InvalidFormat(_))),
+            "a crit-bearing DPoP header must be rejected, got: {result:?}"
+        );
     }
 
     #[test]

@@ -125,6 +125,17 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
         )
     })?;
 
+    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
+    // Parameters are not understood and supported by the recipient, then the
+    // JWS is invalid." Vouch supports no `crit` extension, so any `crit`
+    // member makes the assertion invalid.
+    if crate::crypto::jwt::has_critical_header(assertion) {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "JWT assertion header carries an unsupported 'crit' extension",
+        ));
+    }
+
     // Structural algorithm check: only asymmetric algorithms are ever accepted.
     // HS* and "none" are unconditionally rejected to prevent symmetric key
     // confusion attacks (RFC 7523 Section 3). This does not consider the
@@ -435,6 +446,36 @@ mod tests {
         assert!(
             desc.contains("Unsupported JWT assertion algorithm"),
             "Error should mention unsupported algorithm, got: {desc}"
+        );
+    }
+
+    // RFC 7515 §4.1.11: "If any of the listed extension Header Parameters are
+    // not understood and supported by the recipient, then the JWS is invalid."
+    // Vouch implements no crit extension, so the check is on the member's
+    // presence and runs before the algorithm gate — a crit-bearing assertion
+    // never reaches key resolution.
+    #[test]
+    fn test_parse_assertion_header_rejects_crit() {
+        let jwt = make_jwt_with_header(&serde_json::json!({
+            "alg": "ES256",
+            "crit": ["exp"],
+            "exp": 1_363_284_000,
+        }));
+        let result = parse_assertion_header(&jwt);
+        assert!(
+            result.is_err(),
+            "a crit-bearing assertion header must be rejected"
+        );
+    }
+
+    // RFC 7515 §4.1.11: "Producers MUST NOT use the empty list \"[]\" as the
+    // \"crit\" value."
+    #[test]
+    fn test_parse_assertion_header_rejects_empty_crit_list() {
+        let jwt = make_jwt_with_header(&serde_json::json!({ "alg": "ES256", "crit": [] }));
+        assert!(
+            parse_assertion_header(&jwt).is_err(),
+            "an empty crit list must be rejected"
         );
     }
 

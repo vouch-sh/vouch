@@ -269,6 +269,11 @@ async fn test_rfc9101_authorize_request_object_with_pkce() {
 #[tokio::test]
 async fn test_rfc9101_authorize_request_parameter_invalid_signature() {
     // A Request Object signed with a different key should be rejected.
+    //
+    // RFC 7515 §5.2: "at least one JWS Signature value MUST successfully
+    // validate, or the JWS MUST be considered invalid" — a Request Object is
+    // a compact-serialization JWS with exactly one signature, so a signature
+    // that does not validate leaves none that does.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "jar-badsig@example.com").await;
@@ -769,6 +774,10 @@ async fn test_rfc9101_par_accepts_request_object_in_body() {
 
 #[tokio::test]
 async fn test_rfc9101_par_request_object_invalid_signature_rejected() {
+    // RFC 7515 §5.2 step 10: "If none of the validations in step 9 succeeded,
+    // then the JWS MUST be considered invalid." The pushed-request endpoint
+    // verifies the same Request Object as the authorization endpoint, so the
+    // signature check is pinned on both routes.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "jar-parbad@example.com").await;

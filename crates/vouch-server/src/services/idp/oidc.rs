@@ -358,6 +358,15 @@ pub(crate) async fn verify_id_token(
     expected_client_id: &str,
     expected_nonce: &str,
 ) -> Result<IdentityResult, anyhow::Error> {
+    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
+    // Parameters are not understood and supported by the recipient, then the
+    // JWS is invalid." Vouch supports no `crit` extension, and
+    // `jsonwebtoken::decode_header` does not surface the parameter, so the
+    // raw header is checked before anything is read out of it.
+    if crate::crypto::jwt::has_critical_header(id_token) {
+        anyhow::bail!("ID token header carries an unsupported 'crit' extension");
+    }
+
     // Decode the JWT header to determine algorithm and key ID
     let header = jsonwebtoken::decode_header(id_token)
         .map_err(|e| anyhow::anyhow!("Invalid ID token header: {e}"))?;

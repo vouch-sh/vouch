@@ -346,6 +346,56 @@ fn check_state_token_not_expired(now: i64, exp: i64) -> Result<(), StateTokenErr
 }
 
 // ============================================================================
+// RFC 7515 Section 4.1.11 — the "crit" Header Parameter
+// ============================================================================
+
+/// Returns `true` when the protected header of a compact JWS carries the
+/// `crit` (critical) Header Parameter.
+///
+/// RFC 7515 Section 4.1.11: "The 'crit' (critical) Header Parameter indicates
+/// that extensions to this specification and/or [JWA] are being used that MUST
+/// be understood and processed. ... If any of the listed extension Header
+/// Parameters are not understood and supported by the recipient, then the JWS
+/// is invalid." The same section closes with "This Header Parameter MUST be
+/// understood and processed by implementations."
+///
+/// Vouch implements no `crit` extension, so every listed name is by definition
+/// not understood and the JWS is invalid — a caller that sees `true` rejects
+/// the token. Presence of the member is enough; its contents are never
+/// inspected, because there is no value it could hold that Vouch supports. An
+/// empty list is rejected on the same path, which is also what RFC 7515
+/// Section 4.1.11 requires of the producer: "Producers MUST NOT use the empty
+/// list '[]' as the 'crit' value."
+///
+/// A token whose header does not parse returns `false`: the caller's own parse
+/// rejects it a few lines later with a more specific error, and reporting
+/// "critical header" for a malformed header would be misleading.
+///
+/// Callers are the paths that verify a JWS Vouch did not sign — DPoP proofs,
+/// Request Objects, and RFC 7523 client assertions. Tokens Vouch issued carry
+/// a header Vouch built, and the signature check binds it; `crit` cannot
+/// appear there without a forged signature.
+pub(crate) fn has_critical_header(token: &str) -> bool {
+    let Some(header_b64) = token.split('.').next() else {
+        return false;
+    };
+    // The assertion and Request Object parsers accept a padded header as well
+    // as the base64url form RFC 7515 Section 3.1 defines, so this check has to
+    // decode everything they decode. A `crit` the parser reads but this
+    // function cannot see is a bypass.
+    let Ok(header_bytes) = URL_SAFE_NO_PAD
+        .decode(header_b64)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(header_b64))
+    else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
+        return false;
+    };
+    header.get("crit").is_some()
+}
+
+// ============================================================================
 // ES256 Access Token Validation
 // ============================================================================
 
@@ -1043,5 +1093,95 @@ mod tests {
             decoded.is_err(),
             "an Unsecured JWS must never be accepted as a state token"
         );
+    }
+
+    // ========================================================================
+    // RFC 7515 §4.1.11 — has_critical_header
+    //
+    // The endpoint-level behavior lives in
+    // handlers/oidc/tests/rfc7515.rs; these pin the predicate itself, whose
+    // job is to see a `crit` member wherever a client can put one.
+    // ========================================================================
+
+    /// Encode `header` as the protected header of a compact JWS. The payload
+    /// and signature are placeholders — only the header is read.
+    fn jws_with_header(header: &serde_json::Value) -> String {
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).expect("header"));
+        format!("{header_b64}.e30.c2ln")
+    }
+
+    // RFC 7515 §4.1.11: "This Header Parameter MUST be understood and
+    // processed by implementations."
+    #[test]
+    fn test_has_critical_header_detects_crit() {
+        let token = jws_with_header(&serde_json::json!({
+            "alg": "ES256",
+            "crit": ["exp"],
+            "exp": 1_363_284_000,
+        }));
+        assert!(has_critical_header(&token));
+    }
+
+    // RFC 7515 §4.1.11: "Producers MUST NOT use the empty list \"[]\" as the
+    // \"crit\" value." Vouch refuses on the member, so an empty list is caught
+    // by the same check rather than read as "nothing critical".
+    #[test]
+    fn test_has_critical_header_detects_empty_crit_list() {
+        let token = jws_with_header(&serde_json::json!({ "alg": "ES256", "crit": [] }));
+        assert!(has_critical_header(&token));
+    }
+
+    // A `crit` of any JSON type is still a `crit`: the check must not depend
+    // on the value parsing as an array, or a client could hide one behind a
+    // shape the parser skips.
+    #[test]
+    fn test_has_critical_header_detects_non_array_crit() {
+        for value in [
+            serde_json::json!("exp"),
+            serde_json::json!(null),
+            serde_json::json!({ "exp": true }),
+        ] {
+            let token = jws_with_header(&serde_json::json!({ "alg": "ES256", "crit": value }));
+            assert!(
+                has_critical_header(&token),
+                "a crit member of any type must be seen: {value}"
+            );
+        }
+    }
+
+    // The assertion and Request Object parsers fall back to padded base64 for
+    // the header, so this must too — a `crit` those parsers read but this one
+    // cannot see would be a bypass.
+    #[test]
+    fn test_has_critical_header_reads_padded_base64_header() {
+        // Length chosen so the standard-base64 encoding is padded; the
+        // base64url form Vouch normally sees never is.
+        let header = serde_json::json!({ "alg": "ES256", "crit": ["exp"], "kid": "k" });
+        let padded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&header).expect("header"));
+        assert!(
+            padded.contains('='),
+            "test needs a header whose standard-base64 form is padded, got {padded}"
+        );
+        assert!(has_critical_header(&format!("{padded}.e30.c2ln")));
+    }
+
+    #[test]
+    fn test_has_critical_header_absent_on_ordinary_header() {
+        let token = jws_with_header(&serde_json::json!({ "alg": "ES256", "typ": "at+jwt" }));
+        assert!(!has_critical_header(&token));
+    }
+
+    // A header that does not decode or does not parse is not reported as
+    // critical: the caller's own parse rejects it a few lines later with a
+    // more specific error.
+    #[test]
+    fn test_has_critical_header_false_on_unparseable_header() {
+        assert!(!has_critical_header("!!!not-base64!!!.e30.c2ln"));
+        assert!(!has_critical_header(&format!(
+            "{}.e30.c2ln",
+            URL_SAFE_NO_PAD.encode(b"not json")
+        )));
+        assert!(!has_critical_header(""));
     }
 }
