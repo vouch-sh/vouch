@@ -6,10 +6,11 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
-    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
+    AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
     RegistrationSource, TokenEndpointAuthMethod,
 };
 use super::store::DocumentStore;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;

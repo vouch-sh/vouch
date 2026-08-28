@@ -10,7 +10,7 @@ use anyhow::Result;
 
 use super::{OrgKeySetSnapshot, build_snapshot, ensure_key};
 use crate::AppState;
-use crate::db::documents::oauth::JwsAlgorithm;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::organization::SigningKeyState;
 use crate::db::{self, Organization};
 use crate::error::ServiceError;
@@ -161,12 +161,14 @@ pub async fn org_jwks(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::super::test_support::setup;
     use super::*;
-    use crate::crypto::keys::Jwk;
+    use crate::crypto::jwk::Jwk;
     use crate::db::get_org_signing_key;
 
     #[tokio::test]
@@ -212,6 +214,10 @@ mod tests {
             match jwk {
                 Jwk::Rsa(_) => assert!(!saw_ec, "RSA JWK after an EC JWK"),
                 Jwk::Ec(_) => saw_ec = true,
+                // `Jwk` also models the OKP keys Vouch verifies DPoP proofs
+                // with. It signs with none, so no `for_jwks` constructor
+                // builds one and a published set cannot contain one.
+                Jwk::Okp(_) => panic!("Vouch publishes no OKP signing key"),
             }
         }
         assert!(saw_ec, "at least one EC JWK must be present");
@@ -220,9 +226,13 @@ mod tests {
             .jwks
             .iter()
             .map(|jwk| match jwk {
-                Jwk::Rsa(rsa) => rsa.kid.as_str(),
-                Jwk::Ec(ec) => ec.kid.as_str(),
+                Jwk::Rsa(rsa) => rsa.kid(),
+                Jwk::Ec(ec) => ec.kid(),
+                Jwk::Okp(_) => panic!("Vouch publishes no OKP signing key"),
             })
+            // `for_jwks` is the only constructor and it always sets `kid`, so
+            // this doubles as an assertion of that guarantee.
+            .map(|kid| kid.expect("a published JWK carries a kid"))
             .collect();
         let unique: std::collections::HashSet<&str> = kids.iter().copied().collect();
         assert_eq!(kids.len(), unique.len(), "duplicate kids: {kids:?}");

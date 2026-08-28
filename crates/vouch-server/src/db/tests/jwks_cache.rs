@@ -6,6 +6,7 @@
 )]
 
 use super::*;
+use crate::crypto::alg::JwsAlgorithm;
 
 // ========================================================================
 // JWKS cache — behavioral invariants

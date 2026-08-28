@@ -464,6 +464,13 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
 #[tokio::test]
 async fn test_rfc7523_private_key_jwt_wrong_key() {
     // RFC 7523 Section 3: JWT assertion signed with wrong key must be rejected.
+    //
+    // RFC 7515 §5.2 step 8 is the check underneath: "Validate the JWS
+    // Signature against the JWS Signing Input ... in the manner defined for
+    // the algorithm being used". The signature here is well formed and made
+    // with the wrong key, so it is step 8 that fails, and §5.2 step 10 —
+    // "If none of the validations in step 9 succeeded, then the JWS MUST be
+    // considered invalid" — is what makes the assertion unusable.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "jwt-wrong-key@example.com").await;

@@ -353,7 +353,7 @@ pub const CLIENT_DATA_TYPE_GET: &str = "webauthn.get";
 ///
 /// This is the algorithm FAPI 2.0 permits and Vouch signs every
 /// FAPI-scoped JWT with — DPoP proofs, client assertions, access and ID
-/// tokens. `vouch_server::db::JwsAlgorithm` owns the enum; this is the
+/// tokens. `vouch_server::crypto::alg::JwsAlgorithm` owns the enum; this is the
 /// spelling its `Es256` arm serializes to.
 pub const JWS_ALG_ES256: &str = "ES256";
 

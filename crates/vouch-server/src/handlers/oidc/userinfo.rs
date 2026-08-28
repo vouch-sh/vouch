@@ -7,8 +7,9 @@
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::keys::OidcSigningKey;
-use crate::db::{self, JwsAlgorithm};
+use crate::db::{self};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;

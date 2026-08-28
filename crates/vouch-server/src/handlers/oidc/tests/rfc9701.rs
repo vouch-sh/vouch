@@ -17,8 +17,8 @@ async fn create_test_client_with_introspection_jwt(
         user_id,
         TestClientSpec {
             name: "JWT Introspect App".to_string(),
-            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
-            introspection_signed_response_alg: Some(db::JwsAlgorithm::Es256),
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            introspection_signed_response_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
             ..Default::default()
         },
     )

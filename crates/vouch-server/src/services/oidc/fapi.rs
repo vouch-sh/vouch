@@ -6,7 +6,8 @@
 //!
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
-use crate::db::{JwsAlgorithm, OAuthClient, TokenEndpointAuthMethod};
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db::{OAuthClient, TokenEndpointAuthMethod};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
@@ -116,15 +117,12 @@ pub(crate) fn validate_fapi_token_request(
 ///
 /// Returns `ServiceError::OAuth` with `invalid_request` if the algorithm
 /// is not in the FAPI 2.0 allowlist.
-pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> ServiceResult<()> {
+pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: JwsAlgorithm) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
-    let allowed = algorithm
-        .parse::<JwsAlgorithm>()
-        .is_ok_and(|alg| JwsAlgorithm::FAPI_ALLOWED.contains(&alg));
-    if !allowed {
+    if !JwsAlgorithm::FAPI_ALLOWED.contains(&algorithm) {
         let allowed_list = JwsAlgorithm::FAPI_ALLOWED
             .iter()
             .map(JwsAlgorithm::as_str)
@@ -209,7 +207,8 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
-    use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType};
+    use crate::crypto::alg::JwsAlgorithm;
+    use crate::db::{AccessScope, FapiProfile, OAuthClientType};
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn test_validate_fapi_algorithm_rejects_rs256() {
         let client = fapi_client();
-        let result = validate_fapi_algorithm(&client, "RS256");
+        let result = validate_fapi_algorithm(&client, JwsAlgorithm::Rs256);
         assert!(result.is_err(), "RS256 must be rejected");
         if let Err(err) = result {
             let message = err.oauth_description();
@@ -397,33 +396,27 @@ mod tests {
     #[test]
     fn test_validate_fapi_algorithm_allows_es256() {
         let client = fapi_client();
-        assert!(validate_fapi_algorithm(&client, "ES256").is_ok());
+        assert!(validate_fapi_algorithm(&client, JwsAlgorithm::Es256).is_ok());
     }
 
     #[test]
     fn test_validate_fapi_algorithm_allows_ps256() {
         let client = fapi_client();
-        assert!(validate_fapi_algorithm(&client, "PS256").is_ok());
+        assert!(validate_fapi_algorithm(&client, JwsAlgorithm::Ps256).is_ok());
     }
 
     #[test]
     fn test_validate_fapi_algorithm_allows_eddsa() {
         let client = fapi_client();
-        assert!(validate_fapi_algorithm(&client, "EdDSA").is_ok());
-    }
-
-    #[test]
-    fn test_validate_fapi_algorithm_rejects_rs384() {
-        let client = fapi_client();
-        assert!(validate_fapi_algorithm(&client, "RS384").is_err());
+        assert!(validate_fapi_algorithm(&client, JwsAlgorithm::EdDsa).is_ok());
     }
 
     #[test]
     fn test_validate_fapi_algorithm_skips_non_fapi() {
         let client = standard_client();
         // Non-FAPI clients are not restricted
-        assert!(validate_fapi_algorithm(&client, "RS256").is_ok());
-        assert!(validate_fapi_algorithm(&client, "ES256").is_ok());
+        assert!(validate_fapi_algorithm(&client, JwsAlgorithm::Rs256).is_ok());
+        assert!(validate_fapi_algorithm(&client, JwsAlgorithm::Es256).is_ok());
     }
 
     // =========================================================================

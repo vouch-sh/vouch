@@ -398,8 +398,8 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
         &user.id,
         TestClientSpec {
             name: "Signed UserInfo Test Client".to_string(),
-            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
-            userinfo_signed_response_alg: Some(db::JwsAlgorithm::Es256),
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            userinfo_signed_response_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
             with_secret: false,
             ..Default::default()
         },
@@ -481,7 +481,7 @@ async fn test_userinfo_rs256_without_rsa_key_returns_500() {
         &user.id,
         TestClientSpec {
             name: "RS256 No Key Test Client".to_string(),
-            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
             with_secret: false,
             ..Default::default()
         },
@@ -490,9 +490,13 @@ async fn test_userinfo_rs256_without_rsa_key_returns_500() {
 
     // Override userinfo_signed_response_alg to RS256 directly — registration would
     // reject RS256 when no RSA key is available, but direct DB write is needed here.
-    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(db::JwsAlgorithm::Rs256))
-        .await
-        .expect("Failed to set RS256 alg");
+    db::set_oauth_client_userinfo_alg(
+        &state.store,
+        &client.app_id,
+        Some(crate::crypto::alg::JwsAlgorithm::Rs256),
+    )
+    .await
+    .expect("Failed to set RS256 alg");
 
     let token =
         create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
@@ -538,7 +542,7 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
         &user.id,
         TestClientSpec {
             name: "Unsupported Alg Test Client".to_string(),
-            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
             with_secret: false,
             ..Default::default()
         },
@@ -547,9 +551,13 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
 
     // Inject PS256 directly — registration correctly rejects it, but a client
     // record could have it from a future schema change or manual edit.
-    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(db::JwsAlgorithm::Ps256))
-        .await
-        .expect("Failed to set PS256 alg");
+    db::set_oauth_client_userinfo_alg(
+        &state.store,
+        &client.app_id,
+        Some(crate::crypto::alg::JwsAlgorithm::Ps256),
+    )
+    .await
+    .expect("Failed to set PS256 alg");
 
     let token =
         create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)

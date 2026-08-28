@@ -13,17 +13,16 @@
 //! - FAPI 2.0 parameter consistency: query params must match JWT values
 
 use crate::AppState;
+use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
 use crate::services::oidc::jwt_bearer::validate::{
-    JwtAssertionHeader, JwtAudience, map_algorithm, parse_assertion_header,
+    JwtAssertionHeader, JwtAudience, assertion_header_from, map_algorithm,
 };
 use crate::services::oidc::jwt_bearer::{
     find_matching_key_with_refresh_client, resolve_client_jwks,
 };
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -104,21 +103,6 @@ pub struct QueryParamHints<'a> {
     pub response_type: Option<&'a str>,
     /// `scope` from the query string.
     pub scope: Option<&'a str>,
-}
-
-/// Extended header that includes `typ` for Request Object validation.
-#[derive(Debug, Deserialize)]
-struct RequestObjectHeader {
-    /// Algorithm used for signing.
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    pub alg: String,
-    /// Key ID (optional).
-    #[serde(default)]
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    pub kid: Option<String>,
-    /// Type header — must be "oauth-authz-req+jwt" for Request Objects.
-    #[serde(default)]
-    pub typ: Option<String>,
 }
 
 /// Maximum size for a fetched Request Object (64 KB).
@@ -266,41 +250,37 @@ pub(crate) fn validate_request_object_header(jwt: &str) -> ServiceResult<()> {
 ///
 /// Unlike `parse_assertion_header`, this also validates the `typ` header
 /// to prevent cross-JWT confusion (RFC 8725).
-fn parse_request_object_header(
-    jwt: &str,
-) -> ServiceResult<(RequestObjectHeader, JwtAssertionHeader)> {
-    // First validate the basic structure and algorithm via the shared parser
-    let assertion_header = parse_assertion_header(jwt)?;
-
-    // Re-decode the header to get the `typ` field
-    let header_part = jwt.split('.').next().ok_or_else(|| {
-        ServiceError::oauth(
+fn parse_request_object_header(jwt: &str) -> ServiceResult<(Option<String>, JwtAssertionHeader)> {
+    // One decode of the protected header, which also enforces RFC 7515
+    // Section 4.1.11. Parsed here rather than relying on the identical check
+    // inside `parse_assertion_header` so the client is told the Request Object
+    // is at fault (`invalid_request_object`) and not its authentication
+    // (`invalid_client`).
+    let jws = Jws::parse(jwt).map_err(|e| match e {
+        JwsError::Critical => ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
-            "Invalid Request Object format",
-        )
+            "Request Object header carries an unsupported 'crit' extension",
+        ),
+        JwsError::Malformed(reason) => ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            format!("Invalid Request Object: {reason}"),
+        ),
+        JwsError::PrivateKey => ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            "Request Object header JWK contains private key material",
+        ),
     })?;
 
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_part)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(header_part))
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                "Invalid Request Object header encoding",
-            )
-        })?;
+    let typ = jws.header().typ.clone();
 
-    let full_header: RequestObjectHeader = serde_json::from_slice(&header_bytes).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
-            "Invalid Request Object header JSON",
-        )
-    })?;
+    // Validate the algorithm through the shared assertion check, reusing the
+    // header already decoded above rather than re-parsing the token.
+    let assertion_header = assertion_header_from(&jws)?;
 
     // RFC 9101 Section 10.2: typ SHOULD be "oauth-authz-req+jwt".
     // Accept case-insensitively per MIME type rules, and also accept
     // "JWT" (the generic typ) or absent typ for interoperability.
-    if let Some(typ) = &full_header.typ {
+    if let Some(typ) = &typ {
         let is_valid =
             typ.eq_ignore_ascii_case(REQUEST_OBJECT_TYP) || typ.eq_ignore_ascii_case("JWT");
         if !is_valid {
@@ -311,7 +291,7 @@ fn parse_request_object_header(
         }
     }
 
-    Ok((full_header, assertion_header))
+    Ok((typ, assertion_header))
 }
 
 /// Validate a Request Object JWT and extract authorization parameters.
@@ -327,11 +307,11 @@ pub async fn validate_request_object(
     query_params: Option<&QueryParamHints<'_>>,
 ) -> ServiceResult<AuthorizeRequestParams> {
     // 1. Parse and validate the header (algorithm + typ)
-    let (_full_header, assertion_header) = parse_request_object_header(request_jwt)?;
+    let (_typ, assertion_header) = parse_request_object_header(request_jwt)?;
 
     // 2. Enforce client's preferred signing algorithm if configured
     if let Some(required_alg) = client.request_object_signing_alg
-        && assertion_header.alg != required_alg.as_str()
+        && assertion_header.alg != required_alg
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -345,7 +325,7 @@ pub async fn validate_request_object(
     // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
     // RS256 is excluded per FAPI 2.0 Section 5.4.1 — use PS256, ES256, or EdDSA.
     if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_algorithm(client, &assertion_header.alg)
+        crate::services::oidc::fapi::validate_fapi_algorithm(client, assertion_header.alg)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -423,12 +403,7 @@ pub async fn validate_request_object(
     })?;
 
     // 4. Verify signature and extract claims
-    let algorithm = map_algorithm(&assertion_header.alg).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
-            format!("Unsupported algorithm: {}", assertion_header.alg),
-        )
-    })?;
+    let algorithm = map_algorithm(assertion_header.alg);
 
     let mut validation = jsonwebtoken::Validation::new(algorithm);
     validation.required_spec_claims.clear();
@@ -685,7 +660,9 @@ fn validate_temporal_claims(
 )]
 mod tests {
     use super::*;
-    use crate::db::JwsAlgorithm;
+    use crate::crypto::alg::JwsAlgorithm;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.
@@ -776,10 +753,9 @@ mod tests {
         let jwt = make_jwt_with_header(
             &serde_json::json!({"alg": "ES256", "typ": "oauth-authz-req+jwt"}),
         );
-        let (full, assertion) =
-            parse_request_object_header(&jwt).expect("ES256 should be accepted");
-        assert_eq!(assertion.alg, "ES256");
-        assert_eq!(full.typ.as_deref(), Some("oauth-authz-req+jwt"));
+        let (typ, assertion) = parse_request_object_header(&jwt).expect("ES256 should be accepted");
+        assert_eq!(assertion.alg, JwsAlgorithm::Es256);
+        assert_eq!(typ.as_deref(), Some("oauth-authz-req+jwt"));
     }
 
     // RFC 9101 §6.2: an asymmetrically signed request object is accepted.
@@ -790,7 +766,7 @@ mod tests {
         );
         let (_full, assertion) =
             parse_request_object_header(&jwt).expect("RS256 should be accepted");
-        assert_eq!(assertion.alg, "RS256");
+        assert_eq!(assertion.alg, JwsAlgorithm::Rs256);
     }
 
     // FAPI 2.0 Message Signing §5.3.1: request objects carry typ oauth-authz-req+jwt.
@@ -982,7 +958,7 @@ mod tests {
         let jwt = sign_request_object(&claims, &enc);
 
         // Verify header parsing works
-        let (_full, _assertion) = parse_request_object_header(&jwt).expect("Header should parse");
+        let (_typ, _assertion) = parse_request_object_header(&jwt).expect("Header should parse");
 
         // Verify signature
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);

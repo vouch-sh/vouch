@@ -18,10 +18,11 @@
 //! - <https://www.rfc-editor.org/rfc/rfc7592>
 
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
-    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::oidc::grant_type::OAuthGrantType;

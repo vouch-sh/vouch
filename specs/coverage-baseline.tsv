@@ -1679,51 +1679,14 @@ rfc7239#8.3#2e518873	SHOULD	The default configuration for both the "by" and "for
 rfc7239#8.3#31f3a32e	SHOULD	These identifiers SHOULD be randomly generated per request.
 rfc7239#8.3#7c32a9a5	SHOULD NOT	specifically request privacy semantics, the proxy SHOULD NOT use the "Forwarded" header field, nor in any other manner pass private information, such as IP addr
 rfc7239#8.3#e62f1c54	SHOULD	If identifiers that persist across requests are required, their lifetimes SHOULD be limited and they SHOULD NOT persist longer than client IP addresses.
-rfc7515#10.12#0dd50cfb	SHOULD	Section 4 of "The JavaScript Object Notation (JSON) Data Interchange Format" [RFC7159] states, "The names within an object SHOULD be unique", whereas this speci
-rfc7515#10.12#1da99af2	MUST	In particular, any JSON inputs not conforming to the JSON-text syntax defined in RFC 7159 MUST be rejected in their entirety by JSON parsers.
-rfc7515#10.12#3d386066	MUST	Thus, this specification requires that the "SHOULD" in Section 4 of [RFC7159] be treated as a "MUST" by producers and that it be either treated as a "MUST" or t
-rfc7515#10.12#95dfba09	MUST	The Header Parameter names within the JOSE Header MUST be unique; JWS parsers MUST either reject JWSs with duplicate Header Parameter names or use a JSON parser
-rfc7515#10.12#99dd2351	MUST	Implementations MUST consider JWSs containing such input to be invalid.
 rfc7515#10.13#0ededb77	MUST	Ideally, JWS implementations SHOULD ensure that characters outside the Basic Multilingual Plane are preserved and compared correctly; alternatively, if this is 
 rfc7515#10.6#1d4bc23a	MUST	When using such libraries, as part of the algorithm validation performed, implementations MUST ensure that the algorithm information encoded in the signature co
 rfc7515#2#f494d010	MUST	StringOrURI A JSON string value, with the additional requirement that while arbitrary string values MAY be used, any value containing a ":" character MUST be a 
 rfc7515#3.2#32ffb7a9	MUST	In the JWS JSON Serialization, one or both of the JWS Protected Header and JWS Unprotected Header MUST be present.
-rfc7515#4#3095fd7a	MUST	Implementations are required to understand the specific Header Parameters defined by this specification that are designated as "MUST be understood" and process 
-rfc7515#4#41808cb9	MUST	Unless listed as a critical Header Parameter, per Section 4.1.11, all Header Parameters not defined by this specification MUST be ignored when not understood.
-rfc7515#4#55cd4b27	MUST	specification that are not so designated MUST be ignored when not understood.
-rfc7515#4#95dfba09	MUST	The Header Parameter names within the JOSE Header MUST be unique; JWS parsers MUST either reject JWSs with duplicate Header Parameter names or use a JSON parser
-rfc7515#4.1#004c73da	MUST	The certificate containing the public key corresponding to the key used to digitally sign the JWS MUST be the first certificate.
-rfc7515#4.1#2422fdda	MUST	(TLS) [RFC2818] [RFC5246]; and the identity of the server MUST be validated, as per Section 6 of RFC 6125 [RFC6125].
-rfc7515#4.1#2b61489d	MUST	The protocol used to acquire the resource MUST provide integrity protection; an HTTP GET request to retrieve the JWK Set MUST use Transport Layer Security.
-rfc7515#4.1#3f5a2df2	MUST	The identified resource MUST provide a representation of the certificate or certificate chain that conforms to RFC 5280 [RFC5280] in PEM-encoded form, with each
-rfc7515#4.1#411b6fb5	MUST	This Header Parameter MUST be present and MUST be understood and processed by implementations.
-rfc7515#4.1#4381296d	MUST	This Header Parameter MUST be understood and processed by implementations.
-rfc7515#4.1#43df7d0b	MUST NOT	Producers MUST NOT include Header Parameter names defined by this specification or [JWA] for use with JWS, duplicate names, or names that do not occur as Header
-rfc7515#4.1#4a0055d8	SHOULD	To keep messages compact in common situations, it is RECOMMENDED that producers omit an "application/" prefix of a media type value in a "cty" Header Parameter 
-rfc7515#4.1#50534930	MUST	A recipient using the media type value MUST treat it as if "application/" were prepended to any "cty" value not containing a '/'.
-rfc7515#4.1#5a5f8a05	MUST	The recipient MUST validate the certificate chain according to RFC 5280 [RFC5280] and consider the certificate or certificate chain to be invalid if any validat
-rfc7515#4.1#78eb3b9e	MUST	A recipient using the media type value MUST treat it as if "application/" were prepended to any "typ" value not containing a '/'.
-rfc7515#4.1#84597b76	SHOULD	To keep messages compact in common situations, it is RECOMMENDED that producers omit an "application/" prefix of a media type value in a "typ" Header Parameter 
-rfc7515#4.1#8cf21f8e	MUST	The "crit" (critical) Header Parameter indicates that extensions to this specification and/or [JWA] are being used that MUST be understood and processed.
-rfc7515#4.1#8eac1975	SHOULD	For instance, a "typ" value of "example" SHOULD be used to represent the "application/example" media type, whereas the media type "application/example;part="1/2
-rfc7515#4.1#987698b5	MUST	Its value MUST be a case-sensitive string.
-rfc7515#4.1#aa5e3700	MUST NOT	Producers MUST NOT use the empty list "[]" as the "crit" value.
-rfc7515#4.1#c1b33567	MUST	The keys MUST be encoded as a JWK Set [JWK].
-rfc7515#4.1#c5d906bf	MUST	When used, this Header Parameter MUST be integrity protected; therefore, it MUST occur only within the JWS Protected Header.
-rfc7515#4.1#d9ed99b8	SHOULD	For instance, a "cty" value of "example" SHOULD be used to represent the "application/example" media type, whereas the media type "application/example;part="1/2
-rfc7515#4.1#f33c6f2e	MUST	The protocol used to acquire the resource MUST provide integrity protection; an HTTP GET request to retrieve the certificate MUST use TLS [RFC2818] [RFC5246]; a
 rfc7515#5.1#4932cba0	MUST	The "alg" (algorithm) Header Parameter MUST be present in the JOSE Header, with the algorithm value accurately representing the algorithm used to construct the 
-rfc7515#5.2#3769b421	MUST	However, in all cases, at least one JWS Signature value MUST successfully validate, or the JWS MUST be considered invalid.
-rfc7515#5.2#5a603793	MUST NOT	JSON Serialization, this restriction includes that the same Header Parameter name also MUST NOT occur in distinct JSON object values that together comprise the 
-rfc7515#5.2#85f09618	SHOULD	Even if a JWS can be successfully validated, unless the algorithm(s) used in the JWS are acceptable to the application, it SHOULD consider the JWS to be invalid
-rfc7515#5.2#b4f9e046	MUST	Validate the JWS Signature against the JWS Signing Input ASCII(BASE64URL(UTF8(JWS Protected Header)) || '.' || BASE64URL(JWS Payload)) in the manner defined for
-rfc7515#5.2#b7a1579e	MUST	If none of the validations in step 9 succeeded, then the JWS MUST be considered invalid.
 rfc7515#5.3#281e5f86	MUST	These comparison rules MUST be used for all JSON string comparisons except in cases where the definition of the member explicitly calls out that a different com
 rfc7515#6#32f96dbe	SHOULD	The producer SHOULD include sufficient information in the Header Parameters to identify the key used, unless the application uses another means or convention to
 rfc7515#6#c25f5d76	MUST	These Header Parameters MUST be integrity protected if the information that they convey is to be utilized in a trust decision; however, if the only information 
-rfc7515#8#894f57a7	MUST	Implementations supporting the "jku" and/or "x5u" Header Parameters MUST support TLS.
-rfc7515#8#b1c439a0	MUST	Whenever TLS is used, the identity of the service provider encoded in the TLS server certificate MUST be verified using the procedures described in Section 6 of
-rfc7515#8#cebb45a2	MUST	To protect against information disclosure and tampering, confidentiality protection MUST be applied using TLS with a ciphersuite that provides confidentiality a
 rfc7515#9.1.1#4bea5d8f	SHOULD	Because a core goal of this specification is for the resulting representations to be compact, it is RECOMMENDED that the name be short -- not to exceed 8 charac
 rfc7515#9.2.1#08f51dd3	SHOULD	o Encoding considerations: 8bit; application/jose+json values are represented as a JSON Object; UTF-8 encoding SHOULD be employed for the JSON object.
 rfc7517#2#a6abbc6f	MUST	The JSON object MUST have a "keys" member, which is an array of JWKs.
@@ -2162,12 +2125,6 @@ rfc9101#11.1#78091e7b	MUST	The Consent screen MUST indicate the client and SHOUL
 rfc9101#11.1#e9127831	SHOULD	When the client is being granted access to a protected resource containing personal data, the client SHOULD limit the collection of personal data to that which 
 rfc9101#11.2.1#287af311	MUST	Where the Request Object URI method is being used, if the Request Object contains personally identifiable or sensitive information, the "request_uri" SHOULD be 
 rfc9101#11.2.1#e7ed6bee	SHOULD	Since URI query parameters may leak through various means but most notably through referrer and browser history, if the authorization request contains a potenti
-rfc9101#5.2#25e2e47d	SHOULD NOT	The entire Request URI SHOULD NOT exceed 512 ASCII characters.
-rfc9101#5.2#306a5c14	MUST	In the first case, the "request_uri" MUST be an "https" URI, as specified in Section 2.7.2 of [RFC7230].
-rfc9101#5.2#618a08e6	MUST	In the second case, it MUST be a URN, as specified in [RFC8141].
-rfc9101#5.2#68ad5ccb	MUST	The contents of the resource referenced by the "request_uri" MUST be a Request Object and MUST be reachable by the authorization server unless the URI was provi
-rfc9101#5.2#6aea424b	SHOULD NOT	The entire Request URI SHOULD NOT exceed 512 ASCII characters. There are two reasons for this restriction: 1. Many phones on the market as of this writing still
-rfc9101#5.2#81a6de18	SHOULD NOT	The entire Request URI SHOULD NOT exceed 512 ASCII characters. There are two reasons for this restriction: 2. On a slow connection such as a 2G mobile connectio
 rfc9101#5.2.1#cc99a49c	MUST	As such, the "request_uri" MUST have appropriate entropy for its lifetime so that the URI is not guessable if publicly retrievable.
 rfc9101#5.2.1#f260c8ea	SHOULD	It is RECOMMENDED that the "request_uri" be removed after a reasonable timeout unless access control measures are taken.
 rfc9101#5.2.3#7fb53b33	MUST	Upon receipt of the Request, the authorization server MUST send an HTTP "GET" request to the "request_uri" to retrieve the referenced Request Object unless the 
@@ -2744,7 +2701,6 @@ rfc9449#11.3#39a4c7a6	MUST NOT	A server MUST NOT accept any DPoP proofs without 
 rfc9449#11.5#03c4af6f	MUST	Servers accepting signed DPoP proof JWTs MUST verify that the typ field is dpop+jwt in the headers of the JWTs to ensure that adversaries cannot use JWTs create
 rfc9449#11.6#0bae7a89	MUST	Implementers MUST ensure that only asymmetric digital signature algorithms (such as ES256) that are deemed secure can be used for signing DPoP proofs.
 rfc9449#11.6#618a3c8e	MUST NOT	In particular, the algorithm none MUST NOT be allowed.
-rfc9449#5.2#56760d78	MUST	If the value is true, the authorization server MUST reject token requests from the client that do not contain the DPoP header.
 rfc9449#6.2#f59aa2a1	MUST	If the token_type member is included in the introspection response, it MUST contain the value DPoP.
 rfc9449#7.3#a896545e	SHOULD	It is RECOMMENDED that clients generate a unique DPoP proof, even when retrying idempotent requests in response to HTTP errors generally understood as transient
 rfc9449#8.2#f73bbc0c	MUST	The client MUST use the new nonce value supplied for the next token request and for all subsequent token requests until the authorization server supplies a new 

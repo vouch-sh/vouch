@@ -5,11 +5,11 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{JwkEntry, JwkSet, JwsAlgorithm, KeyType};
+use crate::db::{JwkEntry, JwkSet, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use vouch_common::protocol;
 
 /// Resolve the JWKS for a client — from an inline key set or a fetched
 /// `jwks_uri`. The two are exclusive (RFC 7591 §2), so there is no precedence
@@ -108,11 +108,11 @@ pub fn find_matching_key(
                     continue;
                 }
                 if let Some(ref key_alg) = key.alg
-                    && key_alg != &header.alg
+                    && key_alg.as_str() != header.alg.as_str()
                 {
                     continue;
                 }
-                return build_decoding_key_from_jwk(key, &header.alg);
+                return build_decoding_key_from_jwk(key, header.alg);
             }
         }
         tracing::debug!("No key with kid '{kid}' found in JWKS");
@@ -125,19 +125,13 @@ pub fn find_matching_key(
     // Fall back to matching by algorithm/key type. The kty-per-alg rule is
     // `KeyType::for_alg`, shared with the write-time usability checks so the
     // two cannot disagree about which keys are selectable.
-    let Ok(alg) = header.alg.parse::<JwsAlgorithm>() else {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            format!("Unsupported algorithm: {}", header.alg),
-        ));
-    };
-    let expected_kty = KeyType::for_alg(alg);
+    let expected_kty = KeyType::for_alg(header.alg);
 
     for key in &jwks.keys {
         if key.kty == expected_kty {
             // If key has an alg field, it must match
             if let Some(ref key_alg) = key.alg
-                && key_alg != &header.alg
+                && key_alg.as_str() != header.alg.as_str()
             {
                 continue;
             }
@@ -147,7 +141,7 @@ pub fn find_matching_key(
             {
                 continue;
             }
-            return build_decoding_key_from_jwk(key, &header.alg);
+            return build_decoding_key_from_jwk(key, header.alg);
         }
     }
 
@@ -226,10 +220,10 @@ pub async fn find_matching_key_with_refresh_client(
 /// Build a `DecodingKey` from a JWK entry.
 fn build_decoding_key_from_jwk(
     key: &JwkEntry,
-    alg: &str,
+    alg: JwsAlgorithm,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
     match (&key.kty, alg) {
-        (KeyType::Ec, protocol::JWS_ALG_ES256) => {
+        (KeyType::Ec, JwsAlgorithm::Es256) => {
             let x = key.x.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing x component")
             })?;
@@ -241,7 +235,7 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        (KeyType::Rsa, "RS256" | "PS256") => {
+        (KeyType::Rsa, JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256) => {
             let n = key.n.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing n component")
             })?;
@@ -253,7 +247,7 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        (KeyType::Okp, "EdDSA") => {
+        (KeyType::Okp, JwsAlgorithm::EdDsa) => {
             let x = key.x.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "OKP key missing x component")
             })?;
@@ -373,9 +367,9 @@ mod tests {
         }
     }
 
-    fn header(alg: &str, kid: Option<&str>) -> JwtAssertionHeader {
+    fn header(alg: JwsAlgorithm, kid: Option<&str>) -> JwtAssertionHeader {
         JwtAssertionHeader {
-            alg: alg.to_string(),
+            alg,
             kid: kid.map(String::from),
         }
     }
@@ -393,7 +387,7 @@ mod tests {
                 ec_jwk_entry(Some("key-2"), None, None),
             ],
         };
-        let hdr = header("ES256", Some("key-2"));
+        let hdr = header(JwsAlgorithm::Es256, Some("key-2"));
 
         // Should succeed and select the second key (kid="key-2")
         let result = find_matching_key(&jwks, &hdr);
@@ -409,7 +403,7 @@ mod tests {
                 ec_jwk_entry(Some("key-2"), None, None),
             ],
         };
-        let hdr = header("ES256", Some("missing"));
+        let hdr = header(JwsAlgorithm::Es256, Some("missing"));
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
@@ -428,7 +422,7 @@ mod tests {
             keys: vec![ec_jwk_entry(None, None, None)],
         };
         // No kid in header — should fall back to kty matching
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok(), "should match EC key by algorithm fallback");
@@ -440,7 +434,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![rsa_jwk_entry(None, None, None)],
         };
-        let hdr = header("RS256", None);
+        let hdr = header(JwsAlgorithm::Rs256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok(), "should match RSA key by algorithm fallback");
@@ -453,7 +447,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, None, Some("enc"))],
         };
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
@@ -472,7 +466,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, None, Some("sig"))],
         };
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok(), "should accept key with use=sig");
@@ -485,7 +479,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, Some("ES384"), None)],
         };
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
@@ -504,28 +498,29 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, Some("ES256"), None)],
         };
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok(), "should accept key with matching alg");
     }
 
-    // RFC 7517 §4: an algorithm with no implementation resolves no key.
+    // RFC 7517 §4: an algorithm the key cannot carry resolves no key.
+    //
+    // `KeyType::for_alg` maps RS256 to an RSA key, so an EC-only key set has
+    // nothing selectable. An `alg` outside `JwsAlgorithm` cannot be tested
+    // here at all — `HeaderAlg` refuses it before a `JwtAssertionHeader`
+    // exists (`test_structural_algorithm_gate_matches_client_assertion_allowed`).
     #[test]
-    fn test_find_matching_key_unsupported_algorithm() {
-        // No kid in header, unsupported algorithm should error
+    fn test_find_matching_key_algorithm_without_matching_key_type() {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, None, None)],
         };
-        let hdr = header("ES384", None);
+        let hdr = header(JwsAlgorithm::Rs256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("Unsupported algorithm"))
         );
     }
 
@@ -533,7 +528,7 @@ mod tests {
     #[test]
     fn test_find_matching_key_empty_jwks() {
         let jwks = JwkSet { keys: vec![] };
-        let hdr = header("ES256", None);
+        let hdr = header(JwsAlgorithm::Es256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_err(), "empty JWKS should produce error");
@@ -548,7 +543,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![rsa_jwk_entry(Some("rsa-key"), None, None)],
         };
-        let hdr = header("ES256", Some("rsa-key"));
+        let hdr = header(JwsAlgorithm::Es256, Some("rsa-key"));
 
         // kid match causes build_decoding_key_from_jwk("RSA", "ES256") which is
         // an unsupported combination and returns an error.
@@ -568,7 +563,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(Some("key-1"), None, Some("enc"))],
         };
-        let hdr = header("ES256", Some("key-1"));
+        let hdr = header(JwsAlgorithm::Es256, Some("key-1"));
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
@@ -589,7 +584,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![rsa_jwk_entry(Some("key-1"), Some("PS256"), None)],
         };
-        let hdr = header("RS256", Some("key-1"));
+        let hdr = header(JwsAlgorithm::Rs256, Some("key-1"));
 
         let result = find_matching_key(&jwks, &hdr);
         let err = result.unwrap_err();
@@ -610,7 +605,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(Some("key-1"), None, None)],
         };
-        let hdr = header("ES256", Some("key-1"));
+        let hdr = header(JwsAlgorithm::Es256, Some("key-1"));
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(
@@ -630,7 +625,7 @@ mod tests {
                 ec_jwk_entry(Some("key-2"), None, None),
             ],
         };
-        let hdr = header("ES256", Some("key-2"));
+        let hdr = header(JwsAlgorithm::Es256, Some("key-2"));
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok());
@@ -644,7 +639,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_ec_valid() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "ES256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
         assert!(result.is_ok(), "should build valid EC decoding key");
     }
 
@@ -660,8 +655,9 @@ mod tests {
 
         // The full-size coordinates verify the token: the control case, without
         // which a truncated coordinate failing would prove nothing.
-        let full = ec_entry_from_coordinates(&jwk.x, &jwk.y);
-        let key = build_decoding_key_from_jwk(&full, "ES256").expect("full-size EC key builds");
+        let full = ec_entry_from_coordinates(jwk.x(), jwk.y());
+        let key = build_decoding_key_from_jwk(&full, JwsAlgorithm::Es256)
+            .expect("full-size EC key builds");
         assert!(
             verify_es256(&token, &key),
             "a P-256 key with full-size coordinates must verify its own token"
@@ -670,14 +666,14 @@ mod tests {
         // Drop the last octet of x: 31 octets where the curve requires 32.
         let short_x = URL_SAFE_NO_PAD.encode(
             URL_SAFE_NO_PAD
-                .decode(&jwk.x)
+                .decode(jwk.x())
                 .expect("x is base64url")
                 .get(..31)
                 .expect("P-256 x is 32 octets"),
         );
-        let truncated = ec_entry_from_coordinates(&short_x, &jwk.y);
+        let truncated = ec_entry_from_coordinates(&short_x, jwk.y());
 
-        let verified = build_decoding_key_from_jwk(&truncated, "ES256")
+        let verified = build_decoding_key_from_jwk(&truncated, JwsAlgorithm::Es256)
             .is_ok_and(|key| verify_es256(&token, &key));
         assert!(
             !verified,
@@ -686,7 +682,7 @@ mod tests {
     }
 
     /// Sign an ES256 JWT and return it with the public JWK that verifies it.
-    async fn es256_token_and_jwk() -> (String, crate::crypto::keys::EcJwk) {
+    async fn es256_token_and_jwk() -> (String, crate::crypto::jwk::EcJwk) {
         let key = crate::test_utils::make_test_oidc_key();
         let token = key
             .sign_jwt(&serde_json::json!({ "sub": "subject", "exp": 9_999_999_999i64 }))
@@ -721,7 +717,7 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, "ES256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -740,7 +736,7 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.y = None;
 
-        let result = build_decoding_key_from_jwk(&key, "ES256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -756,7 +752,7 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = Some("not-valid-base64url!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, "ES256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -771,7 +767,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "RS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         assert!(result.is_ok(), "should build valid RSA decoding key");
     }
 
@@ -782,7 +778,7 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = None;
 
-        let result = build_decoding_key_from_jwk(&key, "RS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -799,7 +795,7 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.e = None;
 
-        let result = build_decoding_key_from_jwk(&key, "RS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -815,7 +811,7 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = Some("not-valid!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, "RS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -830,7 +826,7 @@ mod tests {
     fn test_build_decoding_key_unsupported_kty_alg_combination() {
         // EC key with RS256 algorithm — unsupported combination
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "RS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -845,15 +841,15 @@ mod tests {
     fn test_build_decoding_key_rsa_key_with_ec_alg() {
         // RSA key with ES256 algorithm — unsupported combination
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "ES256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
         assert!(result.is_err());
     }
 
-    // RFC 7517 §4: an unrecognized alg builds no key.
+    // RFC 7517 §4: an alg that does not match the key's kty builds no key.
     #[test]
-    fn test_build_decoding_key_unknown_algorithm() {
+    fn test_build_decoding_key_algorithm_kty_mismatch() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "ES384");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
         assert!(result.is_err());
     }
 
@@ -867,7 +863,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![rsa_jwk_entry(None, None, None)],
         };
-        let hdr = header("PS256", None);
+        let hdr = header(JwsAlgorithm::Ps256, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(
@@ -880,7 +876,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_ps256_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "PS256");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Ps256);
         assert!(
             result.is_ok(),
             "PS256 with valid RSA key should produce a decoding key"
@@ -897,7 +893,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![okp_jwk_entry(None, None, None)],
         };
-        let hdr = header("EdDSA", None);
+        let hdr = header(JwsAlgorithm::EdDsa, None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(
@@ -910,7 +906,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_okp_eddsa_valid() {
         let key = okp_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
         assert!(
             result.is_ok(),
             "EdDSA with valid OKP key should produce a decoding key"
@@ -923,7 +919,7 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -939,7 +935,7 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = None;
 
-        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -955,7 +951,7 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = Some("Ed448".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -976,7 +972,7 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] }; // empty — no matching key
-        let hdr = header("ES256", Some("unknown-kid"));
+        let hdr = header(JwsAlgorithm::Es256, Some("unknown-kid"));
 
         let result = find_matching_key_with_refresh_client(
             &state.store,
@@ -1004,7 +1000,7 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] };
-        let hdr = header("ES256", Some("missing-kid"));
+        let hdr = header(JwsAlgorithm::Es256, Some("missing-kid"));
 
         // cached_at = now (0 seconds ago) — within the 10-second rate limit window
         let recent = JwksCacheDoc {
@@ -1041,7 +1037,7 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let stale_jwks = JwkSet { keys: vec![] };
-        let hdr = header("ES256", Some("fresh-kid"));
+        let hdr = header(JwsAlgorithm::Es256, Some("fresh-kid"));
 
         // cached_at 60 seconds ago — well outside the 10-second rate-limit window
         let old_cache = JwksCacheDoc {

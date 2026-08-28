@@ -27,6 +27,7 @@
 spec_id	section_prefix	reason
 rfc6265	5	Section 5 is "User Agent Requirements" -- the browser-side cookie storage and parsing algorithm. Vouch is a server (Section 4); the CLI writes a Netscape cookie file for curl interop and implements no part of the UA algorithm.
 rfc7515	7.2	JWS JSON Serialization. Vouch uses compact serialization throughout; no code path produces or parses the general or flattened JSON forms.
+rfc7515	8	TLS requirements for retrieving key material named by the "jku" and "x5u" header parameters. The section is scoped by its opening sentence, "Implementations supporting the \"jku\" and/or \"x5u\" Header Parameters MUST support TLS"; Vouch supports neither, dereferences no header-supplied URL (grep for jku/x5u across crates/*/src returns nothing), and pins that refusal in test_rfc7515_header_supplied_key_material_is_not_a_key_source.
 rfc7518	4	JWE key management algorithms (RSAES, ECDH-ES, AES-KW, PBES2). Vouch implements no JWE: services/oidc/jar.rs rejects five-part tokens, and the only algorithms produced or verified anywhere are ES256, RS256, PS256, EdDSA and HS256.
 rfc7518	5	JWE content encryption algorithms (AES-CBC-HMAC, AES-GCM). Same reason as section 4 -- no JWE support.
 rfc9700	2.2.2	Refresh token guidance. Vouch issues no refresh tokens by design; see the section 4.14 row.

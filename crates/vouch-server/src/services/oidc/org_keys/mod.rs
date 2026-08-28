@@ -68,14 +68,15 @@ use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
 use crate::config::ServerConfig;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::document_type::Document;
-use crate::db::documents::oauth::JwsAlgorithm;
 use crate::db::documents::organization::{OrgSigningKeyDoc, SigningKeyState};
 use crate::db::store::DocumentStore;
 use crate::db::{self, Organization};
 use crate::error::ServiceError;
 
-use crate::crypto::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
 
 mod resolve;
 mod rotation;
@@ -326,10 +327,9 @@ pub(super) mod test_support {
     use jiff::{Span, Timestamp};
 
     use super::Operator;
+    use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
-    use crate::db::{
-        JwsAlgorithm, OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id,
-    };
+    use crate::db::{OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id};
     use crate::test_utils::{create_test_org, test_app_state_encrypted};
 
     /// No operator identity — service-level tests don't exercise audit trails.
@@ -391,8 +391,9 @@ mod tests {
     use jiff::Timestamp;
 
     use super::{org_issuer_or_base, state_priority};
+    use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
-    use crate::db::{JwsAlgorithm, Organization, deterministic_org_key_id};
+    use crate::db::{Organization, deterministic_org_key_id};
     use crate::test_utils::test_config;
 
     fn org(subdomain: Option<&str>) -> Organization {

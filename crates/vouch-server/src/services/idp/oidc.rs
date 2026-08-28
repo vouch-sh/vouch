@@ -358,11 +358,33 @@ pub(crate) async fn verify_id_token(
     expected_client_id: &str,
     expected_nonce: &str,
 ) -> Result<IdentityResult, anyhow::Error> {
-    // Decode the JWT header to determine algorithm and key ID
-    let header = jsonwebtoken::decode_header(id_token)
-        .map_err(|e| anyhow::anyhow!("Invalid ID token header: {e}"))?;
+    // RFC 7515 Section 4.1.11: "If any of the listed extension Header
+    // Parameters are not understood and supported by the recipient, then the
+    // JWS is invalid." Vouch supports no `crit` extension, so a `crit`-bearing
+    // ID token never yields a header at all.
+    let jws = crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
+        crate::crypto::jwt::JwsError::Critical => {
+            anyhow::anyhow!("ID token header carries an unsupported 'crit' extension")
+        }
+        crate::crypto::jwt::JwsError::Malformed(reason) => {
+            anyhow::anyhow!("Invalid ID token: {reason}")
+        }
+        crate::crypto::jwt::JwsError::PrivateKey => {
+            anyhow::anyhow!("ID token header JWK contains private key material")
+        }
+    })?;
 
-    let alg = header.alg;
+    // The signing algorithm, from the header already decoded above. Parsed
+    // from the wire string rather than through `HeaderAlg::Known`, because an
+    // upstream IdP is not held to Vouch's own signing policy: RS384, RS512,
+    // ES384, PS384 and PS512 are all algorithms `jsonwebtoken` can verify and
+    // an OP may legitimately use, and none of them are in `JwsAlgorithm`.
+    let alg: jsonwebtoken::Algorithm = jws.header().alg.as_str().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Unsupported ID token algorithm: {}",
+            jws.header().alg.as_str()
+        )
+    })?;
 
     // Fetch JWKS from the upstream IdP
     let jwks_response = http_client
@@ -385,7 +407,7 @@ pub(crate) async fn verify_id_token(
         .map_err(|e| anyhow::anyhow!("Failed to parse JWKS: {e}"))?;
 
     // Find matching key by kid, then by algorithm
-    let decoding_key = find_decoding_key(&jwks, header.kid.as_deref(), alg)?;
+    let decoding_key = find_decoding_key(&jwks, jws.header().kid.as_deref(), alg)?;
 
     // Entra `/organizations/v2.0` discovery stores the literal `{tenantid}`
     // placeholder in `provider.issuer`; real tokens carry a concrete tenant

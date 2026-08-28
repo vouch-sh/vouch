@@ -5,8 +5,8 @@ use jiff::Timestamp;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::document_type::{DocumentType, IndexEntry};
-use crate::db::documents::oauth::JwsAlgorithm;
 
 /// An organization (tenant).
 #[derive(Debug, Clone, Serialize, Deserialize)]

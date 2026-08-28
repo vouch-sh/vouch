@@ -20,9 +20,11 @@
 //! machine's.
 
 use super::{
-    DpopClaimsValidation, DpopJwk, compute_access_token_hash, parse_and_verify_dpop_proof,
+    DpopClaimsValidation, compute_access_token_hash, parse_and_verify_dpop_proof,
     validate_dpop_claims,
 };
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwk::Jwk;
 
 /// The DPoP proof from RFC 9449 Figure 2, reused verbatim in Figure 5.
 ///
@@ -77,7 +79,7 @@ const FIGURE_14_ATH: &str = "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo";
 /// self-signed test cannot detect any of them.
 #[test]
 fn thumbprint_matches_published_jkt() {
-    let jwk: DpopJwk = serde_json::from_str(FIGURE_4_JWK).expect("Figure 4 JWK parses");
+    let jwk: Jwk = serde_json::from_str(FIGURE_4_JWK).expect("Figure 4 JWK parses");
     assert_eq!(
         jwk.thumbprint(),
         FIGURE_9_JKT,
@@ -94,8 +96,7 @@ fn figure_2_proof_signature_verifies() {
     let (header, claims) =
         parse_and_verify_dpop_proof(FIGURE_2_PROOF).expect("Figure 2 proof must verify");
 
-    assert_eq!(header.typ, "dpop+jwt");
-    assert_eq!(header.alg, "ES256");
+    assert_eq!(header.alg, JwsAlgorithm::Es256);
 
     // Figure 4: the decoded claims of this proof.
     assert_eq!(claims.jti, "-BwC3ESc6acc2lTc");
@@ -121,7 +122,7 @@ fn figure_13_proof_signature_verifies() {
     let (header, claims) =
         parse_and_verify_dpop_proof(FIGURE_13_PROOF).expect("Figure 13 proof must verify");
 
-    assert_eq!(header.alg, "ES256");
+    assert_eq!(header.alg, JwsAlgorithm::Es256);
 
     // Figure 14: the decoded claims of this proof.
     assert_eq!(claims.jti, "e1j3V_bKic8-LAEB");

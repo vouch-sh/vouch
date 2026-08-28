@@ -23,6 +23,7 @@ mod oidc_userinfo;
 mod rfc6749_authorize;
 mod rfc6749_token;
 mod rfc7009;
+mod rfc7515;
 mod rfc7523;
 mod rfc7591;
 mod rfc7592;

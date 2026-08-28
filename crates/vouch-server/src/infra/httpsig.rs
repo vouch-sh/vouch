@@ -8,8 +8,6 @@
 
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 
 use vouch_common::protocol;
@@ -189,11 +187,13 @@ fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<Str
     let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
         .or_else(|| crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
 
-    // Parse JWT payload (second segment) without verification
-    let parts: Vec<&str> = token.split('.').collect();
-    let payload_b64 = parts.get(1)?;
-    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    // Parse the JWT payload without verification. Going through `Jws` keeps
+    // this pre-parse on the same splitting and decoding as every other JWS
+    // path — including the RFC 7515 Section 4.1.11 `crit` refusal, so a token
+    // the verifying paths would reject never resolves a signing key here.
+    let claims: serde_json::Value = crate::crypto::jwt::Jws::parse(token)
+        .and_then(|jws| jws.claims_as())
+        .ok()?;
     claims.get("client_id")?.as_str().map(String::from)
 }
 
@@ -223,6 +223,8 @@ fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
 )]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     fn auth_headers(value: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();

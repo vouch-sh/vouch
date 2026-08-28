@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::crypto::alg::JwsAlgorithm;
 
 // ========================================================================
 // Cascade Delete Tests

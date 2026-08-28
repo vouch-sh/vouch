@@ -10,7 +10,8 @@
 
 use serde_json::Value;
 use vouch_server::OAuthErrorCode;
-use vouch_server::db::{self, JwsAlgorithm, OAuthClient};
+use vouch_server::crypto::alg::JwsAlgorithm;
+use vouch_server::db::{self, OAuthClient};
 use vouch_server::services::oidc::jarm::{build_jarm_error_jwt, build_jarm_success_jwt};
 use vouch_server::test_utils;
 use vouch_tests::TestHarness;

@@ -827,6 +827,12 @@ async fn test_rfc9449_dpop_symmetric_algorithm_rejected() {
 
 #[tokio::test]
 async fn test_rfc9449_dpop_rs256_algorithm_rejected() {
+    // RFC 7515 §5.2: "Even if a JWS can be successfully validated, unless the
+    // algorithm(s) used in the JWS are acceptable to the application, it
+    // SHOULD consider the JWS to be invalid." That is exactly this case: the
+    // signature is genuine and would verify, and the proof is refused anyway
+    // because RS256 is not an algorithm this application accepts.
+    //
     // RS256 is a valid JwsAlgorithm but is not in JwsAlgorithm::FAPI_ALLOWED, so
     // DPoP proofs declaring it must be rejected. This proof carries a REAL RSA
     // keypair and a REAL RS256 signature over the signing input: if the
@@ -1875,7 +1881,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
             "discovery advertises a DPoP algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }
@@ -1918,7 +1924,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::db::JwsAlgorithm>().is_ok(),
+            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
             "discovery advertises a token endpoint auth algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }
