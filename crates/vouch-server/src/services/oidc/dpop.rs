@@ -377,17 +377,42 @@ pub fn validate_dpop_claims(
     Ok(())
 }
 
-/// Normalize a URI by removing query string and fragment.
+/// Normalize a URI for comparison against the DPoP `htu` claim.
 ///
-/// RFC 9449 Section 4.2: The `htu` claim should contain the HTTP target URI
-/// without query and fragment components.
-/// Normalize a URI by stripping query and fragment for comparison.
+/// RFC 9449 Section 4.2 defines `htu` as "The HTTP target URI (Section 7.1 of
+/// [RFC9110]) of the request to which the JWT is attached, without query and
+/// fragment parts", so both are dropped. Section 4.3 then asks for more than
+/// that: "To reduce the likelihood of false negatives, servers SHOULD employ
+/// syntax-based normalization (Section 6.2.2 of [RFC3986]) and scheme-based
+/// normalization (Section 6.2.3 of [RFC3986]) before comparing the htu claim."
+///
+/// Parsing with the URL parser supplies both: it lowercases the scheme and
+/// host, uppercases percent-encoding hex digits, resolves dot segments, elides
+/// a port that is the scheme's default, and gives an empty path a single
+/// slash. Without it a proof reading `https://Example.com:443/token` failed
+/// against a configured `https://example.com/token` even though RFC 3986 calls
+/// the two equivalent.
+///
+/// A URI the parser rejects keeps the old treatment — query and fragment
+/// stripped, nothing else — so an unparseable claim still fails the comparison
+/// rather than matching something it should not.
+pub fn normalize_uri(uri: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(uri) else {
+        return strip_query_and_fragment(uri);
+    };
+
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+/// Drop the query and fragment from a URI that could not be parsed.
 #[expect(
     clippy::string_slice,
     reason = "byte offsets come from str::find on ASCII chars; always at valid char boundary"
 )]
-pub fn normalize_uri(uri: &str) -> String {
-    // Find the first occurrence of either '?' or '#' to handle all orderings
+fn strip_query_and_fragment(uri: &str) -> String {
+    // Find the first occurrence of either '?' or '#' to handle all orderings.
     // Safety: both `find('?')` and `find('#')` return byte offsets of ASCII
     // characters, so slicing at `end` is always at a valid char boundary.
     let end = uri
@@ -643,6 +668,8 @@ mod tests {
         assert_eq!(thumbprint.len(), 43);
     }
 
+    // RFC 9449 §4.2: the htu claim is "the HTTP target URI ... without query and
+    // fragment parts", so both are removed before comparison.
     #[test]
     fn test_normalize_uri() {
         assert_eq!(
@@ -656,6 +683,49 @@ mod tests {
         assert_eq!(
             normalize_uri("https://example.com/token"),
             "https://example.com/token"
+        );
+    }
+
+    // RFC 9449 §4.3: "To reduce the likelihood of false negatives, servers
+    // SHOULD employ syntax-based normalization (Section 6.2.2 of [RFC3986]) and
+    // scheme-based normalization (Section 6.2.3 of [RFC3986]) before comparing
+    // the htu claim." Each of these pairs is equivalent under those rules, so
+    // each must compare equal.
+    #[test]
+    fn test_normalize_uri_applies_rfc3986_normalization() {
+        let canonical = normalize_uri("https://example.com/token");
+
+        // §6.2.2.1 case normalization: scheme and host are case insensitive.
+        assert_eq!(normalize_uri("HTTPS://Example.COM/token"), canonical);
+        // §6.2.3 scheme-based normalization: 443 is the default port for https.
+        assert_eq!(normalize_uri("https://example.com:443/token"), canonical);
+        // §6.2.2.3 path segment normalization: dot segments resolve away.
+        assert_eq!(normalize_uri("https://example.com/a/../token"), canonical);
+        // §6.2.3: an empty path is equivalent to "/".
+        assert_eq!(
+            normalize_uri("https://example.com"),
+            normalize_uri("https://example.com/")
+        );
+    }
+
+    // RFC 9449 §4.3 step 9 compares the htu claim to the request URI; a
+    // non-default port distinguishes two hosts and must not be normalized away.
+    #[test]
+    fn test_normalize_uri_keeps_non_default_port() {
+        assert_ne!(
+            normalize_uri("https://example.com:8443/token"),
+            normalize_uri("https://example.com/token")
+        );
+    }
+
+    // A claim the URL parser rejects keeps the older treatment, so it still
+    // fails the comparison rather than normalizing into a match.
+    #[test]
+    fn test_normalize_uri_unparseable_input() {
+        assert_eq!(normalize_uri("not a uri?x=1"), "not a uri");
+        assert_ne!(
+            normalize_uri("not a uri"),
+            normalize_uri("https://example.com/token")
         );
     }
 
