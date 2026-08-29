@@ -91,6 +91,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             userinfo_signed_response_alg: None,
             request_uris: None,
             post_logout_redirect_uris: None,
+            client_name: None,
         },
     )
     .await

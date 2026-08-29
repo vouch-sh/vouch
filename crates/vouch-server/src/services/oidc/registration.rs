@@ -1511,6 +1511,10 @@ pub async fn update_client_configuration(
 
     // token_endpoint_auth_method is intentionally NOT updated — it is immutable
     // per RFC 7592 (clients cannot change their auth method after registration).
+    // RFC 7592 §2.2 is a full replacement: an explicit `client_name` replaces
+    // the stored value; an omitted one reverts to the registration default
+    // (`update_oauth_client_registration` applies the "Unnamed Client"
+    // fallback, matching `register_client`).
     let updated = db::update_oauth_client_registration(
         &state.store,
         &client.id,
@@ -1524,6 +1528,7 @@ pub async fn update_client_configuration(
             userinfo_signed_response_alg: userinfo_alg,
             request_uris: validated_request_uris.as_deref(),
             post_logout_redirect_uris: validated_post_logout_redirect_uris.clone(),
+            client_name: mutable_request.client_name.as_deref(),
         },
     )
     .await

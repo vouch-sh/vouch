@@ -1599,6 +1599,13 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub request_uris: Option<&'a [String]>,
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
     pub post_logout_redirect_uris: Option<Vec<String>>,
+    /// RFC 7591 §2: Human-readable name of the client.
+    ///
+    /// `Some` replaces the stored `client_name`; `None` reverts to the
+    /// registration default `"Unnamed Client"` (the `name` column is
+    /// non-nullable), matching `register_client`'s fallback for an
+    /// omitted `client_name` on RFC 7592 PUT (a full replacement).
+    pub client_name: Option<&'a str>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
@@ -1647,6 +1654,10 @@ pub async fn update_oauth_client_registration(
             data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
             data.request_uris = params.request_uris.map(|u| u.to_vec());
             data.post_logout_redirect_uris = params.post_logout_redirect_uris.clone();
+            // `client_name` maps to the non-nullable `name` column; an omitted
+            // value reverts to the registration default, the same fallback
+            // `register_client` applies for an initial registration.
+            data.name = params.client_name.unwrap_or("Unnamed Client").to_string();
         })
         .await?;
 

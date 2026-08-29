@@ -491,6 +491,13 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         uris[0].as_str().unwrap(),
         "https://new-callback.example.com/callback"
     );
+    // The PUT body includes `client_name`; it MUST be echoed back rather
+    // than silently ignored (RFC 7592 §2.2 — accepted fields replace).
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client",
+        "PUT must persist the client_name it accepted"
+    );
     // PUT must return a new registration_access_token (token rotation)
     let new_token = json["registration_access_token"]
         .as_str()
@@ -511,6 +518,136 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         get_json["redirect_uris"][0].as_str().unwrap(),
         "https://new-callback.example.com/callback",
         "Stored redirect_uri should match the PUT update"
+    );
+}
+
+/// Register a dynamically registered client whose `client_name` is `name`,
+/// returning `(client_id, registration_access_token)`.
+async fn register_named_client(app: &axum::Router, name: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": name
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_client_name() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Original Client Name").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Updated Client Name"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "PUT response must echo updated client_name"
+    );
+
+    // The rotated token must be used to read back the persisted name.
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token")
+        .to_string();
+
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "Stored client_name must match the PUT update"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_client_name_reverts_to_default() {
+    // RFC 7592 §2.2 is a full replacement: a PUT that omits `client_name`
+    // clears it. The `name` column is non-nullable, so the server reverts
+    // to the registration default ("Unnamed Client"), the same fallback
+    // `register_client` applies for an initial registration.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Branded Client").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Omitting client_name on a full-replacement PUT must revert to the default"
+    );
+
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // Read back via GET to confirm the default was persisted, not just echoed.
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Persisted client_name must be the default after being omitted on PUT"
     );
 }
 
