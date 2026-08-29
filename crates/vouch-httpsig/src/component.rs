@@ -518,12 +518,30 @@ fn resolve_field_bs(headers: &http::HeaderMap, lower_name: &str) -> Result<Strin
     let encoded: Vec<String> = values
         .iter()
         .map(|v| {
-            let b64 = STANDARD.encode(v.as_bytes());
+            // RFC 9421 Section 2.1.3 step 3.1: strip leading/trailing whitespace
+            // from the field value before encoding (step 3.3). OWS is defined as
+            // SP and HTAB (RFC 9110 §5.6.3); trim at the byte level so this works
+            // for both UTF-8 and non-UTF-8 field values.
+            let b64 = STANDARD.encode(trim_ascii_ows(v.as_bytes()));
             format!(":{b64}:")
         })
         .collect();
 
     Ok(encoded.join(", "))
+}
+
+/// Strip leading/trailing HTTP optional whitespace (OWS: SP and HTAB) from a
+/// byte slice. Operates on raw bytes so it is valid for non-UTF-8 values.
+fn trim_ascii_ows(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t')
+        .map_or(start, |i| i.saturating_add(1));
+    bytes.get(start..end).unwrap_or(&[])
 }
 
 /// Resolve a derived component value from an HTTP request.
@@ -1134,8 +1152,160 @@ mod tests {
         };
         let result = cid.resolve_from_request(&req).unwrap();
         // Each field line individually encoded, combined with ", "
+        // "first" = "Zmlyc3Q=", "second" = "c2Vjb25k"
+        assert_eq!(result, ":Zmlyc3Q=:, :c2Vjb25k:");
         assert!(result.contains(", "));
         assert!(result.starts_with(':'));
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: with ;bs leading/trailing OWS (SP) is stripped
+    // before base64 encoding. "  hello  " must encode "hello", not "  hello  ".
+    #[test]
+    fn test_bs_trims_leading_trailing_spaces() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "  hello  ")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // base64 of "hello" = "aGVsbG8="; base64 of "  hello  " = "ICBoZWxsbyAg"
+        assert_eq!(result, ":aGVsbG8=:");
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: HTAB is HTTP optional whitespace (OWS) and must
+    // be trimmed alongside SP.
+    #[test]
+    fn test_bs_trims_leading_trailing_tabs() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "\thello\t")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        assert_eq!(result, ":aGVsbG8=:");
+    }
+
+    // RFC 9421 §2.1.3: only leading/trailing OWS is stripped; internal
+    // whitespace is preserved as part of the field value (step 3.3 encodes
+    // the resulting value).
+    #[test]
+    fn test_bs_preserves_internal_whitespace() {
+        let req = make_request(
+            "GET",
+            "https://example.com/",
+            &[("x-val", "  hello  world  ")],
+        );
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        let b64 = result
+            .strip_prefix(':')
+            .and_then(|s| s.strip_suffix(':'))
+            .unwrap();
+        assert_eq!(STANDARD.decode(b64).unwrap(), b"hello  world");
+    }
+
+    // RFC 9421 §2.1.3: for multiple field lines, each is trimmed independently
+    // before encoding and combined with ", ".
+    #[test]
+    fn test_bs_trims_each_multiline_value() {
+        let mut req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header("x-multi", "  first  ")
+            .header("x-multi", "  second  ")
+            .body(())
+            .unwrap();
+        let _ = &mut req;
+        let cid = ComponentIdentifier::Field {
+            name: "x-multi".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        assert_eq!(result, ":Zmlyc3Q=:, :c2Vjb25k:");
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: a value that is entirely OWS yields an empty
+    // Byte Sequence (base64 of "" = "").
+    #[test]
+    fn test_bs_all_whitespace_value() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "   \t  ")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // base64 of "" is "", so the wrapped Byte Sequence is "::" (two colons).
+        assert_eq!(result, "::");
+    }
+
+    // RFC 9421 §2.1.3: ;bs preserves non-UTF-8 / binary field values byte-for-byte
+    // (minus leading/trailing OWS). The trimming is byte-level, not UTF-8 level.
+    #[test]
+    fn test_bs_non_utf8_value() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header(
+                "x-bin",
+                http::HeaderValue::from_bytes(b" \xff\xfe bin ").unwrap(),
+            )
+            .body(())
+            .unwrap();
+        let cid = ComponentIdentifier::Field {
+            name: "x-bin".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        let b64 = result
+            .strip_prefix(':')
+            .and_then(|s| s.strip_suffix(':'))
+            .unwrap();
+        assert_eq!(STANDARD.decode(b64).unwrap(), b"\xff\xfe bin");
+    }
+
+    // RFC 9421 §2.1.3 example: a header with internal commas is encoded
+    // verbatim (no list-splitting) per field line.
+    #[test]
+    fn test_bs_rfc_example_with_commas() {
+        let mut req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header("example-header", "value, with, lots")
+            .header("example-header", "of, commas")
+            .body(())
+            .unwrap();
+        let _ = &mut req;
+        let cid = ComponentIdentifier::Field {
+            name: "example-header".into(),
+            params: ComponentParams {
+                bs: true,
+                ..ComponentParams::default()
+            },
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // Matches the RFC 9421 §2.1.3 example base.
+        assert_eq!(result, ":dmFsdWUsIHdpdGgsIGxvdHM=:, :b2YsIGNvbW1hcw==:");
     }
 
     // ;tr tests
