@@ -408,7 +408,7 @@ pub(crate) async fn rename_key(
         ));
     }
     let name = req.name.trim();
-    if name.is_empty() || name.len() > 256 {
+    if name.is_empty() || name.chars().count() > 256 {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
@@ -1162,6 +1162,79 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_name");
+    }
+
+    // Regression (commit a39feb4a): the pre-auth guard measured `name.len()`
+    // (UTF-8 byte count) while the error message said "256 characters". A
+    // multibyte name within the 256-character cap — but over 256 bytes — was
+    // rejected with `invalid_name`. The handler must measure characters, the
+    // same approach the service layer uses (`services/keys.rs`).
+    #[tokio::test]
+    async fn test_rename_key_accepts_multibyte_name_within_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjk@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // 90 CJK characters = 270 UTF-8 bytes: above the old 256-byte cap, yet
+        // within both the 256-character handler limit and the 100-character
+        // service limit, so the rename must succeed end to end.
+        let name = "名".repeat(90);
+        assert_eq!(name.chars().count(), 90);
+        assert!(name.len() > 256);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "multibyte name within limits must be accepted: {resp_body}"
+        );
+    }
+
+    // The character-based guard must still bound multibyte names by character
+    // count — a >256-character CJK name is rejected by the handler (before the
+    // service) with `invalid_name`, and the message claims "characters".
+    #[tokio::test]
+    async fn test_rename_key_rejects_multibyte_name_exceeding_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjklong@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // 257 CJK characters = 771 bytes: over the cap by character count.
+        let name = "名".repeat(257);
+        assert_eq!(name.chars().count(), 257);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 256 characters"
+        );
     }
 
     // ========================================================================
