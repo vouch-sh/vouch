@@ -1761,14 +1761,6 @@ rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digita
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the
 rfc7591#4.1.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
 rfc7591#4.2.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
-rfc7592#5#5675aca4	MUST	As the registration access tokens are relatively long-term credentials, and since the registration access token is a Bearer Token and acts as the sole authentic
-rfc7592#5#6dc34f4d	MUST	If a client is deprovisioned from a server, any outstanding registration access token for that client MUST be invalidated at the same time.
-rfc7592#5#9b8f8d0f	MUST	The authorization server MUST treat all such requests as if the registration access token was invalid by returning an HTTP 401 Unauthorized error, as described.
-rfc7592#5#a340e56d	MUST	When using TLS, the client MUST perform a TLS/SSL server certificate check, per RFC 6125 [RFC6125].
-rfc7592#5#a41ac113	MUST	Since requests to the client configuration endpoint result in the transmission of clear-text credentials (in the HTTP request and response), the authorization s
-rfc7592#5#b14b62a2	MUST	The server MUST support TLS 1.2 [RFC5246] and MAY support additional transport-layer security mechanisms meeting its security requirements.
-rfc7592#5#bb368785	SHOULD NOT	While the client secret can expire, the registration access token SHOULD NOT expire while a client is still actively registered.
-rfc7592#5#da65d890	MUST	Since possession of the registration access token authorizes the holder to potentially read, modify, or delete a client's registration (including its credential
 rfc7617#2.1#ac61c9b6	MUST	For the password, recipients MUST support all characters defined in the "OpaqueString" profile defined in Section 4.2 of [RFC7613].
 rfc7617#2.1#f5b6336e	MUST	For the user-id, recipients MUST support all characters defined in the "UsernameCasePreserved" profile defined in Section 3.3 of [RFC7613], with the exception o
 rfc7617#2.2#6aa53f19	SHOULD	A client SHOULD assume that resources identified by URIs with a prefix-match of the authentication scope are also within the protection space specified by the r
