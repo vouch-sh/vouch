@@ -449,6 +449,35 @@ pub(crate) async fn patch_user(
         }
     }
 
+    // Revoke access before persisting `active=false`. If revocation fails,
+    // abort — persisting the deactivation first would leave an inactive user
+    // with valid SSH certs, and an IdP retry won't re-enter this arm because
+    // `patched.deactivated` is gated on the true→false transition (the user
+    // is already `active=false` on retry). Revoking first matches
+    // `delete_user`'s order: an error leaves the user `active=true` and
+    // retryable, rather than inactive with live credentials.
+    if patched.deactivated {
+        tracing::info!(
+            "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
+            id
+        );
+        if crate::services::auth::revoke_user_access(
+            &state,
+            &id,
+            "User deactivated via SCIM",
+            "scim",
+        )
+        .await
+        .is_err()
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to revoke user access")),
+            )
+                .into_response();
+        }
+    }
+
     // Update user in database
     match db::update_scim_user(
         &state.store,
@@ -476,29 +505,6 @@ pub(crate) async fn patch_user(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ScimError::new(500, "Failed to update user")),
-            )
-                .into_response();
-        }
-    }
-
-    // If user was deactivated, invalidate all their sessions and revoke SSH certificates
-    if patched.deactivated {
-        tracing::info!(
-            "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
-            id
-        );
-        if crate::services::auth::revoke_user_access(
-            &state,
-            &id,
-            "User deactivated via SCIM",
-            "scim",
-        )
-        .await
-        .is_err()
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ScimError::new(500, "Failed to revoke user access")),
             )
                 .into_response();
         }

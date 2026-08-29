@@ -1062,3 +1062,228 @@ async fn test_scim_delete_user_returns_404_when_target_vanishes_mid_delete() {
             .join(", ")
     );
 }
+
+// ========================================================================
+// Deactivation side-effects: SSH certificate revocation & ordering
+// ========================================================================
+//
+// A SCIM PATCH that flips `active` true→false must revoke the user's
+// previously-issued SSH certificates, and must do so BEFORE persisting
+// `active=false`. Persisting the deactivation first and then failing to
+// revoke leaves an "inactive" user with live SSH certs, and an IdP retry
+// won't re-enter the revocation arm because `patched.deactivated` is gated on
+// the true→false transition. See `delete_user` for the equivalent
+// revoke-before-mutate ordering. Mirrors
+// `handlers::admin::members::test_deactivate_member_revokes_ssh_certificates`.
+
+/// Record an issued SSH cert for `user_id` so revocation has something to act on.
+async fn record_test_ssh_cert(state: &crate::AppState, user_id: &str, serial: u64) {
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        serial,
+        user_id,
+        "scim-test@example.com",
+        &["scim-test".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+}
+
+#[tokio::test]
+async fn test_patch_user_deactivate_revokes_ssh_certificates() {
+    // A SCIM PATCH deactivation must revoke all previously-issued SSH
+    // certificates — a deactivated user must not retain valid SSH access
+    // (RFC 7644 §3.5.2; the deactivation semantics invalidate credentials).
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-revoke-ssh", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create an active user.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "patch-revoke@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+
+    // Record an issued SSH cert so revocation has something to act on.
+    record_test_ssh_cert(&state, &user_id, 42_000_001).await;
+
+    // Pre-condition: one issued cert, zero revoked.
+    let issued_before = crate::db::get_issued_ssh_certificates_for_user(&state.store, &user_id)
+        .await
+        .expect("issued certs");
+    assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
+    let revoked_before = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("revoked certs");
+    assert!(revoked_before.is_empty(), "setup: no revocations yet");
+
+    // PATCH to deactivate (Replace op, the canonical IdP path).
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "deactivate should succeed: {body}");
+
+    // The user is now active=false...
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["active"], false, "PATCH must deactivate the user");
+
+    // ...and the issued cert must appear on the revocation list.
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("revoked certs");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "patch_user deactivation must revoke all SSH certificates"
+    );
+    assert_eq!(
+        revoked[0].serial, issued_before[0].serial,
+        "revoked serial must match the issued cert"
+    );
+    assert_eq!(revoked[0].user_id, user_id);
+
+    // The serial reports revoked via the KRL lookup path used at auth time.
+    assert!(
+        crate::db::is_ssh_certificate_revoked(&state.store, &issued_before[0].serial)
+            .await
+            .expect("revocation check"),
+        "revoked serial must be reported revoked by is_ssh_certificate_revoked"
+    );
+
+    // Re-GET to confirm persistence.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(fetched["active"], false, "deactivation must persist");
+}
+
+#[tokio::test]
+async fn test_patch_user_deactivate_revokes_before_persisting_active_false() {
+    // The fix reverses patch_user's order: revoke credentials BEFORE
+    // committing `active=false` (matching delete_user). This test pins that
+    // ordering by installing a `modify_test_hook` on the user document: at
+    // the moment `update_scim_user`'s `store.modify` runs (and
+    // `clear_user_github_refresh_token`'s modify inside revocation), the SSH
+    // certificate must ALREADY be revoked. With the buggy update-then-revoke
+    // order the modify would fire while the cert is still live, so this test
+    // fails on the pre-fix code.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const SERIAL_STR: &str = "42000002";
+
+    let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&target_slot);
+    let modify_fires: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let not_revoked: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let fires = Arc::clone(&modify_fires);
+    let notok = Arc::clone(&not_revoked);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+            let writer = writer.clone();
+            let doc_id = doc_id.to_string();
+            let slot = Arc::clone(&slot);
+            let fires = Arc::clone(&fires);
+            let notok = Arc::clone(&notok);
+            Box::pin(async move {
+                let target = slot.lock().expect("slot lock").clone();
+                let Some(target) = target else { return };
+                if doc_id != target {
+                    return;
+                }
+                fires.fetch_add(1, Ordering::Relaxed);
+                let revoked = crate::db::is_ssh_certificate_revoked(&writer, SERIAL_STR)
+                    .await
+                    .unwrap_or(false);
+                if !revoked {
+                    notok.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        }));
+    })
+    .await;
+
+    let token = create_test_scim_token(&state.store, "test-patch-order", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create an active user.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "patch-order@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+    *target_slot.lock().expect("slot lock") = Some(user_id.clone());
+
+    // Record an issued SSH cert so revocation has something to revoke.
+    record_test_ssh_cert(&state, &user_id, 42_000_002).await;
+
+    // Deactivate via PATCH. The hook observes whether the cert is revoked at
+    // the moment `update_scim_user`'s (and `clear_user_github_refresh_token`'s)
+    // `store.modify` runs on the user document.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "deactivate should succeed: {body}");
+
+    // The user-doc modify must have fired at least once during the request.
+    assert!(
+        modify_fires.load(Ordering::Relaxed) >= 1,
+        "the modify_test_hook must fire on the user document during PATCH"
+    );
+    // And at every user-doc modify the cert was already revoked — proving
+    // revocation ran before `update_scim_user`'s persist. The buggy
+    // update-then-revoke order would observe the cert as still live here.
+    assert_eq!(
+        not_revoked.load(Ordering::Relaxed),
+        0,
+        "SSH cert must be revoked BEFORE update_scim_user persists active=false; \
+         the buggy update-then-revoke order would leave the cert live during the modify"
+    );
+
+    // Sanity: the cert is revoked and the user is inactive after the request.
+    assert!(
+        crate::db::is_ssh_certificate_revoked(&state.store, SERIAL_STR)
+            .await
+            .expect("revocation check"),
+        "cert must be revoked after PATCH deactivation"
+    );
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["active"], false, "PATCH must deactivate the user");
+}
