@@ -1963,6 +1963,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         };
         store
             .insert(&mk_session(

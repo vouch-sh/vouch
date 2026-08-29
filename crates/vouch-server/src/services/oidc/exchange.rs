@@ -527,6 +527,7 @@ pub(crate) async fn exchange_token(
             // after the user rotates keys or changes orgs.
             hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
             org_domain: subject_session.org_domain.as_deref(),
+            source_code_hash: None,
         },
         proof,
     )

@@ -406,6 +406,7 @@ pub(crate) async fn exchange_fido2_assertion(
             authorization_details: ad_value.as_ref(),
             hardware_aaguid: authenticator.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         proof,
     )

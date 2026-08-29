@@ -936,6 +936,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
@@ -1657,6 +1658,7 @@ pub(crate) async fn browser_register_complete(
             authorization_details: None,
             hardware_aaguid: validated.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentComplete(registration_claim),

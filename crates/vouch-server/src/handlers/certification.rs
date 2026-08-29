@@ -180,6 +180,7 @@ pub(crate) async fn complete_login(
             // exercised by conformance suites; omit both.
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::CertificationBypass,

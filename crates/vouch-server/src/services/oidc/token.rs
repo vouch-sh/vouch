@@ -377,6 +377,10 @@ pub(crate) async fn exchange_authorization_code(
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            // Link this session to the consumed authorization code so replay
+            // detection (enforce_single_use_code above) can revoke only this
+            // code's tokens per RFC 6749 Section 10.5.
+            source_code_hash: Some(&code_hash),
         },
         proof,
     )
@@ -537,9 +541,9 @@ struct ResolvedGrants {
 /// RFC 6749 Section 10.5: Enforce single-use authorization codes.
 ///
 /// Atomically consumes the code; on success returns an [`crate::db::AuthCodeClaim`]
-/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes all tokens
-/// for the user the original code was issued to before returning the OAuth
-/// `invalid_grant` error.
+/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes only the tokens
+/// issued from **that** authorization code (RFC 6749 Section 10.5) before
+/// returning the OAuth `invalid_grant` error.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
@@ -548,28 +552,33 @@ async fn enforce_single_use_code(
     match db::try_consume_authorization_code(&state.store, code_hash).await {
         Ok(claim) => Ok(claim),
         Err(db::claim::ClaimError::AlreadyConsumed) => {
-            if let Ok(Some((user_id, _client_id))) =
-                db::get_consumed_code_owner(&state.store, code_hash).await
-            {
-                tracing::warn!(
-                    target: "security",
-                    client_id = %auth_code.client_id,
-                    "Authorization code replay detected — code already consumed"
-                );
-                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
-                    Ok(count) if count > 0 => {
-                        state.session_cache.invalidate_for_user(&user_id);
-                        tracing::warn!(
-                            target: "security",
-                            user_id = %user_id,
-                            revoked_count = count,
-                            "Revoked OAuth tokens due to authorization code replay"
-                        );
+            tracing::warn!(
+                target: "security",
+                client_id = %auth_code.client_id,
+                user_id = %auth_code.user_id,
+                "Authorization code replay detected — code already consumed"
+            );
+            // RFC 6749 Section 10.5: revoke the tokens previously issued based
+            // on **that** authorization code — not every session for the user.
+            // Sessions store `source_code_hash = code_hash` at issuance, so
+            // this targets exactly the compromised code's tokens and leaves
+            // the user's other sessions (other codes, FIDO2, browser login,
+            // …) intact.
+            match db::delete_sessions_for_code_replay(&state.store, code_hash).await {
+                Ok(token_hashes) if !token_hashes.is_empty() => {
+                    for token_hash in &token_hashes {
+                        state.session_cache.invalidate(token_hash);
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
-                    }
+                    tracing::warn!(
+                        target: "security",
+                        user_id = %auth_code.user_id,
+                        revoked_count = token_hashes.len(),
+                        "Revoked OAuth tokens issued from the replayed authorization code"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to revoke tokens during replay detection: {e}");
                 }
             }
             Err(ServiceError::oauth(

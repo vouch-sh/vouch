@@ -50,6 +50,7 @@ async fn test_user_cascade_delete() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
     )
     .await

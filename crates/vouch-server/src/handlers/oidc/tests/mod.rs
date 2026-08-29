@@ -20,6 +20,7 @@ mod fido2_grant;
 mod oidc_core;
 mod oidc_discovery;
 mod oidc_userinfo;
+mod replay_protection;
 mod rfc6749_authorize;
 mod rfc6749_token;
 mod rfc7009;
