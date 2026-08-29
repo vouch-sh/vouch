@@ -15,6 +15,7 @@
 use crate::db;
 use crate::db::documents::jwks_cache::{JWKS_STALE_MAX_AGE_SECONDS, JwksCacheDoc};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::egress::{BodyError, read_capped_text};
 
 /// Maximum JWKS response size (256KB).
 const MAX_JWKS_RESPONSE_SIZE: usize = 256 * 1024;
@@ -24,65 +25,40 @@ pub(crate) const JWKS_CACHE_TTL_SECONDS: i64 = 3600;
 
 /// Per-request timeout for a JWKS fetch (seconds).
 ///
-/// `AppState::http_client` has no client-level timeout configured, so an
-/// unbounded request to a stalling `jwks_uri` server would hang the calling
-/// request indefinitely — including the token endpoint, which resolves this
-/// synchronously as part of authenticating a client. Applied per-request
-/// here rather than on the shared client.
+/// Tighter than the shared client's `SERVER_TOTAL` budget because the token
+/// endpoint resolves this synchronously while authenticating a client, so a
+/// stalling `jwks_uri` host holds a request slot for as long as the fetch runs.
+/// Applied per-request rather than on the shared client, which serves callers
+/// with more headroom.
 const JWKS_FETCH_TIMEOUT_SECONDS: u64 = 10;
 
-/// Read a JWKS response body, rejecting it as soon as it exceeds
-/// [`MAX_JWKS_RESPONSE_SIZE`].
+/// Read a JWKS response body under [`MAX_JWKS_RESPONSE_SIZE`], reporting
+/// failures in the token endpoint's vocabulary.
 ///
-/// Two checks cooperate so memory stays bounded no matter how the server
-/// frames the body:
-///
-/// 1. A pre-read `Content-Length` rejection — a sized response advertising more
-///    than the cap is refused without buffering a single byte of it.
-/// 2. An incremental, chunk-by-chunk cap while streaming. `content_length()` is
-///    `None` for `Transfer-Encoding: chunked` responses, so check #1 is skipped
-///    for them, and reading via `response.bytes().await` would collect the
-///    *entire* body into memory before a post-read size check could reject it —
-///    a memory-exhaustion vector for a hostile `jwks_uri` (`chunked`, no
-///    `Content-Length`, streaming until the fetch timeout). Polling
-///    [`reqwest::Response::chunk`] and aborting the moment the running length
-///    crosses the cap bounds memory to `MAX_JWKS_RESPONSE_SIZE` plus one frame,
-///    whatever the transport or attacker bandwidth.
-async fn read_capped_body(mut response: reqwest::Response) -> ServiceResult<String> {
-    // Sized responses: refuse before any body I/O.
-    if let Some(len) = response.content_length()
-        && len > MAX_JWKS_RESPONSE_SIZE as u64
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS response exceeds maximum size (256KB)",
-        ));
-    }
-
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            format!("Failed to read JWKS response: {e}"),
-        )
-    })? {
-        // Reject *before* extending so a chunk that already busts the cap is
-        // never copied in; `saturating_add` keeps this panic-free arithmetic.
-        if body.len().saturating_add(chunk.len()) > MAX_JWKS_RESPONSE_SIZE {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "JWKS response exceeds maximum size (256KB)",
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    String::from_utf8(body).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS response is not valid UTF-8",
-        )
-    })
+/// The bounded read itself lives in [`crate::infra::egress`], which streams the
+/// body and aborts the moment the running length crosses the cap — a
+/// `Content-Length` check alone would not do, because `content_length()` is
+/// `None` for a `Transfer-Encoding: chunked` response and a hostile `jwks_uri`
+/// can stream until the fetch timeout (issue #1105). This binds that reader to
+/// this endpoint's cap and maps its errors onto `invalid_client`, whose
+/// descriptions RFC 6749 Section 5.2 addresses to the client developer and so
+/// stay ASCII English.
+async fn read_jwks_body(response: reqwest::Response) -> ServiceResult<String> {
+    read_capped_text(response, MAX_JWKS_RESPONSE_SIZE)
+        .await
+        .map_err(|e| {
+            let description = match e {
+                BodyError::TooLarge { .. } => {
+                    "JWKS response exceeds maximum size (256KB)".to_string()
+                }
+                BodyError::NotUtf8 => "JWKS response is not valid UTF-8".to_string(),
+                BodyError::Transport { source } => {
+                    format!("Failed to read JWKS response: {source}")
+                }
+                BodyError::Json { source } => format!("Failed to read JWKS response: {source}"),
+            };
+            ServiceError::oauth(OAuthErrorCode::InvalidClient, description)
+        })
 }
 
 /// Fetch a JWKS document from a remote URI.
@@ -134,12 +110,12 @@ async fn fetch_jwks(
     }
 
     // Enforce the response size cap while streaming the body via
-    // [`read_capped_body`]. `response.bytes().await` would buffer the whole
+    // [`read_jwks_body`]. `response.bytes().await` would buffer the whole
     // response before a size check could reject it; for `Transfer-Encoding:
     // chunked` the `Content-Length` is `None`, so the incremental chunk check
     // inside the helper is what bounds memory — see
     // `test_chunked_oversize_aborts_during_streaming`.
-    read_capped_body(response).await
+    read_jwks_body(response).await
 }
 
 /// Fetch a JWKS from `uri` and write it to the cache under `parent_id`.
@@ -453,7 +429,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// response with full manual control over framing (`Transfer-Encoding`,
     /// `Content-Length`) and timing.
     ///
-    /// [`read_capped_body`] only sees the [`reqwest::Response`] after TLS
+    /// [`read_jwks_body`] only sees the [`reqwest::Response`] after TLS
     /// termination, so plain HTTP on loopback exercises the same body-read path
     /// a remote `jwks_uri` reaches — and lets the tests assert streaming and
     /// early-abort behaviour deterministically, without HTTPS or a real host.
@@ -478,7 +454,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// accept it (no false positives below the cap), and `content_length()` is
     /// `None` — the very condition that defeated the old pre-read check.
     #[tokio::test]
-    async fn read_capped_body_accepts_small_chunked_response() {
+    async fn read_jwks_body_accepts_small_chunked_response() {
         let expected: Vec<u8> = br#"{"keys":[{"kty":"EC","kid":"k1"}]}"#.to_vec();
         let payload = expected.clone();
         let addr = spawn_raw_http_server(move |mut stream| async move {
@@ -508,7 +484,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
             None,
             "chunked responses advertise no Content-Length"
         );
-        let body = read_capped_body(response)
+        let body = read_jwks_body(response)
             .await
             .expect("a small chunked body is under the cap and must be accepted");
         assert_eq!(body.as_bytes(), expected.as_slice());
@@ -519,7 +495,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// withholds the body for 3s; a buffering reader would block on it, while
     /// the pre-read `Content-Length` check rejects in milliseconds.
     #[tokio::test]
-    async fn read_capped_body_rejects_oversized_content_length_without_reading_body() {
+    async fn read_jwks_body_rejects_oversized_content_length_without_reading_body() {
         const OVERSIZED_LEN: u64 = MAX_JWKS_RESPONSE_SIZE as u64 + 1;
         let addr = spawn_raw_http_server(|mut stream| async move {
             let head = format!(
@@ -537,7 +513,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         let start = std::time::Instant::now();
         let response = reqwest::get(url).await.expect("GET succeeds");
         assert_eq!(response.content_length(), Some(OVERSIZED_LEN));
-        let err = read_capped_body(response)
+        let err = read_jwks_body(response)
             .await
             .expect_err("an oversized Content-Length must be rejected up front");
         assert_invalid_client(&err, "JWKS response exceeds maximum size (256KB)");
@@ -605,7 +581,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
             None,
             "chunked responses advertise no Content-Length — the pre-read check is bypassed"
         );
-        let err = read_capped_body(response)
+        let err = read_jwks_body(response)
             .await
             .expect_err("an oversized chunked body must be rejected during streaming");
         assert_invalid_client(&err, "JWKS response exceeds maximum size (256KB)");
@@ -631,7 +607,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// `Content-Length` check does not apply so the streaming check alone
     /// decides.
     #[tokio::test]
-    async fn read_capped_body_accepts_body_at_the_cap_and_rejects_one_byte_more() {
+    async fn read_jwks_body_accepts_body_at_the_cap_and_rejects_one_byte_more() {
         const AT_CAP: usize = MAX_JWKS_RESPONSE_SIZE;
         const OVER_CAP: usize = MAX_JWKS_RESPONSE_SIZE + 1;
 
@@ -655,7 +631,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         .await;
         let url = format!("http://{addr}/jwks");
         let response = reqwest::get(url).await.expect("GET succeeds");
-        let body = read_capped_body(response)
+        let body = read_jwks_body(response)
             .await
             .expect("a chunked body of exactly 256 KB is at the cap and is accepted");
         assert_eq!(body.len(), AT_CAP);
@@ -680,7 +656,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         .await;
         let url = format!("http://{addr}/jwks");
         let response = reqwest::get(url).await.expect("GET succeeds");
-        let err = read_capped_body(response)
+        let err = read_jwks_body(response)
             .await
             .expect_err("a chunked body of 256 KB + 1 must be rejected");
         assert_invalid_client(&err, "JWKS response exceeds maximum size (256KB)");
@@ -727,7 +703,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// `Content-Length` streamed past the cap over a `tokio_rustls` connection.
     /// Goes through the full `fetch_jwks` pipeline — HTTPS-only check, SSRF
     /// egress guard (loopback permitted via `allow_loopback`), 2xx status
-    /// check, then `read_capped_body` — and asserts the streaming cap rejects
+    /// check, then `read_jwks_body` — and asserts the streaming cap rejects
     /// mid-stream after TLS termination, with memory bounded as on plaintext.
     #[tokio::test]
     async fn fetch_jwks_over_tls_rejects_oversized_chunked() {

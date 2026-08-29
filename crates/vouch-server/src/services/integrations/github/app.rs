@@ -19,6 +19,15 @@ use zeroize::Zeroizing;
 
 use crate::config::ServerConfig;
 
+/// Maximum size of a GitHub API response body (1 MB).
+///
+/// The largest bodies here are paginated installation and repository listings
+/// capped at 100 entries per page, which run to tens of kilobytes. `api.github.com`
+/// is a fixed host rather than an attacker-nominated one, so this is a bound on
+/// how much a compromised or impersonated API host could make the server
+/// allocate, not a fix for a reachable attack.
+const MAX_GITHUB_RESPONSE_SIZE: usize = 1024 * 1024;
+
 /// GitHub App ID (assigned when creating the app on github.com).
 #[derive(Debug, Clone, Copy)]
 pub struct GitHubAppId(pub u64);
@@ -302,7 +311,7 @@ impl GitHubApp {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::infra::egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -310,10 +319,12 @@ impl GitHubApp {
             );
         }
 
-        response
-            .json::<InstallationDetails>()
-            .await
-            .context("Failed to parse installation details response")
+        crate::infra::egress::read_capped_json::<InstallationDetails>(
+            response,
+            MAX_GITHUB_RESPONSE_SIZE,
+        )
+        .await
+        .context("Failed to read installation details response")
     }
 
     /// Get a scoped installation access token from GitHub.
@@ -353,7 +364,7 @@ impl GitHubApp {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::infra::egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -361,10 +372,10 @@ impl GitHubApp {
             );
         }
 
-        let token_response: InstallationTokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse installation token response")?;
+        let token_response: InstallationTokenResponse =
+            crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+                .await
+                .context("Failed to read installation token response")?;
 
         Ok(GitHubInstallationToken {
             token: token_response.token,
@@ -413,7 +424,7 @@ impl GitHubApp {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = crate::infra::egress::read_error_body(response).await;
                 bail!(
                     "GitHub API error ({}): {}",
                     status,
@@ -421,10 +432,10 @@ impl GitHubApp {
                 );
             }
 
-            let body: InstallationRepositoriesResponse = response
-                .json()
-                .await
-                .context("Failed to parse installation repositories response")?;
+            let body: InstallationRepositoriesResponse =
+                crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+                    .await
+                    .context("Failed to read installation repositories response")?;
 
             let count = body.repositories.len();
             all_repos.extend(body.repositories.into_iter().map(|r| r.name));
@@ -513,7 +524,7 @@ pub(crate) async fn list_user_accessible_installations(
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::infra::egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -521,10 +532,10 @@ pub(crate) async fn list_user_accessible_installations(
             );
         }
 
-        let body: UserInstallationsResponse = response
-            .json()
-            .await
-            .context("Failed to parse user installations response")?;
+        let body: UserInstallationsResponse =
+            crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+                .await
+                .context("Failed to read user installations response")?;
 
         let count = body.installations.len();
         all_installations.extend(body.installations);
@@ -572,7 +583,7 @@ pub(crate) async fn get_github_user(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::infra::egress::read_error_body(response).await;
         bail!(
             "GitHub API error ({}): {}",
             status,
@@ -580,10 +591,9 @@ pub(crate) async fn get_github_user(
         );
     }
 
-    response
-        .json::<GitHubUser>()
+    crate::infra::egress::read_capped_json::<GitHubUser>(response, MAX_GITHUB_RESPONSE_SIZE)
         .await
-        .context("Failed to parse GitHub user response")
+        .context("Failed to read GitHub user response")
 }
 
 /// Response from GitHub OAuth token endpoint.
@@ -650,7 +660,7 @@ pub(crate) async fn exchange_oauth_code(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::infra::egress::read_error_body(response).await;
         bail!(
             "GitHub OAuth error ({}): {}",
             status,
@@ -659,10 +669,10 @@ pub(crate) async fn exchange_oauth_code(
     }
 
     // GitHub may return 200 with an error in the body
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .context("Failed to parse OAuth token response")?;
+    let body: serde_json::Value =
+        crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+            .await
+            .context("Failed to read OAuth token response")?;
 
     if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
         let description = body
@@ -703,7 +713,7 @@ pub(crate) async fn refresh_oauth_token(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::infra::egress::read_error_body(response).await;
         bail!(
             "GitHub OAuth refresh error ({}): {}",
             status,
@@ -712,10 +722,10 @@ pub(crate) async fn refresh_oauth_token(
     }
 
     // GitHub may return 200 with an error in the body
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .context("Failed to parse OAuth refresh response")?;
+    let body: serde_json::Value =
+        crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+            .await
+            .context("Failed to read OAuth refresh response")?;
 
     if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
         let description = body

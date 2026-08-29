@@ -664,8 +664,9 @@ async fn fetch_discovery_invalid_json() {
     let err = fetch_discovery(&client, &server.uri()).await.unwrap_err();
 
     assert!(
-        err.to_string().contains("parse discovery"),
-        "expected parse error, got: {err}",
+        err.to_string().contains("parse response as JSON"),
+        "a non-JSON body must be reported as a parse failure, not a size or \
+         transport one, got: {err}",
     );
 }
 

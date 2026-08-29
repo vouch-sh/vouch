@@ -41,6 +41,11 @@ use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;
 
+/// Maximum size of an upstream IdP's token endpoint response (256 KB).
+///
+/// The body is a small JSON object whose largest member is an ID token.
+const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024;
+
 // ============================================================================
 // Templates
 // ============================================================================
@@ -664,7 +669,7 @@ pub(crate) async fn oidc_callback(
     };
 
     if !token_response.status().is_success() {
-        let error_text = token_response.text().await.unwrap_or_default();
+        let error_text = crate::infra::egress::read_error_body(token_response).await;
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
             title: Tr::new("error-heading").to_string(),
@@ -674,18 +679,20 @@ pub(crate) async fn oidc_callback(
         .into_response();
     }
 
-    let tokens: OidcTokenResponse = match token_response.json().await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to parse token response: {}", e);
-            return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
-                back_url: None,
+    let tokens: OidcTokenResponse =
+        match crate::infra::egress::read_capped_json(token_response, MAX_TOKEN_RESPONSE_SIZE).await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Failed to read token response: {}", e);
+                return ErrorTemplate {
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     // Verify ID token: signature, issuer, audience, nonce, email_verified,
     // and extract domain (OIDC Core Section 3.1.3.7).
