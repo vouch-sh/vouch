@@ -186,6 +186,11 @@ pub struct SessionCache {
     /// Bumped on every invalidation; prevents stale DB results from
     /// being inserted after a concurrent revocation.
     generation: AtomicU64,
+    /// Test-only fault-injection seam: token hashes whose next (and every)
+    /// lookup must return `Err`, simulating a store failure. Absent in
+    /// production builds (`#[cfg(test)]`), so it cannot affect runtime.
+    #[cfg(test)]
+    fault_hashes: Mutex<Vec<String>>,
 }
 
 struct CacheEntry {
@@ -226,6 +231,8 @@ impl SessionCache {
             ttl: Duration::from_secs(ttl_secs),
             max_capacity,
             generation: AtomicU64::new(0),
+            #[cfg(test)]
+            fault_hashes: Mutex::new(Vec::new()),
         }
     }
 
@@ -235,6 +242,15 @@ impl SessionCache {
         store: &DocumentStore,
         token_hash: &str,
     ) -> Result<Option<Session>> {
+        // Test-only fault injection: the hash was registered via
+        // [`Self::inject_fault`]; return a store-style `Err` so callers can
+        // exercise their DB-error propagation path without a real outage.
+        #[cfg(test)]
+        if self.is_faulted(token_hash) {
+            return Err(anyhow::anyhow!(
+                "injected store fault for token hash {token_hash}"
+            ));
+        }
         match self.get(token_hash) {
             CacheLookup::Hit(session) => return Ok(Some(session)),
             CacheLookup::NegativeHit => return Ok(None),
@@ -292,6 +308,28 @@ impl SessionCache {
     #[cfg(test)]
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Test-only: register a token hash whose lookups must fail with a store
+    /// error, so DB-error propagation in callers of
+    /// [`Self::get_session_by_token_hash`] can be exercised deterministically
+    /// without closing the pool (which would fault every earlier lookup too).
+    #[cfg(test)]
+    pub fn inject_fault(&self, token_hash: String) {
+        let Ok(mut faults) = self.fault_hashes.lock() else {
+            return;
+        };
+        if !faults.iter().any(|h| h == &token_hash) {
+            faults.push(token_hash);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_faulted(&self, token_hash: &str) -> bool {
+        let Ok(faults) = self.fault_hashes.lock() else {
+            return false;
+        };
+        faults.iter().any(|h| h == token_hash)
     }
 
     /// Insert a value only if no invalidation has occurred since

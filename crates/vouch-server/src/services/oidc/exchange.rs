@@ -345,18 +345,17 @@ pub(crate) async fn exchange_token(
 
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
-        if !matches!(
-            state
-                .session_cache
-                .get_session_by_token_hash(&state.store, &actor_token_hash)
-                .await,
-            Ok(Some(_))
-        ) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Actor token session not found or revoked",
-            ));
-        }
+        let _actor_session = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &actor_token_hash)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Actor token session not found or revoked",
+                )
+            })?;
 
         // Always load the actor user to check the active flag (#550).
         // Also use the canonical email from the DB when it is absent from the JWT.
