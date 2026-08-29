@@ -559,7 +559,18 @@ pub async fn validate_request_object(
 
     // 11. Parse prompt value
     let parsed_prompt = match claims.prompt.as_deref() {
-        Some(p) => Prompt::parse(p),
+        Some(p) => match Prompt::parse(p) {
+            Some(prompt) => Some(prompt),
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequestObject,
+                    format!(
+                        "Unsupported prompt value. Supported values: {}",
+                        Prompt::supported_values()
+                    ),
+                ));
+            }
+        },
         None => None,
     };
 
