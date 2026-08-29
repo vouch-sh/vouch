@@ -996,9 +996,12 @@ pub async fn create_test_session_with_audience(
 /// Create a test session backed by a non-hardware-verified access token.
 ///
 /// Mirrors the enrollment-bootstrap shape in `handlers/enroll.rs`: a real
-/// user, a persisted session, but `HardwareVerification::NotVerified`.
-/// Used to verify that paths gated on hardware attestation reject these
-/// sessions (e.g., the RFC 8693 ID-token fork).
+/// user, a persisted session, but `HardwareVerification::NotVerified` and
+/// `auth_time: None` (no FIDO2 authentication occurred; the session was
+/// minted right after upstream IdP sign-in). Used to verify that paths
+/// gated on hardware attestation reject these sessions (e.g., the RFC 8693
+/// ID-token fork), and that freshness-gated destructive operations fail
+/// closed instead of treating the IdP login time as recent FIDO2.
 pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
     use crate::services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
@@ -1020,7 +1023,8 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
+            // No FIDO2 authentication occurred — see `handlers/enroll.rs`.
+            auth_time: None,
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1049,7 +1053,9 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
 /// This reproduces the #451 token-laundering scenario: a re-enrollment
 /// bootstrap session for a user who already has a registered security
 /// key has `authenticator_id = Some(_)` and `hardware_verified = false`.
-/// Hardware-gated handlers must reject it.
+/// As in production, `auth_time` is `None` (no FIDO2 assertion happened on
+/// a direct browser sign-in), so the destructive-key freshness gate must
+/// reject this session. Hardware-gated handlers must reject it.
 pub async fn create_test_bootstrap_session_with_authenticator(
     state: &AppState,
     user_id: &str,
@@ -1077,7 +1083,8 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
+            // No FIDO2 authentication occurred — see `handlers/enroll.rs`.
+            auth_time: None,
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,

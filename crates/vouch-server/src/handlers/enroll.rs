@@ -925,6 +925,15 @@ pub(crate) async fn complete_enrollment_after_identity(
     // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
     // FIDO2 WebAuthn registration — do NOT claim AAL3 or FIDO2 amr here.
     // The proper FIDO2 claims are set later in browser_register_complete.
+    //
+    // `auth_time` is deliberately `None`: per the codebase-wide semantics it
+    // records when FIDO2 authentication occurred, not when the upstream IdP
+    // authenticated the person. No FIDO2 assertion happened here (the user is
+    // either a first-time enrollee or a returning user on a direct browser
+    // sign-in), so the destructive-key freshness gate in
+    // `handlers/enroll_keys::delete_key` — which anchors on
+    // `auth_time.unwrap_or(0)` — must see Unix epoch and step up, rather
+    // than accept the IdP login time as proof of recent FIDO2.
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         state,
@@ -937,7 +946,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(now.as_second()),
+            auth_time: None,
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,

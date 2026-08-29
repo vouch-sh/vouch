@@ -89,8 +89,12 @@ pub(crate) async fn delete_key(
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     let token = extract_session_from_cookie(&state, &jar).await?;
 
-    // Require a recent authentication for destructive key operations.
-    // Use auth_time (when FIDO2 occurred) if available, otherwise fall back to iat.
+    // Require a recent FIDO2 authentication for destructive key operations.
+    // `auth_time` records when FIDO2 occurred (set only on
+    // `HardwareVerification::Verified` sessions — enrollment bootstrap
+    // sessions have it absent). When absent, default to Unix epoch (always
+    // stale) so the freshness gate fails closed and forces a step-up, rather
+    // than accepting the IdP login time as proof of recent FIDO2.
     let auth_timestamp = token.auth_time.unwrap_or(0);
     key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
 

@@ -257,3 +257,68 @@ async fn delete_of_current_session_key_reports_revoked() {
         "deleting the session's own key must flag the current session revoked"
     );
 }
+
+#[tokio::test]
+async fn delete_rejects_bootstrap_session_without_fido2_auth_time() {
+    // Regression for the enrollment bootstrap `auth_time` bug: a bootstrap
+    // session minted after upstream IdP sign-in (no FIDO2 assertion) has
+    // `hardware_verified: false` and `auth_time: None`. The destructive-key
+    // freshness gate in `delete_key` anchors on `auth_time.unwrap_or(0)`,
+    // so it must fail closed (epoch → stale → step-up), rather than accept
+    // the IdP login time as proof of recent FIDO2 — otherwise an attacker
+    // who hijacked the victim's IdP session could delete the victim's keys
+    // (n-1) within the 60-second window without ever touching a key.
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("bootstrap-delete@example.com")
+        .await
+        .expect("create user");
+    // Two keys so the "last key" guard would otherwise permit deletion.
+    let kept = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create kept authenticator");
+    let doomed = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create doomed authenticator");
+
+    // The helper mirrors the (fixed) production bootstrap session: a
+    // returning user with an existing key gets `authenticator_id = Some(kept)`,
+    // `hardware_verified = false`, and `auth_time = None`.
+    let token = test_utils::create_test_bootstrap_session_with_authenticator(
+        &harness.state,
+        &user.id,
+        &user.email,
+        &kept,
+    )
+    .await;
+
+    let resp = delete_key(&harness, &token, &doomed).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "bootstrap session must not delete keys, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("insufficient_user_authentication"),
+        "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // Both keys must survive the rejected deletion.
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| k.get("id").and_then(Value::as_str).unwrap_or(""))
+        .collect();
+    assert!(
+        ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
+        "both keys must survive the rejected deletion, got ids: {ids:?}"
+    );
+}

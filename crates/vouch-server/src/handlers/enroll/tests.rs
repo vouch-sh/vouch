@@ -8,8 +8,8 @@
 
 use super::*;
 use crate::test_utils::{
-    create_test_authenticator, create_test_session, create_test_user, http_post_json, test_app,
-    test_app_state,
+    create_test_authenticator, create_test_session, create_test_user, http_delete_full,
+    http_get_full, http_post_json, test_app, test_app_state,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -446,6 +446,141 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
     assert!(
         approvals.is_empty(),
         "direct sign-in must not emit device_auth_approved"
+    );
+}
+
+// ── Regression: bootstrap session must NOT delete keys without FIDO2 ────
+//
+// The enrollment bootstrap session minted after upstream IdP sign-in (no
+// FIDO2 assertion) must carry `auth_time: None`. The destructive-key
+// freshness gate in `handlers::enroll_keys::delete_key` anchors on
+// `auth_time.unwrap_or(0)`; with the fix it sees Unix epoch and demands a
+// step-up. Before the fix the bootstrap session carried the IdP login
+// time, so an attacker who hijacked the victim's IdP session could sign
+// in directly via the browser, land on `/enroll/keys`, and delete the
+// victim's keys (n-1) within the 60-second window without ever touching a
+// security key.
+//
+// This drives the real `complete_enrollment_after_identity` handler for a
+// returning user with existing keys on a direct browser sign-in (no CLI),
+// extracts the issued session cookie, decodes the JWT to assert `auth_time`
+// is absent, then issues `DELETE /enroll/keys/{id}` through the router with
+// that cookie and asserts it is rejected with `insufficient_user_authentication`.
+#[tokio::test]
+async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
+    let (app, state) = test_app().await;
+    // Two keys: the "last key" guard refuses to delete the only key, so a
+    // deletion that *would* be allowed by the freshness gate needs a spare
+    // to reach the delete step at all.
+    let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+    let kept = create_test_authenticator(&state.store, &user.id).await;
+    let doomed = create_test_authenticator(&state.store, &user.id).await;
+
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bootstrap-delete-state", None).await;
+    let identity = IdentityResult {
+        email: "bootstrap-delete@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The exploit relies on landing on `/enroll/keys` (a direct web sign-in
+    // with no CLI waiting is NOT sent to `/login` for a FIDO2 assertion).
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location")
+        .to_string();
+    assert_eq!(
+        location, "/enroll/keys",
+        "direct returning-user sign-in must redirect to the keys page, got {location}"
+    );
+
+    // Extract the session cookie value the handler just issued.
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("Set-Cookie header must be present")
+        .to_str()
+        .expect("ascii Set-Cookie");
+    let cookie_value = set_cookie
+        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
+        .and_then(|(_, rest)| rest.split(';').next())
+        .expect("extract cookie value");
+
+    // G1: the bootstrap session JWT MUST NOT carry `auth_time` — no FIDO2
+    // authentication occurred on this direct IdP sign-in.
+    let jwt_payload = decode_jwt_payload_claims(cookie_value);
+    assert!(
+        matches!(
+            jwt_payload.get("auth_time"),
+            None | Some(serde_json::Value::Null)
+        ),
+        "bootstrap session must not carry auth_time (no FIDO2 occurred): {jwt_payload}"
+    );
+    // The session is also not hardware-verified (sanity-check the shape).
+    assert_eq!(
+        jwt_payload
+            .get("hardware_verified")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "bootstrap session hardware_verified must be false: {jwt_payload}"
+    );
+
+    // Drive DELETE /enroll/keys/{doomed} through the router with the cookie.
+    let cookie_header = format!("{}={}", vouch_common::SESSION_COOKIE_NAME, cookie_value);
+    let resp = http_delete_full(
+        &app,
+        &format!("/enroll/keys/{doomed}"),
+        &[("Cookie", &cookie_header)],
+    )
+    .await;
+
+    // G2: the destructive-key freshness gate must fail closed — the
+    // bootstrap session has no recent FIDO2 auth_time, so step-up is
+    // required rather than letting the IdP login time authorize deletion.
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "bootstrap session must not be able to delete keys, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("insufficient_user_authentication"),
+        "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // G3: the victim's keys survive. List via the same cookie and confirm
+    // both `kept` and `doomed` are still present (no partial deletion).
+    let resp = http_get_full(&app, "/enroll/keys/api", &[("Cookie", &cookie_header)]).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "list keys failed: {}",
+        resp.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| {
+            k.get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        })
+        .collect();
+    assert!(
+        ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
+        "both keys must survive the rejected deletion, got ids: {ids:?}"
     );
 }
 

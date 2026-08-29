@@ -452,4 +452,24 @@ mod tests {
             "a refused cross-user delete must leave the key in place"
         );
     }
+
+    /// Epoch (0) is the value `delete_key` feeds to the freshness gate when
+    /// `auth_time` is absent — i.e. an enrollment bootstrap session that
+    /// never performed FIDO2 (`auth_time.unwrap_or(0)`). It must fail closed
+    /// so the gate demands a step-up instead of treating a no-FIDO2 session
+    /// as freshly authenticated.
+    #[test]
+    fn test_require_fresh_timestamp_epoch_is_rejected() {
+        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired for epoch (auth_time absent), got: {err:?}"
+        );
+    }
 }
