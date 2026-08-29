@@ -26,6 +26,14 @@ pub mod timeouts {
     pub const SERVER_TOTAL: Duration = Duration::from_secs(15);
     /// Connection timeout for server-side API calls.
     pub const SERVER_CONNECT: Duration = Duration::from_secs(5);
+    /// Idle gap allowed between reads on a server-side response body.
+    ///
+    /// [`SERVER_TOTAL`] already caps how long a hostile host can hold a
+    /// connection, but it lets one that has gone silent sit on the slot for the
+    /// full budget. This bounds the gap between frames instead, so a stalled
+    /// peer is dropped promptly rather than at the total deadline — the outbound
+    /// counterpart to refusing a client that dribbles a request.
+    pub const SERVER_READ: Duration = Duration::from_secs(5);
 }
 
 /// Apply the process-wide DoH resolver to a builder, if one is installed.
@@ -114,7 +122,8 @@ pub fn server_client(
         .user_agent(user_agent)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::SERVER_TOTAL)
-        .connect_timeout(timeouts::SERVER_CONNECT);
+        .connect_timeout(timeouts::SERVER_CONNECT)
+        .read_timeout(timeouts::SERVER_READ);
 
     if let Some(pem_data) = extra_ca_certs {
         let certs = reqwest::Certificate::from_pem_bundle(pem_data)
