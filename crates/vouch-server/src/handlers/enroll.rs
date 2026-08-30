@@ -1179,7 +1179,7 @@ pub(crate) async fn browser_register_start(
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
-                "Invalid or expired session",
+                Tr::new("enroll-error-session-invalid").to_string(),
             )
         })?;
 
@@ -1225,7 +1225,7 @@ pub(crate) async fn browser_register_start(
                         ServiceError::api(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "db_error",
-                            "Failed to look up enrollment session",
+                            Tr::new("enroll-error-session-lookup-failed").to_string(),
                         )
                     })?;
             enrollment_session
@@ -1411,7 +1411,7 @@ pub(crate) async fn browser_register_complete(
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
-                "This registration link has already been used",
+                Tr::new("enroll-error-registration-link-used").to_string(),
             ));
         }
     };
@@ -1454,7 +1454,9 @@ pub(crate) async fn browser_register_complete(
             ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "attestation_failed",
-                format!("Attestation verification failed: {e}"),
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
             )
         })?;
 
@@ -1470,7 +1472,7 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "credential_already_registered",
-            "This security key is already registered",
+            Tr::new("enroll-error-key-already-registered").to_string(),
         ));
     }
 
@@ -1483,7 +1485,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cbor_error",
-            "Failed to serialize key",
+            Tr::new("enroll-error-key-serialize-failed").to_string(),
         )
     })?;
 
@@ -1576,7 +1578,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
-            "Invalid session hours",
+            Tr::new("enroll-error-invalid-session-hours").to_string(),
         )
     })?;
 
@@ -1592,7 +1594,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            "Failed to create session",
+            Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
     let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
@@ -1661,7 +1663,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "render_error",
-            "Failed to render template",
+            Tr::new("enroll-error-render-failed").to_string(),
         )
     })?;
 

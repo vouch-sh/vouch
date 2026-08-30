@@ -10,6 +10,7 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
@@ -140,18 +141,22 @@ pub(crate) async fn rename_key(
     // Validate key_id is a UUID before DB lookup
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
     // Validate name
     let name = new_name.trim();
     if name.is_empty() {
-        return Err(ServiceError::Validation("Name cannot be empty".to_string()));
+        return Err(ServiceError::Validation(
+            Tr::new("keys-error-name-empty").to_string(),
+        ));
     }
     if name.chars().count() > MAX_KEY_NAME_CHARS {
         return Err(ServiceError::Validation(
-            "Name must be 100 characters or less".to_string(),
+            Tr::new("keys-error-name-too-long")
+                .arg("max", MAX_KEY_NAME_CHARS.to_string())
+                .to_string(),
         ));
     }
 
@@ -218,7 +223,7 @@ pub(crate) async fn delete_key(
     // Validate key_id is a UUID before opening a transaction.
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
@@ -267,7 +272,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -295,7 +300,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -326,7 +331,7 @@ pub(crate) async fn delete_key(
         ServiceError::OccConflict => ServiceError::api(
             axum::http::StatusCode::CONFLICT,
             "conflict",
-            "Key deletion conflicted with a concurrent operation. Please retry.",
+            Tr::new("keys-error-delete-conflict").to_string(),
         ),
         other => other,
     })

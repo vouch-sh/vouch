@@ -7,6 +7,7 @@
 use crate::AppState;
 use crate::db;
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use crate::services::keys as key_svc;
 use axum::{
     Form, Json,
@@ -68,9 +69,12 @@ pub(crate) async fn rename_key_form(
             // A generic, user-safe message: the common failures (empty / too
             // long) are also constrained by the form, and we must not surface
             // internal error detail.
+            let message = Tr::new("keys-error-rename-failed")
+                .arg("max", vouch_common::MAX_KEY_NAME_CHARS.to_string())
+                .to_string();
             let jar = crate::handlers::admin::flash::set_err_at(
                 jar,
-                "Could not rename key. Please choose a name between 1 and 100 characters.",
+                &message,
                 crate::handlers::admin::flash::KEYS_PATH,
             );
             (jar, Redirect::to("/enroll/keys")).into_response()
