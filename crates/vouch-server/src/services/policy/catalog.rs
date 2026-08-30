@@ -18,8 +18,10 @@ use dogwood_language::Value;
 use serde::Deserialize;
 use vouch_common::posture::{DevicePosture, EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
 
-/// Maximum stored policy text length, shared by the form guard, the JSON
-/// validate endpoint, and the generator's `TooLong` check.
+/// Maximum stored policy text length in Unicode characters, shared by the
+/// form guard, the JSON validate endpoint, and the generator's `TooLong`
+/// check. Counted in characters rather than UTF-8 bytes so the limit matches
+/// the `maxlength` the textarea advertises and the number the error names.
 pub(crate) const MAX_POLICY_TEXT_LEN: usize = 4096;
 
 /// The temporal window cap in hours, mirroring Dogwood's default

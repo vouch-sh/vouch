@@ -105,7 +105,7 @@ impl IdpConfig {
 /// Validate that a provider slug matches `[a-z0-9-]{1,32}` and does not start
 /// or end with a hyphen.
 pub fn validate_provider_slug(slug: &str) -> Result<()> {
-    if slug.is_empty() || slug.len() > 32 {
+    if slug.is_empty() || slug.chars().count() > 32 {
         anyhow::bail!("Provider slug '{}' must be 1-32 characters long", slug);
     }
     if !slug

@@ -8,7 +8,8 @@ use inquire::{
     ui::{RenderConfig, Styled},
 };
 use vouch_common::{
-    DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
+    DeleteKeyResponse, KeyInfo, ListKeysResponse, MAX_KEY_NAME_CHARS, RenameKeyRequest,
+    RenameKeyResponse,
 };
 
 use crate::client::VouchClient;
@@ -361,7 +362,7 @@ pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result
     if new_name.is_empty() {
         bail!(tr!("keys-err-name-empty"));
     }
-    if new_name.len() > 100 {
+    if new_name.chars().count() > MAX_KEY_NAME_CHARS {
         bail!(tr!("keys-err-name-long"));
     }
 
