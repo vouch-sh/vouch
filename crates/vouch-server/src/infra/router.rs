@@ -8,9 +8,8 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, MatchedPath, State},
-    http::{HeaderValue, Request, StatusCode, header},
-    middleware::Next,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{delete, get, patch, post},
 };
@@ -210,7 +209,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         StatusCode::REQUEST_TIMEOUT,
         std::time::Duration::from_secs(30),
     ))
-    .layer(axum::middleware::from_fn(metrics_middleware))
+    .layer(axum::middleware::from_fn(metrics::metrics_middleware))
     .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
     .layer(request_id::propagate_request_id_layer())
     .layer(axum::middleware::from_fn(
@@ -907,26 +906,6 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         .layer(security_headers::build_ui_cors_layer(config)))
 }
 
-/// Middleware that records HTTP request metrics (counter + duration histogram).
-async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> impl IntoResponse {
-    let method = req.method().to_string();
-    let path = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map_or_else(|| req.uri().path().to_string(), |p| p.as_str().to_string());
-    let start = std::time::Instant::now();
-
-    let response = next.run(req).await;
-
-    let duration = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-    let labels = [("method", method), ("path", path), ("status", status)];
-    ::metrics::counter!("http_requests_total", &labels).increment(1);
-    ::metrics::histogram!("http_request_duration_seconds", &labels[..2]).record(duration);
-
-    response
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -937,6 +916,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
+    use axum::http::Request;
     use tower::ServiceExt;
 
     /// Handler that never completes, used to trigger `TimeoutLayer`.
@@ -982,7 +962,7 @@ mod tests {
                 StatusCode::REQUEST_TIMEOUT,
                 Duration::from_millis(50),
             ))
-            .layer(axum::middleware::from_fn(metrics_middleware));
+            .layer(axum::middleware::from_fn(metrics::metrics_middleware));
 
         let resp = router
             .oneshot(build_request("/slow-timeout-regression"))
@@ -1030,7 +1010,7 @@ mod tests {
             .find("TimeoutLayer::with_status_code")
             .expect("TimeoutLayer in build_app");
         let metrics_pos = build_app_src
-            .find("axum::middleware::from_fn(metrics_middleware)")
+            .find("axum::middleware::from_fn(metrics::metrics_middleware)")
             .expect("metrics_middleware in build_app");
         assert!(
             timeout_pos < metrics_pos,

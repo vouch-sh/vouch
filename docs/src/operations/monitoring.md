@@ -67,10 +67,20 @@ scrape_configs:
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `http_requests_total` | counter | `method`, `path`, `status` | Requests served. `path` is the matched route template (e.g. `/v1/keys/{id}`), not the raw URL, so cardinality stays bounded. |
+| `http_requests_total` | counter | `method`, `path`, `status` | Requests served. See the label note below. |
 | `http_request_duration_seconds` | histogram | `method`, `path` | Request latency. Not labelled by status. |
 | `vouch_auth_events_total` | counter | `event_type` | Authentication outcomes |
 | `vouch_credential_issuance_total` | counter | `type` | Credentials issued |
+
+The `method` and `path` labels are both drawn from fixed sets, so the number of series has a
+ceiling that no request can raise:
+
+- `path` is the matched route template (e.g. `/v1/keys/{id}`), never the raw request target. A
+  request that matches no route is labelled `<unmatched>` rather than by the target it asked for,
+  so 404 traffic contributes exactly one series per method/status pair. To see what is actually
+  being probed, read the request logs — every request logs its raw path on the `request` span.
+- `method` is one of the nine methods registered by RFC 9110. Any other token — HTTP permits any
+  token as a method — is labelled `OTHER`.
 
 `vouch_auth_events_total` uses these `event_type` values: `enrollment`, `browser_login_success`,
 `fido2_login_success`, `fido2_login_failure`, `authorization_code_success`.
