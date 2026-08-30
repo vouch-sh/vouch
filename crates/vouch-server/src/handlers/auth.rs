@@ -136,12 +136,20 @@ pub(crate) async fn logout(
         let token_hash = hash_token(token);
 
         // Look up session before deletion to capture user info for audit
-        let session_info = state
+        let session_info = match state
             .session_cache
             .get_session_by_token_hash(&state.store, &token_hash)
             .await
-            .ok()
-            .flatten();
+        {
+            Ok(info) => info,
+            Err(e) => {
+                // Don't silently drop the error: log it and proceed. The
+                // session is still deleted below; only the audit event's user
+                // context is lost.
+                tracing::warn!(error = %e, "Logout: session lookup for audit failed");
+                None
+            }
+        };
 
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => {

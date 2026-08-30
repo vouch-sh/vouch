@@ -421,7 +421,7 @@ async fn check_session_and_authorize(
             )
             .await
         }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
+        Ok(AuthorizationSessionState::NeedsAuth) => {
             if validated.has_prompt(Prompt::Silent) {
                 return resolved
                     .error_redirect(
@@ -443,6 +443,25 @@ async fn check_session_and_authorize(
                 par_to_consume.map(|par| par.request_uri),
             )
             .await
+        }
+        // A failed session lookup says nothing about whether the user is
+        // authenticated, so it is not `login_required`: that code would send
+        // the client into an interactive re-authentication loop against a
+        // store that is down. RFC 6749 Section 4.1.2.1 reserves `server_error`
+        // for "an unexpected condition that prevented it from fulfilling the
+        // request", precisely because a 500 cannot be delivered over a
+        // redirect. Sending the user to the login form is equally wrong — the
+        // pending-authorization write would fail against the same store.
+        Err(e) => {
+            tracing::error!(error = %e, "Session lookup failed during authorization");
+            resolved
+                .error_redirect(
+                    state,
+                    OAuthErrorCode::ServerError,
+                    "Session lookup failed",
+                    validated.state(),
+                )
+                .await
         }
     }
 }
@@ -1191,11 +1210,22 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             )
             .await
         }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
+        Ok(AuthorizationSessionState::NeedsAuth) => {
             tracing::warn!("User not authenticated after returning from login");
             AuthorizeDeniedTemplate {
                 client_name: resolved.client.name.clone(),
                 error_message: Tr::new("authorize-denied-authentication-failed"),
+            }
+            .into_response()
+        }
+        // A store failure is not a failed authentication. Telling the user
+        // their sign-in did not work invites them to retry a ceremony that
+        // was never the problem.
+        Err(e) => {
+            tracing::error!(error = %e, "Session lookup failed after returning from login");
+            AuthorizeDeniedTemplate {
+                client_name: resolved.client.name.clone(),
+                error_message: Tr::new("authorize-denied-server-error"),
             }
             .into_response()
         }
