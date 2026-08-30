@@ -6,6 +6,7 @@ use crate::crypto::hash_token;
 use crate::db;
 use crate::error::ServiceError;
 use crate::services::auth::ValidatedResourceToken;
+use crate::services::keys as key_svc;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -341,6 +342,20 @@ pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
 /// while `hardware_verified` is false.
 pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
 
+/// An access token whose session exercised the security key *recently*.
+///
+/// [`HardwareVerifiedToken`] asks whether a ceremony ever backed this session;
+/// this asks whether one happened within
+/// [`key_svc::KEY_DELETE_MAX_AGE_SECS`]. Deleting a key wants both, because a
+/// session lives for hours and a destructive action should rest on a touch
+/// from seconds ago.
+///
+/// Rejects with RFC 9470 `insufficient_user_authentication` (401) rather than
+/// the 403 `HardwareVerifiedToken` uses: the caller's correct response is to
+/// re-authenticate and retry, and the key-management page drives an inline
+/// FIDO2 step-up off exactly that challenge.
+pub(crate) struct SteppedUpToken(pub(crate) ValidatedResourceToken);
+
 /// Run the shared validation for both extractors.
 ///
 /// The path comes from `OriginalUri` so it is the path the client actually
@@ -447,6 +462,19 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
                 "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
             ));
         }
+        Ok(Self(token))
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_token_from_parts(parts, state).await?;
+        key_svc::require_recent_hardware_verification(&token)?;
         Ok(Self(token))
     }
 }

@@ -1123,6 +1123,78 @@ pub async fn create_test_bootstrap_session_with_authenticator(
 ///
 /// Used for step-up authentication tests (RFC 9470) where the auth_time
 /// relative to now determines whether the operation is allowed.
+/// Mint an access token in the shape issue #1114 exploited: `auth_time` fresh,
+/// `hardware_verified` false.
+///
+/// `HardwareVerification` no longer lets that combination be constructed —
+/// `NotVerified` has nowhere to put a timestamp — so the claims are signed
+/// directly rather than through `create_oauth_access_token`. That is the
+/// point: it produces a token this deployment's issuer cannot mint, which is
+/// what an older server's token, or a future regression, would put in front of
+/// the key handlers.
+pub async fn create_test_session_unverified_with_fresh_auth_time(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+) -> String {
+    use crate::services::auth::AccessTokenClaims;
+    use crate::services::oidc::ScopeSet;
+
+    let now = jiff::Timestamp::now().as_second();
+    let client_id = state.config().base_url.to_string();
+    let claims = AccessTokenClaims {
+        iss: client_id.clone(),
+        sub: user_id.to_string(),
+        aud: client_id.clone(),
+        exp: now.saturating_add(3600),
+        iat: now,
+        nbf: Some(now),
+        jti: uuid::Uuid::now_v7().to_string(),
+        client_id,
+        scope: Some(ScopeSet::all()),
+        email: Some(email.to_string()),
+        email_verified: Some(true),
+        // The defect: a session that ran no ceremony, carrying the instant one
+        // would have been recorded at.
+        hardware_verified: false,
+        auth_time: Some(now),
+        cnf: None,
+        act: None,
+        amr: None,
+        acr: None,
+    };
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the pre-fix-shaped access token");
+
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+    let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash: &crate::crypto::hash_token(&token),
+            authenticator_id: Some(auth_id),
+            expires_at,
+            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("Failed to persist the pre-fix-shaped session");
+
+    token
+}
+
 pub async fn create_test_session_with_iat(
     state: &AppState,
     user_id: &str,

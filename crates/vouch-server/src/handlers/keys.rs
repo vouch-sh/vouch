@@ -23,7 +23,7 @@ use vouch_common::{
 };
 
 use super::extractors::ValidJson;
-use super::session::AuthenticatedToken;
+use super::session::{AuthenticatedToken, SteppedUpToken};
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
 
@@ -126,9 +126,15 @@ impl RegistrationCompletion {
 /// Start registration - generate challenge and return to client
 /// (WebAuthn Level 2 Section 7.1, Step 1-3).
 ///
-/// Requires an OAuth access token (FAPI 2.0). Users must first enroll via OIDC
-/// (`vouch enroll`) to register their first key. After that, they can add
-/// additional keys via this endpoint after logging in with an existing key.
+/// Requires an OAuth access token (FAPI 2.0), but deliberately *not* a
+/// hardware-verified one. Registering a key is the recovery path: a user whose
+/// security key is lost or broken signs in through the upstream IdP and enrolls
+/// a replacement, so requiring possession of an existing key here would lock
+/// out exactly the people who need it. The compensating control is the
+/// `KeyRegistered` audit event, not a gate.
+///
+/// Key *deletion* is gated, because it is destructive and has no recovery
+/// argument — see `SteppedUpToken`.
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
@@ -419,7 +425,7 @@ pub(crate) async fn rename_key(
 /// Delete a registered key.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
@@ -431,12 +437,6 @@ pub(crate) async fn delete_key(
             "Key ID must be a valid UUID",
         ));
     }
-
-    // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
-    key_svc::require_fresh_timestamp(
-        token.auth_time.unwrap_or(0),
-        key_svc::KEY_DELETE_MAX_AGE_SECS,
-    )?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -1291,5 +1291,143 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_key_id");
+    }
+
+    // ========================================================================
+    // Step-up on key deletion (issue #1114)
+    //
+    // The cookie route is covered by the enroll_keys_api integration tests;
+    // these pin the Bearer route, which reaches the same `SteppedUpToken`
+    // extractor over the Authorization header.
+    // ========================================================================
+
+    /// RFC 9470 Section 3: the challenge names what was missing so the client
+    /// can re-authenticate and retry, which is what the keys page does.
+    fn assert_step_up_challenge(resp: &HttpResponse) {
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "body: {}", resp.body);
+        let challenge = resp
+            .headers
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.contains("insufficient_user_authentication"),
+            "expected an RFC 9470 challenge, got: {challenge}"
+        );
+    }
+
+    async fn surviving_keys(state: &AppState, user_id: &str) -> usize {
+        crate::db::get_authenticators_for_user(&state.store, user_id)
+            .await
+            .expect("list keys")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_bootstrap_session_over_bearer() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // The browser's cookie is a bearer token; presenting it over the
+        // Authorization header must not buy more than presenting it as a cookie.
+        let token =
+            create_test_bootstrap_session_with_authenticator(&state, &user.id, &user.email, &key_a)
+                .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "no key may be deleted without a recent assertion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_stale_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "stale-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // Asserted with a key, but long ago: possession is proven, recency is
+        // not, and deleting a key demands both.
+        let stale = jiff::Timestamp::now()
+            .as_second()
+            .saturating_sub(key_svc::KEY_DELETE_MAX_AGE_SECS.saturating_mul(10));
+        let token =
+            create_test_session_with_iat(&state, &user.id, &user.email, &key_a, stale).await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(surviving_keys(&state, &user.id).await, 2);
+    }
+
+    /// The gate must ask whether a ceremony happened rather than infer it from
+    /// a timestamp. `HardwareVerification` makes a fresh `auth_time` on an
+    /// unverified session unconstructible, so this signs one directly: if that
+    /// invariant ever breaks, or an older server's token arrives during a
+    /// rolling deploy, deletion must still refuse it.
+    #[tokio::test]
+    async fn test_delete_key_rejects_fresh_auth_time_without_hardware_verification() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "unverified-fresh@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_unverified_with_fresh_auth_time(
+            &state,
+            &user.id,
+            &user.email,
+            &key_a,
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "a fresh timestamp is not evidence a ceremony occurred"
+        );
+    }
+
+    /// The companion success case: a session that did assert, recently, still
+    /// deletes. Without this the three rejections above would pass even if the
+    /// extractor refused everything.
+    #[tokio::test]
+    async fn test_delete_key_allows_recent_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "fresh-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &key_a).await;
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{key_b}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(surviving_keys(&state, &user.id).await, 1);
     }
 }

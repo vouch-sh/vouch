@@ -19,7 +19,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{DeleteKeyResponse, ListKeysResponse};
 
-use super::session::extract_session_from_cookie;
+use super::session::{SteppedUpToken, extract_session_from_cookie};
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
@@ -87,21 +87,10 @@ pub(crate) async fn rename_key_form(
 /// Authentication is via session cookie.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
-
-    // Require a recent FIDO2 authentication for destructive key operations.
-    // `auth_time` records when FIDO2 occurred (set only on
-    // `HardwareVerification::Verified` sessions — enrollment bootstrap
-    // sessions have it absent). When absent, default to Unix epoch (always
-    // stale) so the freshness gate fails closed and forces a step-up, rather
-    // than accepting the IdP login time as proof of recent FIDO2.
-    let auth_timestamp = token.auth_time.unwrap_or(0);
-    key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
-
     // Whether we just deleted the key this very session is bound to (so the
     // browser knows to re-authenticate rather than reload into a dead session).
     let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());
