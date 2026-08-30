@@ -604,8 +604,10 @@ async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
 
 #[tokio::test]
 async fn test_rfc9470_unsupported_prompt_value_rejected() {
-    // OIDC Core Section 3.1.2.1: Unsupported prompt values should be rejected.
-    // Vouch supports "login", "none", and "consent".
+    // OIDC Core Section 3.1.2.1: for select_account, "If it cannot obtain an
+    // account selection choice made by the End-User, it MUST return an error,
+    // typically `account_selection_required`." Vouch authenticates a single
+    // account per session and has no account chooser, so it never can.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "prompt-bad@example.com").await;
@@ -644,8 +646,89 @@ async fn test_rfc9470_unsupported_prompt_value_rejected() {
         .expect("Valid UTF-8");
 
     assert!(
+        location.contains("error=account_selection_required"),
+        "prompt=select_account must return account_selection_required: {location}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1 permits either answer for a value outside the
+// defined set — "it MAY return an error or it MAY ignore it" — and Vouch
+// returns one, at the authorization endpoint as well as at PAR.
+#[tokio::test]
+async fn test_rfc9470_undefined_prompt_value_rejected() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "prompt-undefined@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&prompt=x_vendor_ext&state=undef",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Undefined prompt value must redirect with an error, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
         location.contains("error=invalid_request"),
-        "Unsupported prompt value must return invalid_request: {location}"
+        "Undefined prompt value must return invalid_request: {location}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1: prompt is a space-delimited list, and `login` in
+// that list means the same thing whether or not it arrives alone.
+#[tokio::test]
+async fn test_rfc9470_multiple_prompt_values_accepted_at_authorize() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "prompt-multi@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&prompt={}&state=multi",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            urlencoding::encode("login consent"),
+        ),
+        &[],
+    )
+    .await;
+
+    // No session, so the request proceeds to the login redirect rather than
+    // failing: what matters is that the list itself was not rejected.
+    let location = response
+        .headers
+        .get("Location")
+        .map(|l| l.to_str().expect("Valid UTF-8").to_string())
+        .unwrap_or_default();
+    assert!(
+        !location.contains("error="),
+        "prompt=\"login consent\" must not be rejected: {} {location}",
+        response.status
     );
 }
 
@@ -665,33 +748,19 @@ async fn test_rfc9470_acr_values_carried_to_token() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let acr = "urn:nist:authentication:assurance-level:aal3";
-    let scope_set = ScopeSet::parse("openid");
 
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             acr_values: Some(acr),
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code with acr_values");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -741,33 +810,19 @@ async fn test_rfc9470_unsatisfiable_acr_in_token_exchange_rejected() {
     // Issue a code with an ACR that Vouch cannot satisfy (simulates a bug
     // or bypass at the authorization endpoint).
     let bad_acr = "urn:nist:authentication:assurance-level:aal2";
-    let scope_set = ScopeSet::parse("openid");
 
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             acr_values: Some(bad_acr),
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(

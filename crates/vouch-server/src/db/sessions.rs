@@ -31,6 +31,11 @@ pub struct Session {
     pub hardware_aaguid: Option<String>,
     /// Organization domain (`hd` claim) at session creation time (snapshot).
     pub org_domain: Option<String>,
+    /// Hash of the single-use grant code (authorization code or device code)
+    /// that this session was issued from. `None` for grants with no such
+    /// code. Used by replay detection (RFC 6749 §10.5) to revoke only the
+    /// tokens issued from the replayed code.
+    pub source_code_hash: Option<String>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -47,6 +52,7 @@ impl From<Document<SessionDoc>> for Session {
             authorization_details: doc.data.authorization_details,
             hardware_aaguid: doc.data.hardware_aaguid,
             org_domain: doc.data.org_domain,
+            source_code_hash: doc.data.source_code_hash,
         }
     }
 }
@@ -66,6 +72,10 @@ pub struct CreateSessionParams<'a> {
     pub authorization_details: Option<&'a serde_json::Value>,
     pub hardware_aaguid: Option<&'a str>,
     pub org_domain: Option<&'a str>,
+    /// Hash of the single-use grant code that sourced this session. `None`
+    /// for grants with no single-use code; `Some` for the authorization-code
+    /// and device-code grants so replay detection can target this session.
+    pub source_code_hash: Option<&'a str>,
 }
 
 /// Create a new session.
@@ -83,6 +93,7 @@ pub async fn create_session(
         authorization_details: params.authorization_details.cloned(),
         hardware_aaguid: params.hardware_aaguid.map(String::from),
         org_domain: params.org_domain.map(String::from),
+        source_code_hash: params.source_code_hash.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -120,21 +131,39 @@ pub async fn delete_expired_sessions(store: &DocumentStore, _now: &str) -> Resul
     store.delete_expired(SessionDoc::DOC_TYPE).await
 }
 
-/// Delete OAuth access token sessions for a user.
+/// Revoke the OAuth access-token sessions issued from a single-use grant
+/// code, returning their token hashes so the caller can drop them from the
+/// session cache.
 ///
-/// Used by authorization code replay detection (RFC 6749 Section 10.5) to
-/// revoke all access tokens that may have been issued from a compromised code.
-pub async fn delete_oauth_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
-    // Find all sessions for this user, filter for OAuth access tokens, delete
-    let sessions = store.find_all::<SessionDoc>("user_id", user_id).await?;
-    let mut count: u64 = 0;
+/// RFC 6749 Section 10.5: "If the authorization server observes multiple
+/// attempts to exchange an authorization code for an access token, the
+/// authorization server SHOULD attempt to revoke all access tokens already
+/// granted based on the compromised authorization code." The same applies by
+/// extension to an RFC 8628 device code, which is likewise single-use.
+///
+/// Revocation is bounded by that sentence's "based on the compromised
+/// authorization code": this targets only sessions whose `source_code_hash`
+/// matches the replayed code, so a replay cannot log the victim out of
+/// unrelated applications. Sessions issued from other codes, and sessions from
+/// grants with no single-use code (FIDO2, browser login), are left intact.
+///
+/// Returns the token hashes of the deleted sessions in insertion order so
+/// the caller can invalidate each cache entry by key.
+pub async fn delete_sessions_for_code_replay(
+    store: &DocumentStore,
+    code_hash: &str,
+) -> Result<Vec<String>> {
+    let sessions = store
+        .find_all::<SessionDoc>("source_code_hash", code_hash)
+        .await?;
+    let mut token_hashes = Vec::with_capacity(sessions.len());
     for session in &sessions {
         if session.data.session_type == SessionPurpose::OAuthAccessToken {
             store.delete(&session.id).await?;
-            count = count.saturating_add(1);
+            token_hashes.push(session.data.token_hash.clone());
         }
     }
-    Ok(count)
+    Ok(token_hashes)
 }
 
 /// Delete all sessions for a user (for immediate session invalidation).
@@ -157,6 +186,11 @@ pub struct SessionCache {
     /// Bumped on every invalidation; prevents stale DB results from
     /// being inserted after a concurrent revocation.
     generation: AtomicU64,
+    /// Test-only fault-injection seam: token hashes whose next (and every)
+    /// lookup must return `Err`, simulating a store failure. Absent in
+    /// production builds (`#[cfg(test)]`), so it cannot affect runtime.
+    #[cfg(test)]
+    fault_hashes: Mutex<Vec<String>>,
 }
 
 struct CacheEntry {
@@ -197,6 +231,8 @@ impl SessionCache {
             ttl: Duration::from_secs(ttl_secs),
             max_capacity,
             generation: AtomicU64::new(0),
+            #[cfg(test)]
+            fault_hashes: Mutex::new(Vec::new()),
         }
     }
 
@@ -206,6 +242,15 @@ impl SessionCache {
         store: &DocumentStore,
         token_hash: &str,
     ) -> Result<Option<Session>> {
+        // Test-only fault injection: the hash was registered via
+        // [`Self::inject_fault`]; return a store-style `Err` so callers can
+        // exercise their DB-error propagation path without a real outage.
+        #[cfg(test)]
+        if self.is_faulted(token_hash) {
+            return Err(anyhow::anyhow!(
+                "injected store fault for token hash {token_hash}"
+            ));
+        }
         match self.get(token_hash) {
             CacheLookup::Hit(session) => return Ok(Some(session)),
             CacheLookup::NegativeHit => return Ok(None),
@@ -265,6 +310,28 @@ impl SessionCache {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Test-only: register a token hash whose lookups must fail with a store
+    /// error, so DB-error propagation in callers of
+    /// [`Self::get_session_by_token_hash`] can be exercised deterministically
+    /// without closing the pool (which would fault every earlier lookup too).
+    #[cfg(test)]
+    pub fn inject_fault(&self, token_hash: String) {
+        let Ok(mut faults) = self.fault_hashes.lock() else {
+            return;
+        };
+        if !faults.iter().any(|h| h == &token_hash) {
+            faults.push(token_hash);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_faulted(&self, token_hash: &str) -> bool {
+        let Ok(faults) = self.fault_hashes.lock() else {
+            return false;
+        };
+        faults.iter().any(|h| h == token_hash)
+    }
+
     /// Insert a value only if no invalidation has occurred since
     /// `expected_gen` was captured. The generation is re-checked under
     /// the lock so no invalidation can race between the check and the
@@ -320,6 +387,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         }
     }
 

@@ -712,6 +712,13 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub hardware_aaguid: Option<&'a str>,
     /// Organization domain (`hd` claim) at session creation time.
     pub org_domain: Option<&'a str>,
+    /// Hash of the single-use grant code that sourced this token. `None` for
+    /// grants with no single-use code (FIDO2, client_credentials, token
+    /// exchange, browser login, enrollment); `Some` for the authorization-code
+    /// and device-code grants. Recorded on the session so that replay
+    /// detection (RFC 6749 §10.5) can revoke only the tokens issued from the
+    /// replayed code rather than every session for the user.
+    pub source_code_hash: Option<&'a str>,
 }
 
 /// How an issued token is bound to the party that may present it.
@@ -905,6 +912,7 @@ pub(crate) async fn create_oauth_access_token(
             authorization_details: params.authorization_details,
             hardware_aaguid: params.hardware_aaguid,
             org_domain: params.org_domain,
+            source_code_hash: params.source_code_hash,
         },
     )
     .await
@@ -1287,6 +1295,30 @@ mod tests {
         assert_eq!(format!("{}", AuthMethod::HardwareKey), "hwk");
         assert_eq!(format!("{}", AuthMethod::Pin), "pin");
         assert_eq!(format!("{}", AuthMethod::UserPresence), "user");
+    }
+
+    /// The claim mapping the browser-enrollment regression test from #1124
+    /// used to assert end to end. Registration now requires an attestation
+    /// chain no test can mint, so the mapping is pinned here instead.
+    #[test]
+    fn test_verified_hardware_sets_amr_acr_and_flag() {
+        let verified = HardwareVerification::Verified;
+        assert!(verified.hardware_verified());
+        assert_eq!(verified.acr().as_deref(), Some(ACR_AAL3));
+        let amr = verified.amr().expect("Verified must set amr");
+        for expected in AuthMethod::all_fido2() {
+            assert!(
+                amr.contains(expected),
+                "amr must include {expected:?}, got {amr:?}"
+            );
+        }
+
+        // The negative half: without a FIDO2 ceremony none of the three are
+        // asserted, so a machine token cannot look like a hardware login.
+        let not_verified = HardwareVerification::NotVerified;
+        assert!(!not_verified.hardware_verified());
+        assert!(not_verified.amr().is_none());
+        assert!(not_verified.acr().is_none());
     }
 
     #[test]

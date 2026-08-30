@@ -6,20 +6,29 @@ describe controls you must opt into: authenticator policy and trusted proxies.
 
 ## Authenticator policy
 
-By default Vouch accepts **any hardware FIDO2 authenticator**. What it enforces is the
-*attestation format*, and only two are accepted: `packed` and `fido-u2f`. Everything else is
-rejected at registration with a 400 — `none` (software authenticators and browser-synced
-passkeys), the platform formats `tpm`, `apple`, `android-key` and `android-safetynet`
-(Windows Hello, Touch ID, Android), and any identifier not on that list. Format identifiers are
-matched case-sensitively, so `Packed` is not `packed`. The hardware guarantee therefore holds
-without any configuration.
+Vouch only issues credentials to a hardware security key it can prove is genuine, and there is no
+setting that relaxes that. Every registration must satisfy both checks below; the only thing you
+configure is whether to narrow it further to specific models.
 
-Two settings tighten it further.
+**Attestation format.** Only `packed` and `fido-u2f` are accepted. Everything else is rejected at
+registration with a 400 — `none` (software authenticators and browser-synced passkeys), the
+platform formats `tpm`, `apple`, `android-key` and `android-safetynet` (Windows Hello, Touch ID,
+Android), and any identifier not on that list. Format identifiers are matched case-sensitively, so
+`Packed` is not `packed`.
+
+**Attestation certificate.** The authenticator must present an `x5c` chain that validates against
+a pinned Yubico root. Self-attestation is rejected, and so is a chain that is present but does not
+verify — a self-signed certificate offered in `x5c` is refused exactly like no certificate at all.
+This is what makes the `hardware_verified` claim in issued tokens a statement Vouch can support,
+so it is not configurable.
+
+The practical consequence: **Vouch enrolls YubiKeys.** Authenticators from other vendors chain to
+their own vendor roots, which are not pinned, and are rejected at registration.
 
 ### Restricting which authenticator models may enroll
 
 ```bash
-# Any hardware authenticator (default)
+# Any authenticator with a valid attestation chain (default)
 VOUCH_ALLOWED_AAGUIDS=
 
 # Only FIPS-certified YubiKey models
@@ -37,35 +46,30 @@ maintained lists: `fips-only` matches FIPS-certified YubiKeys, `yubikey-5` match
 series (excluding the Security Key series and Bio FIDO Edition). Anything else is parsed as a
 comma-separated list of AAGUID UUIDs, and a malformed entry is a fatal startup error.
 
+The AAGUID is read from the `id-fido-gen-ce-aaguid` extension of the verified attestation
+certificate, never from the client-supplied `authData`. A chain that validates but carries no such
+extension proves the key is genuine without saying which model it is, so it yields no AAGUID and
+is rejected whenever a policy is configured.
+
 If your organization has a contractual FIPS requirement for the authenticator itself, `fips-only`
 is the control that enforces it. Nothing else in Vouch does.
 
 > Restricting AAGUIDs affects enrollment. Users who already enrolled a now-disallowed model keep
 > working; tighten the policy before rolling out keys, not after.
 
-### Requiring a full attestation certificate
+### What the certificate is checked against
 
-```bash
-VOUCH_REQUIRE_ATTESTATION_CERT=true
-```
-
-Rejects self-attestation, requiring authenticators to present a full attestation certificate chain.
-This is what makes the AAGUID trustworthy rather than self-asserted, so enable it alongside
-`VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction for compliance. Some authenticators
-only self-attest, so test with your fleet's hardware before enabling it broadly.
-
-Whenever a `packed` statement does carry a chain, the leaf is checked against the certificate
-requirements in WebAuthn Level 2 section 8.2.1 before its AAGUID is trusted, in addition to the
-chain terminating at a pinned Yubico root:
+The leaf is checked against the certificate requirements in WebAuthn Level 2 section 8.2.1, in
+addition to the chain terminating at a pinned Yubico root:
 
 - the certificate is X.509 version 3;
 - if it carries a Basic Constraints extension, `cA` is false;
 - if it carries the `id-fido-gen-ce-aaguid` extension, that extension is not marked critical and
   its value is the AAGUID wrapped in two OCTET STRINGs.
 
-A malformed AAGUID extension fails the registration rather than being skipped, so the
-certificate AAGUID is always cross-checked against the one in `authData`. There is no setting
-for any of this — the checks always run on the chain path.
+A malformed AAGUID extension fails the registration rather than being skipped. When `authData`
+also carries an AAGUID, the two are cross-checked and a disagreement fails the registration. There
+is no setting for any of this.
 
 ## Rate limiting
 
@@ -198,6 +202,7 @@ warning in a production log, treat it as an incident: see the
 - [ ] Client IP preserved if anything fronts the server — `VOUCH_TRUSTED_PROXIES` for a proxy that terminates TLS, or client IP preservation on a TCP-passthrough target group
 - [ ] `VOUCH_CERTIFICATION_TEST_TOKEN` **unset**
 - [ ] `VOUCH_METRICS_BEARER_TOKEN` set to a strong random value if metrics are scraped
-- [ ] `VOUCH_ALLOWED_AAGUIDS` / `VOUCH_REQUIRE_ATTESTATION_CERT` set if you have a hardware policy
+- [ ] `VOUCH_ALLOWED_AAGUIDS` set if you restrict enrollment to particular authenticator models
+      (verified attestation chains are always required and need no configuration)
 - [ ] TLS terminated in Vouch where possible; HSTS present either way
 - [ ] Database and S3 configuration encrypted at rest with least-privilege access

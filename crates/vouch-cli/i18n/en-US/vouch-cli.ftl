@@ -167,7 +167,7 @@ webauthn-err-not-passkey =
 fido2-pin-prompt-new = New PIN (minimum 8 characters):
 fido2-pin-prompt-confirm = Confirm PIN:
 fido2-pin-err-too-short = PIN must be at least 8 characters.
-fido2-pin-err-too-long = PIN must be at most 63 characters.
+fido2-pin-err-too-long = PIN must be at most 63 bytes when encoded as UTF-8.
 fido2-pin-err-mismatch = PINs do not match. Please try again.
 
 fido2-insert-prompt = Please insert your { -yubikey }...

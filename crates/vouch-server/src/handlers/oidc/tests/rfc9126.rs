@@ -555,10 +555,11 @@ async fn test_rfc9126_par_rejects_unsupported_response_mode() {
 
 #[tokio::test]
 async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
-    // OIDC Core Section 3.1.2.1: Unsupported prompt values must be rejected.
-    // Vouch supports "login", "none", and "consent"; the error description
-    // returned at the PAR endpoint must list all three supported values so
-    // developers are not misled into believing "consent" is unsupported.
+    // OIDC Core Section 3.1.2.1: a prompt value outside the defined set may be
+    // rejected — "it MAY return an error or it MAY ignore it" — and Vouch
+    // returns an error. Vouch honors "login", "none", and "consent"; the
+    // description must list all three so developers are not misled into
+    // believing "consent" is unsupported.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-badprompt@example.com").await;
@@ -572,7 +573,7 @@ async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
          &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
          &code_challenge_method=S256\
          &scope=openid\
-         &prompt=select_account",
+         &prompt=x_vendor_ext",
         client.client_id,
         urlencoding::encode("https://example.com/callback"),
     );
@@ -610,6 +611,111 @@ async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
         description.contains("consent"),
         "error_description should mention 'consent': {description}"
     );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_translates_account_selection_required() {
+    // RFC 9126 Section 2.3: "Since initial processing of the pushed
+    // authorization request does not involve resource owner interaction, error
+    // codes related to user interaction, such as `consent_required` defined by
+    // [OIDC], are never returned." `prompt=select_account` is rejected under
+    // OIDC Core Section 3.1.2.1, but the code that rejection carries at the
+    // authorization endpoint — `account_selection_required` — is one of those,
+    // so PAR reports it under the default this section names instead.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-selectaccount@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256\
+         &scope=openid\
+         &prompt=select_account",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prompt=select_account must be rejected: {response_body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_request",
+        "PAR must not answer with a user-interaction error code: {response_body}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1: prompt is a "Space-delimited, case-sensitive list
+// of ASCII string values", so asking for two behaviors at once is a valid
+// request rather than an unrecognized value.
+#[tokio::test]
+async fn test_rfc9126_par_accepts_multiple_prompt_values() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-multiprompt@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("login consent")).await;
+    assert!(
+        request_uri.starts_with("urn:ietf:params:oauth:request_uri:"),
+        "prompt=\"login consent\" must be accepted, got {request_uri}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1: "If this parameter contains none with any other
+// value, an error is returned."
+#[tokio::test]
+async fn test_rfc9126_par_rejects_none_combined_with_other_prompt_values() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-nonecombo@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256\
+         &scope=openid\
+         &prompt={}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+        urlencoding::encode("none login"),
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prompt=\"none login\" must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
 }
 
 #[tokio::test]

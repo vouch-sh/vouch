@@ -136,32 +136,14 @@ async fn test_rfc6749_successful_authorization_code_exchange() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -241,32 +223,17 @@ async fn test_rfc6749_token_response_no_error_field_on_success() {
 
     // The issue_oauth_access_token helper already validates success,
     // but let's explicitly verify via a fresh exchange.
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -313,32 +280,14 @@ async fn test_token_exchange_rejects_revoked_authenticator() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     // Revoke the authenticator between code issuance and code exchange.
     db::delete_authenticator(&state.store, &auth_id)
@@ -383,32 +332,17 @@ async fn test_rfc6749_token_client_secret_post_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue code");
+    .await;
 
     // Credentials in the form body (NO Authorization header).
     let body = format!(
@@ -1011,4 +945,121 @@ async fn test_rfc6749_another_grants_parameter_is_ignored() {
         body, baseline_body,
         "another grant's parameters must not change this grant's response"
     );
+}
+
+// ========================================================================
+// RFC 6749 Section 10.5 — Scope of replay revocation
+// ========================================================================
+
+/// Exchange an authorization code at `/oauth/token`. Returns `(status, body)`.
+async fn exchange_code(
+    app: &axum::Router,
+    client: &TestOAuthClient,
+    code: &str,
+) -> (StatusCode, String) {
+    http_post_form(
+        app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await
+}
+
+/// Exchange `code` and return the access token it issues.
+async fn token_from_code(app: &axum::Router, client: &TestOAuthClient, code: &str) -> String {
+    let (status, body) = exchange_code(app, client, code).await;
+    assert_eq!(status, StatusCode::OK, "code exchange failed: {body}");
+    serde_json::from_str::<serde_json::Value>(&body)
+        .expect("token response is JSON")["access_token"]
+        .as_str()
+        .expect("access_token present")
+        .to_string()
+}
+
+/// Probe a client-audience access token at `/oauth/userinfo`, which accepts it
+/// where `/v1/keys` would reject it on audience grounds. 200 means the session
+/// is live, 401 means it has been revoked.
+async fn userinfo_status(app: &axum::Router, token: &str) -> StatusCode {
+    let (status, _body) = http_get(
+        app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    status
+}
+
+/// RFC 6749 Section 10.5: "If the authorization server observes multiple
+/// attempts to exchange an authorization code for an access token, the
+/// authorization server SHOULD attempt to revoke all access tokens already
+/// granted based on the compromised authorization code."
+///
+/// `rfc9700::test_rfc9700_code_replay_revokes_the_tokens_it_issued` covers the
+/// revocation itself; this covers its scope. Only the replayed code's token is
+/// revoked, so a token from a second code and a token from a grant that has no
+/// single-use code both keep working.
+#[tokio::test]
+async fn test_rfc6749_code_replay_revocation_is_scoped_to_that_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "replay-scope@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code_a = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec {
+            nonce: Some("a"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_a = token_from_code(&app, &client, &code_a).await;
+    let code_b = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec {
+            nonce: Some("b"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_b = token_from_code(&app, &client, &code_b).await;
+    // A session from a grant with no single-use code. It carries the server's
+    // own audience, so `/v1/keys` is its probe.
+    let token_c = create_test_session(&state, &user.id, &user.email, &auth).await;
+
+    assert_eq!(
+        userinfo_status(&app, &token_b).await,
+        StatusCode::OK,
+        "token B must be live before the replay"
+    );
+    assert_token_alive(&app, &token_c, "token C").await;
+
+    let (status, body) = exchange_code(&app, &client, &code_a).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "replayed code A must be denied: {body}"
+    );
+
+    assert_eq!(
+        userinfo_status(&app, &token_a).await,
+        StatusCode::UNAUTHORIZED,
+        "the replayed code's own token must be revoked"
+    );
+    assert_eq!(
+        userinfo_status(&app, &token_b).await,
+        StatusCode::OK,
+        "a token issued from a different code must survive the replay"
+    );
+    assert_token_alive(&app, &token_c, "token C after the replay").await;
 }

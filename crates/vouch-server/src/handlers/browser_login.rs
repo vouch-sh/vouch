@@ -723,6 +723,7 @@ pub(crate) async fn browser_login_complete(
             authorization_details: None,
             hardware_aaguid: authenticator.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::BrowserLogin(challenge_claim),

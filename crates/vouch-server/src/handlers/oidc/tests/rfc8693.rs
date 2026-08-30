@@ -1481,3 +1481,242 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         "Error description must mention deactivated: {body}"
     );
 }
+
+/// RFC 6749 Section 10.5: "the authorization server SHOULD attempt to revoke
+/// all access tokens already granted based on the compromised authorization
+/// code." An exchanged token derives its authority from the subject token, so
+/// a token exchanged from an authorization-code token was granted based on
+/// that code and must be revoked when the code is replayed — otherwise an
+/// exchange launders a compromised code into a token that outlives it.
+#[tokio::test]
+async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "exchange-replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Redeem an authorization code, then exchange the resulting token.
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "code exchange failed: {body}");
+    let subject_token =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+    let exchanged =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    // A session from a grant with no single-use code must survive the replay.
+    let unrelated = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the replayed code must be denied"
+    );
+
+    for (token, label) in [
+        (&subject_token, "the subject token"),
+        (&exchanged, "the exchanged token"),
+    ] {
+        let (status, _) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{label} must be revoked with the replayed code"
+        );
+    }
+    assert_token_alive(&app, &unrelated, "a session from a grant with no code").await;
+}
+
+// ========================================================================
+// Actor token session lookup — error propagation parity with the subject
+// token lookup (issue #540 pattern).
+//
+// The actor session lookup must distinguish:
+//   * Ok(None) — session missing/revoked → `invalid_grant`
+//   * Err(_)   — store failure          → `ServiceError::Internal` (500)
+//
+// The `Ok(None)` arm is exercised here by issuing a real actor token and
+// deleting its backing session before the exchange. The `Err` arm is not
+// reachable end-to-end via `state.db.close()`: with the pool closed the
+// handler's client-auth lookup, the subject session lookup, and the
+// subject's (uncached) `db::get_user_by_id` all run before the actor
+// session lookup and would surface a 500 first. The isolated `Err`-arm
+// regression test uses the test-only `SessionCache::inject_fault` seam so
+// only the actor token hash faults while the subject path keeps the open
+// pool (see `test_rfc8693_actor_session_store_error_returns_internal`).
+// ========================================================================
+
+/// A validly-decoded actor token whose backing session has been removed
+/// must produce `invalid_grant` ("Actor token session not found or
+/// revoked"), not a 500. Exercises the `Ok(None)` arm of the actor session
+/// lookup — the same call site whose `Err` handling the fix tightens.
+#[tokio::test]
+async fn test_rfc8693_actor_session_not_found_returns_invalid_grant() {
+    let (app, state) = test_app().await;
+
+    // Subject (grantor) with a stored, valid access token.
+    let grantor = create_test_user(&state.store, "actor-notfound-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+
+    // Grantee (actor): issue a real token, then delete its backing session so
+    // the actor session lookup returns `Ok(None)`.
+    let grantee = create_test_user(&state.store, "actor-notfound-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let grantee_hash = crate::crypto::hash_token(&grantee_token);
+    state.session_cache.invalidate(&grantee_hash);
+    db::delete_session_by_token_hash(&state.store, &grantee_hash)
+        .await
+        .expect("delete actor session");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing actor session must return invalid_grant, got: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "missing actor session must report invalid_grant: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Actor token session not found or revoked")),
+        "error_description must name the actor session: {body}"
+    );
+}
+
+/// Regression: a *store failure* during the actor token session lookup must
+/// surface as `500 Internal Server Error`, not `invalid_grant`.
+///
+/// `state.db.close()` cannot isolate this branch: with the pool closed the
+/// handler's client-auth lookup, the subject session lookup, and the subject
+/// user lookup all run first and would return 500 via the subject path. Instead
+/// we use the test-only `SessionCache::inject_fault` seam to make the actor
+/// token hash fail with a store error while every other lookup uses the live,
+/// open pool.
+///
+/// Against the pre-fix `!matches!(.., Ok(Some(_)))` code this returns
+/// `invalid_grant` (the bug); against the fixed `.map_err(Internal)?.ok_or_else(InvalidGrant)?`
+/// code it returns 500. This is the only test that discriminates the fix from
+/// the bug.
+#[tokio::test]
+async fn test_rfc8693_actor_session_store_error_returns_internal() {
+    let (app, state) = test_app().await;
+
+    // Distinct subject (grantor) and actor (grantee) users.
+    let grantor = create_test_user(&state.store, "actor-fault-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+
+    let grantee = create_test_user(&state.store, "actor-fault-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    // Fault only the actor session lookup; the subject path keeps using the
+    // open pool and succeeds.
+    let grantee_hash = crate::crypto::hash_token(&grantee_token);
+    state.session_cache.inject_fault(grantee_hash);
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store failure during actor session lookup must return 500, not \
+         invalid_grant; got: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_grant",
+        "DB error must not be reported as invalid_grant: {body}"
+    );
+}

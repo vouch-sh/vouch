@@ -169,33 +169,47 @@ pub(crate) async fn device_code(
     }))
 }
 
-/// Revoke all OAuth sessions for the user that authorized a replayed device
-/// code, and drop them from the session cache.
+/// Revoke the OAuth sessions issued from a replayed device code, and drop
+/// them from the session cache.
+///
+/// RFC 6749 Section 10.5 asks the server to "revoke all access tokens already
+/// granted based on the compromised authorization code", which applies by
+/// extension to a device code: revocation is bounded to that code, not
+/// widened to every session for the user. `user_id` is used only for the
+/// security log; revocation targets sessions whose `source_code_hash` equals
+/// `device_code_hash`.
 ///
 /// The caller is already returning `invalid_grant` for the replay; a failed
 /// revocation must not mask that response, but it is a security event that
 /// must stay visible, so it is logged at error level rather than propagated.
-async fn revoke_sessions_for_device_replay(state: &AppState, user_id: &str) {
+async fn revoke_sessions_for_device_replay(
+    state: &AppState,
+    device_code_hash: &str,
+    user_id: Option<&str>,
+) {
     tracing::warn!(
         target: "security",
-        "Device code replay detected — revoking tokens for user"
+        user_id = ?user_id,
+        "Device code replay detected — revoking tokens issued from that code"
     );
-    match db::delete_oauth_sessions_for_user(&state.store, user_id).await {
-        Ok(count) => {
-            if count > 0 {
-                state.session_cache.invalidate_for_user(user_id);
+    match db::delete_sessions_for_code_replay(&state.store, device_code_hash).await {
+        Ok(token_hashes) => {
+            for token_hash in &token_hashes {
+                state.session_cache.invalidate(token_hash);
+            }
+            if !token_hashes.is_empty() {
                 tracing::warn!(
                     target: "security",
-                    user_id = %user_id,
-                    revoked_count = count,
-                    "Revoked tokens due to device code replay"
+                    user_id = ?user_id,
+                    revoked_count = token_hashes.len(),
+                    "Revoked tokens issued from the replayed device code"
                 );
             }
         }
         Err(e) => {
             tracing::error!(
                 target: "security",
-                user_id = %user_id,
+                user_id = ?user_id,
                 error = %e,
                 "Failed to revoke tokens after device code replay"
             );
@@ -286,10 +300,9 @@ pub(crate) async fn device_token(
         )),
         DeviceAuthState::Consumed { user_id } => {
             // RFC 8628 Section 3.5: Device code already used.
-            // Replay detected — revoke all tokens for the affected user.
-            if let Some(ref user_id) = user_id {
-                revoke_sessions_for_device_replay(&state, user_id).await;
-            }
+            // Replay detected — revoke only the tokens issued from this
+            // device code (RFC 6749 §10.5), not every session for the user.
+            revoke_sessions_for_device_replay(&state, &device_code_hash, user_id.as_deref()).await;
             Err(oauth_error(
                 StatusCode::BAD_REQUEST,
                 OAuthError::invalid_grant(),
@@ -403,14 +416,19 @@ pub(crate) async fn device_token(
             // code that was consumed earlier (replay) and a code that a
             // concurrent caller just consumed (race loser) — see
             // `try_consume_device_auth`. Match the authorization code flow's
-            // defensive "replay = full logout" posture and revoke all of the
-            // user's OAuth sessions in either case, attributed via the
-            // approval read at the top of the handler.
+            // precise-revocation posture (RFC 6749 §10.5): revoke only the
+            // tokens issued from **that** device code in either case,
+            // attributed via the approval read at the top of the handler.
             let (approval, device_claim) =
                 match db::try_consume_device_auth(&state.store, &device_code_hash).await {
                     Ok(consumed) => consumed,
                     Err(db::claim::ClaimError::AlreadyConsumed) => {
-                        revoke_sessions_for_device_replay(&state, &stale_approval.user_id).await;
+                        revoke_sessions_for_device_replay(
+                            &state,
+                            &device_code_hash,
+                            Some(&stale_approval.user_id),
+                        )
+                        .await;
                         return Err(oauth_error(
                             StatusCode::BAD_REQUEST,
                             OAuthError::invalid_grant(),
@@ -520,6 +538,10 @@ pub(crate) async fn device_token(
                     authorization_details: None,
                     hardware_aaguid: hardware_aaguid.as_deref(),
                     org_domain: org_domain.as_deref(),
+                    // Link this session to the consumed device code so replay
+                    // detection (revoke_sessions_for_device_replay above) can
+                    // revoke only this code's tokens per RFC 6749 §10.5.
+                    source_code_hash: Some(&device_code_hash),
                 },
                 TokenIssuanceProof {
                     grant: GrantProof::DeviceCode(device_claim),
@@ -1576,15 +1598,42 @@ mod tests {
     }
 
     /// End-to-end: when two concurrent `/oauth/token` device-code polls
-    /// race, the loser's response must trigger revocation of the user's
-    /// pre-existing session. Drives the HTTP handler, not just the db layer.
+    /// race, the loser's response must trigger revocation of the sessions
+    /// issued from **that** device code (RFC 6749 §10.5), while sessions the
+    /// user holds from other grants survive. Drives the HTTP handler, not
+    /// just the db layer.
     #[tokio::test]
     async fn test_device_code_race_loser_revokes_sessions_via_handler() {
         let (app, state, setup) = setup_race("handler").await;
 
+        // Seed an extra session issued from the same device code, so the
+        // race-loser's revocation has a code-targeted session to revoke.
+        // (The pre-existing session from setup_race has no source_code_hash.)
+        let code_session_token_hash = {
+            use aws_lc_rs::digest::{self, SHA256};
+            URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, b"race-code-session-token").as_ref())
+        };
+        crate::db::create_session(
+            &state.store,
+            &crate::db::CreateSessionParams {
+                user_id: "handler@example.com",
+                user_email: "handler@example.com",
+                token_hash: &code_session_token_hash,
+                authenticator_id: None,
+                expires_at: Timestamp::now().checked_add(Span::new().hours(1)).unwrap(),
+                session_type: crate::db::SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                source_code_hash: Some(&setup.device_code_hash),
+            },
+        )
+        .await
+        .expect("create code-targeted session");
+
         // Issue two concurrent token requests for the same device code.
         // Exactly one wins and gets an access token; the other gets a 400
-        // invalid_grant and — via the handler — revokes sessions.
+        // invalid_grant and — via the handler — revokes the code's sessions.
         let app_a = app.clone();
         let app_b = app.clone();
         let body_a = setup.body.clone();
@@ -1612,17 +1661,30 @@ mod tests {
             "race-loser must return invalid_grant"
         );
 
-        // After the race, the user's pre-existing session must be revoked.
-        // Note: the winner's freshly-issued session is ALSO revoked under the
-        // "replay = full logout" posture — matching the authorization code
-        // flow. So we only assert the pre-existing session is gone.
-        let session =
+        // RFC 6749 §10.5: the session issued from the replayed device code
+        // must be revoked by the race-loser handler path.
+        let code_session = crate::db::get_session_by_token_hash(
+            &state.store,
+            &code_session_token_hash,
+            Timestamp::now(),
+        )
+        .await
+        .expect("code-session lookup");
+        assert!(
+            code_session.is_none(),
+            "race-loser must revoke the session issued from the replayed device code"
+        );
+
+        // The user's pre-existing session (from a grant with no single-use
+        // code) must survive — a replay of one code must not log the user out
+        // of unrelated sessions.
+        let pre_existing =
             crate::db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
                 .await
-                .expect("session lookup");
+                .expect("pre-existing session lookup");
         assert!(
-            session.is_none(),
-            "race-loser handler path must revoke pre-existing sessions"
+            pre_existing.is_some(),
+            "race-loser must NOT revoke sessions unrelated to the replayed device code"
         );
     }
 

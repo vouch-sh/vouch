@@ -315,20 +315,15 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info)
-    let mut validated = validate_registration_attestation(
-        &req.attestation_object,
-        &config.allowed_aaguids,
-        config.require_attestation_cert,
-    )?;
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the browser path in `enroll.rs`, so the two
+    // agree by construction.
+    let validated =
+        validate_registration_attestation(&req.attestation_object, &config.allowed_aaguids)?;
 
-    // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation.is_some() {
-        validated.attestation = verified.attestation;
-    }
-
-    // Use server-verified AAGUID if available, fall back to client-provided
-    let aaguid = verified.aaguid.or(validated.aaguid);
+    // The AAGUID comes from the attestation certificate, never from the
+    // client-supplied authData that `verified.aaguid` reports.
+    let aaguid = validated.aaguid;
 
     // Use server-verified public key from authData
     let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
@@ -347,7 +342,7 @@ pub(crate) async fn register_complete(
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;
@@ -408,11 +403,11 @@ pub(crate) async fn rename_key(
         ));
     }
     let name = req.name.trim();
-    if name.is_empty() || name.len() > 256 {
+    if name.is_empty() || name.chars().count() > vouch_common::MAX_KEY_NAME_CHARS {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "Key name must be between 1 and 256 characters",
+            "Key name must be between 1 and 100 characters",
         ));
     }
 
@@ -1162,6 +1157,107 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_name");
+    }
+
+    // The guard measures Unicode characters, not UTF-8 bytes, so a multibyte
+    // name is bounded by the same number the error message names.
+    #[tokio::test]
+    async fn test_rename_key_accepts_multibyte_name_within_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjk@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // 90 CJK characters = 270 UTF-8 bytes: within the 100-character limit
+        // the handler and service share, so the rename succeeds end to end.
+        let name = "名".repeat(90);
+        assert_eq!(name.chars().count(), 90);
+        assert!(name.len() > 256);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "multibyte name within limits must be accepted: {resp_body}"
+        );
+    }
+
+    // The character-based guard still bounds multibyte names: a 101-character
+    // CJK name is rejected by the handler, before the service sees it.
+    #[tokio::test]
+    async fn test_rename_key_rejects_multibyte_name_exceeding_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjklong@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // 101 CJK characters = 303 bytes: one character over the cap.
+        let name = "名".repeat(101);
+        assert_eq!(name.chars().count(), 101);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    // The handler guard and the service limit are the same number, so no name
+    // clears the handler only to be rejected by the service under a different
+    // message. The range the error names is the range the endpoint accepts.
+    #[tokio::test]
+    async fn test_rename_key_rejects_name_over_shared_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamemidrange@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let name = "a".repeat(150);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
     }
 
     // ========================================================================

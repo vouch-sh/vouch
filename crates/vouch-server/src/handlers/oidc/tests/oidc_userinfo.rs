@@ -108,6 +108,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,

@@ -52,42 +52,6 @@ async fn token_exchange_with_dpop(
     .await
 }
 
-/// Issue an authorization code for `client`, ready to be redeemed at the
-/// token endpoint with a client assertion.
-async fn issue_code(
-    state: &std::sync::Arc<crate::AppState>,
-    user: &db::User,
-    auth_id: &str,
-    client: &TestOAuthClient,
-) -> String {
-    let scope_set = ScopeSet::parse("openid");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("issue authorization code")
-}
-
 /// Redeem `code` at the token endpoint, authenticating with `assertion`
 /// (RFC 7523 `private_key_jwt`).
 async fn redeem_code_with_assertion(
@@ -349,7 +313,17 @@ async fn test_rfc7515_crit_header_rejected_on_client_assertion() {
     });
     let plain = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
 
-    let code = issue_code(&state, &user, &auth_id, &client).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
     let assertion =
         client_assertion_with_header(&pkcs8, &client.client_id, &token_endpoint, &critical);
     let (status, body) = redeem_code_with_assertion(&app, &code, &assertion).await;
@@ -361,7 +335,17 @@ async fn test_rfc7515_crit_header_rejected_on_client_assertion() {
 
     // Control: the same assertion without `crit` authenticates the client and
     // the grant succeeds, so the rejection above is the critical header.
-    let code = issue_code(&state, &user, &auth_id, &client).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
     let assertion =
         client_assertion_with_header(&pkcs8, &client.client_id, &token_endpoint, &plain);
     let (status, body) = redeem_code_with_assertion(&app, &code, &assertion).await;
@@ -475,7 +459,17 @@ async fn test_rfc7515_header_supplied_key_material_is_not_a_key_source() {
         "x5c": [cert_b64],
     });
 
-    let code = issue_code(&state, &user, &auth_id, &client).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
     let assertion = client_assertion_with_header(
         &unregistered_pkcs8,
         &client.client_id,
@@ -494,7 +488,17 @@ async fn test_rfc7515_header_supplied_key_material_is_not_a_key_source() {
     // Control: the identical header, signed by the key the client did
     // register, authenticates. The four parameters are inert — they neither
     // supply a key nor reject one — so the failure above is the signing key.
-    let code = issue_code(&state, &user, &auth_id, &client).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
     let assertion = client_assertion_with_header(
         &registered_pkcs8,
         &client.client_id,

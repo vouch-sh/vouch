@@ -193,32 +193,14 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     // Issue an authorization code
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     // Exchange code with private_key_jwt client assertion
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
@@ -260,32 +242,17 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
     let fixed_jti = "replay-test-jti-12345";
 
     // First request: issue code and exchange with JWT assertion
-    let scope_set = ScopeSet::parse("openid");
-    let code1 = issue_authorization_code(
+    let code1 = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let assertion1 = build_client_assertion(
         &client.client_id,
@@ -341,32 +308,17 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build an expired assertion (iat and exp in the past)
     let now = jiff::Timestamp::now().as_second();
@@ -410,32 +362,17 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build assertion with wrong audience
     let assertion = build_client_assertion(
@@ -480,32 +417,17 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
     // Generate a different key pair (not the one registered with the client)
     let (wrong_pkcs8, _wrong_jwk) = generate_es256_signing_key();
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &wrong_pkcs8, None);
@@ -535,32 +457,17 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build assertion where iss != sub
     let now = jiff::Timestamp::now().as_second();
@@ -605,32 +512,17 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
@@ -901,32 +793,17 @@ async fn test_rfc7523_authorization_code_grant_accepts_non_fapi_jwt_without_jti(
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion =
@@ -1142,32 +1019,17 @@ async fn test_jwt_assertion_jti_concurrent_replay_authorization_code() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let fixed_jti = "race-ac-jti-12345";
@@ -1225,32 +1087,17 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
 
     // Seed an access token to use as subject_token via a one-shot
     // authorization_code exchange (single-use, unique JTI).
-    let scope_set = ScopeSet::parse("openid");
-    let seed_code = issue_authorization_code(
+    let seed_code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue seed code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let seed_assertion =
@@ -1437,32 +1284,17 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -1536,42 +1368,6 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
 // (private_key_jwt + DPoP-bound code, FAPI 2.0 sender-constraint check).
 // ========================================================================
 
-/// Issue an authorization code with optional dpop_jkt binding.
-async fn pkjwt_issue_code(
-    state: &std::sync::Arc<crate::AppState>,
-    client_id: &str,
-    user: &crate::db::User,
-    auth_id: &str,
-    dpop_jkt: Option<&str>,
-) -> String {
-    let scope = ScopeSet::parse("openid email");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("issue code")
-}
-
 /// Compute the RFC 7638 JWK thumbprint (jkt) for a DPoP JWK with EC P-256 members.
 fn pkjwt_dpop_jkt(jwk: &serde_json::Value) -> String {
     let canonical = serde_json::json!({
@@ -1600,7 +1396,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_succeeds() {
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
 
     // Authorization code carries the dpop_jkt binding.
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Acquire DPoP nonce via the throwaway proof.
     let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
@@ -1662,7 +1468,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_grant_jkt_mismatch
     // Authorization is bound to key A's jkt.
     let (_key_a, jwk_a) = generate_dpop_key_pair();
     let jkt_a = pkjwt_dpop_jkt(&jwk_a);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt_a)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Token request signs with key B.
     let (key_b, jwk_b) = generate_dpop_key_pair();
@@ -1719,7 +1535,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_use_dpop_nonce() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = pkjwt_dpop_jkt(&dpop_jwk);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     // Proof carries no nonce — server must reject with use_dpop_nonce.
@@ -1760,7 +1586,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_client_bad_jwt() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = pkjwt_dpop_jkt(&dpop_jwk);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
@@ -1830,7 +1666,14 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
     )
     .await;
 
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let issuer = &state.config().base_url;
     let assertion = build_client_assertion(&client.client_id, issuer, &pkcs8_bytes, None);
 

@@ -41,6 +41,11 @@ use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;
 
+/// Maximum size of an upstream IdP's token endpoint response (256 KB).
+///
+/// The body is a small JSON object whose largest member is an ID token.
+const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024;
+
 // ============================================================================
 // Templates
 // ============================================================================
@@ -664,7 +669,7 @@ pub(crate) async fn oidc_callback(
     };
 
     if !token_response.status().is_success() {
-        let error_text = token_response.text().await.unwrap_or_default();
+        let error_text = crate::infra::egress::read_error_body(token_response).await;
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
             title: Tr::new("error-heading").to_string(),
@@ -674,18 +679,20 @@ pub(crate) async fn oidc_callback(
         .into_response();
     }
 
-    let tokens: OidcTokenResponse = match token_response.json().await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to parse token response: {}", e);
-            return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
-                back_url: None,
+    let tokens: OidcTokenResponse =
+        match crate::infra::egress::read_capped_json(token_response, MAX_TOKEN_RESPONSE_SIZE).await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Failed to read token response: {}", e);
+                return ErrorTemplate {
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     // Verify ID token: signature, issuer, audience, nonce, email_verified,
     // and extract domain (OIDC Core Section 3.1.3.7).
@@ -936,6 +943,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
@@ -1407,14 +1415,13 @@ pub(crate) async fn browser_register_complete(
         expires_at: _,
     } = checked;
 
-    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the CLI path in `keys.rs`, so the two agree by
+    // construction.
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &state.config().allowed_aaguids,
-        state.config().require_attestation_cert,
     )?;
-
-    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
 
     // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
@@ -1476,45 +1483,6 @@ pub(crate) async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
-    // x5c attestation chain validation (browser enrollment).
-    // The browser enrollment path uses webauthn-rs for verification, so we
-    // additionally validate the x5c chain here for attestation_verified status.
-    let mut validated = validated;
-    if let Some(x5c_certs) = x5c_certs {
-        match crate::crypto::attestation_chain::validate_attestation_chain(
-            &x5c_certs,
-            validated.aaguid.as_deref(),
-        ) {
-            Ok(chain_result) => {
-                validated.attestation = Some(chain_result);
-                tracing::info!(
-                    attestation_verified = true,
-                    "Browser enrollment: x5c chain validated"
-                );
-            }
-            Err(e) => {
-                if state.config().require_attestation_cert {
-                    tracing::warn!(
-                        "Browser enrollment: x5c chain validation \
-                         failed (fatal, require_attestation_cert=true): {e}"
-                    );
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_chain_invalid",
-                        "Attestation certificate chain could not be \
-                         verified against trusted roots. Only genuine \
-                         hardware authenticators with valid attestation \
-                         chains are accepted.",
-                    ));
-                }
-                tracing::warn!(
-                    "Browser enrollment: x5c chain validation \
-                     failed (non-fatal): {e}"
-                );
-            }
-        }
-    }
-
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
@@ -1528,7 +1496,7 @@ pub(crate) async fn browser_register_complete(
             public_key: &public_key_cbor,
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;
@@ -1657,6 +1625,7 @@ pub(crate) async fn browser_register_complete(
             authorization_details: None,
             hardware_aaguid: validated.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentComplete(registration_claim),

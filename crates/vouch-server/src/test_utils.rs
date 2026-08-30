@@ -114,7 +114,6 @@ pub fn test_config() -> ServerConfig {
         aws_use_fips_endpoint: None,
         jwt_assertion_max_lifetime_seconds: 300,
         allowed_aaguids: vouch_common::AaguidPolicy::Any,
-        require_attestation_cert: false,
         log_format: crate::config::LogFormat::Text,
         trusted_proxies: Vec::new(),
         metrics_bearer_token: None,
@@ -917,6 +916,7 @@ pub async fn create_test_session(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -977,6 +977,7 @@ pub async fn create_test_session_with_audience(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1025,6 +1026,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1081,6 +1083,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1134,6 +1137,7 @@ pub async fn create_test_session_with_iat(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1187,6 +1191,7 @@ pub async fn create_test_session_for_client(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1246,6 +1251,7 @@ pub async fn create_test_session_with_dpop(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1299,6 +1305,7 @@ pub async fn create_test_session_with_mtls(
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
