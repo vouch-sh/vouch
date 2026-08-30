@@ -28,27 +28,137 @@ pub enum DerivedComponent {
     Path,
     /// `@query` — the query component of the target URI.
     Query,
-    /// `@query-param` — a specific query parameter (requires `name` param).
-    QueryParam { name: String },
+    /// `@query-param` — a single query parameter, named by the `;name`
+    /// parameter (RFC 9421 §2.2.8).
+    QueryParam,
     /// `@status` — the HTTP response status code.
     Status,
 }
 
-/// Parameters that can be applied to a component identifier.
+/// A parameter on a component identifier.
+///
+/// RFC 9421 §2.1 and §2.2.8 define the complete set. §2.5 requires an error for
+/// "a parameter that is unknown or does not apply to the component identifier
+/// to which it is attached", so anything outside this enum has no
+/// representation — [`ComponentIdentifier::from_sfv_item`] rejects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ComponentParam {
+    /// `;sf` — serialize the field value with the strict Structured Field
+    /// rules (§2.1.1).
+    Sf,
+    /// `;key="…"` — select one member of a Dictionary field (§2.1.2).
+    Key(String),
+    /// `;name="…"` — select one query parameter, for `@query-param` (§2.2.8).
+    Name(String),
+    /// `;bs` — wrap each field value as a Byte Sequence (§2.1.3).
+    Bs,
+    /// `;req` — resolve against the request that triggered a response (§2.4).
+    Req,
+    /// `;tr` — take the value from the trailers rather than the headers (§2.1.4).
+    Tr,
+}
+
+impl ComponentParam {
+    /// The SFV key this parameter serializes under.
+    fn key_name(&self) -> &'static str {
+        match self {
+            Self::Sf => "sf",
+            Self::Key(_) => "key",
+            Self::Name(_) => "name",
+            Self::Bs => "bs",
+            Self::Req => "req",
+            Self::Tr => "tr",
+        }
+    }
+}
+
+/// The parameters on a component identifier, in the order the signer wrote them.
+///
+/// Order is load-bearing. RFC 9421 §2.5 step 2.2 puts the serialized component
+/// identifier — parameters included — into the signature base, and RFC 8941
+/// §4.1.1.2 serializes parameters in the order they occur. A verifier that
+/// re-emits them in an order of its own computes a different signature base
+/// than the signer did and rejects a valid signature.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentParams {
-    /// Structured field (`;sf`) — treat the field value as a structured field.
-    pub sf: bool,
-    /// Dictionary member key (`;key="name"`) — extract a specific key from an SFV Dictionary.
-    pub key: Option<String>,
-    /// Query parameter name (`;name="x"`) — used by `@query-param` (RFC 9421 §2.2.8).
-    pub name: Option<String>,
-    /// Binary-wrapped (`;bs`) — base64-encode the field value.
-    pub bs: bool,
-    /// Request-bound (`;req`) — resolve from the related request.
-    pub req: bool,
-    /// Trailer (`;tr`) — resolve from trailers.
-    pub tr: bool,
+    params: Vec<ComponentParam>,
+}
+
+impl ComponentParams {
+    /// An empty parameter set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { params: Vec::new() }
+    }
+
+    /// Append a parameter, keeping the order it was added in.
+    pub fn push(&mut self, param: ComponentParam) {
+        self.params.push(param);
+    }
+
+    /// Iterate the parameters in the order they were written.
+    pub fn iter(&self) -> impl Iterator<Item = &ComponentParam> {
+        self.params.iter()
+    }
+
+    /// Whether `;sf` is present.
+    #[must_use]
+    pub fn sf(&self) -> bool {
+        self.params.contains(&ComponentParam::Sf)
+    }
+
+    /// Whether `;bs` is present.
+    #[must_use]
+    pub fn bs(&self) -> bool {
+        self.params.contains(&ComponentParam::Bs)
+    }
+
+    /// Whether `;req` is present.
+    #[must_use]
+    pub fn req(&self) -> bool {
+        self.params.contains(&ComponentParam::Req)
+    }
+
+    /// Whether `;tr` is present.
+    #[must_use]
+    pub fn tr(&self) -> bool {
+        self.params.contains(&ComponentParam::Tr)
+    }
+
+    /// The `;key` Dictionary member name, if present.
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        self.params.iter().find_map(|param| match param {
+            ComponentParam::Key(key) => Some(key.as_str()),
+            ComponentParam::Sf
+            | ComponentParam::Name(_)
+            | ComponentParam::Bs
+            | ComponentParam::Req
+            | ComponentParam::Tr => None,
+        })
+    }
+
+    /// The `;name` query parameter name, if present.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.params.iter().find_map(|param| match param {
+            ComponentParam::Name(name) => Some(name.as_str()),
+            ComponentParam::Sf
+            | ComponentParam::Key(_)
+            | ComponentParam::Bs
+            | ComponentParam::Req
+            | ComponentParam::Tr => None,
+        })
+    }
+}
+
+impl FromIterator<ComponentParam> for ComponentParams {
+    fn from_iter<I: IntoIterator<Item = ComponentParam>>(iter: I) -> Self {
+        Self {
+            params: iter.into_iter().collect(),
+        }
+    }
 }
 
 /// A component identifier: either a field name or a derived component.
@@ -158,14 +268,12 @@ impl ComponentIdentifier {
         }
     }
 
-    /// Create a derived `@query-param` component.
+    /// Create a derived `@query-param` component for the named parameter.
     #[must_use]
     pub fn query_param(name: &str) -> Self {
         Self::Derived {
-            component: DerivedComponent::QueryParam {
-                name: name.to_string(),
-            },
-            params: ComponentParams::default(),
+            component: DerivedComponent::QueryParam,
+            params: ComponentParams::from_iter([ComponentParam::Name(name.to_string())]),
         }
     }
 
@@ -188,27 +296,19 @@ impl ComponentIdentifier {
         };
 
         let mut sfv_params = SfvParams::new();
-        if component_params.sf {
-            sfv_params.insert("sf".into(), None);
-        }
-        // RFC 9421 Section 2.2.8: @query-param uses ;name=, not ;key=
-        if let Self::Derived {
-            component: DerivedComponent::QueryParam { name: qp_name },
-            ..
-        } = self
-        {
-            sfv_params.insert("name".into(), Some(SfvBareItem::String(qp_name.clone())));
-        } else if let Some(key) = &component_params.key {
-            sfv_params.insert("key".into(), Some(SfvBareItem::String(key.clone())));
-        }
-        if component_params.bs {
-            sfv_params.insert("bs".into(), None);
-        }
-        if component_params.req {
-            sfv_params.insert("req".into(), None);
-        }
-        if component_params.tr {
-            sfv_params.insert("tr".into(), None);
+        for param in component_params.iter() {
+            // RFC 8941 §4.1.1.2 serializes a Boolean-true parameter by omitting
+            // its value, so the flag parameters are written bare.
+            let value = match param {
+                ComponentParam::Key(value) | ComponentParam::Name(value) => {
+                    Some(SfvBareItem::String(value.clone()))
+                }
+                ComponentParam::Sf
+                | ComponentParam::Bs
+                | ComponentParam::Req
+                | ComponentParam::Tr => None,
+            };
+            sfv_params.insert(param.key_name().into(), value);
         }
 
         SfvItem {
@@ -221,28 +321,50 @@ impl ComponentIdentifier {
     ///
     /// # Errors
     ///
-    /// Returns [`HttpSigError::InvalidComponent`] if the item cannot be parsed.
+    /// Returns [`HttpSigError::InvalidComponent`] if the item cannot be parsed,
+    /// names a derived component this implementation does not know, or carries
+    /// a parameter that is unknown, inapplicable, or incompatible with another
+    /// (RFC 9421 §2.5).
     pub fn from_sfv_item(item: &SfvItem) -> Result<Self, HttpSigError> {
         let name = match &item.value {
             SfvBareItem::String(s) => s.as_str(),
-            _ => {
+            SfvBareItem::Integer(_)
+            | SfvBareItem::Decimal(_)
+            | SfvBareItem::Token(_)
+            | SfvBareItem::ByteSequence(_)
+            | SfvBareItem::Boolean(_) => {
                 return Err(HttpSigError::InvalidComponent(
                     "component identifier must be a string".into(),
                 ));
             }
         };
 
-        let params = parse_component_params(&item.params)?;
-
-        if let Some(stripped) = name.strip_prefix('@') {
-            let component = parse_derived_name(stripped, &params)?;
-            Ok(Self::Derived { component, params })
-        } else {
-            Ok(Self::Field {
+        let Some(stripped) = name.strip_prefix('@') else {
+            let params = parse_component_params(&item.params, ParamContext::Field)?;
+            return Ok(Self::Field {
                 name: name.to_ascii_lowercase(),
                 params,
-            })
+            });
+        };
+
+        let component = parse_derived_name(stripped)?;
+        let context = if component == DerivedComponent::QueryParam {
+            ParamContext::QueryParam
+        } else {
+            ParamContext::Derived
+        };
+        let params = parse_component_params(&item.params, context)?;
+
+        // RFC 9421 §2.2.8: "The REQUIRED name parameter of each component
+        // identifier contains the encoded nameString of a single query
+        // parameter as a String value."
+        if component == DerivedComponent::QueryParam && params.name().is_none() {
+            return Err(HttpSigError::InvalidComponent(
+                "@query-param requires the ';name' parameter".into(),
+            ));
         }
+
+        Ok(Self::Derived { component, params })
     }
 
     /// Resolve the value of this component from an HTTP request.
@@ -253,10 +375,14 @@ impl ComponentIdentifier {
     pub fn resolve_from_request<T>(&self, req: &http::Request<T>) -> Result<String, HttpSigError> {
         match self {
             Self::Field { name, params } => {
+                reject_req_on_request(params)?;
                 reject_trailers(params)?;
                 resolve_field(req.headers(), name, params)
             }
-            Self::Derived { component, .. } => resolve_derived_from_request(component, req),
+            Self::Derived { component, params } => {
+                reject_req_on_request(params)?;
+                resolve_derived_from_request(component, params, req)
+            }
         }
     }
 
@@ -273,7 +399,7 @@ impl ComponentIdentifier {
         match self {
             Self::Field { name, params } => {
                 reject_trailers(params)?;
-                if params.req {
+                if params.req() {
                     let request = req.ok_or_else(|| {
                         HttpSigError::MissingComponent(
                             "req flag set but no request provided".into(),
@@ -285,13 +411,13 @@ impl ComponentIdentifier {
                 }
             }
             Self::Derived { component, params } => {
-                if params.req {
+                if params.req() {
                     let request = req.ok_or_else(|| {
                         HttpSigError::MissingComponent(
                             "req flag set but no request provided".into(),
                         )
                     })?;
-                    resolve_derived_from_request(component, request)
+                    resolve_derived_from_request(component, params, request)
                 } else {
                     resolve_derived_from_response(component, resp)
                 }
@@ -322,15 +448,12 @@ fn derived_name(component: &DerivedComponent) -> &'static str {
         DerivedComponent::RequestTarget => "@request-target",
         DerivedComponent::Path => "@path",
         DerivedComponent::Query => "@query",
-        DerivedComponent::QueryParam { .. } => "@query-param",
+        DerivedComponent::QueryParam => "@query-param",
         DerivedComponent::Status => "@status",
     }
 }
 
-fn parse_derived_name(
-    name: &str,
-    params: &ComponentParams,
-) -> Result<DerivedComponent, HttpSigError> {
+fn parse_derived_name(name: &str) -> Result<DerivedComponent, HttpSigError> {
     match name {
         "method" => Ok(DerivedComponent::Method),
         "target-uri" => Ok(DerivedComponent::TargetUri),
@@ -339,14 +462,7 @@ fn parse_derived_name(
         "request-target" => Ok(DerivedComponent::RequestTarget),
         "path" => Ok(DerivedComponent::Path),
         "query" => Ok(DerivedComponent::Query),
-        "query-param" => {
-            let qp_name = params.name.as_ref().ok_or_else(|| {
-                HttpSigError::InvalidComponent("@query-param requires ;name parameter".into())
-            })?;
-            Ok(DerivedComponent::QueryParam {
-                name: qp_name.clone(),
-            })
-        }
+        "query-param" => Ok(DerivedComponent::QueryParam),
         "status" => Ok(DerivedComponent::Status),
         _ => Err(HttpSigError::InvalidComponent(format!(
             "unknown derived component: @{name}"
@@ -354,35 +470,146 @@ fn parse_derived_name(
     }
 }
 
-fn parse_component_params(sfv: &SfvParams) -> Result<ComponentParams, HttpSigError> {
-    let mut params = ComponentParams::default();
+/// Which parameters a component identifier is allowed to carry.
+///
+/// RFC 9421 §2.5 requires an error for a parameter that is "unknown or does not
+/// apply to the component identifier to which it is attached", so the allowed
+/// set depends on what the identifier names.
+#[derive(Debug, Clone, Copy)]
+enum ParamContext {
+    /// An HTTP field: `;sf`, `;key`, `;bs`, `;tr` (§2.1), plus `;req` (§2.4).
+    Field,
+    /// `@query-param`: `;name` (§2.2.8), plus `;req` (§2.4).
+    QueryParam,
+    /// Any other derived component: `;req` only (§2.4).
+    Derived,
+}
 
-    if sfv.contains_key("sf") {
-        params.sf = true;
+impl ParamContext {
+    fn allows(self, param: &ComponentParam) -> bool {
+        match param {
+            // §2.1 lists sf, key, bs, and tr under "Any HTTP field component
+            // identifiers MAY have the following parameters"; none of them has
+            // a meaning for a derived component.
+            ComponentParam::Sf
+            | ComponentParam::Key(_)
+            | ComponentParam::Bs
+            | ComponentParam::Tr => matches!(self, Self::Field),
+            ComponentParam::Name(_) => matches!(self, Self::QueryParam),
+            // §2.4: ";req" applies to fields and to derived components alike.
+            ComponentParam::Req => true,
+        }
     }
-    if let Some(Some(SfvBareItem::String(k))) = sfv.get("key") {
-        params.key = Some(k.clone());
+}
+
+/// Parse and validate the parameters on one component identifier.
+fn parse_component_params(
+    sfv: &SfvParams,
+    context: ParamContext,
+) -> Result<ComponentParams, HttpSigError> {
+    let mut params = ComponentParams::new();
+
+    for (key, value) in sfv.iter() {
+        let param = match key.as_str() {
+            "sf" => {
+                expect_flag(key, value)?;
+                ComponentParam::Sf
+            }
+            "bs" => {
+                expect_flag(key, value)?;
+                ComponentParam::Bs
+            }
+            "req" => {
+                expect_flag(key, value)?;
+                ComponentParam::Req
+            }
+            "tr" => {
+                expect_flag(key, value)?;
+                ComponentParam::Tr
+            }
+            "key" => ComponentParam::Key(expect_string(key, value)?),
+            "name" => ComponentParam::Name(expect_string(key, value)?),
+            // §2.5: "If the component identifier has a parameter that is not
+            // understood, produce an error."
+            _ => {
+                return Err(HttpSigError::InvalidComponent(format!(
+                    "unknown component parameter ';{key}'"
+                )));
+            }
+        };
+
+        if !context.allows(&param) {
+            return Err(HttpSigError::InvalidComponent(format!(
+                "component parameter ';{key}' does not apply to this component identifier"
+            )));
+        }
+
+        params.push(param);
     }
-    // @query-param uses ;name= (RFC 9421 §2.2.8) — stored separately from ;key=
-    if let Some(Some(SfvBareItem::String(n))) = sfv.get("name") {
-        params.name = Some(n.clone());
-    }
-    if sfv.contains_key("bs") {
-        params.bs = true;
-    }
-    if sfv.contains_key("req") {
-        params.req = true;
-    }
-    if sfv.contains_key("tr") {
-        params.tr = true;
+
+    // §2.5: "If the component identifier has parameters that are mutually
+    // incompatible with one another, such as bs and sf, produce an error."
+    // §2.1 names the pair: bs "is not compatible with the use of the sf or key
+    // parameters, which require the parsed data structures of the field values
+    // after combination."
+    if params.bs() && (params.sf() || params.key().is_some()) {
+        return Err(HttpSigError::InvalidComponent(
+            "component parameter ';bs' is incompatible with ';sf' and ';key'".into(),
+        ));
     }
 
     Ok(params)
 }
 
+/// Accept a Boolean-flag parameter, which RFC 8941 §4.1.1.2 writes bare because
+/// a `true` value is serialized by omitting it.
+fn expect_flag(key: &str, value: &Option<SfvBareItem>) -> Result<(), HttpSigError> {
+    match value {
+        None | Some(SfvBareItem::Boolean(true)) => Ok(()),
+        Some(
+            SfvBareItem::Boolean(false)
+            | SfvBareItem::Integer(_)
+            | SfvBareItem::Decimal(_)
+            | SfvBareItem::String(_)
+            | SfvBareItem::Token(_)
+            | SfvBareItem::ByteSequence(_),
+        ) => Err(HttpSigError::InvalidComponent(format!(
+            "component parameter ';{key}' is a Boolean flag and takes no value"
+        ))),
+    }
+}
+
+/// Accept a String-valued parameter.
+fn expect_string(key: &str, value: &Option<SfvBareItem>) -> Result<String, HttpSigError> {
+    match value {
+        Some(SfvBareItem::String(text)) => Ok(text.clone()),
+        None
+        | Some(
+            SfvBareItem::Boolean(_)
+            | SfvBareItem::Integer(_)
+            | SfvBareItem::Decimal(_)
+            | SfvBareItem::Token(_)
+            | SfvBareItem::ByteSequence(_),
+        ) => Err(HttpSigError::InvalidComponent(format!(
+            "component parameter ';{key}' must be a string"
+        ))),
+    }
+}
+
+/// RFC 9421 §2.5: "If the component identifier contains the req parameter and
+/// the target message is a request, produce an error."
+fn reject_req_on_request(params: &ComponentParams) -> Result<(), HttpSigError> {
+    if params.req() {
+        return Err(HttpSigError::InvalidComponent(
+            "the ';req' parameter is not allowed when the target message is a request".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject `;tr` (trailer) components — the `http` crate does not model trailers.
 fn reject_trailers(params: &ComponentParams) -> Result<(), HttpSigError> {
-    if params.tr {
+    if params.tr() {
         return Err(HttpSigError::InvalidComponent(
             "trailer fields (;tr) are not supported — \
              the http crate does not model HTTP trailers"
@@ -402,47 +629,59 @@ fn resolve_field(
     let lower = name;
 
     // §2.1.3: Binary-wrapped (;bs) — each field line individually base64-encoded
-    if params.bs {
+    if params.bs() {
         return resolve_field_bs(headers, lower);
     }
 
-    let raw = resolve_field_raw(headers, lower)?;
-
     // §2.1.1 + §2.1.2: Structured Field with optional key extraction
-    if params.sf || params.key.is_some() {
+    if params.sf() || params.key().is_some() {
         return resolve_field_sf(headers, lower, params);
     }
 
-    Ok(raw)
+    resolve_field_raw(headers, lower)
 }
 
 /// Get the raw combined field value (no SFV processing).
+///
+/// RFC 9421 §2.1 combines the instances of a field by "concatenating the values
+/// using a single comma and a single space as a separator", after stripping
+/// leading and trailing whitespace from each.
+///
+/// Every instance takes part. A value outside the visible-ASCII range the
+/// signature base admits fails the whole resolution rather than being left out:
+/// dropping one would let the signature claim to cover a field while binding
+/// only part of it, so an intermediary could append a value the signature never
+/// saw. §2.1 states the requirement — "all non-ASCII field values MUST be
+/// encoded to ASCII before being added to the signature base" — and names the
+/// remedy in the same breath: "The bs parameter, as described in Section 2.1.3,
+/// provides a method for wrapping such problematic field values."
 fn resolve_field_raw(headers: &http::HeaderMap, lower_name: &str) -> Result<String, HttpSigError> {
-    let mut iter = headers.get_all(lower_name).iter();
+    let mut result = String::new();
+    let mut found = false;
 
-    let first = iter.next().and_then(|v| v.to_str().ok()).ok_or_else(|| {
-        HttpSigError::MissingComponent(format!("header '{lower_name}' not found"))
-    })?;
+    for value in headers.get_all(lower_name) {
+        let value = value.to_str().map_err(|_| {
+            HttpSigError::InvalidComponent(format!(
+                "header '{lower_name}' has a value outside the visible-ASCII range \
+                 that the signature base admits; cover it with the ';bs' parameter instead"
+            ))
+        })?;
 
-    // Fast path: single-value header (the overwhelmingly common case)
-    let second = iter.next();
-    if second.is_none() {
-        return Ok(first.trim().to_string());
-    }
-
-    // Multi-value: combine with ", " per RFC 9421 §2.1
-    let mut result = String::from(first.trim());
-    if let Some(v) = second.and_then(|v| v.to_str().ok()) {
-        result.push_str(", ");
-        result.push_str(v.trim());
-    }
-    for val in iter {
-        if let Ok(v) = val.to_str() {
+        if found {
             result.push_str(", ");
-            result.push_str(v.trim());
         }
+        found = true;
+        // OWS is SP and HTAB (RFC 9110 §5.6.3).
+        result.push_str(value.trim_matches([' ', '\t']));
     }
-    Ok(result)
+
+    if found {
+        Ok(result)
+    } else {
+        Err(HttpSigError::MissingComponent(format!(
+            "header '{lower_name}' not found"
+        )))
+    }
 }
 
 /// §2.1.1 / §2.1.2: Resolve a field as a Structured Field, optionally extracting
@@ -460,7 +699,7 @@ fn resolve_field_sf(
 ) -> Result<String, HttpSigError> {
     let raw = resolve_field_raw(headers, lower_name)?;
 
-    if let Some(key) = &params.key {
+    if let Some(key) = params.key() {
         // §2.1.2: Parse as Dictionary, extract member by key
         let dict = crate::sfv::parse::parse_dictionary(&raw).map_err(|e| {
             HttpSigError::InvalidComponent(format!(
@@ -518,7 +757,11 @@ fn resolve_field_bs(headers: &http::HeaderMap, lower_name: &str) -> Result<Strin
     let encoded: Vec<String> = values
         .iter()
         .map(|v| {
-            let b64 = STANDARD.encode(v.as_bytes());
+            // RFC 9421 Section 2.1.3 step 3.1: strip leading/trailing whitespace
+            // from the field value before encoding (step 3.3). OWS is defined as
+            // SP and HTAB (RFC 9110 §5.6.3); trim at the byte level so this works
+            // for both UTF-8 and non-UTF-8 field values.
+            let b64 = STANDARD.encode(trim_ascii_ows(v.as_bytes()));
             format!(":{b64}:")
         })
         .collect();
@@ -526,9 +769,24 @@ fn resolve_field_bs(headers: &http::HeaderMap, lower_name: &str) -> Result<Strin
     Ok(encoded.join(", "))
 }
 
+/// Strip leading/trailing HTTP optional whitespace (OWS: SP and HTAB) from a
+/// byte slice. Operates on raw bytes so it is valid for non-UTF-8 values.
+fn trim_ascii_ows(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t')
+        .map_or(start, |i| i.saturating_add(1));
+    bytes.get(start..end).unwrap_or(&[])
+}
+
 /// Resolve a derived component value from an HTTP request.
 fn resolve_derived_from_request<T>(
     component: &DerivedComponent,
+    params: &ComponentParams,
     req: &http::Request<T>,
 ) -> Result<String, HttpSigError> {
     match component {
@@ -561,25 +819,16 @@ fn resolve_derived_from_request<T>(
                 None => Ok("?".into()),
             }
         }
-        DerivedComponent::QueryParam { name } => {
+        DerivedComponent::QueryParam => {
+            let name = params.name().ok_or_else(|| {
+                HttpSigError::InvalidComponent("@query-param requires the ';name' parameter".into())
+            })?;
             let query = req.uri().query().ok_or_else(|| {
                 HttpSigError::MissingComponent(format!(
                     "no query string for @query-param;name=\"{name}\""
                 ))
             })?;
-            // Parse query parameters and find the matching one
-            for pair in query.split('&') {
-                let (k, v) = match pair.split_once('=') {
-                    Some((k, v)) => (k, v),
-                    None => (pair, ""),
-                };
-                if url_decode(k) == *name {
-                    return Ok(url_decode(v));
-                }
-            }
-            Err(HttpSigError::MissingComponent(format!(
-                "query parameter '{name}' not found"
-            )))
+            resolve_query_param(query, name)
         }
         DerivedComponent::Status => Err(HttpSigError::InvalidComponent(
             "@status is only valid for responses".into(),
@@ -685,30 +934,101 @@ fn extract_path<T>(req: &http::Request<T>) -> String {
     }
 }
 
-/// RFC 3986 percent-decoding for query parameter names/values.
+/// RFC 9421 §2.2.8: resolve the component value of one named query parameter.
 ///
-/// Note: `+` is NOT decoded as space — that is `application/x-www-form-urlencoded`
-/// (RFC 1866), not RFC 3986. RFC 9421 §2.2.8 references RFC 3986 percent-encoding.
-fn url_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
+/// The query is read with the "application/x-www-form-urlencoded parsing"
+/// algorithm the section requires, and the name being matched and the value
+/// returned are then put back through the "percent-encode after encoding"
+/// process, which is what makes the result the ASCII string the signature base
+/// needs. Skipping that second step lets a decoded value carry a newline or a
+/// non-ASCII byte into the base — the RFC prints exactly that outcome as its
+/// counterexample and calls the resulting base "invalid".
+fn resolve_query_param(query: &str, name: &str) -> Result<String, HttpSigError> {
+    let mut found: Option<String> = None;
+
+    for pair in query.split('&') {
+        // URL Standard §5.1 skips empty sequences, so "a=1&&b=2" has two pairs.
+        if pair.is_empty() {
+            continue;
+        }
+        let (raw_name, raw_value) = match pair.split_once('=') {
+            Some((raw_name, raw_value)) => (raw_name, raw_value),
+            None => (pair, ""),
+        };
+
+        if form_urlencoded_component(raw_name) != name {
+            continue;
+        }
+
+        // §2.2.8: "If a parameter name occurs multiple times in a request, the
+        // named query parameter MUST NOT be included."
+        if found.is_some() {
+            return Err(HttpSigError::InvalidComponent(format!(
+                "query parameter '{name}' occurs more than once and cannot be covered"
+            )));
+        }
+        found = Some(form_urlencoded_component(raw_value));
+    }
+
+    // §2.2.8: "If a query parameter is named as a covered component but it does
+    // not occur in the query parameters, this MUST cause an error in the
+    // signature base generation."
+    found.ok_or_else(|| {
+        HttpSigError::MissingComponent(format!("query parameter '{name}' not found"))
+    })
+}
+
+/// Decode one `application/x-www-form-urlencoded` name or value and re-encode
+/// it, which is the two-step process RFC 9421 §2.2.8 specifies.
+fn form_urlencoded_component(raw: &str) -> String {
+    let decoded = form_urlencoded_decode(raw);
+    // URL Standard §5.1 finishes each component with a UTF-8 decode without
+    // BOM, which substitutes replacement characters rather than failing.
+    percent_encode_form(String::from_utf8_lossy(&decoded).as_bytes())
+}
+
+/// URL Standard §5.1 "application/x-www-form-urlencoded parsing": `+` stands
+/// for a space, and `%XX` sequences decode to the byte they name.
+fn form_urlencoded_decode(raw: &str) -> Vec<u8> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
 
-    while let Some(&c) = bytes.get(i) {
-        if c == b'%' {
-            let hi = bytes.get(i.saturating_add(1)).copied().and_then(hex_val);
-            let lo = bytes.get(i.saturating_add(2)).copied().and_then(hex_val);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                result.push(char::from(h << 4 | l));
-                i = i.saturating_add(3);
-                continue;
-            }
+    while let Some(&byte) = bytes.get(i) {
+        if byte == b'%'
+            && let Some(hi) = bytes.get(i.saturating_add(1)).copied().and_then(hex_val)
+            && let Some(lo) = bytes.get(i.saturating_add(2)).copied().and_then(hex_val)
+        {
+            decoded.push(hi << 4 | lo);
+            i = i.saturating_add(3);
+            continue;
         }
-        result.push(char::from(c));
+        decoded.push(if byte == b'+' { b' ' } else { byte });
         i = i.saturating_add(1);
     }
 
-    result
+    decoded
+}
+
+/// URL Standard §5.2 "percent-encode after encoding" with the urlencoded
+/// percent-encode set: ASCII alphanumerics and `*`, `-`, `.`, `_` pass through,
+/// every other byte becomes `%XX` with uppercase hex digits.
+///
+/// A space becomes `%20` rather than `+`. RFC 9421 §2.2.8's own example renders
+/// the query `bar=with+plus+whitespace` as the component value
+/// `with%20plus%20whitespace`.
+fn percent_encode_form(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len());
+
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'*' | b'-' | b'.' | b'_') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded
 }
 
 fn hex_val(c: u8) -> Option<u8> {
@@ -969,18 +1289,110 @@ mod tests {
     }
 
     // RFC 9421 §2.2.8: query parameters are parsed per the HTML URL rules,
-    // which leave malformed percent-escapes intact.
+    // which leave malformed percent-escapes intact. `%` is outside the
+    // urlencoded percent-encode set, so re-encoding escapes it as %25.
     #[test]
-    fn test_url_decode_preserves_malformed_percent_encoding() {
-        assert_eq!(url_decode("%2G"), "%2G");
-        assert_eq!(url_decode("foo%2"), "foo%2");
-        assert_eq!(url_decode("%ZZhello"), "%ZZhello");
+    fn test_query_param_preserves_malformed_percent_encoding() {
+        assert_eq!(form_urlencoded_component("%2G"), "%252G");
+        assert_eq!(form_urlencoded_component("foo%2"), "foo%252");
+        assert_eq!(form_urlencoded_component("%ZZhello"), "%25ZZhello");
     }
 
-    // RFC 9421 §2.2.8: valid percent-escapes are decoded before inclusion.
+    // RFC 9421 §2.2.8 step 1: valid percent-escapes are decoded, then step 2
+    // re-encodes the result, so a percent-escaped space survives as %20.
     #[test]
-    fn test_url_decode_decodes_valid_percent_encoding() {
-        assert_eq!(url_decode("name%20with%20space"), "name with space");
+    fn test_query_param_decodes_then_reencodes() {
+        assert_eq!(
+            form_urlencoded_component("name%20with%20space"),
+            "name%20with%20space"
+        );
+    }
+
+    // RFC 9421 §2.2.8: "The query parameters MUST be parsed according to
+    // Section 5.1 ('application/x-www-form-urlencoded parsing') of [HTMLURL]",
+    // which maps `+` to a space. The RFC's example renders the query
+    // `bar=with+plus+whitespace` as the value `with%20plus%20whitespace`.
+    #[test]
+    fn test_query_param_plus_is_a_space() {
+        let req = make_request(
+            "GET",
+            "https://example.com/parameters?bar=with+plus+whitespace",
+            &[],
+        );
+        let cid = ComponentIdentifier::query_param("bar");
+        assert_eq!(
+            cid.resolve_from_request(&req).unwrap(),
+            "with%20plus%20whitespace"
+        );
+    }
+
+    // RFC 9421 §2.2.8 step 2: the decoded value is re-encoded with the
+    // "percent-encode after encoding" process, so a value holding a newline
+    // enters the signature base as %0A. Without that step the RFC's own
+    // counterexample applies: the base "contains characters that violate the
+    // constraints on component names and values and is therefore invalid".
+    #[test]
+    fn test_query_param_reencodes_newline() {
+        let req = make_request(
+            "GET",
+            "https://example.com/parameters?var=this%20is%20a%20big%0Amultiline%20value",
+            &[],
+        );
+        let cid = ComponentIdentifier::query_param("var");
+        assert_eq!(
+            cid.resolve_from_request(&req).unwrap(),
+            "this%20is%20a%20big%0Amultiline%20value"
+        );
+    }
+
+    // RFC 9421 §2.2.8: "The REQUIRED name parameter of each component
+    // identifier contains the encoded nameString of a single query parameter",
+    // so a name is matched in its encoded form. This is the RFC's own example.
+    #[test]
+    fn test_query_param_matches_encoded_name() {
+        let req = make_request(
+            "GET",
+            "https://example.com/parameters?fa%C3%A7ade%22%3A%20=something",
+            &[],
+        );
+        let cid = ComponentIdentifier::query_param("fa%C3%A7ade%22%3A%20");
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "something");
+    }
+
+    // RFC 9421 §2.2.8: "Named query parameters with an empty valueString have
+    // an empty string as the component value."
+    #[test]
+    fn test_query_param_empty_value() {
+        let req = make_request("GET", "https://example.com/path?qux=", &[]);
+        let cid = ComponentIdentifier::query_param("qux");
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "");
+    }
+
+    // RFC 9421 §2.2.8: "If a parameter name occurs multiple times in a request,
+    // the named query parameter MUST NOT be included."
+    #[test]
+    fn test_query_param_duplicate_name_is_an_error() {
+        let req = make_request("GET", "https://example.com/path?a=1&a=2", &[]);
+        let cid = ComponentIdentifier::query_param("a");
+        assert!(cid.resolve_from_request(&req).is_err());
+    }
+
+    // RFC 9421 §2.2.8: "If a query parameter is named as a covered component
+    // but it does not occur in the query parameters, this MUST cause an error
+    // in the signature base generation."
+    #[test]
+    fn test_query_param_absent_is_an_error() {
+        let req = make_request("GET", "https://example.com/path?a=1", &[]);
+        let cid = ComponentIdentifier::query_param("b");
+        assert!(cid.resolve_from_request(&req).is_err());
+    }
+
+    // RFC 9421 §2.2.8: the parameter is required, so an @query-param
+    // identifier without ;name cannot be parsed.
+    #[test]
+    fn test_query_param_requires_name_parameter() {
+        let item = crate::sfv::parse::parse_item("\"@query-param\"").unwrap();
+        assert!(ComponentIdentifier::from_sfv_item(&item).is_err());
     }
 
     // RFC 9421 §2.2.9: @status is the response status code.
@@ -1024,10 +1436,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-val", "42")]);
         let cid = ComponentIdentifier::Field {
             name: "x-val".into(),
-            params: ComponentParams {
-                sf: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Sf]),
         };
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "42");
     }
@@ -1038,10 +1447,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a=1, b=2")]);
         let cid = ComponentIdentifier::Field {
             name: "x-dict".into(),
-            params: ComponentParams {
-                sf: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Sf]),
         };
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "a=1, b=2");
     }
@@ -1058,10 +1464,7 @@ mod tests {
         );
         let cid = ComponentIdentifier::Field {
             name: "x-dict".into(),
-            params: ComponentParams {
-                key: Some("b".into()),
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Key("b".into())]),
         };
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "2");
     }
@@ -1073,10 +1476,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a=1, b=2")]);
         let cid = ComponentIdentifier::Field {
             name: "x-dict".into(),
-            params: ComponentParams {
-                key: Some("z".into()),
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Key("z".into())]),
         };
         assert!(cid.resolve_from_request(&req).is_err());
     }
@@ -1087,10 +1487,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-dict", "a, b=2")]);
         let cid = ComponentIdentifier::Field {
             name: "x-dict".into(),
-            params: ComponentParams {
-                key: Some("a".into()),
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Key("a".into())]),
         };
         // Boolean true dict member serializes as "?1"
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "?1");
@@ -1104,10 +1501,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-val", "hello")]);
         let cid = ComponentIdentifier::Field {
             name: "x-val".into(),
-            params: ComponentParams {
-                bs: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
         };
         let result = cid.resolve_from_request(&req).unwrap();
         // "hello" base64 = "aGVsbG8="
@@ -1127,15 +1521,143 @@ mod tests {
         let _ = &mut req; // suppress unused warning
         let cid = ComponentIdentifier::Field {
             name: "x-multi".into(),
-            params: ComponentParams {
-                bs: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
         };
         let result = cid.resolve_from_request(&req).unwrap();
         // Each field line individually encoded, combined with ", "
+        // "first" = "Zmlyc3Q=", "second" = "c2Vjb25k"
+        assert_eq!(result, ":Zmlyc3Q=:, :c2Vjb25k:");
         assert!(result.contains(", "));
         assert!(result.starts_with(':'));
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: with ;bs leading/trailing OWS (SP) is stripped
+    // before base64 encoding. "  hello  " must encode "hello", not "  hello  ".
+    #[test]
+    fn test_bs_trims_leading_trailing_spaces() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "  hello  ")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // base64 of "hello" = "aGVsbG8="; base64 of "  hello  " = "ICBoZWxsbyAg"
+        assert_eq!(result, ":aGVsbG8=:");
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: HTAB is HTTP optional whitespace (OWS) and must
+    // be trimmed alongside SP.
+    #[test]
+    fn test_bs_trims_leading_trailing_tabs() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "\thello\t")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        assert_eq!(result, ":aGVsbG8=:");
+    }
+
+    // RFC 9421 §2.1.3: only leading/trailing OWS is stripped; internal
+    // whitespace is preserved as part of the field value (step 3.3 encodes
+    // the resulting value).
+    #[test]
+    fn test_bs_preserves_internal_whitespace() {
+        let req = make_request(
+            "GET",
+            "https://example.com/",
+            &[("x-val", "  hello  world  ")],
+        );
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        let b64 = result
+            .strip_prefix(':')
+            .and_then(|s| s.strip_suffix(':'))
+            .unwrap();
+        assert_eq!(STANDARD.decode(b64).unwrap(), b"hello  world");
+    }
+
+    // RFC 9421 §2.1.3: for multiple field lines, each is trimmed independently
+    // before encoding and combined with ", ".
+    #[test]
+    fn test_bs_trims_each_multiline_value() {
+        let mut req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header("x-multi", "  first  ")
+            .header("x-multi", "  second  ")
+            .body(())
+            .unwrap();
+        let _ = &mut req;
+        let cid = ComponentIdentifier::Field {
+            name: "x-multi".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        assert_eq!(result, ":Zmlyc3Q=:, :c2Vjb25k:");
+    }
+
+    // RFC 9421 §2.1.3 step 3.1: a value that is entirely OWS yields an empty
+    // Byte Sequence (base64 of "" = "").
+    #[test]
+    fn test_bs_all_whitespace_value() {
+        let req = make_request("GET", "https://example.com/", &[("x-val", "   \t  ")]);
+        let cid = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // base64 of "" is "", so the wrapped Byte Sequence is "::" (two colons).
+        assert_eq!(result, "::");
+    }
+
+    // RFC 9421 §2.1.3: ;bs preserves non-UTF-8 / binary field values byte-for-byte
+    // (minus leading/trailing OWS). The trimming is byte-level, not UTF-8 level.
+    #[test]
+    fn test_bs_non_utf8_value() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header(
+                "x-bin",
+                http::HeaderValue::from_bytes(b" \xff\xfe bin ").unwrap(),
+            )
+            .body(())
+            .unwrap();
+        let cid = ComponentIdentifier::Field {
+            name: "x-bin".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        let b64 = result
+            .strip_prefix(':')
+            .and_then(|s| s.strip_suffix(':'))
+            .unwrap();
+        assert_eq!(STANDARD.decode(b64).unwrap(), b"\xff\xfe bin");
+    }
+
+    // RFC 9421 §2.1.3 example: a header with internal commas is encoded
+    // verbatim (no list-splitting) per field line.
+    #[test]
+    fn test_bs_rfc_example_with_commas() {
+        let mut req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/")
+            .header("example-header", "value, with, lots")
+            .header("example-header", "of, commas")
+            .body(())
+            .unwrap();
+        let _ = &mut req;
+        let cid = ComponentIdentifier::Field {
+            name: "example-header".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        let result = cid.resolve_from_request(&req).unwrap();
+        // Matches the RFC 9421 §2.1.3 example base.
+        assert_eq!(result, ":dmFsdWUsIHdpdGgsIGxvdHM=:, :b2YsIGNvbW1hcw==:");
     }
 
     // ;tr tests
@@ -1146,10 +1668,7 @@ mod tests {
         let req = make_request("GET", "https://example.com/", &[("x-val", "1")]);
         let cid = ComponentIdentifier::Field {
             name: "x-val".into(),
-            params: ComponentParams {
-                tr: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Tr]),
         };
         let result = cid.resolve_from_request(&req);
         assert!(result.is_err());
@@ -1166,10 +1685,7 @@ mod tests {
         // @method;req should resolve from the request
         let cid = ComponentIdentifier::Derived {
             component: DerivedComponent::Method,
-            params: ComponentParams {
-                req: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Req]),
         };
         assert_eq!(
             cid.resolve_from_response(&resp, Some(&req)).unwrap(),
@@ -1185,14 +1701,190 @@ mod tests {
 
         let cid = ComponentIdentifier::Derived {
             component: DerivedComponent::Authority,
-            params: ComponentParams {
-                req: true,
-                ..ComponentParams::default()
-            },
+            params: ComponentParams::from_iter([ComponentParam::Req]),
         };
         assert_eq!(
             cid.resolve_from_response(&resp, Some(&req)).unwrap(),
             "example.com"
+        );
+    }
+
+    // component parameter validation
+
+    fn parse_identifier(input: &str) -> Result<ComponentIdentifier, HttpSigError> {
+        ComponentIdentifier::from_sfv_item(&crate::sfv::parse::parse_item(input)?)
+    }
+
+    // RFC 9421 §2.5: "If the component identifier has a parameter that is not
+    // understood, produce an error."
+    #[test]
+    fn test_unknown_parameter_is_rejected() {
+        assert!(parse_identifier("\"@method\";foo=\"bar\"").is_err());
+        assert!(parse_identifier("\"content-type\";unknown").is_err());
+    }
+
+    // RFC 9421 §2.5: a parameter that "does not apply to the component
+    // identifier to which it is attached" is equally an error. §2.1 offers sf,
+    // key, bs, and tr for HTTP fields only.
+    #[test]
+    fn test_field_parameter_on_derived_component_is_rejected() {
+        assert!(parse_identifier("\"@method\";sf").is_err());
+        assert!(parse_identifier("\"@path\";key=\"a\"").is_err());
+        assert!(parse_identifier("\"@authority\";bs").is_err());
+        assert!(parse_identifier("\"@query\";tr").is_err());
+    }
+
+    // RFC 9421 §2.2.8 defines ;name for @query-param; no HTTP field takes it.
+    #[test]
+    fn test_name_parameter_on_field_is_rejected() {
+        assert!(parse_identifier("\"content-type\";name=\"a\"").is_err());
+    }
+
+    // RFC 9421 §2.4: ";req" applies to fields and derived components alike.
+    #[test]
+    fn test_req_parameter_is_accepted_on_both_kinds() {
+        assert!(parse_identifier("\"content-type\";req").is_ok());
+        assert!(parse_identifier("\"@method\";req").is_ok());
+    }
+
+    // RFC 9421 §2.5: "If the component identifier has parameters that are
+    // mutually incompatible with one another, such as bs and sf, produce an
+    // error." §2.1: bs "is not compatible with the use of the sf or key
+    // parameters".
+    #[test]
+    fn test_bs_with_sf_or_key_is_rejected() {
+        assert!(parse_identifier("\"x-dict\";bs;sf").is_err());
+        assert!(parse_identifier("\"x-dict\";sf;bs").is_err());
+        assert!(parse_identifier("\"x-dict\";bs;key=\"a\"").is_err());
+        assert!(parse_identifier("\"x-dict\";key=\"a\";bs").is_err());
+    }
+
+    // RFC 8941 §4.1.1.2 serializes a Boolean-true parameter by omitting the
+    // value, so a flag parameter is written bare; ";bs=?1" means the same
+    // thing, and anything else is not a flag at all.
+    #[test]
+    fn test_flag_parameter_value_handling() {
+        assert!(parse_identifier("\"x-val\";bs=?1").is_ok());
+        assert!(parse_identifier("\"x-val\";bs=?0").is_err());
+        assert!(parse_identifier("\"x-val\";bs=\"yes\"").is_err());
+        assert!(parse_identifier("\"x-val\";bs=1").is_err());
+    }
+
+    // RFC 9421 §2.1.2 and §2.2.8 both define their selector as a String value.
+    #[test]
+    fn test_string_parameter_value_handling() {
+        assert!(parse_identifier("\"x-dict\";key=\"a\"").is_ok());
+        assert!(parse_identifier("\"x-dict\";key").is_err());
+        assert!(parse_identifier("\"x-dict\";key=1").is_err());
+        assert!(parse_identifier("\"@query-param\";name=42").is_err());
+    }
+
+    // RFC 9421 §2.5 step 2.2 serializes the component identifier into the
+    // signature base, and RFC 8941 §4.1.1.2 emits parameters in the order they
+    // occur, so the verifier has to keep the signer's order rather than impose
+    // one. Reordering here would change the base and reject a valid signature.
+    #[test]
+    fn test_parameter_order_is_preserved() {
+        for input in [
+            "\"x-dict\";key=\"a\";req",
+            "\"x-dict\";req;key=\"a\"",
+            "\"x-val\";tr;req",
+            "\"x-val\";req;tr",
+        ] {
+            assert_eq!(parse_identifier(input).unwrap().serialize_id(), input);
+        }
+    }
+
+    // RFC 9421 §2.5: "If the component identifier contains the req parameter
+    // and the target message is a request, produce an error."
+    #[test]
+    fn test_req_on_a_request_is_rejected() {
+        let req = make_request("GET", "https://example.com/p", &[("x-val", "1")]);
+
+        let field = ComponentIdentifier::Field {
+            name: "x-val".into(),
+            params: ComponentParams::from_iter([ComponentParam::Req]),
+        };
+        assert!(field.resolve_from_request(&req).is_err());
+
+        let derived = ComponentIdentifier::Derived {
+            component: DerivedComponent::Method,
+            params: ComponentParams::from_iter([ComponentParam::Req]),
+        };
+        assert!(derived.resolve_from_request(&req).is_err());
+    }
+
+    // field combination
+
+    // RFC 9421 §2.1: fields "sent as multiple fields MUST be combined by
+    // concatenating the values using a single comma and a single space as a
+    // separator".
+    #[test]
+    fn test_multiple_field_values_are_all_combined() {
+        let mut req = make_request("GET", "https://example.com/", &[]);
+        for value in ["max-age=60", "must-revalidate", "no-store"] {
+            req.headers_mut()
+                .append("cache-control", value.parse().unwrap());
+        }
+        let cid = ComponentIdentifier::field("cache-control");
+        assert_eq!(
+            cid.resolve_from_request(&req).unwrap(),
+            "max-age=60, must-revalidate, no-store"
+        );
+    }
+
+    // RFC 9421 §2.1 step 2: "Strip leading and trailing whitespace from each
+    // item in the list", which for an HTTP field value means SP and HTAB.
+    #[test]
+    fn test_field_values_are_trimmed_before_combining() {
+        let mut req = make_request("GET", "https://example.com/", &[]);
+        for value in ["  max-age=60  ", "\tmust-revalidate\t"] {
+            req.headers_mut()
+                .append("cache-control", value.parse().unwrap());
+        }
+        let cid = ComponentIdentifier::field("cache-control");
+        assert_eq!(
+            cid.resolve_from_request(&req).unwrap(),
+            "max-age=60, must-revalidate"
+        );
+    }
+
+    // RFC 9421 §2.1: an empty field has the empty string as its component
+    // value, and it still occupies its place in the combination.
+    #[test]
+    fn test_empty_field_value_still_takes_its_place() {
+        let mut req = make_request("GET", "https://example.com/", &[("x-multi", "")]);
+        req.headers_mut()
+            .append("x-multi", "second".parse().unwrap());
+        let cid = ComponentIdentifier::field("x-multi");
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), ", second");
+    }
+
+    // RFC 9421 §2.1 requires every instance of the field to take part in the
+    // combined value, and "all non-ASCII field values MUST be encoded to ASCII
+    // before being added to the signature base". A value that cannot be has to
+    // fail the resolution: dropping it would leave the signature covering the
+    // field in name while binding only part of it. §2.1 directs such fields to
+    // the ";bs" parameter, which still covers them faithfully.
+    #[test]
+    fn test_non_ascii_field_value_is_an_error_not_a_silent_drop() {
+        let mut req = make_request("GET", "https://example.com/", &[("x-multi", "first")]);
+        req.headers_mut().append(
+            "x-multi",
+            http::HeaderValue::from_bytes(&[0xC3, 0x28]).unwrap(),
+        );
+
+        let cid = ComponentIdentifier::field("x-multi");
+        assert!(cid.resolve_from_request(&req).is_err());
+
+        // The same field is still coverable the way §2.1.3 intends.
+        let wrapped = ComponentIdentifier::Field {
+            name: "x-multi".into(),
+            params: ComponentParams::from_iter([ComponentParam::Bs]),
+        };
+        assert_eq!(
+            wrapped.resolve_from_request(&req).unwrap(),
+            ":Zmlyc3Q=:, :wyg=:"
         );
     }
 }
