@@ -1776,3 +1776,266 @@ async fn test_rfc7592_failures_indistinguishable_across_client_types() {
         "WWW-Authenticate must be uniform across failure types"
     );
 }
+
+// =========================================================================
+// RFC 7592 §2.1/2.2/2.3 — revoke a registration access token presented
+// against a client_id that does not exist.
+//
+// §2.1 (identically §2.2, and §2.3 with "if possible"):
+//   "If the client does not exist on this server, the server MUST respond
+//    with HTTP 401 Unauthorized and the registration access token used to
+//    make this request SHOULD be immediately revoked."
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_misdirected_token_is_revoked() {
+    // RFC 7592 §2.1: a live registration access token presented against a
+    // client_id that does not exist is revoked, so it can no longer manage the
+    // client it actually belongs to.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // The token works for its own client before the misdirected request.
+    let before = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        before.status,
+        StatusCode::OK,
+        "token must work for its own client first: {}",
+        before.body
+    );
+
+    // Present that same token against a client_id that does not exist.
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "misdirected live token",
+        misdirected.status,
+        &misdirected.body,
+        www_authenticate(&misdirected),
+    );
+
+    // The token is now revoked for its real client too.
+    let after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "token after revocation",
+        after.status,
+        &after.body,
+        www_authenticate(&after),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_revocation_does_not_disturb_other_clients() {
+    // Revocation is keyed on the presented token's hash, so it must clear
+    // exactly one client's token and leave every other registration alone.
+    let (app, _state) = test_app().await;
+    let (victim_id, victim_token) = register_dynamic_client(&app).await;
+    let (bystander_id, bystander_token) = register_dynamic_client(&app).await;
+
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {victim_token}"))],
+    )
+    .await;
+    assert_eq!(misdirected.status, StatusCode::UNAUTHORIZED);
+
+    let victim = http_get_full(
+        &app,
+        &format!("/oauth/register/{victim_id}"),
+        &[("Authorization", &format!("Bearer {victim_token}"))],
+    )
+    .await;
+    assert_eq!(
+        victim.status,
+        StatusCode::UNAUTHORIZED,
+        "the presented token must be the one revoked: {}",
+        victim.body
+    );
+
+    let bystander = http_get_full(
+        &app,
+        &format!("/oauth/register/{bystander_id}"),
+        &[("Authorization", &format!("Bearer {bystander_token}"))],
+    )
+    .await;
+    assert_eq!(
+        bystander.status,
+        StatusCode::OK,
+        "an unrelated client's token must survive: {}",
+        bystander.body
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_unknown_token_against_unknown_client_still_401() {
+    // The common case: a token that matches no client at all. Revocation finds
+    // nothing to clear and the response is the same uniform 401 as every other
+    // failure — the revocation SHOULD must not become a distinguisher.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", "Bearer vouch_reg_not_a_real_token")],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "unknown token, unknown client",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_wrong_token_for_existing_client_is_not_revoked() {
+    // The revocation SHOULD is scoped to the "client does not exist" branch.
+    // A live token presented against a *real* client that it does not own is
+    // rejected, but must not be revoked — §2.1 attaches revocation only to the
+    // non-existent-client case, and revoking here would let any caller who
+    // learns two client_ids disable a token by pointing it at the wrong one.
+    let (app, _state) = test_app().await;
+    let (own_id, own_token) = register_dynamic_client(&app).await;
+    let (other_id, _other_token) = register_dynamic_client(&app).await;
+
+    let crossed = http_get_full(
+        &app,
+        &format!("/oauth/register/{other_id}"),
+        &[("Authorization", &format!("Bearer {own_token}"))],
+    )
+    .await;
+    assert_eq!(crossed.status, StatusCode::UNAUTHORIZED);
+
+    let still_valid = http_get_full(
+        &app,
+        &format!("/oauth/register/{own_id}"),
+        &[("Authorization", &format!("Bearer {own_token}"))],
+    )
+    .await;
+    assert_eq!(
+        still_valid.status,
+        StatusCode::OK,
+        "a token pointed at another existing client must not be revoked: {}",
+        still_valid.body
+    );
+}
+
+// =========================================================================
+// RFC 7592 §5 — Security Considerations for the registration access token.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_registration_access_token_has_sufficient_entropy() {
+    // RFC 7592 §5: "Since possession of the registration access token
+    // authorizes the holder to potentially read, modify, or delete a client's
+    // registration (including its credentials such as a client_secret), the
+    // registration access token MUST contain sufficient entropy to prevent a
+    // random guessing attack of this token, such as described in Section 5.2
+    // of [RFC6750] and Section 5.1.4.2.2 of [RFC6819]."
+    //
+    // The OAuth 2.0 core specification supplies the numeric floor those
+    // sections point at: "The probability of an attacker guessing generated
+    // tokens (and other credentials not intended for handling by end-users)
+    // MUST be less than or equal to 2^(-128) and SHOULD be less than or equal
+    // to 2^(-160)." Only the registration access token is asserted here, so
+    // this test claims no coverage of that broader requirement.
+    use base64::Engine as _;
+
+    let (app, _state) = test_app().await;
+
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..8 {
+        let (_client_id, token) = register_dynamic_client(&app).await;
+
+        let random_part = token
+            .strip_prefix("vouch_reg_")
+            .expect("registration access token must carry the vouch_reg_ prefix");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(random_part)
+            .expect("the random part must be base64url");
+
+        assert!(
+            decoded.len() >= 20,
+            "token entropy is {} bits, below the 160-bit floor OAuth 2.0 recommends",
+            decoded.len().saturating_mul(8)
+        );
+        assert!(
+            seen.insert(token.clone()),
+            "registration access tokens must never repeat: {token}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_registration_access_token_does_not_expire_while_registered() {
+    // RFC 7592 §5: "While the client secret can expire, the registration access
+    // token SHOULD NOT expire while a client is still actively registered. If
+    // this token were to expire, a developer or client could be left in a
+    // situation where they have no means of retrieving, updating, or deleting
+    // the client's registration information."
+    //
+    // Vouch stores only the token's hash, with no expiry alongside it, so the
+    // token stays usable for the life of the registration. Two observable
+    // consequences pin that: the registration response advertises no expiry for
+    // the token, and the token keeps authenticating across repeated use.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "RFC7592 Token Lifetime Client"
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // RFC 7591 §3.2.1 defines `client_secret_expires_at` for the secret. There
+    // is no counterpart for the registration access token, and inventing one
+    // would be the expiry §5 warns against.
+    for member in [
+        "registration_access_token_expires_at",
+        "registration_access_token_expires_in",
+    ] {
+        assert!(
+            json.get(member).is_none(),
+            "the registration access token must carry no expiry, found {member}: {json}"
+        );
+    }
+
+    // Repeated use keeps working, and each PUT-rotated token is itself durable.
+    for round in 0..3 {
+        let response = http_get_full(
+            &app,
+            &format!("/oauth/register/{client_id}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "round {round}: the registration access token must not expire while the client is \
+             actively registered: {}",
+            response.body
+        );
+    }
+}

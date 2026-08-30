@@ -147,9 +147,9 @@ pub use oauth::{
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
     get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
     is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
-    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
-    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
-    validate_oauth_client_credentials, validate_redirect_uri,
+    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, revoke_registration_access_token,
+    store_jwt_assertion_jti, update_oauth_client, update_oauth_client_last_used,
+    update_oauth_client_registration, validate_oauth_client_credentials, validate_redirect_uri,
 };
 
 // Re-export test-only OAuth client helpers

@@ -1582,6 +1582,13 @@ pub async fn update_client_configuration(
 /// A genuine database outage is the one exception: it surfaces as an HTTP 500
 /// `server_error` because it is a transient fault independent of the queried
 /// `client_id` and carries no information about whether the client exists.
+///
+/// On the `client_id`-does-not-exist branch the presented token is additionally
+/// revoked, per the `SHOULD` that accompanies the 401 in §2.1/2.2/2.3. A token
+/// offered against a `client_id` that was never issued it is either a guess or a
+/// leaked credential; either way it has no legitimate use, and it may still be
+/// live for the client it really belongs to. Revocation is best-effort and never
+/// changes the response — see [`db::revoke_registration_access_token`].
 async fn lookup_and_verify_registration_token(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1603,6 +1610,7 @@ async fn lookup_and_verify_registration_token(
         Ok(Some(client)) => client,
         Ok(None) => {
             tracing::debug!("RFC 7592 token verification failed: client_id {client_id} not found");
+            revoke_token_for_unknown_client(state, token).await;
             return Err(invalid_token());
         }
         Err(e) => {
@@ -1645,6 +1653,33 @@ async fn lookup_and_verify_registration_token(
     }
 
     Ok(client)
+}
+
+/// Revoke a registration access token presented against an unknown `client_id`.
+///
+/// RFC 7592 §2.1 (and identically §2.2, and §2.3 with "if possible"):
+///
+/// > If the client does not exist on this server, the server MUST respond with
+/// > HTTP 401 Unauthorized and the registration access token used to make this
+/// > request SHOULD be immediately revoked.
+///
+/// Best-effort by construction: the outcome never reaches the response, so a
+/// failed revocation cannot turn into a distinguisher, and a database error here
+/// must not mask the 401 the caller is owed. The token is hashed the same way it
+/// was stored, so a miss costs one indexed lookup and nothing else.
+async fn revoke_token_for_unknown_client(state: &Arc<AppState>, token: &str) {
+    match db::revoke_registration_access_token(&state.store, &hash_token(token)).await {
+        Ok(Some(owner_id)) => {
+            tracing::warn!(
+                "RFC 7592: revoked the registration access token of client {owner_id} after it \
+                 was presented against a client_id that does not exist"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("RFC 7592: failed to revoke a misdirected registration token: {e}");
+        }
+    }
 }
 
 /// Build a `RegistrationResponse` from a stored `OAuthClient`.
