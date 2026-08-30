@@ -107,17 +107,30 @@ pub(crate) const ACR_AAL3: &str = "urn:nist:authentication:assurance-level:aal3"
 
 /// Authentication assurance level for an issued token.
 ///
-/// Bundles `hardware_verified`, `amr`, and `acr` into a single type
-/// to prevent inconsistent combinations (e.g., `hardware_verified: true`
+/// Bundles `hardware_verified`, `auth_time`, `amr`, and `acr` into a single
+/// type to prevent inconsistent combinations (e.g., `hardware_verified: true`
 /// with `amr: None`).
+///
+/// `auth_time` lives inside [`Self::Verified`] rather than beside this enum
+/// because it records *when the FIDO2 assertion happened*. A token that ran no
+/// assertion has no such instant, and [`Self::NotVerified`] has nowhere to put
+/// one — so an enrollment bootstrap or M2M token cannot carry an `auth_time`
+/// that a freshness gate would read as proof of recent FIDO2 (issue #1114).
 #[derive(Debug, Clone)]
 pub(crate) enum HardwareVerification {
     /// FIDO2 hardware key verified by Vouch (UP + UV).
     /// Sets `hardware_verified: true`, `amr: [hwk, pin, user]`,
     /// `acr: urn:nist:...:aal3`.
-    Verified,
+    Verified {
+        /// When the assertion happened (Unix seconds), for the `auth_time`
+        /// claim. `None` when verification is inherited from another token
+        /// rather than observed here — RFC 8693 token exchange runs no
+        /// ceremony of its own.
+        auth_time: Option<i64>,
+    },
     /// No hardware verification performed (M2M, JWT bearer, etc.).
-    /// Sets `hardware_verified: false`, `amr: None`, `acr: None`.
+    /// Sets `hardware_verified: false`, `auth_time: None`, `amr: None`,
+    /// `acr: None`.
     NotVerified,
 }
 
@@ -125,14 +138,24 @@ impl HardwareVerification {
     /// Whether FIDO2 hardware verification was performed.
     #[must_use]
     pub(crate) fn hardware_verified(&self) -> bool {
-        matches!(self, Self::Verified)
+        matches!(self, Self::Verified { .. })
+    }
+
+    /// RFC 9068 Section 2.2 / OIDC Core Section 2: when the End-User
+    /// authentication occurred. Absent unless FIDO2 ran.
+    #[must_use]
+    pub(crate) fn auth_time(&self) -> Option<i64> {
+        match self {
+            Self::Verified { auth_time } => *auth_time,
+            Self::NotVerified => None,
+        }
     }
 
     /// RFC 8176 authentication methods reference.
     #[must_use]
     pub(crate) fn amr(&self) -> Option<Vec<AuthMethod>> {
         match self {
-            Self::Verified => Some(AuthMethod::all_fido2().to_vec()),
+            Self::Verified { .. } => Some(AuthMethod::all_fido2().to_vec()),
             Self::NotVerified => None,
         }
     }
@@ -141,7 +164,7 @@ impl HardwareVerification {
     #[must_use]
     pub(crate) fn acr(&self) -> Option<String> {
         match self {
-            Self::Verified => Some(ACR_AAL3.to_string()),
+            Self::Verified { .. } => Some(ACR_AAL3.to_string()),
             Self::NotVerified => None,
         }
     }
@@ -697,11 +720,10 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     /// Optional audience override (for token exchange with explicit audience).
     /// When `None`, defaults to `client_id`.
     pub audience: Option<&'a str>,
-    /// Time when the End-User authentication occurred (Unix timestamp).
-    /// Populated from FIDO2 session creation time for authorization code grants.
-    pub auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `hardware_verified`, `amr`,
-    /// and `acr` to prevent inconsistent combinations.
+    /// Authentication assurance level — bundles `hardware_verified`,
+    /// `auth_time`, `amr`, and `acr` to prevent inconsistent combinations.
+    /// The `auth_time` claim is derived from this field, so a token issued
+    /// without a FIDO2 assertion cannot claim one.
     pub hardware_verification: HardwareVerification,
     /// Session purpose for the database record.
     pub session_purpose: SessionPurpose,
@@ -886,7 +908,7 @@ pub(crate) async fn create_oauth_access_token(
         email_verified: if has_email_scope { Some(true) } else { None },
         hardware_verified: params.hardware_verification.hardware_verified(),
         cnf,
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         act: params.act,
         amr: params.hardware_verification.amr(),
         acr: params.hardware_verification.acr(),
@@ -984,10 +1006,17 @@ impl DecodedToken {
     }
 
     /// Reconstruct the hardware verification level from token claims.
+    ///
+    /// `auth_time` is deliberately not carried over: the reconstruction
+    /// describes a token being minted *from* this one, and that token runs no
+    /// assertion of its own. Inheriting the instant would let a derived token
+    /// satisfy a freshness gate on a ceremony it never performed.
     #[must_use]
     pub(crate) fn hardware_verification(&self) -> HardwareVerification {
         match self {
-            Self::AccessToken(c) if c.hardware_verified => HardwareVerification::Verified,
+            Self::AccessToken(c) if c.hardware_verified => {
+                HardwareVerification::Verified { auth_time: None }
+            }
             Self::AccessToken(_) => HardwareVerification::NotVerified,
         }
     }
@@ -1302,7 +1331,9 @@ mod tests {
     /// chain no test can mint, so the mapping is pinned here instead.
     #[test]
     fn test_verified_hardware_sets_amr_acr_and_flag() {
-        let verified = HardwareVerification::Verified;
+        let verified = HardwareVerification::Verified {
+            auth_time: Some(42),
+        };
         assert!(verified.hardware_verified());
         assert_eq!(verified.acr().as_deref(), Some(ACR_AAL3));
         let amr = verified.amr().expect("Verified must set amr");

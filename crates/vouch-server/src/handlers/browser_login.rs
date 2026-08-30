@@ -717,8 +717,9 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(auth_now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_now.as_second()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: authenticator.aaguid.as_deref(),

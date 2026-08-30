@@ -371,8 +371,9 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
@@ -404,8 +405,9 @@ pub(crate) async fn exchange_authorization_code(
             expires_in,
             binding: params.binding,
             scope: &auth_code.scope,
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -917,9 +919,8 @@ struct IdTokenParams<'a> {
     /// key receives the same confirmation on both tokens of one response.
     binding: TokenBinding<'a>,
     scope: &'a ScopeSet,
-    /// Time when the user authenticated (FIDO2 session creation time).
-    auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `amr` and `acr`.
+    /// Authentication assurance level — bundles `auth_time`, `amr`, and `acr`,
+    /// so the `auth_time` claim cannot outlive the assertion that earned it.
     hardware_verification: crate::services::auth::HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
@@ -953,7 +954,7 @@ async fn generate_id_token(
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())

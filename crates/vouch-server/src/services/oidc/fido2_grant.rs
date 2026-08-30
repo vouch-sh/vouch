@@ -400,8 +400,9 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
-            auth_time: Some(now),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(now),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
             hardware_aaguid: authenticator.aaguid.as_deref(),

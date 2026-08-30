@@ -910,8 +910,9 @@ pub async fn create_test_session(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -971,8 +972,9 @@ pub async fn create_test_session_with_audience(
             binding: TokenBinding::Bearer,
             act: None,
             audience: Some(audience),
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1023,8 +1025,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            // No FIDO2 authentication occurred — see `handlers/enroll.rs`.
-            auth_time: None,
+            // `NotVerified` carries no `auth_time` — see `handlers/enroll.rs`.
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1083,8 +1084,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            // No FIDO2 authentication occurred — see `handlers/enroll.rs`.
-            auth_time: None,
+            // `NotVerified` carries no `auth_time` — see `handlers/enroll.rs`.
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1138,8 +1138,9 @@ pub async fn create_test_session_with_iat(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(iat),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(iat),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1192,8 +1193,9 @@ pub async fn create_test_session_for_client(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1252,8 +1254,9 @@ pub async fn create_test_session_with_dpop(
             binding: TokenBinding::new(Some(&dpop_proof), None),
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1306,8 +1309,9 @@ pub async fn create_test_session_with_mtls(
             binding: TokenBinding::new(None, Some(mtls_cert_thumbprint)),
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),

@@ -513,11 +513,10 @@ pub(crate) async fn exchange_token(
             binding: params.binding,
             act: actor_claim,
             audience,
-            // Token exchange does not carry auth_time from the subject token
-            auth_time: None,
             // Propagate hardware verification from the subject token so
             // non-FIDO2 tokens (e.g., JWT bearer) cannot be laundered into
-            // hardware-verified tokens via exchange.
+            // hardware-verified tokens via exchange. The reconstruction drops
+            // `auth_time` — the exchange runs no ceremony of its own.
             hardware_verification: subject_decoded.hardware_verification(),
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),

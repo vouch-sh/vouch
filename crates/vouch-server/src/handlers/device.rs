@@ -525,12 +525,15 @@ pub(crate) async fn device_token(
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
-                    auth_time: Some(now_secs),
                     // Mirrors how the browser approved this request, so the
-                    // claim the credential endpoints gate on reflects whether
-                    // the authenticator was actually exercised.
+                    // claims the credential endpoints gate on reflect whether
+                    // the authenticator was actually exercised. An approval
+                    // without a ceremony carries no `auth_time`: the approval
+                    // instant is not a FIDO2 instant.
                     hardware_verification: if hardware_verified {
-                        crate::services::auth::HardwareVerification::Verified
+                        crate::services::auth::HardwareVerification::Verified {
+                            auth_time: Some(now_secs),
+                        }
                     } else {
                         crate::services::auth::HardwareVerification::NotVerified
                     },
