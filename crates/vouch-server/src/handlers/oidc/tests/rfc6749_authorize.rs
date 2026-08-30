@@ -1157,3 +1157,111 @@ async fn test_rfc6749_authorize_empty_parameter_is_treated_as_omitted() {
         location(&empty)
     );
 }
+
+// ========================================================================
+// response_mode — unrecognized values
+//
+// OAuth 2.0 Multiple Response Type Encoding Practices §2.1 defines
+// `response_mode` and says what an absent one means — "If `response_mode` is
+// not present in a request, the default Response Mode mechanism specified by
+// the Response Type is used" — but is silent on an unrecognized value. The
+// choice is therefore ours, and substituting the default is the one answer
+// that cannot be right: a client asking for `form_post` or `jwt` is not
+// listening on a query redirect, so it would receive an authorization
+// response it never reads. The PAR endpoint has always rejected these; these
+// tests hold the authorization endpoint to the same answer.
+// ========================================================================
+
+#[tokio::test]
+async fn test_authorize_rejects_unrecognized_response_mode() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "bad-response-mode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256\
+             &response_mode=formpost&state=rm-state",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        !location.contains("code="),
+        "an unrecognized response_mode must not issue an authorization code: {location}"
+    );
+    assert!(
+        location.contains("error=invalid_request"),
+        "an unrecognized response_mode must be rejected: {} {location}",
+        response.status
+    );
+    // RFC 6749 §4.1.2.1: the error response carries the request's `state`.
+    assert!(
+        location.contains("state=rm-state"),
+        "the error response must echo state: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_authorize_accepts_every_advertised_response_mode() {
+    // The rejection above must not cost a mode the discovery document
+    // advertises: `response_modes_supported` and the parser read one table.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "good-response-mode@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let advertised = doc["response_modes_supported"]
+        .as_array()
+        .expect("discovery must advertise response_modes_supported");
+    assert!(!advertised.is_empty(), "discovery must list some mode");
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    for mode in advertised {
+        let mode = mode.as_str().expect("response mode must be a string");
+        let response = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={challenge}&code_challenge_method=S256&response_mode={}",
+                client.client_id,
+                urlencoding::encode("https://example.com/callback"),
+                urlencoding::encode(mode),
+            ),
+            &[],
+        )
+        .await;
+
+        let location = response
+            .headers
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !location.contains("error=invalid_request"),
+            "advertised response_mode {mode:?} must be accepted: {location}"
+        );
+    }
+}

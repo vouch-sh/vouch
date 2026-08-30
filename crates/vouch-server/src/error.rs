@@ -187,6 +187,16 @@ pub enum OAuthErrorCode {
     /// interface for End-User authentication."
     /// <https://openid.net/specs/openid-connect-core-1_0.html#AuthError>
     LoginRequired,
+    /// OIDC Core Section 3.1.2.6: "The End-User is REQUIRED to select a
+    /// session at the Authorization Server. The End-User MAY be authenticated
+    /// at the Authorization Server with different associated accounts, but
+    /// the End-User did not select a session."
+    ///
+    /// Returned for `prompt=select_account`, which Vouch cannot honor.
+    /// RFC 9126 Section 2.3 bars user-interaction codes from the PAR
+    /// endpoint, so that handler translates this one before responding.
+    /// <https://openid.net/specs/openid-connect-core-1_0.html#AuthError>
+    AccountSelectionRequired,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -210,10 +220,12 @@ impl OAuthErrorCode {
             | Self::InvalidClientMetadata
             | Self::InvalidAuthorizationDetails
             | Self::InvalidRequestUri
-            // `login_required` only ever travels as a redirect query
-            // parameter (OIDC Core 3.1.2.6), never as an HTTP status on a
-            // direct response, so this arm is currently unreachable.
-            | Self::LoginRequired => StatusCode::BAD_REQUEST,
+            // `login_required` and `account_selection_required` travel as
+            // redirect query parameters (OIDC Core 3.1.2.6). The PAR endpoint
+            // translates the latter rather than returning it (RFC 9126 2.3),
+            // so neither reaches a client as an HTTP status.
+            | Self::LoginRequired
+            | Self::AccountSelectionRequired => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -258,6 +270,7 @@ impl OAuthErrorCode {
             Self::InvalidAuthorizationDetails => "invalid_authorization_details",
             Self::InvalidRequestUri => "invalid_request_uri",
             Self::LoginRequired => "login_required",
+            Self::AccountSelectionRequired => "account_selection_required",
         }
     }
 }

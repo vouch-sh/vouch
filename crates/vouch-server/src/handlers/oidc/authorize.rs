@@ -20,9 +20,9 @@ use crate::infra::i18n::Tr;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
-    CodeChallengeMethod, Prompt, ValidatedAuthRequest, check_client_access,
-    check_session_for_authorization, issue_authorization_code, require_pkce_for_client,
-    validate_authorize_request,
+    CodeChallengeMethod, Prompt, PromptSet, ValidatedAuthRequest, check_client_access,
+    check_session_for_authorization, issue_authorization_code, parse_response_mode,
+    require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::jar::{QueryParamHints, fetch_request_object, validate_request_object};
 use askama::Template;
@@ -180,19 +180,39 @@ impl ResolvedClient {
     /// Full Phase A pipeline: DB lookup + active check + redirect_uri validation.
     ///
     /// Used for Direct, PAR, and pending_auth flows.
+    /// `oauth_state` is the request's `state` parameter, which RFC 6749
+    /// Section 4.1.2.1 requires on the error response this may produce.
     async fn resolve(
         state: &Arc<AppState>,
         client_id: &str,
         redirect_uri_param: Option<&str>,
         response_mode_param: Option<&str>,
+        oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
         let client = lookup_and_check_active(state, client_id).await?;
 
         let redirect_uri = resolve_redirect_uri(redirect_uri_param, &client)?;
 
-        let response_mode = response_mode_param
-            .and_then(ResponseMode::parse)
-            .unwrap_or(ResponseMode::Query);
+        let response_mode = match parse_response_mode(response_mode_param) {
+            Ok(mode) => mode,
+            Err(e) => {
+                // The requested mode is the one mechanism that cannot carry
+                // this answer, so the error goes back in the default `query`
+                // encoding. The redirect_uri is registered by now, so
+                // redirecting is safe and is what RFC 6749 Section 4.1.2.1
+                // asks for.
+                return Err(oauth_error_response(
+                    state,
+                    &client,
+                    &redirect_uri,
+                    OAuthErrorCode::InvalidRequest,
+                    &e.oauth_description(),
+                    oauth_state,
+                    ResponseMode::Query,
+                )
+                .await);
+            }
+        };
 
         Ok(Self {
             client,
@@ -234,6 +254,35 @@ impl ResolvedClient {
             redirect_uri,
             response_mode,
         })
+    }
+
+    /// Apply the `response_mode` a Request Object asked for.
+    ///
+    /// The Request Object flows validate the redirect_uri before they can
+    /// know the mode, so they build a `ResolvedClient` at the `code`
+    /// default first and narrow it here. Splitting it this way is what lets
+    /// an unrecognized mode be reported by redirect — RFC 6749 Section
+    /// 4.1.2.1 — instead of being silently replaced with `query`.
+    async fn with_requested_response_mode(
+        self,
+        state: &Arc<AppState>,
+        requested: Option<&str>,
+        oauth_state: Option<&str>,
+    ) -> Result<Self, Response> {
+        match parse_response_mode(requested) {
+            Ok(response_mode) => Ok(Self {
+                response_mode,
+                ..self
+            }),
+            Err(e) => Err(self
+                .error_redirect(
+                    state,
+                    OAuthErrorCode::InvalidRequest,
+                    &e.oauth_description(),
+                    oauth_state,
+                )
+                .await),
+        }
     }
 
     /// Produce a redirect-based OAuth error using the validated redirect_uri.
@@ -373,7 +422,7 @@ async fn check_session_and_authorize(
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            if validated.prompt() == Some(Prompt::Silent) {
+            if validated.has_prompt(Prompt::Silent) {
                 return resolved
                     .error_redirect(
                         state,
@@ -558,32 +607,12 @@ async fn handle_direct_request(
         &client_id,
         params.redirect_uri.as_deref(),
         params.response_mode.as_deref(),
+        params.state.as_deref(),
     )
     .await
     {
         Ok(r) => r,
         Err(resp) => return resp,
-    };
-
-    // Validate prompt before constructing params — reject unsupported values.
-    let parsed_prompt = match params.prompt.as_deref() {
-        Some(p) => match Prompt::parse(p) {
-            Some(prompt) => Some(prompt),
-            None => {
-                return resolved
-                    .error_redirect(
-                        state,
-                        OAuthErrorCode::InvalidRequest,
-                        &format!(
-                            "Unsupported prompt value. Supported values: {}",
-                            crate::services::oidc::authorization::Prompt::supported_values()
-                        ),
-                        params.state.as_deref(),
-                    )
-                    .await;
-            }
-        },
-        None => None,
     };
 
     let request_params = AuthorizeRequestParams {
@@ -598,9 +627,10 @@ async fn handle_direct_request(
         resource: params.resource.clone(),
         acr_values: params.acr_values.clone(),
         max_age: params.max_age,
-        prompt: parsed_prompt,
+        prompt: params.prompt.clone(),
         dpop_jkt: params.dpop_jkt.clone(),
         authorization_details: params.authorization_details.clone(),
+        // `resolved` already holds the mode this request will answer in.
         response_mode: None,
     };
 
@@ -682,20 +712,39 @@ async fn handle_jar_request(
         }
     };
 
-    // Extract redirect_uri and response_mode from the Request Object.
+    // Extract redirect_uri from the Request Object.
     let redirect_uri = request_params.redirect_uri.clone();
-    let jar_response_mode = request_params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
+    let requested_response_mode = request_params.response_mode.clone();
 
     // Phase A step 3: validate redirect_uri against registered URIs (errors → page).
+    //
+    // The mode starts at the `code` default so that a redirect_uri is
+    // registered before anything is redirected to it; the requested mode is
+    // resolved immediately below, once there is a `ResolvedClient` able to
+    // report a rejection.
     let resolved = match ResolvedClient::from_validated_client(
         oauth_client,
         redirect_uri,
-        jar_response_mode,
+        ResponseMode::Query,
     ) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // RFC 9101 Section 6.3: "The authorization server MUST only use the
+    // parameters in the Request Object, even if the same parameter is
+    // provided in the query parameter." That governs the `state` echoed back
+    // on an error (RFC 6749 Section 4.1.2.1) as much as any other parameter.
+    let oauth_state = request_params.state.clone();
+
+    let resolved = match resolved
+        .with_requested_response_mode(
+            state,
+            requested_response_mode.as_deref(),
+            oauth_state.as_deref(),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -710,7 +759,7 @@ async fn handle_jar_request(
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
-                .error_redirect(state, error_code, &description, query.state.as_deref())
+                .error_redirect(state, error_code, &description, oauth_state.as_deref())
                 .await;
         }
     };
@@ -830,6 +879,7 @@ async fn handle_par_request(
         &par.client_id,
         Some(&par.redirect_uri),
         None, // PAR response_mode handled below
+        par.state.as_deref(),
     )
     .await
     {
@@ -837,8 +887,10 @@ async fn handle_par_request(
         Err(resp) => return resp,
     };
 
-    // Build the ValidatedAuthRequest from PAR fields.
-    let parsed_prompt = par.prompt.as_deref().and_then(Prompt::parse);
+    // Build the ValidatedAuthRequest from PAR fields. The stored values are
+    // the ones `validate_authorize_request` accepted when the request was
+    // pushed, and they go back through it here rather than being re-parsed
+    // by hand — a second parser is a second place for the two to disagree.
     let request_params = AuthorizeRequestParams {
         response_type: par.response_type.clone(),
         client_id: par.client_id.clone(),
@@ -851,7 +903,7 @@ async fn handle_par_request(
         resource: par.resource.clone(),
         acr_values: par.acr_values.clone(),
         max_age: par.max_age.and_then(|v| u64::try_from(v).ok()),
-        prompt: parsed_prompt,
+        prompt: par.prompt.clone(),
         dpop_jkt: par.dpop_jkt.clone(),
         authorization_details: par
             .authorization_details
@@ -1041,15 +1093,20 @@ async fn fetch_and_resolve_request_uri(
             }
         };
 
-    // Step 6: extract redirect_uri and validate against registered URIs.
+    // Step 6: extract redirect_uri and validate against registered URIs, then
+    // apply the requested response_mode (see `with_requested_response_mode`).
     let redirect_uri = request_params.redirect_uri.clone();
-    let jar_response_mode = request_params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
     let resolved =
-        ResolvedClient::from_validated_client(oauth_client, redirect_uri, jar_response_mode)?;
+        ResolvedClient::from_validated_client(oauth_client, redirect_uri, ResponseMode::Query)?;
+    let resolved = resolved
+        .with_requested_response_mode(
+            state,
+            request_params.response_mode.as_deref(),
+            // RFC 9101 Section 6.3: the Request Object's parameters are the
+            // request's, including the `state` an error response echoes.
+            request_params.state.as_deref(),
+        )
+        .await?;
 
     Ok((resolved, request_params))
 }
@@ -1094,6 +1151,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
         &pending.client_id,
         Some(&pending.redirect_uri),
         None, // response_mode set from pending record below
+        pending.state.as_deref(),
     )
     .await
     {
@@ -1385,8 +1443,9 @@ async fn store_pending_and_redirect(
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
     let prompt_str = prompt_override
-        .map(|p| p.as_str())
-        .or_else(|| validated.prompt().map(|p| p.as_str()));
+        .map(PromptSet::of)
+        .or_else(|| validated.prompt())
+        .map(PromptSet::to_space_separated);
     let pending_params = CreatePendingOAuthParams {
         client_id: validated.client_id(),
         redirect_uri: validated.redirect_uri(),
@@ -1399,7 +1458,7 @@ async fn store_pending_and_redirect(
         resource: validated.resource(),
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
-        prompt: prompt_str,
+        prompt: prompt_str.as_deref(),
         dpop_jkt: validated.dpop_jkt(),
         authorization_details: ad_value.as_ref(),
         response_mode: target.response_mode,
@@ -1500,9 +1559,9 @@ async fn authorize_authenticated_user(
 
     // Step 2: Determine whether re-authentication is required.
     let needs_reauth = match reauth_policy {
-        ReauthPolicy::Always => validated.prompt() != Some(Prompt::Silent),
+        ReauthPolicy::Always => !validated.has_prompt(Prompt::Silent),
         ReauthPolicy::OnDemand => {
-            validated.prompt() == Some(Prompt::Login)
+            validated.has_prompt(Prompt::Login)
                 || validated.max_age().is_some_and(|max_age| {
                     // OIDC Core 3.1.2.1: "If the elapsed time is greater than
                     // this value, the OP MUST attempt to actively
@@ -1531,7 +1590,7 @@ async fn authorize_authenticated_user(
     };
 
     // Step 3: prompt=none + re-auth needed → error (cannot show UI).
-    if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
+    if needs_reauth && validated.has_prompt(Prompt::Silent) {
         return oauth_error_response(
             state,
             oauth_client,

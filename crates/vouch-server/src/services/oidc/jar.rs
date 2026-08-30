@@ -16,7 +16,7 @@ use crate::AppState;
 use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
+use crate::services::oidc::authorization::AuthorizeRequestParams;
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, assertion_header_from, map_algorithm,
 };
@@ -93,6 +93,40 @@ struct RequestObjectClaims {
     request: Option<serde_json::Value>,
     #[serde(default)]
     request_uri: Option<serde_json::Value>,
+}
+
+/// Claims of the JWT itself, exempt from the empty-value rule that applies to
+/// the authorization request parameters around them.
+///
+/// `iss`, `aud`, and `jti` are JWT claims rather than request parameters, so
+/// an empty one is malformed rather than absent and has to survive to reach
+/// the check that says so. `request` and `request_uri` are prohibited
+/// parameters whose mere presence is the violation (RFC 9101 Section 4),
+/// which an empty value would otherwise hide.
+const NON_PARAMETER_CLAIMS: &[&str] = &["iss", "aud", "jti", "request", "request_uri"];
+
+/// Drop the Request Object's empty-valued authorization request parameters.
+///
+/// RFC 6749 Section 3.1: "Parameters sent without a value MUST be treated as
+/// if they were omitted from the request." RFC 9101 Section 6.3 makes the
+/// Request Object's claims the request's parameters — "The authorization
+/// server MUST extract the set of authorization request parameters from the
+/// Request Object value" — so the same sentence governs them.
+///
+/// Without this, a signed request would read `"scope": ""` as a present-but-
+/// empty scope while a plain `scope=` arrives as no scope at all, because
+/// `handlers::extractors::deserialize_present_params` drops the empty pairs
+/// out of a form body before deserializing it. Stripping here is the same
+/// operation one layer over, so the two request formats agree on what an
+/// empty parameter means.
+fn strip_empty_request_parameters(payload: &mut serde_json::Value) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.retain(|name, value| {
+        NON_PARAMETER_CLAIMS.contains(&name.as_str())
+            || value.as_str().is_none_or(|text| !text.is_empty())
+    });
 }
 
 /// Hints from query parameters for FAPI 2.0 consistency validation.
@@ -410,8 +444,13 @@ pub async fn validate_request_object(
     validation.validate_exp = false;
     validation.validate_aud = false;
 
+    // Decoding into a `Value` keeps signature verification and claim
+    // deserialization as two failures a client can tell apart: a Request
+    // Object whose `max_age` arrived as a string is malformed, not badly
+    // signed, and reporting it as a signature failure sends the client to
+    // look at its key.
     let token_data =
-        jsonwebtoken::decode::<RequestObjectClaims>(request_jwt, &decoding_key, &validation)
+        jsonwebtoken::decode::<serde_json::Value>(request_jwt, &decoding_key, &validation)
             .map_err(|e| {
                 tracing::debug!("Request Object signature verification failed: {e}");
                 ServiceError::oauth(
@@ -420,7 +459,16 @@ pub async fn validate_request_object(
                 )
             })?;
 
-    let claims = token_data.claims;
+    let mut payload = token_data.claims;
+    strip_empty_request_parameters(&mut payload);
+
+    let claims: RequestObjectClaims = serde_json::from_value(payload).map_err(|e| {
+        tracing::debug!("Request Object claims are malformed: {e}");
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            format!("Request Object claims are malformed: {e}"),
+        )
+    })?;
 
     // 5. Validate temporal claims
     // FAPI 2.0 clients use a tighter 10-second clock skew tolerance.
@@ -557,24 +605,7 @@ pub async fn validate_request_object(
         }
     }
 
-    // 11. Parse prompt value
-    let parsed_prompt = match claims.prompt.as_deref() {
-        Some(p) => match Prompt::parse(p) {
-            Some(prompt) => Some(prompt),
-            None => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequestObject,
-                    format!(
-                        "Unsupported prompt value. Supported values: {}",
-                        Prompt::supported_values()
-                    ),
-                ));
-            }
-        },
-        None => None,
-    };
-
-    // 12. RFC 9396: Parse authorization_details from Request Object if present
+    // 11. RFC 9396: Parse authorization_details from Request Object if present
     let authorization_details_str = if let Some(ref ad_value) = claims.authorization_details {
         let raw = serde_json::to_string(ad_value).map_err(|e| {
             ServiceError::oauth(
@@ -589,7 +620,12 @@ pub async fn validate_request_object(
         None
     };
 
-    // 13. Build the authorization request parameters
+    // 12. Build the authorization request parameters.
+    //
+    // The values themselves are not checked here. RFC 9101 Section 6.3 has
+    // the authorization server "validate the request, as specified in OAuth
+    // 2.0", so they go to `validate_authorize_request` — the same check a
+    // plain request gets, reached with the same error codes.
     Ok(AuthorizeRequestParams {
         response_type,
         client_id: claims.client_id.unwrap_or_else(|| client.client_id.clone()),
@@ -602,7 +638,7 @@ pub async fn validate_request_object(
         resource: claims.resource,
         acr_values: claims.acr_values,
         max_age: claims.max_age,
-        prompt: parsed_prompt,
+        prompt: claims.prompt,
         dpop_jkt: claims.dpop_jkt,
         authorization_details: authorization_details_str,
         response_mode: claims.response_mode,
