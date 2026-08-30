@@ -1415,59 +1415,13 @@ pub(crate) async fn browser_register_complete(
         expires_at: _,
     } = checked;
 
-    // Validate the x5c chain first: its proof is what the AAGUID policy and
-    // `require_attestation_cert` are checked against below. The CLI path gets
-    // the same proof from `webauthn_verify::verify_registration`; running it
-    // here keeps both registration paths on identical rules.
-    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
-    let policy_requires_verified_chain = !matches!(
-        state.config().allowed_aaguids,
-        vouch_common::AaguidPolicy::Any
-    );
-    let mut chain_proof = None;
-    if let Some(ref x5c_certs) = x5c_certs {
-        let auth_data_aaguid =
-            crate::attestation::extract_aaguid_from_attestation(&req.attestation_object);
-        match crate::crypto::attestation_chain::validate_attestation_chain(
-            x5c_certs,
-            auth_data_aaguid.as_deref(),
-        ) {
-            Ok(chain_result) => {
-                tracing::info!(
-                    attestation_verified = true,
-                    "Browser enrollment: x5c chain validated"
-                );
-                chain_proof = Some(chain_result);
-            }
-            Err(e) => {
-                if state.config().require_attestation_cert || policy_requires_verified_chain {
-                    tracing::warn!(
-                        "Browser enrollment: x5c chain validation \
-                         failed (fatal): {e}"
-                    );
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_chain_invalid",
-                        "Attestation certificate chain could not be \
-                         verified against trusted roots. Only genuine \
-                         hardware authenticators with valid attestation \
-                         chains are accepted.",
-                    ));
-                }
-                tracing::warn!(
-                    "Browser enrollment: x5c chain validation \
-                     failed (non-fatal): {e}"
-                );
-            }
-        }
-    }
-
-    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the CLI path in `keys.rs`, so the two agree by
+    // construction.
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &state.config().allowed_aaguids,
         state.config().require_attestation_cert,
-        chain_proof,
     )?;
 
     // WebAuthn cryptographic verification.

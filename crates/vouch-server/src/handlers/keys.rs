@@ -315,14 +315,13 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info).
-    // `verify_registration` above already ran the x5c chain, so its proof is
-    // what the AAGUID policy is checked against.
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the browser path in `enroll.rs`, so the two
+    // agree by construction.
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &config.allowed_aaguids,
         config.require_attestation_cert,
-        verified.attestation,
     )?;
 
     // Use server-verified AAGUID if available, fall back to client-provided
