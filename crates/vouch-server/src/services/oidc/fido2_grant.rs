@@ -279,9 +279,9 @@ pub(crate) async fn exchange_fido2_assertion(
             "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
             user_id
         );
-        // P3.5: a failed assertion — including clone detection (counter
-        // regression) — is a high-signal security event. Record it in the
-        // audit trail with the credential and user IDs and the failure reason.
+        // A failed assertion — including clone detection (counter regression)
+        // — is a high-signal security event. Record it in the audit trail with
+        // the credential and user IDs and the failure reason.
         let failure_event = AuthEventParams {
             user_id: user.id.clone(),
             event_type: AuthEventType::LoginFailed,

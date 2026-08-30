@@ -1279,8 +1279,10 @@ fn determine_client_type(
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.1/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 pub async fn read_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1300,8 +1302,10 @@ pub async fn read_client_configuration(
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.3/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 pub async fn delete_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1348,8 +1352,10 @@ pub async fn delete_client_configuration(
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.2/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 /// - `ServiceError::OAuth` if the request body contains invalid metadata.
 pub async fn update_client_configuration(
     state: &Arc<AppState>,
@@ -1559,38 +1565,78 @@ pub async fn update_client_configuration(
     Ok(response)
 }
 
-/// Look up a client by `client_id` and verify the registration access token.
+/// Look up a client by `client_id` and verify its registration access token.
+///
+/// Per RFC 7592 §2.1/2.2/2.3 and the security rationale in §5, *every* failure
+/// case returns the **same** HTTP 401 `invalid_token` response, so that a
+/// caller who only knows the public `client_id` cannot distinguish:
+/// - a `client_id` that does not exist,
+/// - a client that is inactive / was deprovisioned,
+/// - a client created through the admin UI (no registration access token), and
+/// - a dynamically-registered client presented with the wrong bearer token.
+///
+/// Any distinction (e.g. a 404 for a missing client, or a different 401 message
+/// for an admin-created client) leaks client existence and type, which §5
+/// forbids. Detailed diagnostics are emitted to the server log only.
+///
+/// A genuine database outage is the one exception: it surfaces as an HTTP 500
+/// `server_error` because it is a transient fault independent of the queried
+/// `client_id` and carries no information about whether the client exists.
+///
+/// On the `client_id`-does-not-exist branch the presented token is additionally
+/// revoked, per the `SHOULD` that accompanies the 401 in §2.1/2.2/2.3. A token
+/// offered against a `client_id` that was never issued it is either a guess or a
+/// leaked credential; either way it has no legitimate use, and it may still be
+/// live for the client it really belongs to. Revocation is best-effort and never
+/// changes the response — see [`db::revoke_registration_access_token`].
 async fn lookup_and_verify_registration_token(
     state: &Arc<AppState>,
     client_id: &str,
     token: &str,
 ) -> Result<OAuthClient, ServiceError> {
-    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
-        .await
-        .map_err(|e| {
+    // RFC 6750 §3.1: registration endpoints are OAuth protected resources, so a
+    // bearer-token failure is `invalid_token`, not the client-authentication
+    // error `invalid_client`. The exact same response is reused for every
+    // rejection below to avoid disclosing client existence or type.
+    let invalid_token = || {
+        ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            OAuthErrorCode::InvalidToken.as_str(),
+            "Invalid registration access token",
+        )
+    };
+
+    let client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            tracing::debug!("RFC 7592 token verification failed: client_id {client_id} not found");
+            revoke_token_for_unknown_client(state, token).await;
+            return Err(invalid_token());
+        }
+        Err(e) => {
+            // A real database failure is not an auth determination; keep it as
+            // an internal error so monitoring sees the outage rather than
+            // misclassifying it as an invalid registration access token.
             tracing::error!("DB error looking up client {client_id}: {e}");
-            ServiceError::Internal("Database error".to_string())
-        })?
-        .ok_or(ServiceError::NotFound("Client"))?;
+            return Err(ServiceError::Internal("Database error".to_string()));
+        }
+    };
 
     if !client.active {
-        return Err(ServiceError::NotFound("Client"));
+        tracing::debug!("RFC 7592 token verification failed: client_id {client_id} is inactive");
+        return Err(invalid_token());
     }
 
-    let stored_hash = client
-        .registration_access_token_hash
-        .as_deref()
-        .ok_or_else(|| {
-            // RFC 7592 §2 / RFC 6750 §3.1: registration endpoints are OAuth
-            // protected resources, so bearer-token failures are
-            // `invalid_token`, not the client-authentication error
-            // `invalid_client`.
-            ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                OAuthErrorCode::InvalidToken.as_str(),
-                "Client has no registration access token",
-            )
-        })?;
+    let stored_hash = match client.registration_access_token_hash.as_deref() {
+        Some(hash) => hash,
+        None => {
+            tracing::debug!(
+                "RFC 7592 token verification failed: client_id {client_id} has no \
+                 registration access token (admin-created client)"
+            );
+            return Err(invalid_token());
+        }
+    };
 
     let provided_hash = hash_token(token);
     let is_match: bool = provided_hash
@@ -1599,14 +1645,41 @@ async fn lookup_and_verify_registration_token(
         .into();
 
     if !is_match {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            OAuthErrorCode::InvalidToken.as_str(),
-            "Invalid registration access token",
-        ));
+        tracing::debug!(
+            "RFC 7592 token verification failed: bearer token does not match the stored \
+             hash for client_id {client_id}"
+        );
+        return Err(invalid_token());
     }
 
     Ok(client)
+}
+
+/// Revoke a registration access token presented against an unknown `client_id`.
+///
+/// RFC 7592 §2.1 (and identically §2.2, and §2.3 with "if possible"):
+///
+/// > If the client does not exist on this server, the server MUST respond with
+/// > HTTP 401 Unauthorized and the registration access token used to make this
+/// > request SHOULD be immediately revoked.
+///
+/// Best-effort by construction: the outcome never reaches the response, so a
+/// failed revocation cannot turn into a distinguisher, and a database error here
+/// must not mask the 401 the caller is owed. The token is hashed the same way it
+/// was stored, so a miss costs one indexed lookup and nothing else.
+async fn revoke_token_for_unknown_client(state: &Arc<AppState>, token: &str) {
+    match db::revoke_registration_access_token(&state.store, &hash_token(token)).await {
+        Ok(Some(owner_id)) => {
+            tracing::warn!(
+                "RFC 7592: revoked the registration access token of client {owner_id} after it \
+                 was presented against a client_id that does not exist"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("RFC 7592: failed to revoke a misdirected registration token: {e}");
+        }
+    }
 }
 
 /// Build a `RegistrationResponse` from a stored `OAuthClient`.

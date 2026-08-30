@@ -80,7 +80,7 @@ async fn create_test_jwt_client(
 }
 
 // ========================================================================
-// P1: RFC 7523 §2.2 — JWT Profile for Client Authentication
+// RFC 7523 §2.2 — JWT Profile for Client Authentication
 //
 // The §2.1 authorization grant (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`)
 // has been removed. The lock-in test below asserts the token endpoint rejects it.

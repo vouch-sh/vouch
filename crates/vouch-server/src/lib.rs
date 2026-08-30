@@ -370,6 +370,43 @@ mod redirect_tests {
         );
     }
 
+    /// RFC 7592 §5: "Since requests to the client configuration endpoint result
+    /// in the transmission of clear-text credentials (in the HTTP request and
+    /// response), the authorization server MUST require the use of a
+    /// transport-layer security mechanism when sending requests to the
+    /// endpoint."
+    ///
+    /// When TLS is configured, port 80 runs this router and nothing else, so a
+    /// cleartext client configuration request is redirected rather than served —
+    /// the registration access token never reaches a handler over plain HTTP.
+    #[tokio::test]
+    async fn test_client_configuration_endpoint_is_never_served_over_cleartext() {
+        let state = Arc::new(test_app_state_with_rp_id("vouch.sh"));
+        let app = build_redirect_router(state);
+
+        for method in ["GET", "PUT", "DELETE"] {
+            let req = Request::builder()
+                .method(method)
+                .uri("/oauth/register/some-client-id")
+                .header("host", "vouch.sh")
+                .header("authorization", "Bearer vouch_reg_secret")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::PERMANENT_REDIRECT,
+                "{method} on the client configuration endpoint must be redirected to HTTPS, \
+                 never answered over cleartext"
+            );
+            assert_eq!(
+                resp.headers().get("location").unwrap(),
+                "https://vouch.sh/oauth/register/some-client-id"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_redirect_127_0_0_1_allowed() {
         let state = Arc::new(test_app_state_with_rp_id("vouch.sh"));
