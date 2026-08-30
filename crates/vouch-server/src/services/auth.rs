@@ -141,7 +141,7 @@ impl HardwareVerification {
         matches!(self, Self::Verified { .. })
     }
 
-    /// RFC 9068 Section 2.2 / OIDC Core Section 2: when the End-User
+    /// RFC 9068 Section 2.2.1 / OIDC Core Section 2: when the End-User
     /// authentication occurred. Absent unless FIDO2 ran.
     #[must_use]
     pub(crate) fn auth_time(&self) -> Option<i64> {
@@ -1007,10 +1007,21 @@ impl DecodedToken {
 
     /// Reconstruct the hardware verification level from token claims.
     ///
-    /// `auth_time` is deliberately not carried over: the reconstruction
-    /// describes a token being minted *from* this one, and that token runs no
-    /// assertion of its own. Inheriting the instant would let a derived token
-    /// satisfy a freshness gate on a ceremony it never performed.
+    /// `auth_time` is dropped while `amr` and `acr` are carried over, which is
+    /// a deliberate deviation from RFC 9068 Section 2.2.1. That section groups
+    /// all three as Authentication Information Claims and says their "values
+    /// are fixed and remain the same across all access tokens that derive from
+    /// a given authorization response ... or after one or more token exchanges
+    /// (e.g., ... exchanging one access token for another via [RFC8693]
+    /// procedures)". Read strictly, an exchanged token should carry the
+    /// subject's original `auth_time` unchanged.
+    ///
+    /// We drop it because `auth_time` is load-bearing for the step-up gate on
+    /// key deletion, and propagating it would let a token obtained by exchange
+    /// satisfy a freshness requirement on a ceremony the exchange did not
+    /// perform. Dropping it fails closed: such a token reads as epoch and is
+    /// challenged. Revisit if a resource server ever needs the exchanged
+    /// token's `auth_time` for its own decisions.
     #[must_use]
     pub(crate) fn hardware_verification(&self) -> HardwareVerification {
         match self {

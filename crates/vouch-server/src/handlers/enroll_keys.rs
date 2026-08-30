@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Key management handlers during enrollment (using cookie-based authentication).
+//! Key management handlers during enrollment (browser UI).
 //!
-//! These endpoints allow users to manage their security keys via browser UI.
-//! Authentication is via the session cookie containing an OAuth access token.
+//! These endpoints let users manage their security keys from the enrollment
+//! pages. `list_keys` and `rename_key_form` read the session cookie only.
+//! `delete_key` takes the `SteppedUpToken` extractor, which consults the
+//! `Authorization` header before falling back to the cookie — so it also
+//! accepts a bearer token. That grants nothing new: `DELETE /v1/keys/{id}`
+//! already accepts the same token and performs the same deletion. Pinning this
+//! route back to cookies would mean special-casing the extractor for one
+//! handler, which is worse than the asymmetry.
 
 use crate::AppState;
 use crate::db;
