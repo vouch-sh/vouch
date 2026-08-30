@@ -747,7 +747,7 @@ async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
 }
 
 // ========================================================================
-// P1: RFC 6749 — Authorization Endpoint Additional Tests
+// RFC 6749 — Authorization Endpoint Additional Tests
 // ========================================================================
 
 #[tokio::test]
@@ -1264,4 +1264,192 @@ async fn test_authorize_accepts_every_advertised_response_mode() {
             "advertised response_mode {mode:?} must be accepted: {location}"
         );
     }
+}
+
+// ========================================================================
+// RFC 6749 Section 4.1.2.1 — a failed session lookup is `server_error`
+//
+// A store failure while checking the session says nothing about whether the
+// user is authenticated. Collapsing it into the "not authenticated" branch
+// reports a server fault as `login_required` (or walks the user into a login
+// form whose pending-authorization write hits the same broken store).
+//
+// The `SessionCache::inject_fault` seam faults only the session token's own
+// hash, so client resolution and request validation still run against the
+// live pool and the failure is isolated to the lookup under test.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc6749_authorize_session_store_error_returns_server_error() {
+    // RFC 6749 Section 4.1.2.1: `server_error` is "an unexpected condition
+    // that prevented it from fulfilling the request. (This error code is
+    // needed because a 500 Internal Server Error HTTP status code cannot be
+    // returned to the client via an HTTP redirect.)" — which is exactly a
+    // store failure during the session lookup. `login_required` would instead
+    // tell the client to retry interactively against the broken store.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-store-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+    let state_param = "store-fault-state";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256&prompt=none&state={state_param}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "store failure must still be reported over the redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("error=server_error"),
+        "store failure during the session lookup must return server_error: {location}"
+    );
+    assert!(
+        !location.contains("error=login_required"),
+        "store failure must not be reported as login_required: {location}"
+    );
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_session_store_error_does_not_redirect_to_login() {
+    // Without prompt=none the pre-fix code sent the user to /login, where
+    // storing the pending authorization would fail against the same store.
+    // The client must learn the request failed instead.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-store-fault-ui@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        !location.starts_with("/login"),
+        "store failure must not be masked as a login redirect: {location}"
+    );
+    assert!(
+        location.contains("error=server_error"),
+        "store failure must return server_error to the client: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_pending_auth_store_error_is_not_auth_failure() {
+    // Returning from /login, a store failure must not render "Authentication
+    // failed" — the sign-in was never the problem, and that message invites
+    // the user to repeat a ceremony that cannot help.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pending-store-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    // Unauthenticated first leg: stores the pending authorization and hands
+    // back its id in the /login redirect.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8")
+        .to_string();
+    let pending_id = location
+        .split("pending_auth=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("login redirect must carry pending_auth");
+
+    // Second leg: the user now has a session, but its lookup faults.
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the denied page is rendered inline, got: {status}"
+    );
+    assert!(
+        !body.contains("Authentication failed"),
+        "store failure must not be reported as a failed authentication: {body}"
+    );
+    assert!(
+        body.contains("could not complete the request"),
+        "store failure must render the server-error message: {body}"
+    );
 }

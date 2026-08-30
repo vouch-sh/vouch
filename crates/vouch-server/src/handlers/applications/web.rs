@@ -316,7 +316,9 @@ pub(crate) async fn detail_application_page(
         .collect();
     let secrets_count = secrets.iter().filter(|s| s.active).count();
 
-    // Get usage stats
+    // Get usage stats. A failure renders the page without them rather than
+    // failing the whole detail view, but "no usage" and "stats unavailable"
+    // look identical to the reader, so log the cause.
     let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id, None).await {
         Ok(stats) => stats
             .into_iter()
@@ -325,7 +327,10 @@ pub(crate) async fn detail_application_page(
                 count: s.count,
             })
             .collect(),
-        Err(_) => vec![],
+        Err(e) => {
+            tracing::warn!(error = %e, app_id, "Usage stats lookup failed; rendering page without them");
+            vec![]
+        }
     };
 
     ApplicationDetailTemplate {

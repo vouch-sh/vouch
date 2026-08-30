@@ -668,26 +668,38 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
             None => return AuthContext::unauthenticated(),
         };
 
-    // Verify session exists in DB
+    // Verify session exists in DB. This helper returns an infallible
+    // `AuthContext`, so a store failure can only be reported as
+    // unauthenticated — log it so an outage is distinguishable from a
+    // revoked session rather than surfacing as a silently logged-out UI.
     let token_hash = hash_token(token);
-    let session_exists = matches!(
-        state
-            .session_cache
-            .get_session_by_token_hash(&state.store, &token_hash)
-            .await,
-        Ok(Some(_))
-    );
-
-    if !session_exists {
-        return AuthContext::unauthenticated();
+    match state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return AuthContext::unauthenticated(),
+        Err(e) => {
+            tracing::error!(error = %e, "Session lookup failed; treating UI request as unauthenticated");
+            return AuthContext::unauthenticated();
+        }
     }
 
     let user_id = decoded.sub().to_string();
     let user_email = decoded.email().map(String::from);
 
-    // Look up user to check active status, org membership, and admin status
-    let Ok(user) = load_active_user(state, &user_id).await else {
-        return AuthContext::unauthenticated();
+    // Look up user to check active status, org membership, and admin status.
+    // A deactivated or deleted user is an ordinary unauthenticated outcome;
+    // only a store failure (`Internal`) is worth an error line.
+    let user = match load_active_user(state, &user_id).await {
+        Ok(user) => user,
+        Err(e) => {
+            if matches!(e, ServiceError::Internal(_)) {
+                tracing::error!(error = %e, "User lookup failed; treating UI request as unauthenticated");
+            }
+            return AuthContext::unauthenticated();
+        }
     };
     let (has_org, is_org_admin) = (user.org_id.is_some(), user.is_org_admin);
 
