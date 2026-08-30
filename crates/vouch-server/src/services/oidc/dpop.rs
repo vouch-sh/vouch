@@ -325,11 +325,16 @@ pub fn validate_dpop_claims(
         return Err(DpopError::MethodMismatch);
     }
 
-    // Check URI against all accepted URIs (canonical + mTLS alias)
-    let claims_uri = normalize_uri(&claims.htu);
+    // Check URI against all accepted URIs (canonical + mTLS alias). An htu that
+    // is not a URI at all cannot name the target of this request, so it fails
+    // the same check a URI naming the wrong target would.
+    let Some(claims_uri) = normalize_uri(&claims.htu) else {
+        return Err(DpopError::UriMismatch);
+    };
     let uri_matches = accepted_uris
         .iter()
-        .any(|uri| normalize_uri(uri) == claims_uri);
+        .filter_map(|uri| normalize_uri(uri))
+        .any(|uri| uri == claims_uri);
     if !uri_matches {
         return Err(DpopError::UriMismatch);
     }
@@ -377,7 +382,8 @@ pub fn validate_dpop_claims(
     Ok(())
 }
 
-/// Normalize a URI for comparison against the DPoP `htu` claim.
+/// Normalize a URI for comparison against the DPoP `htu` claim, or `None` when
+/// the input is not a URI.
 ///
 /// RFC 9449 Section 4.2 defines `htu` as "The HTTP target URI (Section 7.1 of
 /// [RFC9110]) of the request to which the JWT is attached, without query and
@@ -393,35 +399,17 @@ pub fn validate_dpop_claims(
 /// against a configured `https://example.com/token` even though RFC 3986 calls
 /// the two equivalent.
 ///
-/// A URI the parser rejects keeps the old treatment — query and fragment
-/// stripped, nothing else — so an unparseable claim still fails the comparison
-/// rather than matching something it should not.
-pub fn normalize_uri(uri: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(uri) else {
-        return strip_query_and_fragment(uri);
-    };
+/// Input the parser rejects yields `None` rather than a partly normalized
+/// string. Such a string could never match anyway — every accepted URI is a
+/// parser output, and a string equal to one would itself have parsed — so the
+/// caller states the rejection instead of computing a value whose only possible
+/// outcome is a mismatch.
+fn normalize_uri(uri: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(uri).ok()?;
 
     parsed.set_query(None);
     parsed.set_fragment(None);
-    parsed.to_string()
-}
-
-/// Drop the query and fragment from a URI that could not be parsed.
-#[expect(
-    clippy::string_slice,
-    reason = "byte offsets come from str::find on ASCII chars; always at valid char boundary"
-)]
-fn strip_query_and_fragment(uri: &str) -> String {
-    // Find the first occurrence of either '?' or '#' to handle all orderings.
-    // Safety: both `find('?')` and `find('#')` return byte offsets of ASCII
-    // characters, so slicing at `end` is always at a valid char boundary.
-    let end = uri
-        .find('?')
-        .into_iter()
-        .chain(uri.find('#'))
-        .min()
-        .unwrap_or(uri.len());
-    uri[..end].to_string()
+    Some(parsed.to_string())
 }
 
 /// Build a `DecodingKey` from a DPoP JWK.
@@ -673,16 +661,16 @@ mod tests {
     #[test]
     fn test_normalize_uri() {
         assert_eq!(
-            normalize_uri("https://example.com/token?foo=bar"),
-            "https://example.com/token"
+            normalize_uri("https://example.com/token?foo=bar").as_deref(),
+            Some("https://example.com/token")
         );
         assert_eq!(
-            normalize_uri("https://example.com/token#frag"),
-            "https://example.com/token"
+            normalize_uri("https://example.com/token#frag").as_deref(),
+            Some("https://example.com/token")
         );
         assert_eq!(
-            normalize_uri("https://example.com/token"),
-            "https://example.com/token"
+            normalize_uri("https://example.com/token").as_deref(),
+            Some("https://example.com/token")
         );
     }
 
@@ -718,15 +706,39 @@ mod tests {
         );
     }
 
-    // A claim the URL parser rejects keeps the older treatment, so it still
-    // fails the comparison rather than normalizing into a match.
+    // RFC 9449 §4.3 step 9 requires the htu claim to match the request URI. A
+    // claim that is not a URI cannot, so it is rejected outright rather than
+    // partly normalized into a value that could only ever mismatch.
     #[test]
-    fn test_normalize_uri_unparseable_input() {
-        assert_eq!(normalize_uri("not a uri?x=1"), "not a uri");
-        assert_ne!(
-            normalize_uri("not a uri"),
-            normalize_uri("https://example.com/token")
+    fn test_normalize_uri_rejects_input_that_is_not_a_uri() {
+        for input in [
+            "not a uri?x=1",
+            "/oauth/token",
+            "example.com/oauth/token",
+            "",
+        ] {
+            assert_eq!(normalize_uri(input), None, "input: {input:?}");
+        }
+    }
+
+    // An htu that is not a URI fails validation the same way one naming the
+    // wrong target does.
+    #[test]
+    fn test_unparseable_htu_is_a_uri_mismatch() {
+        let claims = make_claims("POST", "/oauth/token", Timestamp::now().as_second());
+        let uris = vec!["https://example.com/oauth/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                now: Timestamp::now().as_second(),
+                expected_method: "POST",
+                accepted_uris: &uris,
+                max_age_seconds: 300,
+                expected_nonce: None,
+                expected_ath: None,
+            },
         );
+        assert!(matches!(result, Err(DpopError::UriMismatch)));
     }
 
     #[test]
