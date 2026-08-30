@@ -673,10 +673,18 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             // since the COSE key is verified through usage anyway
         }
         other => {
-            // Other formats (fido-u2f, tpm, ...) are accepted without
-            // verifying their attestation statement; the credential is still
-            // verified through assertion on login. Their authData AAGUID is
-            // discarded, because nothing here signed it.
+            // No verification procedure is implemented for these formats, so
+            // nothing here signs the authData AAGUID and it is discarded. The
+            // credential itself is still verified through assertion on login.
+            //
+            // This is not the hardware-only gate, and passing through here is
+            // not acceptance. `validate_hardware_attestation` runs afterwards
+            // in `validate_registration_attestation` and is default-deny: it
+            // admits only `packed` and `fido-u2f`, rejecting `none` as a
+            // software passkey, `tpm`/`apple`/`android-key`/
+            // `android-safetynet` as platform authenticators, and any
+            // unrecognized identifier outright. `fido-u2f` is therefore the
+            // only format that reaches this arm and survives registration.
             //
             // CTAP 2.0 section 7.2 gives the authenticator data a platform
             // synthesizes from a CTAP1/U2F response as carrying an AAGUID

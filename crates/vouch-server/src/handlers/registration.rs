@@ -268,6 +268,37 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// The hardware-only gate is default-deny and runs before everything else,
+    /// so an unrecognized format is rejected even when it carries an
+    /// allowlisted AAGUID and a verified chain. Only `packed` and `fido-u2f`
+    /// are admitted; nothing about the attestation proof can buy an exemption.
+    #[test]
+    fn test_validate_rejects_unknown_format_despite_verified_chain() {
+        let aaguid_str = "cb69481e-8ff7-4039-93ec-0a2729a154a8";
+        let att = build_attestation("acme-custom", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let err = validate_registration_attestation(
+            &att,
+            &allowlist_of(aaguid_str),
+            false,
+            proof_with_cert_aaguid(aaguid_str),
+        )
+        .expect_err("an unrecognized attestation format must be rejected");
+        assert!(
+            error_code(&err).contains("unknown_attestation_format"),
+            "expected unknown_attestation_format, got {err:?}"
+        );
+    }
+
+    /// `fido-u2f` is hardware and stays registrable, so the gate above is a
+    /// format allowlist rather than a ban on everything but `packed`.
+    #[test]
+    fn test_validate_accepts_fido_u2f_as_hardware() {
+        let att = build_attestation("fido-u2f", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false, None);
+        assert!(result.is_ok(), "fido-u2f is a hardware format");
+    }
+
     // ====================================================================
     // AAGUID policy requires a verified chain
     //
