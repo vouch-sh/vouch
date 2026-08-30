@@ -805,34 +805,15 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
     let fixed_jti = "fixed-jti-replay-test-value";
     let audience = "https://test.example.com/oauth/token";
 
-    let scope_set = ScopeSet::parse("openid email");
-
     // First exchange: commit the JTI.
-    let code1 = issue_authorization_code(
+    let code1 = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue auth code 1");
+    .await;
 
     let assertion1 = build_client_assertion(&client.client_id, audience, &pkcs8, Some(fixed_jti));
     let (status1, body1) = http_post_form(
@@ -855,31 +836,14 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
     );
 
     // Second exchange: same JTI must be rejected as a replay.
-    let code2 = issue_authorization_code(
+    let code2 = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue auth code 2");
+    .await;
 
     let assertion2 = build_client_assertion(&client.client_id, audience, &pkcs8, Some(fixed_jti));
     let (status2, body2) = http_post_form(

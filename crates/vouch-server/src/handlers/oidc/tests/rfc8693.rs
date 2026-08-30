@@ -1481,3 +1481,99 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         "Error description must mention deactivated: {body}"
     );
 }
+
+/// RFC 6749 Section 10.5: "the authorization server SHOULD attempt to revoke
+/// all access tokens already granted based on the compromised authorization
+/// code." An exchanged token derives its authority from the subject token, so
+/// a token exchanged from an authorization-code token was granted based on
+/// that code and must be revoked when the code is replayed — otherwise an
+/// exchange launders a compromised code into a token that outlives it.
+#[tokio::test]
+async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "exchange-replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Redeem an authorization code, then exchange the resulting token.
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "code exchange failed: {body}");
+    let subject_token =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+    let exchanged =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    // A session from a grant with no single-use code must survive the replay.
+    let unrelated = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the replayed code must be denied"
+    );
+
+    for (token, label) in [
+        (&subject_token, "the subject token"),
+        (&exchanged, "the exchanged token"),
+    ] {
+        let (status, _) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{label} must be revoked with the replayed code"
+        );
+    }
+    assert_token_alive(&app, &unrelated, "a session from a grant with no code").await;
+}

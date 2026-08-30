@@ -497,32 +497,14 @@ async fn test_rfc7662_introspect_with_private_key_jwt_succeeds() {
 
     // Issue a token for the JWT client via auth code flow
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &jwt_client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &jwt_client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Exchange code using private_key_jwt
     let token_url = format!("{}/oauth/token", state.config().base_url);

@@ -712,6 +712,13 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub hardware_aaguid: Option<&'a str>,
     /// Organization domain (`hd` claim) at session creation time.
     pub org_domain: Option<&'a str>,
+    /// Hash of the single-use grant code that sourced this token. `None` for
+    /// grants with no single-use code (FIDO2, client_credentials, token
+    /// exchange, browser login, enrollment); `Some` for the authorization-code
+    /// and device-code grants. Recorded on the session so that replay
+    /// detection (RFC 6749 §10.5) can revoke only the tokens issued from the
+    /// replayed code rather than every session for the user.
+    pub source_code_hash: Option<&'a str>,
 }
 
 /// How an issued token is bound to the party that may present it.
@@ -905,6 +912,7 @@ pub(crate) async fn create_oauth_access_token(
             authorization_details: params.authorization_details,
             hardware_aaguid: params.hardware_aaguid,
             org_domain: params.org_domain,
+            source_code_hash: params.source_code_hash,
         },
     )
     .await
