@@ -673,9 +673,26 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             // since the COSE key is verified through usage anyway
         }
         other => {
-            // Accept other formats (fido-u2f, tpm, etc.) without verification.
-            // The credential will still be verified through assertion on login.
-            tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            // Other formats (fido-u2f, tpm, ...) are accepted without
+            // verifying their attestation statement; the credential is still
+            // verified through assertion on login. Their authData AAGUID is
+            // discarded, because nothing here signed it.
+            //
+            // CTAP 2.0 section 7.2 gives the authenticator data a platform
+            // synthesizes from a CTAP1/U2F response as carrying an AAGUID
+            // "Initialized with all zeros", so a conforming fido-u2f
+            // registration conveys no AAGUID in the first place and loses
+            // nothing here. A non-zero AAGUID under such a format did not come
+            // from a conforming authenticator.
+            if aaguid.is_some() {
+                tracing::warn!(
+                    fmt = %other,
+                    "Discarding AAGUID from an attestation format that is not verified"
+                );
+                aaguid = None;
+            } else {
+                tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            }
         }
     }
 

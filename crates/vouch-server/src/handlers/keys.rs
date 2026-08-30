@@ -315,17 +315,15 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info)
-    let mut validated = validate_registration_attestation(
+    // Validate attestation (hardware-only, AAGUID policy, extract device info).
+    // `verify_registration` above already ran the x5c chain, so its proof is
+    // what the AAGUID policy is checked against.
+    let validated = validate_registration_attestation(
         &req.attestation_object,
         &config.allowed_aaguids,
         config.require_attestation_cert,
+        verified.attestation,
     )?;
-
-    // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation.is_some() {
-        validated.attestation = verified.attestation;
-    }
 
     // Use server-verified AAGUID if available, fall back to client-provided
     let aaguid = verified.aaguid.or(validated.aaguid);

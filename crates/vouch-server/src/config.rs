@@ -1171,6 +1171,23 @@ impl ServerConfig {
             }
         }
 
+        // An AAGUID policy restricts which authenticator *models* may enroll,
+        // and the model is only knowable from an attestation certificate. With
+        // require_attestation_cert off, the policy would be enforced against
+        // the self-reported AAGUID in authData, which any client can set to
+        // whatever value the allowlist wants to see. Reject the pairing rather
+        // than serve a restriction that does not restrict.
+        if !matches!(self.allowed_aaguids, vouch_common::AaguidPolicy::Any)
+            && !self.require_attestation_cert
+        {
+            anyhow::bail!(
+                "VOUCH_ALLOWED_AAGUIDS restricts authenticator models, which \
+                 requires VOUCH_REQUIRE_ATTESTATION_CERT=true. Without a \
+                 verified attestation certificate the AAGUID is self-reported \
+                 and the restriction can be bypassed."
+            );
+        }
+
         // Reject partial TLS configuration. With only one of cert/key set the
         // server silently runs plain HTTP (serving and discovery both require
         // tls_configured()), which is never what the operator intended.
@@ -1427,6 +1444,40 @@ mod tests {
         // Mutual exclusivity removed — both kinds can coexist in the same idps list.
         let mut config = test_config();
         config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_aaguid_policy_without_attestation_cert() {
+        // An AAGUID policy names authenticator *models*, which only an
+        // attestation certificate can establish. Without the certificate
+        // requirement the policy is enforced against a self-reported value the
+        // client chooses, so the pairing must not start.
+        let mut config = test_config();
+        config.allowed_aaguids = vouch_common::AaguidPolicy::FipsOnly;
+        config.require_attestation_cert = false;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("VOUCH_REQUIRE_ATTESTATION_CERT"),
+            "error must name the variable the operator has to set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_aaguid_policy_with_attestation_cert() {
+        let mut config = test_config();
+        config.allowed_aaguids = vouch_common::AaguidPolicy::FipsOnly;
+        config.require_attestation_cert = true;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_any_policy_without_attestation_cert() {
+        // The default pairing is unchanged: no model restriction, no
+        // certificate requirement.
+        let mut config = test_config();
+        config.allowed_aaguids = vouch_common::AaguidPolicy::Any;
+        config.require_attestation_cert = false;
         assert!(config.validate().is_ok());
     }
 

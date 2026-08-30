@@ -37,8 +37,20 @@ maintained lists: `fips-only` matches FIPS-certified YubiKeys, `yubikey-5` match
 series (excluding the Security Key series and Bio FIDO Edition). Anything else is parsed as a
 comma-separated list of AAGUID UUIDs, and a malformed entry is a fatal startup error.
 
+**A model restriction requires `VOUCH_REQUIRE_ATTESTATION_CERT=true`, and the server refuses to
+start without it.** The AAGUID lives in `authData`, which the client supplies; on its own it is
+self-reported and any client can send whichever value the allowlist is looking for. Only an
+attestation certificate ties it to a real model, so the two settings are enforced as a pair
+rather than letting you deploy a restriction that does not restrict.
+
+With both set, an enrolling authenticator must present a certificate chain that validates against
+a pinned Yubico root *and* whose leaf names the model in its `id-fido-gen-ce-aaguid` extension. A
+chain that validates but does not name a model is rejected: it proves the key is genuine, not
+which model it is.
+
 If your organization has a contractual FIPS requirement for the authenticator itself, `fips-only`
-is the control that enforces it. Nothing else in Vouch does.
+plus `VOUCH_REQUIRE_ATTESTATION_CERT=true` is the control that enforces it. Nothing else in Vouch
+does.
 
 > Restricting AAGUIDs affects enrollment. Users who already enrolled a now-disallowed model keep
 > working; tighten the policy before rolling out keys, not after.
@@ -49,10 +61,13 @@ is the control that enforces it. Nothing else in Vouch does.
 VOUCH_REQUIRE_ATTESTATION_CERT=true
 ```
 
-Rejects self-attestation, requiring authenticators to present a full attestation certificate chain.
-This is what makes the AAGUID trustworthy rather than self-asserted, so enable it alongside
-`VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction for compliance. Some authenticators
-only self-attest, so test with your fleet's hardware before enabling it broadly.
+Requires every authenticator to present an attestation certificate chain that validates against a
+pinned Yubico root, and rejects self-attestation. Presence of a chain is not enough — it has to
+verify — so a self-signed certificate offered in `x5c` is refused like no certificate at all.
+
+Set this on its own to demand genuine hardware without restricting models; set it alongside
+`VOUCH_ALLOWED_AAGUIDS` to restrict models too, which is mandatory as described above. Some
+authenticators only self-attest, so test with your fleet's hardware before enabling it broadly.
 
 Whenever a `packed` statement does carry a chain, the leaf is checked against the certificate
 requirements in WebAuthn Level 2 section 8.2.1 before its AAGUID is trusted, in addition to the
@@ -198,6 +213,8 @@ warning in a production log, treat it as an incident: see the
 - [ ] Client IP preserved if anything fronts the server — `VOUCH_TRUSTED_PROXIES` for a proxy that terminates TLS, or client IP preservation on a TCP-passthrough target group
 - [ ] `VOUCH_CERTIFICATION_TEST_TOKEN` **unset**
 - [ ] `VOUCH_METRICS_BEARER_TOKEN` set to a strong random value if metrics are scraped
-- [ ] `VOUCH_ALLOWED_AAGUIDS` / `VOUCH_REQUIRE_ATTESTATION_CERT` set if you have a hardware policy
+- [ ] `VOUCH_REQUIRE_ATTESTATION_CERT=true` to require verified attestation chains, plus
+      `VOUCH_ALLOWED_AAGUIDS` if you also restrict models (the server will not start with a
+      model restriction and no certificate requirement)
 - [ ] TLS terminated in Vouch where possible; HSTS present either way
 - [ ] Database and S3 configuration encrypted at rest with least-privilege access

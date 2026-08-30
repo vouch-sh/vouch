@@ -94,6 +94,18 @@ impl AttestationProof {
     pub fn into_cert_aaguid(self) -> Option<String> {
         self.cert_aaguid
     }
+
+    /// Build a proof without running validation, for tests only.
+    ///
+    /// Synthetic certificates cannot chain to `PINNED_ROOTS`, so tests that
+    /// exercise callers of [`validate_attestation_chain`] have no other way to
+    /// obtain a proof. `cfg(test)` keeps this out of every build except this
+    /// crate's own unit tests, so the production invariant — a proof exists
+    /// only where a chain was validated — is unchanged.
+    #[cfg(test)]
+    pub(crate) fn for_test(cert_aaguid: Option<String>) -> Self {
+        Self { cert_aaguid }
+    }
 }
 
 // ============================================================================
