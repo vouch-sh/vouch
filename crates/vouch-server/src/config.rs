@@ -507,11 +507,6 @@ pub struct Args {
     /// Require x5c attestation certificates during WebAuthn registration.
     ///
     /// When enabled, self-attestation (no certificate chain) is rejected.
-    /// Only authenticators that provide a full attestation certificate chain
-    /// (e.g., YubiKeys with packed attestation) will be accepted.
-    #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
-    pub require_attestation_cert: bool,
-
     /// Log output format: "text" (default, human-readable) or "json" (structured).
     #[arg(long, env = "VOUCH_LOG_FORMAT", default_value = "text")]
     pub log_format: String,
@@ -615,6 +610,11 @@ pub fn bootstrap_overlay_args(
         if matches!(arg.get_action(), ArgAction::SetTrue) {
             // SetTrue args cannot accept `--flag=value`, so parse the blob
             // value leniently and emit the bare flag only when truthy.
+            //
+            // `Args` currently declares no boolean flags, so this branch has
+            // no test. It is kept because the loop is generic over every
+            // declared argument: the first bool added would otherwise emit
+            // `--flag=true`, which clap rejects.
             let truthy = matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "true" | "1" | "yes" | "on"
@@ -841,8 +841,6 @@ pub struct ServerConfig {
     pub jwt_assertion_max_lifetime_seconds: i64,
     /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
     pub allowed_aaguids: vouch_common::AaguidPolicy,
-    /// Require x5c attestation certificates during WebAuthn registration.
-    pub require_attestation_cert: bool,
     /// Log output format: `text` or `json`.
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
@@ -1050,7 +1048,6 @@ impl ServerConfig {
             aws_use_fips_endpoint,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
-            require_attestation_cert: args.require_attestation_cert,
             log_format,
             trusted_proxies,
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
@@ -1169,23 +1166,6 @@ impl ServerConfig {
                     idp.id()
                 );
             }
-        }
-
-        // An AAGUID policy restricts which authenticator *models* may enroll,
-        // and the model is only knowable from an attestation certificate. With
-        // require_attestation_cert off, the policy would be enforced against
-        // the self-reported AAGUID in authData, which any client can set to
-        // whatever value the allowlist wants to see. Reject the pairing rather
-        // than serve a restriction that does not restrict.
-        if !matches!(self.allowed_aaguids, vouch_common::AaguidPolicy::Any)
-            && !self.require_attestation_cert
-        {
-            anyhow::bail!(
-                "VOUCH_ALLOWED_AAGUIDS restricts authenticator models, which \
-                 requires VOUCH_REQUIRE_ATTESTATION_CERT=true. Without a \
-                 verified attestation certificate the AAGUID is self-reported \
-                 and the restriction can be bypassed."
-            );
         }
 
         // Reject partial TLS configuration. With only one of cert/key set the
@@ -1444,40 +1424,6 @@ mod tests {
         // Mutual exclusivity removed — both kinds can coexist in the same idps list.
         let mut config = test_config();
         config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_rejects_aaguid_policy_without_attestation_cert() {
-        // An AAGUID policy names authenticator *models*, which only an
-        // attestation certificate can establish. Without the certificate
-        // requirement the policy is enforced against a self-reported value the
-        // client chooses, so the pairing must not start.
-        let mut config = test_config();
-        config.allowed_aaguids = vouch_common::AaguidPolicy::FipsOnly;
-        config.require_attestation_cert = false;
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("VOUCH_REQUIRE_ATTESTATION_CERT"),
-            "error must name the variable the operator has to set, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_accepts_aaguid_policy_with_attestation_cert() {
-        let mut config = test_config();
-        config.allowed_aaguids = vouch_common::AaguidPolicy::FipsOnly;
-        config.require_attestation_cert = true;
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_accepts_any_policy_without_attestation_cert() {
-        // The default pairing is unchanged: no model restriction, no
-        // certificate requirement.
-        let mut config = test_config();
-        config.allowed_aaguids = vouch_common::AaguidPolicy::Any;
-        config.require_attestation_cert = false;
         assert!(config.validate().is_ok());
     }
 
@@ -1858,27 +1804,6 @@ mod tests {
             tokens.is_empty(),
             "blob keys with no matching Args env name must be ignored, got: {tokens:?}"
         );
-    }
-
-    #[test]
-    fn bootstrap_overlay_emits_bare_flag_for_truthy_bool() {
-        // require_attestation_cert is ArgAction::SetTrue (plain bool field),
-        // which cannot accept `--flag=value` on the command line.
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "true")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert_eq!(
-            tokens,
-            vec![std::ffi::OsString::from("--require-attestation-cert")]
-        );
-    }
-
-    #[test]
-    fn bootstrap_overlay_emits_nothing_for_falsy_bool() {
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert!(tokens.is_empty(), "got: {tokens:?}");
     }
 
     #[test]

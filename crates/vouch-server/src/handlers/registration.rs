@@ -2,7 +2,6 @@
 //! WebAuthn registration attestation validation.
 
 use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};
-use crate::crypto::attestation_chain::AttestationProof;
 use crate::error::ServiceError;
 use axum::http::StatusCode;
 
@@ -13,8 +12,6 @@ pub(crate) struct ValidatedAttestation {
     pub aaguid: Option<String>,
     /// The device name determined from the AAGUID.
     pub device_name: String,
-    /// Whether the attestation was cryptographically verified via x5c chain.
-    pub attestation: Option<AttestationProof>,
 }
 
 /// The all-zero AAGUID, which means "this authenticator does not identify a
@@ -30,18 +27,33 @@ const ZERO_AAGUID: &str = "00000000-0000-0000-0000-000000000000";
 ///
 /// This is the single chokepoint for registration policy. Both the CLI
 /// (`/v1/keys/register/complete`) and browser (`/enroll/webauthn/complete`)
-/// paths call it with the raw attestation object and the server's
-/// configuration, and it performs every step itself:
+/// paths call it with the raw attestation object and the server's AAGUID
+/// policy, and it performs every step itself:
 ///
 /// 1. Rejects software passkeys and platform authenticators by format
-/// 2. Validates the x5c certificate chain against the pinned roots
-/// 3. Enforces `require_attestation_cert`
-/// 4. Checks the AAGUID against the configured `AaguidPolicy`
+/// 2. Requires an x5c chain that validates against the pinned Yubico roots
+/// 3. Takes the AAGUID from the leaf certificate, not from authData
+/// 4. Checks that AAGUID against the configured `AaguidPolicy`
 /// 5. Determines the device name from the AAGUID
 ///
-/// The two paths use different WebAuthn *verification* libraries — the CLI
-/// uses [`crate::crypto::webauthn_verify`], the browser uses `webauthn-rs` —
-/// so registration policy deliberately does not live in either of them.
+/// Attestation is not optional and there is no setting to relax it. Vouch
+/// issues credentials on the strength of a hardware key, and a self-attested
+/// registration offers no evidence that a hardware key exists — WebAuthn
+/// Level 2 section 6.5.3: "If an authenticator employs self attestation or no
+/// attestation, then no provenance information is provided for the Relying
+/// Party to base a trust decision on." Accepting one would make the
+/// `hardware_verified` claim a statement Vouch cannot support.
+///
+/// The AAGUID is read from the attestation certificate rather than authData
+/// for the same reason. authData is supplied by the client and a forged value
+/// there would flow into the `hardware_aaguid` claim, which relying parties
+/// use to gate access by authenticator model. Sourcing it from the verified
+/// certificate makes that forgery structurally impossible instead of merely
+/// checked for.
+///
+/// The two registration paths use different WebAuthn *verification* libraries
+/// — the CLI uses [`crate::crypto::webauthn_verify`], the browser uses
+/// `webauthn-rs` — so registration policy deliberately lives in neither.
 /// Deciding it here, from the attestation bytes and the server config alone,
 /// is what guarantees the two paths accept and reject exactly the same
 /// registrations for exactly the same reasons.
@@ -52,13 +64,12 @@ const ZERO_AAGUID: &str = "00000000-0000-0000-0000-000000000000";
 /// # Errors
 ///
 /// Returns an error if the attestation is from a software passkey or platform
-/// authenticator, if a presented certificate chain does not validate, if a
-/// chain is required but absent, or if the AAGUID is missing, not permitted by
-/// the policy, or not vouched for by the certificate chain.
+/// authenticator, if no certificate chain was presented, if the chain does not
+/// validate against a pinned root, or if the resulting AAGUID is missing or
+/// not permitted by the policy.
 pub(crate) fn validate_registration_attestation(
     attestation_object: &[u8],
     policy: &vouch_common::AaguidPolicy,
-    require_attestation_cert: bool,
 ) -> Result<ValidatedAttestation, ServiceError> {
     // Validate attestation format - reject software passkeys and platform authenticators
     let validation = validate_hardware_attestation(attestation_object);
@@ -67,52 +78,11 @@ pub(crate) fn validate_registration_attestation(
         return Err(ServiceError::api(StatusCode::BAD_REQUEST, code, message));
     }
 
-    // The AAGUID in authData is self-reported and forgeable on its own. The
-    // all-zero value is not an identity, so it is read as absent.
-    let aaguid = extract_aaguid_from_attestation(attestation_object).filter(|a| a != ZERO_AAGUID);
-
-    // Validate the certificate chain whenever one is presented. An x5c array
-    // that does not chain to a pinned root is a stronger signal than no chain
-    // at all, so it is rejected regardless of configuration rather than
-    // degraded to "unattested".
-    let attestation = match crate::attestation::extract_x5c_from_attestation(attestation_object) {
-        Some(certs) => {
-            match crate::crypto::attestation_chain::validate_attestation_chain(
-                &certs,
-                aaguid.as_deref(),
-            ) {
-                Ok(proof) => {
-                    tracing::info!(
-                        cert_aaguid = ?proof.cert_aaguid(),
-                        "x5c attestation chain validated"
-                    );
-                    Some(proof)
-                }
-                Err(e) => {
-                    tracing::warn!("Rejected registration: x5c chain validation failed: {e}");
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_chain_invalid",
-                        "Attestation certificate chain could not be \
-                         verified against trusted roots. Only genuine \
-                         hardware authenticators with valid attestation \
-                         chains are accepted.",
-                    ));
-                }
-            }
-        }
-        None => None,
-    };
-
-    // When require_attestation_cert is enabled, a chain must have been
-    // presented and validated. Self-attestation carries no provenance:
-    // WebAuthn Level 2 section 6.5.3 — "If an authenticator employs self
-    // attestation or no attestation, then no provenance information is
-    // provided for the Relying Party to base a trust decision on."
-    if require_attestation_cert && attestation.is_none() {
+    // An attestation certificate chain is mandatory.
+    let Some(certs) = crate::attestation::extract_x5c_from_attestation(attestation_object) else {
         tracing::warn!(
-            "Rejected registration: attestation certificate chain \
-             required but not presented"
+            "Rejected registration: no attestation certificate chain \
+             (self-attestation)"
         );
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -121,11 +91,45 @@ pub(crate) fn validate_registration_attestation(
              attestation certificate chain validating against a \
              trusted root. Self-attestation is not accepted.",
         ));
-    }
+    };
+
+    // The AAGUID in authData is client-supplied. It is passed here only so the
+    // chain validator can cross-check it against the certificate and reject a
+    // statement whose two halves disagree; the value Vouch keeps comes from
+    // the certificate below. The all-zero value is not an identity, so it is
+    // read as absent.
+    let claimed_aaguid =
+        extract_aaguid_from_attestation(attestation_object).filter(|a| a != ZERO_AAGUID);
+
+    let attestation = crate::crypto::attestation_chain::validate_attestation_chain(
+        &certs,
+        claimed_aaguid.as_deref(),
+    )
+    .map_err(|e| {
+        tracing::warn!("Rejected registration: x5c chain validation failed: {e}");
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "attestation_chain_invalid",
+            "Attestation certificate chain could not be verified \
+             against trusted roots. Only genuine hardware \
+             authenticators with valid attestation chains are accepted.",
+        )
+    })?;
+
+    // The model identity comes from the verified certificate. A chain that
+    // validates without the `id-fido-gen-ce-aaguid` extension proves the key
+    // is genuine but not which model it is, so it yields no AAGUID rather than
+    // falling back to the client's claim.
+    let aaguid = attestation.cert_aaguid().map(str::to_owned);
+
+    tracing::info!(
+        aaguid = ?aaguid,
+        "x5c attestation chain validated"
+    );
 
     // Check AAGUID against configured policy.
     // When the policy is not `Any`, a missing AAGUID must be rejected —
-    // otherwise an authenticator with malformed/missing attestation data
+    // otherwise an authenticator whose certificate does not name its model
     // would silently bypass the allowlist.
     if !matches!(policy, vouch_common::AaguidPolicy::Any) {
         match aaguid {
@@ -146,50 +150,19 @@ pub(crate) fn validate_registration_attestation(
             }
             None => {
                 tracing::warn!(
-                    "Rejected registration: missing AAGUID \
-                     with non-Any policy"
+                    "Rejected registration: attestation certificate does \
+                     not identify the authenticator model, with non-Any policy"
                 );
                 return Err(ServiceError::api(
                     StatusCode::BAD_REQUEST,
                     "aaguid_missing",
-                    "Could not extract authenticator identity \
-                     (AAGUID). Registration requires an \
+                    "The attestation certificate does not identify the \
+                     authenticator model. Registration requires an \
                      identifiable hardware security key when an \
                      AAGUID policy is configured.",
                 ));
             }
-            // AAGUID is present and permitted. WebAuthn Level 2 section 7.1
-            // step 25: registering a credential whose attestation is not
-            // trustworthy means "the Relying Party is asserting there is no
-            // cryptographic proof that the public key credential has been
-            // generated by a particular authenticator model". A configured
-            // policy is the operator asserting the opposite, so the model
-            // identity has to come from the certificate rather than from
-            // authData alone.
-            Some(_) => {
-                if attestation
-                    .as_ref()
-                    .and_then(AttestationProof::cert_aaguid)
-                    .is_none()
-                {
-                    tracing::warn!(
-                        aaguid = ?aaguid,
-                        chain_validated = attestation.is_some(),
-                        "Rejected registration: AAGUID policy configured but \
-                         the AAGUID is not vouched for by an attestation \
-                         certificate"
-                    );
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_not_verified",
-                        "The authenticator's identity could not be \
-                         cryptographically verified. This server restricts \
-                         which authenticator models may enroll, which \
-                         requires an attestation certificate chain that \
-                         identifies the model.",
-                    ));
-                }
-            }
+            Some(_) => {}
         }
     }
 
@@ -203,7 +176,6 @@ pub(crate) fn validate_registration_attestation(
     Ok(ValidatedAttestation {
         aaguid,
         device_name,
-        attestation,
     })
 }
 
@@ -289,42 +261,47 @@ mod tests {
         format!("{err:?}")
     }
 
-    // ====================================================================
-    // Format gate — default-deny, runs before everything else
-    // ====================================================================
-
-    #[test]
-    fn test_validate_packed_any_policy() {
-        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let validated =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .expect("should succeed");
-        assert!(validated.aaguid.is_some());
-        assert!(validated.attestation.is_none());
+    /// The fixture with authData's AAGUID zeroed, leaving the certificate as
+    /// the only place a model identity can come from.
+    fn attestation_with_zeroed_authdata_aaguid() -> Vec<u8> {
+        let raw = real_attestation();
+        let mut value: Value = ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+        if let Value::Map(ref mut entries) = value {
+            for (k, v) in entries.iter_mut() {
+                if k.as_text() == Some("authData")
+                    && let Value::Bytes(ref mut bytes) = *v
+                {
+                    for byte in bytes.iter_mut().skip(37).take(16) {
+                        *byte = 0;
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+        out
     }
+
+    // ====================================================================
+    // Format gate — default-deny, runs first
+    // ====================================================================
 
     #[test]
     fn test_validate_rejects_software_passkey() {
         let att = build_attestation("none", None, None);
-        assert!(
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .is_err()
-        );
+        assert!(validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any).is_err());
     }
 
     #[test]
     fn test_validate_rejects_platform_authenticator() {
         let att = build_attestation("apple", None, None);
-        assert!(
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .is_err()
-        );
+        assert!(validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any).is_err());
     }
 
     #[test]
     fn test_validate_rejects_unknown_format() {
         let att = build_attestation("acme-custom", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
+        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
             .expect_err("an unrecognized attestation format must be rejected");
         assert!(
             error_code(&err).contains("unknown_attestation_format"),
@@ -332,65 +309,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_accepts_fido_u2f_as_hardware() {
-        let att = build_attestation("fido-u2f", Some(YUBIKEY_5_NFC_AAGUID), None);
-        assert!(
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .is_ok(),
-            "fido-u2f is a hardware format"
-        );
-    }
-
     // ====================================================================
-    // A presented chain must validate, whatever the configuration
+    // Attestation is mandatory, under every configuration
+    //
+    // WebAuthn L2 section 6.5.3: "If an authenticator employs self attestation
+    // or no attestation, then no provenance information is provided for the
+    // Relying Party to base a trust decision on." Vouch issues credentials on
+    // the strength of a hardware key, so it cannot accept a registration that
+    // offers no evidence one exists.
     // ====================================================================
 
     #[test]
-    fn test_presented_chain_must_validate_even_under_default_config() {
-        // Bytes that are not a certificate. Offering a chain that does not
-        // verify is a stronger signal than offering none, so it is rejected
-        // without needing require_attestation_cert or a policy.
-        let att = build_attestation(
-            "packed",
-            Some(YUBIKEY_5_NFC_AAGUID),
-            Some(vec![vec![0xDE, 0xAD, 0xBE, 0xEF]]),
-        );
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-            .expect_err("an x5c chain that does not validate must be rejected");
-        assert!(
-            error_code(&err).contains("attestation_chain_invalid"),
-            "expected attestation_chain_invalid, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_real_chain_validates_and_names_the_model() {
-        let validated = validate_registration_attestation(
-            &real_attestation(),
-            &vouch_common::AaguidPolicy::Any,
-            true,
-        )
-        .expect("a genuine YubiKey attestation must be accepted");
-        assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
-        assert_eq!(
-            validated
-                .attestation
-                .as_ref()
-                .and_then(AttestationProof::cert_aaguid),
-            Some(FIXTURE_AAGUID)
-        );
-    }
-
-    // ====================================================================
-    // require_attestation_cert demands a validated chain
-    // ====================================================================
-
-    #[test]
-    fn test_require_cert_rejects_self_attestation() {
+    fn test_self_attestation_is_rejected_under_the_default_policy() {
+        // Issue #1111: this registration used to be accepted, and its
+        // client-chosen AAGUID went on to become the hardware_aaguid claim.
         let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, true)
-            .expect_err("self-attestation must be rejected when a chain is required");
+        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+            .expect_err("self-attestation must be rejected even with no AAGUID policy");
         assert!(
             error_code(&err).contains("attestation_cert_required"),
             "expected attestation_cert_required, got {err:?}"
@@ -398,57 +333,10 @@ mod tests {
     }
 
     #[test]
-    fn test_require_cert_accepts_real_chain() {
-        assert!(
-            validate_registration_attestation(
-                &real_attestation(),
-                &vouch_common::AaguidPolicy::Any,
-                true
-            )
-            .is_ok()
-        );
-    }
-
-    // ====================================================================
-    // AAGUID policy requires a chain that names the model
-    //
-    // WebAuthn L2 section 7.1 step 25: registering a credential whose
-    // attestation is not trustworthy means "the Relying Party is asserting
-    // there is no cryptographic proof that the public key credential has been
-    // generated by a particular authenticator model". A configured policy
-    // asserts the opposite, so the two cannot both hold.
-    // ====================================================================
-
-    #[test]
-    fn test_allowlist_permits_listed_aaguid_with_verified_chain() {
-        let validated = validate_registration_attestation(
-            &real_attestation(),
-            &allowlist_of(FIXTURE_AAGUID),
-            false,
-        )
-        .expect("a chain-verified AAGUID on the allowlist is accepted");
-        assert!(validated.attestation.is_some());
-    }
-
-    #[test]
-    fn test_allowlist_rejects_self_attested_aaguid() {
-        // The issue #1111 bypass: a self-attested registration naming an
-        // allowlisted AAGUID. No chain, so no model identity.
-        let aaguid_str = "cb69481e-8ff7-4039-93ec-0a2729a154a8";
-        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let err = validate_registration_attestation(&att, &allowlist_of(aaguid_str), false)
-            .expect_err("a self-attested AAGUID must not satisfy an allowlist");
-        assert!(
-            error_code(&err).contains("attestation_not_verified"),
-            "expected attestation_not_verified, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_fips_only_rejects_forged_fips_aaguid() {
-        // The exploit scenario from issue #1111: forge a FIPS AAGUID into
-        // authData under a self-attested packed statement to satisfy
-        // VOUCH_ALLOWED_AAGUIDS=fips-only.
+    fn test_forged_fips_aaguid_cannot_be_registered() {
+        // The exploit from issue #1111: forge a FIPS AAGUID into authData
+        // under a self-attested packed statement. There is no configuration
+        // under which this succeeds any more.
         const YUBIKEY_5C_NANO_FIPS_AAGUID: [u8; 16] = [
             0x28, 0x96, 0x9c, 0x24, 0x04, 0x87, 0x4a, 0x46, 0xbe, 0x39, 0x37, 0xbc, 0x63, 0x37,
             0xa2, 0x4f,
@@ -457,95 +345,102 @@ mod tests {
             vouch_common::is_fips(FIXTURE_AAGUID),
             "fixture AAGUID must be one fips-only accepts, or the test proves nothing"
         );
-
         let att = build_attestation("packed", Some(YUBIKEY_5C_NANO_FIPS_AAGUID), None);
-        let err =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::FipsOnly, false)
-                .expect_err("a forged FIPS AAGUID must not satisfy fips-only");
+
+        for policy in [
+            vouch_common::AaguidPolicy::Any,
+            vouch_common::AaguidPolicy::FipsOnly,
+            allowlist_of(FIXTURE_AAGUID),
+        ] {
+            let err = validate_registration_attestation(&att, &policy)
+                .expect_err("a forged AAGUID must never be registrable");
+            assert!(
+                error_code(&err).contains("attestation_cert_required"),
+                "expected attestation_cert_required, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chain_that_does_not_validate_is_rejected() {
+        let att = build_attestation(
+            "packed",
+            Some(YUBIKEY_5_NFC_AAGUID),
+            Some(vec![vec![0xDE, 0xAD, 0xBE, 0xEF]]),
+        );
+        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+            .expect_err("an x5c chain that does not validate must be rejected");
         assert!(
-            error_code(&err).contains("attestation_not_verified"),
-            "expected attestation_not_verified, got {err:?}"
+            error_code(&err).contains("attestation_chain_invalid"),
+            "expected attestation_chain_invalid, got {err:?}"
+        );
+    }
+
+    // ====================================================================
+    // A genuine YubiKey, and where its identity comes from
+    // ====================================================================
+
+    #[test]
+    fn test_real_chain_is_accepted_and_names_the_model() {
+        let validated = validate_registration_attestation(
+            &real_attestation(),
+            &vouch_common::AaguidPolicy::Any,
+        )
+        .expect("a genuine YubiKey attestation must be accepted");
+        assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
+        assert_eq!(validated.device_name, "YubiKey 5C Nano FIPS (Enterprise)");
+    }
+
+    #[test]
+    fn test_aaguid_comes_from_the_certificate_not_authdata() {
+        // authData is client-supplied. Zeroing it leaves the certificate as
+        // the only source, and the model identity survives — proving the
+        // stored AAGUID is the verified one rather than the claimed one.
+        let att = attestation_with_zeroed_authdata_aaguid();
+        assert_eq!(
+            extract_aaguid_from_attestation(&att).as_deref(),
+            Some(ZERO_AAGUID),
+            "the fixture's authData AAGUID should now be all zeros"
+        );
+
+        let validated = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+            .expect("a valid chain with no authData AAGUID is still acceptable");
+        assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
+    }
+
+    // ====================================================================
+    // AAGUID policy, checked against the certificate's value
+    // ====================================================================
+
+    #[test]
+    fn test_allowlist_permits_listed_aaguid() {
+        let validated =
+            validate_registration_attestation(&real_attestation(), &allowlist_of(FIXTURE_AAGUID))
+                .expect("a chain-verified AAGUID on the allowlist is accepted");
+        assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
+    }
+
+    #[test]
+    fn test_fips_only_permits_a_real_fips_key() {
+        assert!(
+            validate_registration_attestation(
+                &real_attestation(),
+                &vouch_common::AaguidPolicy::FipsOnly
+            )
+            .is_ok()
         );
     }
 
     #[test]
-    fn test_validate_allowlist_rejects_unlisted_aaguid() {
+    fn test_allowlist_rejects_unlisted_aaguid() {
         let err = validate_registration_attestation(
             &real_attestation(),
             &allowlist_of("00000000-0000-0000-0000-000000000001"),
-            false,
         )
         .expect_err("an unlisted AAGUID is rejected even with a verified chain");
         assert!(
             error_code(&err).contains("aaguid_not_allowed"),
             "expected aaguid_not_allowed, got {err:?}"
         );
-    }
-
-    #[test]
-    fn test_validate_missing_aaguid_with_non_any_policy() {
-        // No AAGUID in authData (UP flag only, no AT flag)
-        let att = build_attestation("packed", None, None);
-        let err =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::FipsOnly, false)
-                .expect_err("a missing AAGUID must not bypass the policy");
-        assert!(
-            error_code(&err).contains("aaguid_missing"),
-            "expected aaguid_missing, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_zero_aaguid_is_read_as_absent() {
-        // CTAP 2.0 section 7.2 and WebAuthn L2 section 5.1.3 both use the
-        // all-zero AAGUID to mean "no model conveyed", so it must not be
-        // treated as an identity a policy could match.
-        let att = build_attestation("packed", Some([0x00; 16]), None);
-        let validated =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .expect("should succeed under the default policy");
-        assert_eq!(validated.aaguid, None);
-        assert_eq!(validated.device_name, "Security Key");
-
-        let err =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::FipsOnly, false)
-                .expect_err("an absent AAGUID cannot satisfy a policy");
-        assert!(
-            error_code(&err).contains("aaguid_missing"),
-            "expected aaguid_missing, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_any_policy_still_accepts_self_attestation() {
-        // The default configuration is unchanged: without a model restriction
-        // a self-attested hardware key still enrolls.
-        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        assert!(
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .is_ok()
-        );
-    }
-
-    // ====================================================================
-    // Device naming
-    // ====================================================================
-
-    #[test]
-    fn test_validate_known_aaguid_sets_device_name() {
-        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let validated =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .expect("should succeed");
-        assert_ne!(validated.device_name, "Security Key");
-    }
-
-    #[test]
-    fn test_validate_unknown_aaguid_uses_default_name() {
-        let att = build_attestation("packed", Some([0x11; 16]), None);
-        let validated =
-            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false)
-                .expect("should succeed");
-        assert_eq!(validated.device_name, "Security Key");
     }
 }

@@ -1421,7 +1421,6 @@ pub(crate) async fn browser_register_complete(
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &state.config().allowed_aaguids,
-        state.config().require_attestation_cert,
     )?;
 
     // WebAuthn cryptographic verification.
@@ -1497,7 +1496,7 @@ pub(crate) async fn browser_register_complete(
             public_key: &public_key_cbor,
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;
