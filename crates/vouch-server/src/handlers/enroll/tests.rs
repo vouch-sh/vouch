@@ -61,6 +61,19 @@ fn valid_client_data_json() -> String {
     URL_SAFE_NO_PAD.encode(json.as_bytes())
 }
 
+/// Decode the payload claims of a JWT without verifying the signature.
+///
+/// Splits the token on `.`, base64url-decodes the second part (payload),
+/// and parses it as a JSON object. Used only in tests to inspect claims.
+fn decode_jwt_payload_claims(token: &str) -> serde_json::Value {
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have exactly 3 parts");
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("Failed to base64url-decode JWT payload");
+    serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
+}
+
 // ── test_enrollment_complete_missing_state ───────────────────────────────
 
 #[tokio::test]
