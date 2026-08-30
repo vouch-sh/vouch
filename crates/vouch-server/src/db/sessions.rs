@@ -135,14 +135,17 @@ pub async fn delete_expired_sessions(store: &DocumentStore, _now: &str) -> Resul
 /// code, returning their token hashes so the caller can drop them from the
 /// session cache.
 ///
-/// RFC 6749 Section 10.5: when an authorization code (or, by extension, an
-/// RFC 8628 device code) is replayed, the server SHOULD revoke all tokens
-/// previously issued based on **that** code — not every token for the user.
-/// This function targets only sessions whose `source_code_hash` matches the
-/// replayed code, so a replay can no longer log the victim out of unrelated
-/// applications. Sessions issued from other codes, and sessions from grants
-/// with no single-use code (FIDO2, token exchange, browser login), are left
-/// intact.
+/// RFC 6749 Section 10.5: "If the authorization server observes multiple
+/// attempts to exchange an authorization code for an access token, the
+/// authorization server SHOULD attempt to revoke all access tokens already
+/// granted based on the compromised authorization code." The same applies by
+/// extension to an RFC 8628 device code, which is likewise single-use.
+///
+/// Revocation is bounded by that sentence's "based on the compromised
+/// authorization code": this targets only sessions whose `source_code_hash`
+/// matches the replayed code, so a replay cannot log the victim out of
+/// unrelated applications. Sessions issued from other codes, and sessions from
+/// grants with no single-use code (FIDO2, browser login), are left intact.
 ///
 /// Returns the token hashes of the deleted sessions in insertion order so
 /// the caller can invalidate each cache entry by key.

@@ -1507,31 +1507,7 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
     let user = create_test_user(&state.store, "e2e-dynamic-user@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code_params = AuthorizationCodeParams {
-        client_id,
-        redirect_uri: "https://example.com/callback",
-        user_id: &user.id,
-        email: &user.email,
-        authenticator_id: &auth_id,
-        aaguid: None,
-        scope: &scope_set,
-        nonce: None,
-        code_challenge: None,
-        code_challenge_method: None,
-        resource: None,
-        acr_values: None,
-        dpop_jkt: None,
-        auth_code_lifetime_seconds:
-            crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-        authorization_details: None,
-        auth_time: None,
-        par: crate::db::ParConsumptionProof::not_pushed(),
-    };
-
-    let code = issue_authorization_code(&state, code_params)
-        .await
-        .expect("Failed to issue authorization code");
+    let code = issue_code(&state, &user, &auth_id, client_id, TestCodeSpec::default()).await;
 
     // Step 3: Exchange the code for tokens using the dynamic client's credentials
     let auth_header = dynamic_client.basic_auth_header();

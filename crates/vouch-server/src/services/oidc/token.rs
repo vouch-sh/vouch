@@ -544,6 +544,17 @@ struct ResolvedGrants {
 /// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes only the tokens
 /// issued from **that** authorization code (RFC 6749 Section 10.5) before
 /// returning the OAuth `invalid_grant` error.
+///
+/// The consume here and the session insert in
+/// [`exchange_authorization_code`] are separate writes, so a replay arriving
+/// between them finds no session carrying the code hash and revokes nothing —
+/// the legitimate exchange then completes and its token survives. Closing the
+/// window means issuing the session in the same transaction that consumes the
+/// code, which DSQL's optimistic concurrency cannot express across the two
+/// document types. Section 10.5 states the revocation as a SHOULD ("the
+/// authorization server SHOULD attempt to revoke"), and the MUST — denying the
+/// replayed request — holds regardless, since the deny is driven by the
+/// consume, not by the revocation.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
@@ -558,12 +569,13 @@ async fn enforce_single_use_code(
                 user_id = %auth_code.user_id,
                 "Authorization code replay detected — code already consumed"
             );
-            // RFC 6749 Section 10.5: revoke the tokens previously issued based
-            // on **that** authorization code — not every session for the user.
-            // Sessions store `source_code_hash = code_hash` at issuance, so
-            // this targets exactly the compromised code's tokens and leaves
-            // the user's other sessions (other codes, FIDO2, browser login,
-            // …) intact.
+            // RFC 6749 Section 10.5: revoke "all access tokens already granted
+            // based on the compromised authorization code" — which bounds the
+            // revocation to this code rather than widening it to every session
+            // for the user. Sessions store `source_code_hash = code_hash` at
+            // issuance, so this targets exactly the compromised code's tokens
+            // and leaves the user's other sessions (other codes, FIDO2,
+            // browser login, …) intact.
             match db::delete_sessions_for_code_replay(&state.store, code_hash).await {
                 Ok(token_hashes) if !token_hashes.is_empty() => {
                     for token_hash in &token_hashes {

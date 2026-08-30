@@ -266,12 +266,11 @@ async fn create_oauth_session(
     .expect("create session")
 }
 
-/// RFC 6749 Section 10.5: replay-based revocation must delete **only** the
-/// sessions issued from the replayed code, leaving the user's other sessions
-/// (other codes, and sessions from grants with no single-use code) intact.
-///
-/// Regression for the over-broad `delete_oauth_sessions_for_user` bug, which
-/// revoked every OAuth session for the user on a single code replay.
+/// RFC 6749 Section 10.5: "the authorization server SHOULD attempt to revoke
+/// all access tokens already granted based on the compromised authorization
+/// code." Revocation deletes only the sessions issued from the replayed code,
+/// leaving the user's other sessions — from other codes, and from grants with
+/// no single-use code — intact.
 #[tokio::test]
 async fn test_replay_revocation_targets_only_the_replayed_code() {
     let (store, _audit) = test_db().await;

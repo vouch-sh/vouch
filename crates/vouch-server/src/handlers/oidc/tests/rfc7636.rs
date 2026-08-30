@@ -41,34 +41,18 @@ async fn test_rfc7636_code_verifier_too_short() {
     let valid_verifier = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"; // 47 chars
     let challenge = sha256_base64url(valid_verifier);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(
-                crate::services::oidc::authorization::CodeChallengeMethod::S256,
-            ),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -146,34 +130,18 @@ async fn test_rfc7636_end_to_end_pkce_flow() {
     let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_abcdefg"; // >= 43 chars
     let challenge = sha256_base64url(code_verifier);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(
-                crate::services::oidc::authorization::CodeChallengeMethod::S256,
-            ),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -214,34 +182,18 @@ async fn test_rfc7636_wrong_verifier_rejected() {
     let correct_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_wrong123";
     let challenge = sha256_base64url(correct_verifier);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(
-                crate::services::oidc::authorization::CodeChallengeMethod::S256,
-            ),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -283,32 +235,18 @@ async fn test_rfc7636_code_verifier_length_too_short() {
     let short_verifier = "abcdef"; // Too short (< 43 chars)
     let challenge = sha256_base64url(short_verifier);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, _body) = http_post_form(
@@ -346,32 +284,18 @@ async fn test_rfc7636_code_verifier_too_long() {
     let long_verifier = "a".repeat(129);
     let challenge = sha256_base64url(&long_verifier);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -408,32 +332,17 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // 43 chars
     let challenge = sha256_base64url(verifier);
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code with PKCE");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -462,42 +371,6 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
 // RFC 7636 Section 4.1 — PKCE Code Verifier Character Set Validation
 // ========================================================================
 
-/// Issue an authorization code with a PKCE challenge pre-computed from the given verifier.
-async fn issue_pkce_code(
-    state: &std::sync::Arc<crate::AppState>,
-    client_id: &str,
-    user: &crate::db::User,
-    auth_id: &str,
-    challenge: &str,
-) -> String {
-    let scope_set = ScopeSet::parse("openid");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: Some(challenge),
-            code_challenge_method: Some(CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("Failed to issue authorization code with PKCE")
-}
-
 #[tokio::test]
 async fn test_rfc7636_code_verifier_invalid_char_space() {
     // RFC 7636 Section 4.1: code_verifier MUST only contain unreserved chars
@@ -514,7 +387,18 @@ async fn test_rfc7636_code_verifier_invalid_char_space() {
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcde f"; // 44 chars, space at position 43
 
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -553,7 +437,18 @@ async fn test_rfc7636_code_verifier_invalid_char_exclamation() {
     // 43-char verifier with '!' character
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcdef!"; // 43 chars, '!' at end
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -592,7 +487,18 @@ async fn test_rfc7636_code_verifier_invalid_char_at_sign() {
     // 43-char verifier with '@' character
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcde@f"; // 43 chars
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -632,7 +538,18 @@ async fn test_rfc7636_code_verifier_invalid_char_unicode() {
     // This results in a string > 43 bytes but has invalid characters
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcdéf"; // contains 'é'
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -673,7 +590,18 @@ async fn test_rfc7636_code_verifier_minimum_length_43_accepted() {
     assert_eq!(verifier.len(), 43, "Test verifier must be exactly 43 chars");
 
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -727,7 +655,18 @@ async fn test_rfc7636_code_verifier_maximum_length_128_accepted() {
     );
 
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -780,7 +719,18 @@ async fn test_rfc7636_code_verifier_all_allowed_char_classes() {
     );
 
     let challenge = sha256_base64url(verifier);
-    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(

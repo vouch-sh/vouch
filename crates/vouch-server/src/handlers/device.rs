@@ -172,10 +172,12 @@ pub(crate) async fn device_code(
 /// Revoke the OAuth sessions issued from a replayed device code, and drop
 /// them from the session cache.
 ///
-/// RFC 6749 Section 10.5 (applied to RFC 8628 device codes): revoke only the
-/// tokens previously issued based on **that** device code, not every session
-/// for the user. `user_id` is used only for the security log; revocation
-/// targets sessions whose `source_code_hash` equals `device_code_hash`.
+/// RFC 6749 Section 10.5 asks the server to "revoke all access tokens already
+/// granted based on the compromised authorization code", which applies by
+/// extension to a device code: revocation is bounded to that code, not
+/// widened to every session for the user. `user_id` is used only for the
+/// security log; revocation targets sessions whose `source_code_hash` equals
+/// `device_code_hash`.
 ///
 /// The caller is already returning `invalid_grant` for the replay; a failed
 /// revocation must not mask that response, but it is a security event that

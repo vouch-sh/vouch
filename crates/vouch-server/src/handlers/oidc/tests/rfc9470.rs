@@ -665,33 +665,19 @@ async fn test_rfc9470_acr_values_carried_to_token() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let acr = "urn:nist:authentication:assurance-level:aal3";
-    let scope_set = ScopeSet::parse("openid");
 
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             acr_values: Some(acr),
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code with acr_values");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -741,33 +727,19 @@ async fn test_rfc9470_unsatisfiable_acr_in_token_exchange_rejected() {
     // Issue a code with an ACR that Vouch cannot satisfy (simulates a bug
     // or bypass at the authorization endpoint).
     let bad_acr = "urn:nist:authentication:assurance-level:aal2";
-    let scope_set = ScopeSet::parse("openid");
 
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             acr_values: Some(bad_acr),
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(

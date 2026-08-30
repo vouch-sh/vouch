@@ -53,32 +53,18 @@ async fn test_rfc8707_resource_passthrough_authorize_to_token() {
     let resource_uri = "https://api.example.com";
 
     // Issue authorization code with resource parameter
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             resource: Some(resource_uri),
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code with resource");
+    .await;
 
     // Exchange at token endpoint
     let auth_header = client.basic_auth_header();
