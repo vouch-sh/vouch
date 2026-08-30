@@ -673,9 +673,34 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             // since the COSE key is verified through usage anyway
         }
         other => {
-            // Accept other formats (fido-u2f, tpm, etc.) without verification.
-            // The credential will still be verified through assertion on login.
-            tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            // No verification procedure is implemented for these formats, so
+            // nothing here signs the authData AAGUID and it is discarded. The
+            // credential itself is still verified through assertion on login.
+            //
+            // This is not the hardware-only gate, and passing through here is
+            // not acceptance. `validate_hardware_attestation` runs afterwards
+            // in `validate_registration_attestation` and is default-deny: it
+            // admits only `packed` and `fido-u2f`, rejecting `none` as a
+            // software passkey, `tpm`/`apple`/`android-key`/
+            // `android-safetynet` as platform authenticators, and any
+            // unrecognized identifier outright. `fido-u2f` is therefore the
+            // only format that reaches this arm and survives registration.
+            //
+            // CTAP 2.0 section 7.2 gives the authenticator data a platform
+            // synthesizes from a CTAP1/U2F response as carrying an AAGUID
+            // "Initialized with all zeros", so a conforming fido-u2f
+            // registration conveys no AAGUID in the first place and loses
+            // nothing here. A non-zero AAGUID under such a format did not come
+            // from a conforming authenticator.
+            if aaguid.is_some() {
+                tracing::warn!(
+                    fmt = %other,
+                    "Discarding AAGUID from an attestation format that is not verified"
+                );
+                aaguid = None;
+            } else {
+                tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            }
         }
     }
 

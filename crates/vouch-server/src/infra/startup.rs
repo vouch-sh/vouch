@@ -872,11 +872,7 @@ fn log_authenticator_policy(config: &config::ServerConfig) {
             format!("allowlist ({} AAGUIDs)", set.len())
         }
     };
-    tracing::info!(
-        "Authenticator policy: aaguid={}, require_attestation_cert={}",
-        aaguid_policy,
-        config.require_attestation_cert,
-    );
+    tracing::info!("Authenticator policy: aaguid={}", aaguid_policy);
 }
 
 /// Timeout configuration for AWS KMS API calls.

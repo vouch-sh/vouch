@@ -1297,6 +1297,30 @@ mod tests {
         assert_eq!(format!("{}", AuthMethod::UserPresence), "user");
     }
 
+    /// The claim mapping the browser-enrollment regression test from #1124
+    /// used to assert end to end. Registration now requires an attestation
+    /// chain no test can mint, so the mapping is pinned here instead.
+    #[test]
+    fn test_verified_hardware_sets_amr_acr_and_flag() {
+        let verified = HardwareVerification::Verified;
+        assert!(verified.hardware_verified());
+        assert_eq!(verified.acr().as_deref(), Some(ACR_AAL3));
+        let amr = verified.amr().expect("Verified must set amr");
+        for expected in AuthMethod::all_fido2() {
+            assert!(
+                amr.contains(expected),
+                "amr must include {expected:?}, got {amr:?}"
+            );
+        }
+
+        // The negative half: without a FIDO2 ceremony none of the three are
+        // asserted, so a machine token cannot look like a hardware login.
+        let not_verified = HardwareVerification::NotVerified;
+        assert!(!not_verified.hardware_verified());
+        assert!(not_verified.amr().is_none());
+        assert!(not_verified.acr().is_none());
+    }
+
     #[test]
     fn test_acr_aal3_constant() {
         assert!(ACR_AAL3.starts_with("urn:nist:"));

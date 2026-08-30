@@ -219,8 +219,7 @@ These optional variables configure download links displayed in the server UI.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_ALLOWED_AAGUIDS` | No | _(empty — any)_ | Which authenticator models may enroll. Accepts `fips-only`, `yubikey-5`, or a comma-separated list of AAGUID UUIDs. Empty means any hardware authenticator. A non-UUID entry in a list is a fatal startup error. |
-| `VOUCH_REQUIRE_ATTESTATION_CERT` | No | `false` | Reject self-attestation, requiring a full attestation certificate chain. Enable alongside `VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction, since self-attested AAGUIDs are unverified. |
+| `VOUCH_ALLOWED_AAGUIDS` | No | _(empty — any)_ | Which authenticator models may enroll, matched against the model named in the attestation certificate. Accepts `fips-only`, `yubikey-5`, or a comma-separated list of AAGUID UUIDs. Empty means any authenticator with a valid attestation chain. A non-UUID entry is a fatal startup error. |
 
 Regardless of these settings, software authenticators are always rejected: the `none` attestation
 format is refused, so only hardware-backed credentials can enroll. See

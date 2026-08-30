@@ -507,11 +507,6 @@ pub struct Args {
     /// Require x5c attestation certificates during WebAuthn registration.
     ///
     /// When enabled, self-attestation (no certificate chain) is rejected.
-    /// Only authenticators that provide a full attestation certificate chain
-    /// (e.g., YubiKeys with packed attestation) will be accepted.
-    #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
-    pub require_attestation_cert: bool,
-
     /// Log output format: "text" (default, human-readable) or "json" (structured).
     #[arg(long, env = "VOUCH_LOG_FORMAT", default_value = "text")]
     pub log_format: String,
@@ -615,6 +610,11 @@ pub fn bootstrap_overlay_args(
         if matches!(arg.get_action(), ArgAction::SetTrue) {
             // SetTrue args cannot accept `--flag=value`, so parse the blob
             // value leniently and emit the bare flag only when truthy.
+            //
+            // `Args` currently declares no boolean flags, so this branch has
+            // no test. It is kept because the loop is generic over every
+            // declared argument: the first bool added would otherwise emit
+            // `--flag=true`, which clap rejects.
             let truthy = matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "true" | "1" | "yes" | "on"
@@ -841,8 +841,6 @@ pub struct ServerConfig {
     pub jwt_assertion_max_lifetime_seconds: i64,
     /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
     pub allowed_aaguids: vouch_common::AaguidPolicy,
-    /// Require x5c attestation certificates during WebAuthn registration.
-    pub require_attestation_cert: bool,
     /// Log output format: `text` or `json`.
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
@@ -1050,7 +1048,6 @@ impl ServerConfig {
             aws_use_fips_endpoint,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
-            require_attestation_cert: args.require_attestation_cert,
             log_format,
             trusted_proxies,
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
@@ -1807,27 +1804,6 @@ mod tests {
             tokens.is_empty(),
             "blob keys with no matching Args env name must be ignored, got: {tokens:?}"
         );
-    }
-
-    #[test]
-    fn bootstrap_overlay_emits_bare_flag_for_truthy_bool() {
-        // require_attestation_cert is ArgAction::SetTrue (plain bool field),
-        // which cannot accept `--flag=value` on the command line.
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "true")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert_eq!(
-            tokens,
-            vec![std::ffi::OsString::from("--require-attestation-cert")]
-        );
-    }
-
-    #[test]
-    fn bootstrap_overlay_emits_nothing_for_falsy_bool() {
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert!(tokens.is_empty(), "got: {tokens:?}");
     }
 
     #[test]
