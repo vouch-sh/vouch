@@ -127,8 +127,9 @@ pub(crate) async fn list_keys_for_user(
 ///
 /// Returns:
 /// - `ServiceError::Validation` if the name is empty or too long.
-/// - `ServiceError::NotFound` if the key does not exist.
-/// - `ServiceError::Forbidden` if the key does not belong to the user.
+/// - `ServiceError::NotFound` if the key does not exist *or* belongs to another
+///   user. The two are deliberately indistinguishable: a 403 for someone else's
+///   key would let any authenticated caller probe whether a given key id exists.
 /// - `ServiceError::Internal` on database errors.
 pub(crate) async fn rename_key(
     store: &DocumentStore,
@@ -163,13 +164,12 @@ pub(crate) async fn rename_key(
         })?
         .ok_or(ServiceError::NotFound("Key"))?;
 
-    // Verify the key belongs to the user
+    // Verify the key belongs to the user. Another user's key is reported as
+    // "not found", identically to a key id that does not exist — the caller is
+    // authenticated but has no business learning which key ids are real.
     if authenticator.user_id != user_id {
-        return Err(ServiceError::api(
-            axum::http::StatusCode::FORBIDDEN,
-            "forbidden",
-            "Key does not belong to this user",
-        ));
+        tracing::debug!("Rename refused: key {key_id} does not belong to user {user_id}");
+        return Err(ServiceError::NotFound("Key"));
     }
 
     // Update the name
@@ -203,8 +203,10 @@ pub(crate) async fn rename_key(
 /// # Errors
 ///
 /// Returns:
-/// - `ServiceError::NotFound` if the key (or user) does not exist.
-/// - `ServiceError::Forbidden` if the key does not belong to the user.
+/// - `ServiceError::NotFound` if the key (or user) does not exist, or if the key
+///   belongs to another user. The last two are deliberately indistinguishable:
+///   a 403 for someone else's key would let any authenticated caller probe
+///   whether a given key id exists.
 /// - `ServiceError::Api(400 "last_key")` if this is the user's last key.
 /// - `ServiceError::Api(409 "conflict")` if the retry budget is exhausted.
 /// - `ServiceError::Internal` on database errors.
@@ -244,12 +246,12 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to retrieve key"))?
             .ok_or(ServiceError::NotFound("Key"))?;
 
+        // Another user's key is reported as "not found", identically to a key
+        // id that does not exist — the caller is authenticated but has no
+        // business learning which key ids are real.
         if auth_doc.data.user_id != user_id {
-            return Err(ServiceError::api(
-                axum::http::StatusCode::FORBIDDEN,
-                "forbidden",
-                "Key does not belong to this user",
-            ));
+            tracing::debug!("Delete refused: key {key_id} does not belong to user {user_id}");
+            return Err(ServiceError::NotFound("Key"));
         }
         let key_name = auth_doc.data.name.clone();
 
@@ -379,6 +381,75 @@ mod tests {
         assert!(
             matches!(err, ServiceError::StepUpRequired { .. }),
             "Expected StepUpRequired for timestamp 1 second over max_age"
+        );
+    }
+
+    /// A key belonging to another user and a key id that does not exist must
+    /// produce the same error. Distinguishing them turns `/v1/keys/{id}` into
+    /// an oracle telling any authenticated caller which key ids are real.
+    #[tokio::test]
+    async fn rename_reports_another_users_key_as_not_found() {
+        let state = crate::test_utils::test_app_state().await;
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "rename-owner@example.com").await;
+        let caller =
+            crate::test_utils::create_test_user(&state.store, "rename-caller@example.com").await;
+        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let absent_key = uuid::Uuid::now_v7().to_string();
+
+        let foreign = rename_key(&state.store, &caller.id, &owned_key, "renamed")
+            .await
+            .unwrap_err();
+        let missing = rename_key(&state.store, &caller.id, &absent_key, "renamed")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(foreign, ServiceError::NotFound("Key")),
+            "another user's key must be reported as not found, got: {foreign:?}"
+        );
+        assert!(
+            matches!(missing, ServiceError::NotFound("Key")),
+            "a nonexistent key must be reported as not found, got: {missing:?}"
+        );
+    }
+
+    /// Same uniformity requirement on the delete path. The ownership check runs
+    /// before the last-key guard, so a foreign key never reaches the 400
+    /// `last_key` branch that would itself be a distinguisher.
+    #[tokio::test]
+    async fn delete_reports_another_users_key_as_not_found() {
+        let state = crate::test_utils::test_app_state().await;
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "delete-owner@example.com").await;
+        let caller =
+            crate::test_utils::create_test_user(&state.store, "delete-caller@example.com").await;
+        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let absent_key = uuid::Uuid::now_v7().to_string();
+
+        let foreign = delete_key(&state.store, &caller.id, &owned_key)
+            .await
+            .unwrap_err();
+        let missing = delete_key(&state.store, &caller.id, &absent_key)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(foreign, ServiceError::NotFound("Key")),
+            "another user's key must be reported as not found, got: {foreign:?}"
+        );
+        assert!(
+            matches!(missing, ServiceError::NotFound("Key")),
+            "a nonexistent key must be reported as not found, got: {missing:?}"
+        );
+
+        // The victim's key must still exist — a refused delete must not delete.
+        assert!(
+            crate::db::get_authenticator_by_id(&state.store, &owned_key)
+                .await
+                .unwrap()
+                .is_some(),
+            "a refused cross-user delete must leave the key in place"
         );
     }
 }

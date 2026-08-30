@@ -802,6 +802,11 @@ mod keys {
     }
 
     /// Test that cannot delete another user's key.
+    ///
+    /// The refusal is reported as 404, identically to a key id that does not
+    /// exist. Returning 403 here would tell any authenticated caller that a
+    /// given key id is real and simply owned by someone else, turning
+    /// `/v1/keys/{id}` into an existence oracle.
     #[tokio::test]
     async fn test_delete_key_wrong_user() {
         let harness = TestHarness::new().await;
@@ -823,9 +828,21 @@ mod keys {
             .await
             .expect("Failed to delete key");
 
-        assert_eq!(response.status, 403);
+        assert_eq!(response.status, 404);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "forbidden");
+        assert_eq!(error["code"], "not_found");
+
+        // ...and indistinguishable from a key id that was never issued.
+        let absent = harness
+            .delete_authenticated("/v1/keys/00000000-0000-0000-0000-000000000000", &token2)
+            .await
+            .expect("Failed to delete key");
+
+        assert_eq!(absent.status, response.status);
+        assert_eq!(
+            absent.body, response.body,
+            "another user's key and a nonexistent key must be indistinguishable"
+        );
     }
 
     /// Test that cannot delete last key.
