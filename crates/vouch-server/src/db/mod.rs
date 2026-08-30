@@ -59,7 +59,7 @@ pub use users::{upsert_user, upsert_user_with_org};
 // Re-export session types and functions
 pub use sessions::{
     CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
-    delete_expired_sessions, delete_oauth_sessions_for_user, delete_session_by_token_hash,
+    delete_expired_sessions, delete_session_by_token_hash, delete_sessions_for_code_replay,
     delete_sessions_for_user, get_session_by_token_hash,
 };
 
@@ -215,8 +215,8 @@ pub(crate) use claim::ClaimError;
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub(crate) use authorization_codes::AuthCodeClaim;
 pub use authorization_codes::{
-    delete_expired_authorization_codes, get_authorization_code_details, get_consumed_code_owner,
-    store_authorization_code, try_consume_authorization_code,
+    delete_expired_authorization_codes, get_authorization_code_details, store_authorization_code,
+    try_consume_authorization_code,
 };
 
 // Re-export enrollment types and functions

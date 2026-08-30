@@ -9,6 +9,21 @@ use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
+use crate::infra::egress::read_capped_json;
+
+/// Maximum size of an upstream IdP's OIDC discovery document (256 KB).
+///
+/// Discovery documents are a flat metadata object; the largest real ones are a
+/// few kilobytes.
+const MAX_DISCOVERY_DOCUMENT_SIZE: usize = 256 * 1024;
+
+/// Maximum size of an upstream IdP's JWKS (256 KB).
+///
+/// Matches the cap applied to a client's `jwks_uri` in [`crate::infra::jwks`].
+/// This one is worth capping for the same reason rather than as hardening: the
+/// URI is read out of the discovery document fetched above, so it is chosen by
+/// the remote host rather than by an operator.
+const MAX_IDP_JWKS_SIZE: usize = 256 * 1024;
 
 /// A fully configured OIDC provider: discovery endpoints + client credentials.
 ///
@@ -308,10 +323,9 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
-    let doc: DiscoveryDocument = response
-        .json()
+    let doc: DiscoveryDocument = read_capped_json(response, MAX_DISCOVERY_DOCUMENT_SIZE)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse discovery document: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read discovery document: {e}"))?;
 
     // RFC 8414 Section 3.3: validate discovered issuer against configured issuer.
     // Entra /organizations/ endpoint returns a per-tenant issuer; validate_discovered_issuer
@@ -401,10 +415,9 @@ pub(crate) async fn verify_id_token(
         );
     }
 
-    let jwks: jsonwebtoken::jwk::JwkSet = jwks_response
-        .json()
+    let jwks: jsonwebtoken::jwk::JwkSet = read_capped_json(jwks_response, MAX_IDP_JWKS_SIZE)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse JWKS: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read JWKS: {e}"))?;
 
     // Find matching key by kid, then by algorithm
     let decoding_key = find_decoding_key(&jwks, jws.header().kid.as_deref(), alg)?;

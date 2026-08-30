@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod cleanup;
 pub mod csp;
 pub mod dns;
+pub(crate) mod egress;
 pub mod generate_document_key;
 pub mod httpsig;
 pub mod i18n;

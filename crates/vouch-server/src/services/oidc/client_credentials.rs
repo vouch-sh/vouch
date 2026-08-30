@@ -86,6 +86,7 @@ pub(crate) async fn exchange_client_credentials(
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         proof,
     )

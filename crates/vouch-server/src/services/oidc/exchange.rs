@@ -527,6 +527,13 @@ pub(crate) async fn exchange_token(
             // after the user rotates keys or changes orgs.
             hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
             org_domain: subject_session.org_domain.as_deref(),
+            // RFC 6749 Section 10.5 asks the server to revoke "all access
+            // tokens already granted based on the compromised authorization
+            // code". An exchanged token derives its authority from the subject
+            // token, so it inherits the subject's code and is revoked with it;
+            // inheriting rather than clearing also keeps a chain of exchanges
+            // linked back to the code that started it.
+            source_code_hash: subject_session.source_code_hash.as_deref(),
         },
         proof,
     )

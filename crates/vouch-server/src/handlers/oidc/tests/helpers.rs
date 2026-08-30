@@ -3,9 +3,9 @@
 
 pub(super) use crate::db;
 pub(super) use crate::services::oidc::ScopeSet;
-pub(super) use crate::services::oidc::authorization::{
-    AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code,
-};
+pub(super) use crate::services::oidc::authorization::CodeChallengeMethod;
+// Only `issue_code` below builds these directly; test modules go through it.
+use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
 pub(super) use crate::test_utils::*;
 pub(super) use aws_lc_rs::digest::SHA256;
 pub(super) use axum::http::StatusCode;
@@ -36,35 +36,17 @@ pub(super) async fn issue_oauth_access_token_with_scope(
     client: &TestOAuthClient,
     scope: &str,
 ) -> (String, String) {
-    use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
-
-    let scope_set = ScopeSet::parse(scope);
-
-    let code_params = AuthorizationCodeParams {
-        client_id: &client.client_id,
-        redirect_uri: "https://example.com/callback",
-        user_id: &user.id,
-        email: &user.email,
-        authenticator_id: auth_id,
-        aaguid: None,
-        scope: &scope_set,
-        nonce: None,
-        code_challenge: None,
-        code_challenge_method: None,
-        resource: None,
-        acr_values: None,
-        dpop_jkt: None,
-        // Use standard lifetime for test helpers; FAPI enforcement tested separately.
-        auth_code_lifetime_seconds:
-            crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-        authorization_details: None,
-        auth_time: None,
-        par: crate::db::ParConsumptionProof::not_pushed(),
-    };
-
-    let code = issue_authorization_code(state, code_params)
-        .await
-        .expect("Failed to issue authorization code");
+    let code = issue_code(
+        state,
+        user,
+        auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope,
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -97,6 +79,110 @@ pub(super) async fn issue_oauth_access_token_with_scope(
         .to_string();
 
     (access_token, id_token)
+}
+
+/// The parts of an authorization code that tests actually vary, with the rest
+/// of [`AuthorizationCodeParams`] fixed at values every OIDC test shares:
+/// `https://example.com/callback` as the redirect URI, no AAGUID, no
+/// `auth_time`, and a request that was never pushed (RFC 9126).
+///
+/// Build one with `..Default::default()` and name only the field under test.
+pub(super) struct TestCodeSpec<'a> {
+    /// Space-separated scope string. Default: `"openid email"`.
+    pub scope: &'a str,
+    /// OIDC nonce. Default: `None`.
+    ///
+    /// The code is an HS256 JWT over an `iat` at second granularity and carries
+    /// no `jti`, so two codes issued in the same second for the same subject,
+    /// client, scope and redirect URI are byte-identical. A distinct nonce is
+    /// what makes them distinct codes with distinct hashes.
+    pub nonce: Option<&'a str>,
+    /// PKCE challenge (RFC 7636). Setting it selects the `S256` method.
+    /// Default: `None`.
+    pub code_challenge: Option<&'a str>,
+    /// RFC 8707 resource indicator. Default: `None`.
+    pub resource: Option<&'a str>,
+    /// RFC 9470 requested ACR values. Default: `None`.
+    pub acr_values: Option<&'a str>,
+    /// RFC 9449 DPoP key thumbprint to bind the code to. Default: `None`.
+    pub dpop_jkt: Option<&'a str>,
+    /// RFC 9396 rich authorization details. Default: `None`.
+    pub authorization_details: Option<&'a serde_json::Value>,
+    /// Use the 60s FAPI 2.0 code lifetime instead of the 300s standard one.
+    /// Default: `false`.
+    pub fapi_lifetime: bool,
+}
+
+impl Default for TestCodeSpec<'_> {
+    fn default() -> Self {
+        Self {
+            scope: "openid email",
+            nonce: Option::None,
+            code_challenge: Option::None,
+            resource: Option::None,
+            acr_values: Option::None,
+            dpop_jkt: Option::None,
+            authorization_details: Option::None,
+            fapi_lifetime: false,
+        }
+    }
+}
+
+/// Issue an authorization code through the real `issue_authorization_code`
+/// service — so the code is signed and stored server-side, and single-use
+/// enforcement applies — without exchanging it, leaving the caller in control
+/// of the token request.
+pub(super) async fn issue_code(
+    state: &std::sync::Arc<crate::AppState>,
+    user: &crate::db::User,
+    authenticator_id: &str,
+    client_id: &str,
+    spec: TestCodeSpec<'_>,
+) -> String {
+    let scope_set = ScopeSet::parse(spec.scope);
+    issue_authorization_code(
+        state,
+        AuthorizationCodeParams {
+            client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: spec.nonce,
+            code_challenge: spec.code_challenge,
+            code_challenge_method: spec.code_challenge.map(|_| CodeChallengeMethod::S256),
+            resource: spec.resource,
+            acr_values: spec.acr_values,
+            dpop_jkt: spec.dpop_jkt,
+            auth_code_lifetime_seconds: if spec.fapi_lifetime {
+                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS
+            } else {
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS
+            },
+            authorization_details: spec.authorization_details,
+            auth_time: None,
+            par: crate::db::ParConsumptionProof::not_pushed(),
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code")
+}
+
+/// Assert that `token` is still accepted as a bearer credential at `/v1/keys`.
+pub(super) async fn assert_token_alive(app: &axum::Router, token: &str, label: &str) {
+    let (status, body) = http_get(
+        app,
+        "/v1/keys",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{label} should still be valid, got {status}: {body}"
+    );
 }
 
 // ========================================================================

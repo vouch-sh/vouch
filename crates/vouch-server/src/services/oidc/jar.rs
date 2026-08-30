@@ -16,6 +16,7 @@ use crate::AppState;
 use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::egress::{BodyError, read_capped_text};
 use crate::services::oidc::authorization::AuthorizeRequestParams;
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, assertion_header_from, map_algorithm,
@@ -238,37 +239,28 @@ pub async fn fetch_request_object(
         }
     }
 
-    // Check Content-Length before reading to avoid streaming large responses.
-    if let Some(len) = response.content_length()
-        && len > MAX_REQUEST_OBJECT_SIZE as u64
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response exceeds maximum size (64 KB)",
-        ));
-    }
-
-    let bytes = response.bytes().await.map_err(|e| {
-        tracing::debug!("Failed to read Request Object body from {uri}: {e}");
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Failed to read Request Object response body",
-        )
-    })?;
-
-    if bytes.len() > MAX_REQUEST_OBJECT_SIZE {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response exceeds maximum size (64 KB)",
-        ));
-    }
-
-    String::from_utf8(bytes.to_vec()).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response is not valid UTF-8",
-        )
-    })
+    // Enforce the size cap while streaming. A `Content-Length` check plus
+    // `response.bytes().await` would not bound memory: `content_length()` is
+    // `None` for a `Transfer-Encoding: chunked` response, so the pre-read check
+    // is skipped and the whole body lands in memory before any size check can
+    // reject it. `request_uri` is attacker-supplied on the authorization and
+    // PAR endpoints, so that is the same memory-exhaustion vector as the JWKS
+    // fetch in issue #1105.
+    read_capped_text(response, MAX_REQUEST_OBJECT_SIZE)
+        .await
+        .map_err(|e| {
+            let description = match &e {
+                BodyError::TooLarge { .. } => {
+                    "Request Object response exceeds maximum size (64 KB)"
+                }
+                BodyError::NotUtf8 => "Request Object response is not valid UTF-8",
+                BodyError::Transport { .. } | BodyError::Json { .. } => {
+                    tracing::debug!("Failed to read Request Object body from {uri}: {e}");
+                    "Failed to read Request Object response body"
+                }
+            };
+            ServiceError::oauth(OAuthErrorCode::InvalidRequestUri, description)
+        })
 }
 
 /// Validate a Request Object JWT header algorithm and `typ` only.

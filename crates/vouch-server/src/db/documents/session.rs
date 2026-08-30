@@ -42,6 +42,16 @@ pub struct SessionDoc {
     /// Organization domain (`hd` claim) at session creation time.
     #[serde(default)]
     pub org_domain: Option<String>,
+    /// Hash of the single-use grant code (RFC 6749 authorization code or
+    /// RFC 8628 device code) that this session was issued from.
+    ///
+    /// `None` for grants with no single-use code (FIDO2, client_credentials,
+    /// token exchange, browser login, enrollment). Populated only by the
+    /// authorization-code and device-code grants so that replay detection
+    /// (RFC 6749 §10.5) can revoke **only** the tokens issued from the
+    /// replayed code instead of every session for the user.
+    #[serde(default)]
+    pub source_code_hash: Option<String>,
 }
 
 impl DocumentType for SessionDoc {
@@ -62,6 +72,12 @@ impl DocumentType for SessionDoc {
             entries.push(IndexEntry {
                 field: "authenticator_id",
                 value: auth_id.clone(),
+            });
+        }
+        if let Some(ref code_hash) = self.source_code_hash {
+            entries.push(IndexEntry {
+                field: "source_code_hash",
+                value: code_hash.clone(),
             });
         }
         entries
@@ -112,6 +128,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: Some("ee882879-721c-4913-9775-3dfcce97072a".to_string()),
             org_domain: Some("example.com".to_string()),
+            source_code_hash: Some("code-hash-abc".to_string()),
         };
         let json = serde_json::to_string(&doc).expect("serialize");
         let back: SessionDoc = serde_json::from_str(&json).expect("deserialize");
@@ -120,5 +137,43 @@ mod tests {
             Some("ee882879-721c-4913-9775-3dfcce97072a")
         );
         assert_eq!(back.org_domain.as_deref(), Some("example.com"));
+        assert_eq!(back.source_code_hash.as_deref(), Some("code-hash-abc"));
+    }
+
+    /// The `source_code_hash` index is emitted only when the field is set, so
+    /// sessions from grants without a single-use code (the common case) do not
+    /// pay for an unused index row, while replay-targeted revocation can find
+    /// the sessions issued from a specific code.
+    #[test]
+    fn index_entries_include_source_code_hash_only_when_set() {
+        let mk = |code_hash: Option<String>| SessionDoc {
+            user_id: "u-1".to_string(),
+            user_email: "a@example.com".to_string(),
+            token_hash: "h".to_string(),
+            authenticator_id: None,
+            session_type: SessionPurpose::OAuthAccessToken,
+            expires_at: "2099-01-01T00:00:00Z".parse().expect("parse timestamp"),
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            source_code_hash: code_hash,
+        };
+        let with_code = mk(Some("code-hash-abc".to_string()));
+        let without_code = mk(None);
+
+        let fields: Vec<&str> = with_code.index_entries().iter().map(|e| e.field).collect();
+        assert!(
+            fields.contains(&"source_code_hash"),
+            "source_code_hash index must be present when set: {fields:?}"
+        );
+        let fields: Vec<&str> = without_code
+            .index_entries()
+            .iter()
+            .map(|e| e.field)
+            .collect();
+        assert!(
+            !fields.contains(&"source_code_hash"),
+            "source_code_hash index must be absent when None: {fields:?}"
+        );
     }
 }

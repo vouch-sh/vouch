@@ -69,6 +69,7 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
     )
     .await
@@ -85,6 +86,7 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
     )
     .await

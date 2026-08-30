@@ -264,32 +264,19 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
 
     // Issue an auth code with the DPoP key thumbprint bound to it
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code with dpop_jkt");
+    .await;
 
     // Acquire DPoP nonce
     let token_uri = format!("{}/oauth/token", state.config().base_url);
@@ -350,32 +337,19 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
     // Key B will be used at the token endpoint
     let (dpop_key_b, dpop_jwk_b) = generate_dpop_key_pair();
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt_a),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let nonce = acquire_dpop_nonce(&app, &dpop_key_b, &dpop_jwk_b, "POST", &token_uri).await;
@@ -438,32 +412,19 @@ async fn test_fapi2_dpop_code_binding_missing_dpop_at_token() {
     let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code with dpop_jkt");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
@@ -656,33 +617,18 @@ async fn test_fapi2_token_rejects_without_dpop() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            // No DPoP binding on the code itself
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
@@ -749,32 +695,17 @@ async fn test_fapi2_non_fapi_client_standard_flow() {
     );
 
     // Issue an auth code via the service (simulating a completed authorization)
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     // Exchange without DPoP (standard client does not require it)
     let (status, response_body) = http_post_form(
