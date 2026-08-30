@@ -14,7 +14,8 @@ use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{ClientAuthProof, ParCreationProof};
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
-    AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
+    AuthorizeRequestParams, parse_response_mode, require_pkce_for_client,
+    validate_authorize_request,
 };
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
 use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
@@ -359,8 +360,19 @@ pub(crate) async fn par(
     }
 
     // Helper: convert ServiceError to PAR error response fields.
+    //
+    // RFC 9126 Section 2.3: "Since initial processing of the pushed
+    // authorization request does not involve resource owner interaction,
+    // error codes related to user interaction, such as `consent_required`
+    // defined by [OIDC], are never returned." `account_selection_required` is
+    // one of those, so the rejection it carries is reported here under the
+    // code the same section names as the default, `invalid_request`.
     let service_error_codes = |e: &ServiceError| -> (OAuthErrorCode, String) {
         match e {
+            ServiceError::OAuth {
+                code: OAuthErrorCode::AccountSelectionRequired,
+                description,
+            } => (OAuthErrorCode::InvalidRequest, description.clone()),
             ServiceError::OAuth { code, description } => (*code, description.clone()),
             _ => (OAuthErrorCode::ServerError, e.to_string()),
         }
@@ -401,24 +413,6 @@ pub(crate) async fn par(
         };
         (v, jar_rm)
     } else {
-        // Validate prompt before constructing params
-        let parsed_prompt = match params.prompt.as_deref() {
-            Some(p) => match Prompt::parse(p) {
-                Some(prompt) => Some(prompt),
-                None => {
-                    return par_error_response(
-                        OAuthErrorCode::InvalidRequest,
-                        presentation,
-                        &format!(
-                            "Unsupported prompt value. Supported values: {}",
-                            crate::services::oidc::authorization::Prompt::supported_values()
-                        ),
-                    );
-                }
-            },
-            None => None,
-        };
-
         let request_params = AuthorizeRequestParams {
             response_type: params.response_type.unwrap_or_default(),
             client_id: authenticated_client.client.client_id.clone(),
@@ -431,7 +425,7 @@ pub(crate) async fn par(
             resource: params.resource.clone(),
             acr_values: params.acr_values.clone(),
             max_age: params.max_age,
-            prompt: parsed_prompt,
+            prompt: params.prompt.clone(),
             dpop_jkt: params.dpop_jkt.clone(),
             authorization_details: params.authorization_details.clone(),
             response_mode: params.response_mode.clone(),
@@ -503,25 +497,17 @@ pub(crate) async fn par(
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
+    let prompt_str = validated.prompt().map(|p| p.to_space_separated());
     // JAR claims take precedence over the plain form body for response_mode.
     let response_mode_str = jar_response_mode
         .as_deref()
         .or(params.response_mode.as_deref());
-    let response_mode = match response_mode_str {
-        None | Some("query") => crate::db::documents::oauth::ResponseMode::Query,
-        Some(mode) => match crate::db::documents::oauth::ResponseMode::parse(mode) {
-            Some(m) => m,
-            None => {
-                return par_error_response(
-                    OAuthErrorCode::InvalidRequest,
-                    presentation,
-                    &format!(
-                        "Unsupported response_mode. Supported values: {}",
-                        crate::db::documents::oauth::ResponseMode::supported_values()
-                    ),
-                );
-            }
-        },
+    let response_mode = match parse_response_mode(response_mode_str) {
+        Ok(mode) => mode,
+        Err(e) => {
+            let (error_code, description) = service_error_codes(&e);
+            return par_error_response(error_code, presentation, &description);
+        }
     };
 
     let create_params = CreateParParams {
@@ -536,7 +522,7 @@ pub(crate) async fn par(
         resource: validated.resource(),
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
-        prompt: validated.prompt().map(|p| p.as_str()),
+        prompt: prompt_str.as_deref(),
         dpop_jkt: effective_dpop_jkt,
         authorization_details: ad_value.as_ref(),
         response_mode,

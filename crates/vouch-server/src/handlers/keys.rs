@@ -315,20 +315,15 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info)
-    let mut validated = validate_registration_attestation(
-        &req.attestation_object,
-        &config.allowed_aaguids,
-        config.require_attestation_cert,
-    )?;
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the browser path in `enroll.rs`, so the two
+    // agree by construction.
+    let validated =
+        validate_registration_attestation(&req.attestation_object, &config.allowed_aaguids)?;
 
-    // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation.is_some() {
-        validated.attestation = verified.attestation;
-    }
-
-    // Use server-verified AAGUID if available, fall back to client-provided
-    let aaguid = verified.aaguid.or(validated.aaguid);
+    // The AAGUID comes from the attestation certificate, never from the
+    // client-supplied authData that `verified.aaguid` reports.
+    let aaguid = validated.aaguid;
 
     // Use server-verified public key from authData
     let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
@@ -347,7 +342,7 @@ pub(crate) async fn register_complete(
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;

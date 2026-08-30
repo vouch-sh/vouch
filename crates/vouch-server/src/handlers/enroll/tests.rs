@@ -1054,24 +1054,27 @@ async fn device_verify_page_ignores_invalid_user_code() {
     );
 }
 
-// ── Regression: browser_register_complete sets auth_time ────────────────
+// ── browser_register_complete requires a verified attestation chain ─────
 //
-// The `browser_register_complete` handler issues a `HardwareVerification::Verified`
-// session after FIDO2 WebAuthn registration. Before the fix it left `auth_time: None`,
-// which caused the `require_fresh_timestamp(token.auth_time.unwrap_or(0), ...)`
-// freshness gate on key deletion to treat the fresh session as Unix epoch, failing
-// every immediate delete with `StepUpRequired`.
+// Issue #1111: a self-attested registration used to be accepted, and the
+// AAGUID the client put in authData became the `hardware_aaguid` claim that
+// relying parties use to gate access by authenticator model. Registration now
+// requires an x5c chain that validates against a pinned Yubico root, with no
+// setting to relax it, so the forgery has nowhere to enter.
 //
-// This test drives the full handler with a cryptographically valid packed
-// self-attestation (signed by a software ES256 key), then decodes the issued
-// session JWT and asserts that `auth_time` is present, recent, and consistent
-// with the `amr`/`acr`/`hardware_verified` claims.
+// This drives the real endpoint with a well-formed, correctly signed
+// self-attestation — everything a forger could produce — and asserts it is
+// refused.
+//
+// This test previously asserted the opposite: that the same object enrolled
+// successfully and that the resulting session JWT carried `auth_time`,
+// `hardware_verified`, `amr` and `acr` (the regression guard from #1124). That
+// success path is no longer reachable from a test, because minting a
+// certificate under a pinned Yubico root is exactly what the change makes
+// impossible. The claim mapping those assertions covered now lives in
+// `services::auth::tests::test_verified_hardware_sets_amr_acr_and_flag`.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "hand-built WebAuthn packed attestation payload is inherently linear"
-)]
-async fn test_browser_register_complete_sets_auth_time_on_session() {
+async fn test_browser_register_complete_rejects_self_attestation() {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
     let (app, state) = test_app().await;
@@ -1232,86 +1235,19 @@ async fn test_browser_register_complete_sets_auth_time_on_session() {
 
     assert_eq!(
         resp.status,
-        StatusCode::OK,
-        "browser_register_complete should succeed, body: {}",
+        StatusCode::BAD_REQUEST,
+        "a self-attested registration must be refused, body: {}",
         resp.body
     );
-
-    // 10. Extract the Set-Cookie header and decode the JWT payload.
-    let set_cookie = resp
-        .headers
-        .get(axum::http::header::SET_COOKIE)
-        .expect("Set-Cookie header must be present")
-        .to_str()
-        .expect("ascii Set-Cookie");
     assert!(
-        set_cookie.contains(vouch_common::SESSION_COOKIE_NAME),
-        "Set-Cookie must set the session cookie: {set_cookie}"
+        resp.body.contains("attestation_cert_required"),
+        "expected attestation_cert_required, body: {}",
+        resp.body
     );
-    // Cookie value is between `<cookie_name>=` and the first `;`.
-    let cookie_value = set_cookie
-        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
-        .and_then(|(_, rest)| rest.split(';').next())
-        .expect("extract cookie value");
-    let jwt_payload = decode_jwt_payload_claims(cookie_value);
-
-    // G4: auth_time is present, recent, non-null.
-    let auth_time = jwt_payload
-        .get("auth_time")
-        .and_then(|v| v.as_i64())
-        .expect("auth_time must be present on the enrollment session JWT");
-    let skew = 10_i64;
-    let now_secs = jiff::Timestamp::now().as_second();
     assert!(
-        (now_secs - skew..=now_secs + skew).contains(&auth_time),
-        "auth_time ({auth_time}) should be within ±{skew}s of now ({now_secs})"
+        resp.headers.get(axum::http::header::SET_COOKIE).is_none(),
+        "a refused registration must not establish a session"
     );
-
-    // G4: hardware_verified, amr, acr are consistent with Verified FIDO2.
-    assert_eq!(
-        jwt_payload
-            .get("hardware_verified")
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "hardware_verified must be true: {jwt_payload}"
-    );
-    let amr = jwt_payload
-        .get("amr")
-        .and_then(|v| v.as_array())
-        .expect("amr must be present");
-    let amr_values: Vec<&str> = amr.iter().map(|v| v.as_str().unwrap_or("")).collect();
-    assert!(
-        amr_values.contains(&"hwk") && amr_values.contains(&"pin") && amr_values.contains(&"user"),
-        "amr must include hwk, pin, user: {amr:?}"
-    );
-    assert_eq!(
-        jwt_payload.get("acr").and_then(|v| v.as_str()),
-        Some(crate::services::auth::ACR_AAL3),
-        "acr must be AAL3: {jwt_payload}"
-    );
-
-    // 11. G1: the fresh session must pass the freshness gate on key delete.
-    // The "last key" guard refuses to delete the only key, so we cannot
-    // drive DELETE to 200 here without a second authenticator — but the
-    // freshness check itself runs *before* the last-key guard, so a 401
-    // StepUpRequired response would prove the gate fails. Instead, we
-    // verify via the unit-test coverage of `require_fresh_timestamp` plus
-    // the auth_time claim being recent (above), which together pin the
-    // fix. A stale-auth_time session (the bug) would have produced
-    // auth_time=null and been rejected; here auth_time is present and
-    // recent, so `unwrap_or(0)` is never taken.
-}
-
-/// Decode a JWT's payload (middle segment) as a JSON object without
-/// verifying the signature — test-only helper for asserting claim values.
-fn decode_jwt_payload_claims(jwt: &str) -> serde_json::Value {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    assert!(parts.len() >= 2, "JWT must have at least 2 parts");
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
-        .expect("decode JWT payload");
-    serde_json::from_slice(&payload_bytes).expect("parse JWT payload JSON")
 }
 
 #[tokio::test]

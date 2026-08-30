@@ -1415,14 +1415,13 @@ pub(crate) async fn browser_register_complete(
         expires_at: _,
     } = checked;
 
-    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the CLI path in `keys.rs`, so the two agree by
+    // construction.
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &state.config().allowed_aaguids,
-        state.config().require_attestation_cert,
     )?;
-
-    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
 
     // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
@@ -1484,45 +1483,6 @@ pub(crate) async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
-    // x5c attestation chain validation (browser enrollment).
-    // The browser enrollment path uses webauthn-rs for verification, so we
-    // additionally validate the x5c chain here for attestation_verified status.
-    let mut validated = validated;
-    if let Some(x5c_certs) = x5c_certs {
-        match crate::crypto::attestation_chain::validate_attestation_chain(
-            &x5c_certs,
-            validated.aaguid.as_deref(),
-        ) {
-            Ok(chain_result) => {
-                validated.attestation = Some(chain_result);
-                tracing::info!(
-                    attestation_verified = true,
-                    "Browser enrollment: x5c chain validated"
-                );
-            }
-            Err(e) => {
-                if state.config().require_attestation_cert {
-                    tracing::warn!(
-                        "Browser enrollment: x5c chain validation \
-                         failed (fatal, require_attestation_cert=true): {e}"
-                    );
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_chain_invalid",
-                        "Attestation certificate chain could not be \
-                         verified against trusted roots. Only genuine \
-                         hardware authenticators with valid attestation \
-                         chains are accepted.",
-                    ));
-                }
-                tracing::warn!(
-                    "Browser enrollment: x5c chain validation \
-                     failed (non-fatal): {e}"
-                );
-            }
-        }
-    }
-
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
@@ -1536,7 +1496,7 @@ pub(crate) async fn browser_register_complete(
             public_key: &public_key_cbor,
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;
