@@ -933,9 +933,7 @@ mod tests {
         .await
         .expect("authorize device");
 
-        crate::db::delete_authenticator(&state.store, &auth_id)
-            .await
-            .expect("delete authenticator");
+        crate::test_utils::remove_test_authenticator(&state.store, &auth_id).await;
 
         let (status, body) = http_post_form(
             &app,

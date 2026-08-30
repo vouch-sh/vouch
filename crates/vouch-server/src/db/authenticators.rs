@@ -211,37 +211,21 @@ fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
     }
 }
 
-/// Delete an authenticator by ID.
+/// Delete an authenticator by ID, cascading to what referenced it.
 ///
-/// Performs application-level cascade deletes:
+/// Application-level cascade, in order:
 /// 1. Void device_auth_request approvals that referenced this authenticator
 /// 2. Delete sessions using this authenticator
 /// 3. Delete the authenticator
-pub async fn delete_authenticator(store: &DocumentStore, authenticator_id: &str) -> Result<u64> {
-    store
-        .update_by_index::<DeviceAuthRequestDoc, _>(
-            "authenticator_id",
-            authenticator_id,
-            detach_authenticator_from_device_auth,
-        )
-        .await?;
-
-    // 2. Delete sessions using this authenticator
-    store
-        .delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
-        .await?;
-
-    // 3. Delete the authenticator
-    store.delete(authenticator_id).await?;
-    Ok(1)
-}
-
-/// Cascade-delete an authenticator within an open transaction.
 ///
-/// Same steps as [`delete_authenticator`], but executed against a caller-owned
-/// `StoreTransaction` so the cascade can be composed with additional checks
-/// (e.g. last-key guard plus User-doc version bump) in a single atomic unit.
-pub async fn delete_authenticator_in_tx(
+/// Takes the caller's transaction because a half-applied cascade is a broken
+/// state: sessions left alive for a key that no longer exists, or a key
+/// removed while a device authorization still points at it. That, and so the
+/// cascade composes with whatever invariant the caller holds around it — the
+/// last-key guard and User-doc version bump in `services::keys::delete_key`,
+/// the full account teardown in `delete_user`, or removing a member's whole
+/// key set as one unit.
+pub async fn delete_authenticator(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
 ) -> Result<()> {

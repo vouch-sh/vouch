@@ -66,10 +66,9 @@ pub use sessions::{
 // Re-export authenticator types and functions
 pub use authenticators::{
     Authenticator, AuthenticatorWithUser, CreateAuthenticatorParams, count_authenticators_for_user,
-    create_authenticator, delete_authenticator, delete_authenticator_in_tx,
-    get_authenticator_by_credential_id, get_authenticator_by_id,
-    get_authenticator_with_user_by_credential_id, get_authenticators_for_user,
-    update_authenticator_counter, update_authenticator_name,
+    create_authenticator, delete_authenticator, get_authenticator_by_credential_id,
+    get_authenticator_by_id, get_authenticator_with_user_by_credential_id,
+    get_authenticators_for_user, update_authenticator_counter, update_authenticator_name,
 };
 
 // Re-export organization types and functions

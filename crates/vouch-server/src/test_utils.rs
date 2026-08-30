@@ -830,6 +830,19 @@ pub async fn create_test_user_in_org(
         .expect("Test user not found after creation")
 }
 
+/// Delete a test authenticator, cascading to its sessions.
+///
+/// `db::delete_authenticator` takes a transaction so its cascade cannot land
+/// half-applied; tests that just need a key gone go through here rather than
+/// repeating begin/commit at each call site.
+pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
+    let mut tx = store.begin().await.expect("Failed to start transaction");
+    crate::db::delete_authenticator(&mut tx, authenticator_id)
+        .await
+        .expect("Failed to delete authenticator");
+    tx.commit().await.expect("Failed to commit deletion");
+}
+
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
     crate::db::create_authenticator(

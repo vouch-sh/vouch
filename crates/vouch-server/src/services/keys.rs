@@ -284,7 +284,7 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to count sessions"))?;
 
         // Cascade-delete the authenticator (device_auth refs, sessions, doc).
-        db::delete_authenticator_in_tx(&mut tx, key_id)
+        db::delete_authenticator(&mut tx, key_id)
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to delete key"))?;
 

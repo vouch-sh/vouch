@@ -398,9 +398,21 @@ pub(crate) async fn revoke_member_credentials(
     let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
 
     let key_count = authenticators.len();
+    // One transaction for the whole set: revoking a member's credentials must
+    // not be able to land half-applied and leave them some working keys.
+    let mut tx = state
+        .store
+        .begin()
+        .await
+        .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
     for auth in &authenticators {
-        db::delete_authenticator(&state.store, &auth.id).await?;
+        db::delete_authenticator(&mut tx, &auth.id)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key revocation"))?;
 
     // Sessions, SSH certificates, and the GitHub refresh token all go, or the
     // request fails.
