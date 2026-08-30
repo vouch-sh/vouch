@@ -408,11 +408,11 @@ pub(crate) async fn rename_key(
         ));
     }
     let name = req.name.trim();
-    if name.is_empty() || name.chars().count() > 256 {
+    if name.is_empty() || name.chars().count() > vouch_common::MAX_KEY_NAME_CHARS {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "Key name must be between 1 and 256 characters",
+            "Key name must be between 1 and 100 characters",
         ));
     }
 
@@ -1164,11 +1164,8 @@ mod tests {
         assert_eq!(json["code"], "invalid_name");
     }
 
-    // Regression (commit a39feb4a): the pre-auth guard measured `name.len()`
-    // (UTF-8 byte count) while the error message said "256 characters". A
-    // multibyte name within the 256-character cap — but over 256 bytes — was
-    // rejected with `invalid_name`. The handler must measure characters, the
-    // same approach the service layer uses (`services/keys.rs`).
+    // The guard measures Unicode characters, not UTF-8 bytes, so a multibyte
+    // name is bounded by the same number the error message names.
     #[tokio::test]
     async fn test_rename_key_accepts_multibyte_name_within_char_limit() {
         let (app, state) = test_app().await;
@@ -1176,9 +1173,8 @@ mod tests {
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-        // 90 CJK characters = 270 UTF-8 bytes: above the old 256-byte cap, yet
-        // within both the 256-character handler limit and the 100-character
-        // service limit, so the rename must succeed end to end.
+        // 90 CJK characters = 270 UTF-8 bytes: within the 100-character limit
+        // the handler and service share, so the rename succeeds end to end.
         let name = "名".repeat(90);
         assert_eq!(name.chars().count(), 90);
         assert!(name.len() > 256);
@@ -1202,9 +1198,8 @@ mod tests {
         );
     }
 
-    // The character-based guard must still bound multibyte names by character
-    // count — a >256-character CJK name is rejected by the handler (before the
-    // service) with `invalid_name`, and the message claims "characters".
+    // The character-based guard still bounds multibyte names: a 101-character
+    // CJK name is rejected by the handler, before the service sees it.
     #[tokio::test]
     async fn test_rename_key_rejects_multibyte_name_exceeding_char_limit() {
         let (app, state) = test_app().await;
@@ -1212,9 +1207,9 @@ mod tests {
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-        // 257 CJK characters = 771 bytes: over the cap by character count.
-        let name = "名".repeat(257);
-        assert_eq!(name.chars().count(), 257);
+        // 101 CJK characters = 303 bytes: one character over the cap.
+        let name = "名".repeat(101);
+        assert_eq!(name.chars().count(), 101);
         let body = serde_json::json!({ "name": name }).to_string();
         let (status, resp_body) = http_request(
             &app,
@@ -1233,7 +1228,40 @@ mod tests {
         assert_eq!(json["code"], "invalid_name");
         assert_eq!(
             json["message"],
-            "Key name must be between 1 and 256 characters"
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    // The handler guard and the service limit are the same number, so no name
+    // clears the handler only to be rejected by the service under a different
+    // message. The range the error names is the range the endpoint accepts.
+    #[tokio::test]
+    async fn test_rename_key_rejects_name_over_shared_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamemidrange@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let name = "a".repeat(150);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
         );
     }
 

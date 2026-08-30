@@ -10,7 +10,7 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
-use vouch_common::{KeyInfo, lookup_device_model};
+use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
@@ -148,7 +148,7 @@ pub(crate) async fn rename_key(
     if name.is_empty() {
         return Err(ServiceError::Validation("Name cannot be empty".to_string()));
     }
-    if name.chars().count() > 100 {
+    if name.chars().count() > MAX_KEY_NAME_CHARS {
         return Err(ServiceError::Validation(
             "Name must be 100 characters or less".to_string(),
         ));
