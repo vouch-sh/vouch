@@ -85,12 +85,6 @@ impl std::str::FromStr for AccessScope {
     }
 }
 
-impl std::fmt::Display for AccessScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// OAuth 2.0 client application type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OAuthClientType {
@@ -144,12 +138,6 @@ impl std::str::FromStr for OAuthClientType {
         } else {
             Err(OAuthDocumentParseError::ClientType(s.to_string()))
         }
-    }
-}
-
-impl std::fmt::Display for OAuthClientType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -220,12 +208,6 @@ impl std::str::FromStr for TokenEndpointAuthMethod {
                 s.to_string(),
             ))
         }
-    }
-}
-
-impl std::fmt::Display for TokenEndpointAuthMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 

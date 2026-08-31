@@ -2195,19 +2195,6 @@ mod tests {
     }
 
     #[test]
-    fn test_access_scope_display_roundtrip() {
-        for scope in [
-            AccessScope::Organization,
-            AccessScope::Personal,
-            AccessScope::Public,
-        ] {
-            let display_str = scope.to_string();
-            let parsed: Result<AccessScope, _> = display_str.parse();
-            assert_eq!(parsed, Ok(scope));
-        }
-    }
-
-    #[test]
     fn test_token_endpoint_auth_method_from_str_basic() {
         let result: Result<TokenEndpointAuthMethod, _> = "client_secret_basic".parse();
         assert!(result.is_ok());
@@ -2242,21 +2229,6 @@ mod tests {
 
         let result2: Result<TokenEndpointAuthMethod, _> = "".parse();
         assert!(result2.is_err());
-    }
-
-    #[test]
-    fn test_token_endpoint_auth_method_display_roundtrip() {
-        let variants = [
-            TokenEndpointAuthMethod::ClientSecretBasic,
-            TokenEndpointAuthMethod::ClientSecretPost,
-            TokenEndpointAuthMethod::PrivateKeyJwt,
-            TokenEndpointAuthMethod::None,
-        ];
-        for variant in variants {
-            let display_str = variant.to_string();
-            let parsed: Result<TokenEndpointAuthMethod, _> = display_str.parse();
-            assert_eq!(parsed, Ok(variant));
-        }
     }
 
     #[test]
