@@ -1547,6 +1547,51 @@ mod tests {
         assert_eq!(surviving_keys(&state, &user.id).await, 2);
     }
 
+    /// Mirror of the stale-session rejection for the other impossible-timestamp
+    /// direction: a hardware-verified session whose `auth_time` is in the
+    /// future relative to the server clock (e.g. after an NTP step-back). The
+    /// freshness gate must reject an impossibly-timed ceremony just as it
+    /// rejects a stale one, instead of admitting the negative `session_age`
+    /// as "age 0" fresh — otherwise an older (but unexpired) verified token
+    /// could delete keys without a fresh FIDO2 touch.
+    #[tokio::test]
+    async fn test_delete_key_rejects_future_dated_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "future-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // auth_time one hour *ahead* of the server clock: an impossible
+        // ceremony the gate must not treat as fresh.
+        let future_iat = jiff::Timestamp::now().as_second().saturating_add(3600);
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::Verified {
+                    auth_time: Some(future_iat),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "a future-dated ceremony must not authorise key deletion"
+        );
+    }
+
     /// The gate must ask whether a ceremony happened rather than infer it from
     /// a timestamp. `HardwareVerification` makes a fresh `auth_time` on an
     /// unverified session unconstructible, so this signs one directly: if that
