@@ -2423,7 +2423,16 @@ async fn test_rfc9101_update_omitting_signing_alg_drops_the_commitment() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-drop-put@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR Drop App").await;
