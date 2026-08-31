@@ -527,6 +527,10 @@ pub(crate) async fn token(
 /// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
 /// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
 /// only path to a `TokenIssuanceProof` carrying that client-auth method.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn commit_optional_jti(
     state: &Arc<AppState>,
     pending: Option<PendingJti>,
@@ -547,6 +551,10 @@ async fn commit_optional_jti(
 /// on success, or a response-ready `Response` on any auth failure
 /// (unknown client, invalid secret, missing required cert, confidential
 /// client presented without auth, etc.).
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn resolve_non_jwt_auth(
     state: &Arc<AppState>,
     headers: &HeaderMap,

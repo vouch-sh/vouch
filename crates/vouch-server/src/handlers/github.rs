@@ -470,6 +470,10 @@ pub(crate) async fn github_callback(
 ///      same session that minted the state is completing the callback.
 ///
 /// Returns the validated session on success or an error response on failure.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn validate_callback_session(
     state: &Arc<AppState>,
     jar: &CookieJar,

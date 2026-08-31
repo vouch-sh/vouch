@@ -230,6 +230,10 @@ async fn revoke_sessions_for_device_replay(
     clippy::too_many_lines,
     reason = "linear RFC 8628 device token grant validation sequence"
 )]
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
