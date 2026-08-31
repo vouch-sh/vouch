@@ -17,7 +17,16 @@ use crate::test_utils::*;
 async fn setup_user_with_app(state: &crate::AppState, email: &str) -> (String, String) {
     let user = create_test_user(&state.store, email).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     (client.app_id, token)
 }
@@ -179,7 +188,16 @@ async fn test_add_secret_wrong_owner() {
     // Authenticate as user2
     let user2 = create_test_user(&state.store, "other@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user2.id).await;
-    let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+    let token2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user2.id,
+            email: &user2.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token2);
 
     let (status, _) = http_post_json(
@@ -197,7 +215,16 @@ async fn test_add_secret_nonexistent_app() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "noapp@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let bogus_id = uuid::Uuid::now_v7();
@@ -216,7 +243,16 @@ async fn test_add_secret_invalid_app_id() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "badid@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, _) = http_post_json(
@@ -238,7 +274,16 @@ async fn test_add_secret_invalid_app_id() {
 async fn authed_user(state: &crate::AppState, email: &str) -> String {
     let user = create_test_user(&state.store, email).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     bearer(&token)
 }
 
@@ -444,7 +489,16 @@ async fn test_list_secrets_wrong_owner() {
 
     let user2 = create_test_user(&state.store, "other2@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user2.id).await;
-    let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+    let token2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user2.id,
+            email: &user2.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token2);
 
     let (status, _) = http_get(
@@ -567,7 +621,16 @@ async fn test_delete_secret_wrong_app() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "wrong-app@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     // Create two apps
@@ -606,7 +669,16 @@ async fn test_delete_secret_wrong_owner() {
 
     let user2 = create_test_user(&state.store, "del-owner2@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user2.id).await;
-    let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+    let token2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user2.id,
+            email: &user2.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token2);
 
     // Get secret ID from app (via db directly, since API would 404)
@@ -771,7 +843,16 @@ async fn test_list_applications_empty() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "list-empty@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_get(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
@@ -786,7 +867,16 @@ async fn test_list_applications_returns_created() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "list-created@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let client = create_test_oauth_client(&state.store, &user.id).await;
@@ -818,7 +908,16 @@ async fn test_create_application_succeeds() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "create-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -841,7 +940,16 @@ async fn test_create_application_returns_client_credentials() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "create-creds@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -880,7 +988,16 @@ async fn test_create_spa_application_is_public_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "spa-public@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -921,7 +1038,16 @@ async fn test_create_native_application_is_public_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "native-public@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -958,7 +1084,16 @@ async fn test_create_web_application_is_confidential_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "web-confidential@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1004,7 +1139,16 @@ async fn test_create_application_rejects_deactivated_user() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-create@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     crate::db::update_user_active_status(&state.store, &user.id, false)
@@ -1030,7 +1174,16 @@ async fn test_create_application_rejects_empty_name() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "create-emptyname@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1051,7 +1204,16 @@ async fn test_create_application_rejects_http_redirect_uri() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "create-http-uri@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     // http:// redirect URIs are not valid for web apps — only https:// or custom schemes
@@ -1077,7 +1239,16 @@ async fn test_get_application_by_id() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "get-app@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1098,7 +1269,16 @@ async fn test_get_application_not_found() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "get-notfound@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let bogus_id = uuid::Uuid::now_v7();
 
@@ -1137,7 +1317,16 @@ async fn test_update_application_name() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "update-name@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1164,7 +1353,16 @@ async fn test_update_application_rejects_deactivated_user() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-update@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1199,7 +1397,16 @@ async fn test_delete_application_succeeds() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "delete-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1226,7 +1433,16 @@ async fn test_delete_application_not_found() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "delete-notfound@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let bogus_id = uuid::Uuid::now_v7();
 
@@ -1282,7 +1498,16 @@ async fn test_revoke_tokens_not_found() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "revoke-notfound@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let bogus_id = uuid::Uuid::now_v7();
 
@@ -1317,18 +1542,30 @@ async fn test_revoke_tokens_clears_m2m_sessions() {
     // Owner user + their application
     let user = create_test_user(&state.store, "revoke-m2m@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let owner_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let owner_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&owner_token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Mint a client_credentials session for the OAuth client.
     // Per RFC 9068 §2.2 the session's user_id is the client's client_id.
-    create_test_session_for_client(
+    create_test_session_with(
         &state,
-        &client.client_id,
-        &format!("{}@clients", client.client_id),
-        &auth_id,
-        &client.client_id,
+        TestSessionSpec {
+            user_id: &client.client_id,
+            email: &format!("{}@clients", client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -1363,7 +1600,16 @@ async fn test_update_application_should_reject_empty_redirect_uris() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "update-no-uris@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1393,7 +1639,16 @@ async fn test_update_application_rejects_fapi_downgrade() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "fapi-downgrade@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let client = create_test_client(
@@ -1450,7 +1705,16 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "pkjwt-preserve@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let client = create_test_client(
@@ -1506,7 +1770,16 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "pkjwt-clear@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let client = create_test_client(
@@ -1558,7 +1831,16 @@ async fn test_update_application_should_reject_empty_name() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "update-empty-name@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1584,7 +1866,16 @@ async fn test_update_application_absent_name_keeps_existing() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "update-no-name@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1617,7 +1908,16 @@ async fn test_create_application_with_post_logout_redirect_uris() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "post-logout-create@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let payload = serde_json::json!({
@@ -1688,7 +1988,16 @@ async fn test_create_application_rejects_invalid_post_logout_redirect_uri() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "post-logout-invalid-create@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let payload = serde_json::json!({
@@ -1724,7 +2033,16 @@ async fn test_update_application_post_logout_redirect_uris_roundtrip() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "post-logout-update@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1770,7 +2088,16 @@ async fn test_create_application_rejects_invalid_access_scope() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bad-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1814,7 +2141,16 @@ async fn test_create_application_rejects_invalid_fapi_profile() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bad-fapi@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1856,7 +2192,16 @@ async fn test_create_application_accepts_valid_access_scope() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "good-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1877,7 +2222,16 @@ async fn test_create_application_defaults_access_scope_to_personal() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "default-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -1898,7 +2252,16 @@ async fn test_update_application_rejects_invalid_access_scope() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "upd-bad-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -1924,7 +2287,16 @@ async fn test_update_application_rejects_invalid_fapi_profile() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "upd-bad-fapi@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -2008,7 +2380,16 @@ async fn test_update_application_accepts_valid_access_scope() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "upd-good-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
@@ -2034,7 +2415,16 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "upd-keep-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = bearer(&token);
 
     // Create with public scope, then PATCH without access_scope.

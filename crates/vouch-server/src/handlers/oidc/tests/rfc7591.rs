@@ -17,7 +17,16 @@ use super::helpers::*;
 async fn bearer_token(app_state: &std::sync::Arc<crate::AppState>) -> String {
     let user = create_test_user(&app_state.store, "rfc7591-test@example.com").await;
     let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
-    let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        app_state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     format!("Bearer {token}")
 }
 
@@ -26,7 +35,16 @@ async fn bearer_token_unique(app_state: &std::sync::Arc<crate::AppState>, suffix
     let email = format!("rfc7591-{suffix}@example.com");
     let user = create_test_user(&app_state.store, &email).await;
     let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
-    let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        app_state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     format!("Bearer {token}")
 }
 
@@ -98,7 +116,16 @@ async fn test_rfc7591_register_rejects_expired_token() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "rfc7591-expired@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete the session to simulate revocation/expiry
     let token_hash = crate::crypto::hash_token(&token);
@@ -1678,8 +1705,17 @@ async fn test_rfc7591_mtls_bound_token_with_matching_cert_authenticates() {
 
     let cert_der = make_test_cert_der("rfc7591-mtls-match");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1724,8 +1760,17 @@ async fn test_rfc7591_mtls_bound_token_with_wrong_cert_rejected() {
 
     let cert_a_der = make_test_cert_der("rfc7591-bound-a");
     let thumbprint_a = cert_thumbprint(&cert_a_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present a different certificate than the one the token is bound to.
     let cert_b_der = make_test_cert_der("rfc7591-presented-b");
@@ -1766,8 +1811,17 @@ async fn test_rfc7591_mtls_bound_token_without_cert_rejected() {
 
     let cert_der = make_test_cert_der("rfc7591-nocert");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1807,7 +1861,16 @@ async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
 
     let user = create_test_user(&state.store, "rfc7591-plain-cert@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let cert_der = make_test_cert_der("rfc7591-plain");
     let body = serde_json::json!({
@@ -1858,7 +1921,17 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Generate and consume a nonce to simulate replay.
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
@@ -1949,7 +2022,17 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
     let register_uri = format!("{}/oauth/register", state.config().base_url);
     let auth = format!("DPoP {token}");
 

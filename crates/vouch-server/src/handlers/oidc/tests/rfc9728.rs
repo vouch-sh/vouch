@@ -847,8 +847,19 @@ async fn test_rfc9728_www_authenticate_preserves_step_up() {
     let auth_id2 = create_test_authenticator(&state.store, &user.id).await;
 
     let stale_iat = jiff::Timestamp::now().as_second() - 600;
-    let token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_id, stale_iat).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(stale_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_delete_full(
         &app,

@@ -28,7 +28,16 @@ async fn test_token_exchange_valid_token_types() {
 
     let user = create_test_user(&state.store, "exchange-types@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -96,7 +105,16 @@ async fn test_token_exchange_successful() {
     // Create a valid subject token and client for authentication
     let user = create_test_user(&state.store, "exchange@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -157,7 +175,16 @@ async fn test_token_exchange_scope_downgrade() {
 
     let user = create_test_user(&state.store, "exchange-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -253,7 +280,16 @@ async fn test_rfc8693_missing_subject_token_type() {
 
     let user = create_test_user(&state.store, "exchange-missing-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -283,7 +319,16 @@ async fn test_rfc8693_issued_token_type_in_response() {
 
     let user = create_test_user(&state.store, "exchange-issued-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -318,7 +363,16 @@ async fn test_rfc8693_unsupported_requested_token_type() {
 
     let user = create_test_user(&state.store, "exchange-bad-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -370,8 +424,16 @@ async fn test_rfc8693_delegation_depth_limit() {
         let actor_email = format!("actor-{}@example.com", i);
         let iter_actor = create_test_user(&state.store, &actor_email).await;
         let iter_actor_auth = create_test_authenticator(&state.store, &iter_actor.id).await;
-        let actor_token =
-            create_test_session(&state, &iter_actor.id, &iter_actor.email, &iter_actor_auth).await;
+        let actor_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &iter_actor.id,
+                email: &iter_actor.email,
+                auth_id: Some(&iter_actor_auth),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_form(
             &app,
@@ -416,7 +478,16 @@ async fn test_rfc8693_client_auth_required_for_exchange() {
 
     let user = create_test_user(&state.store, "exchange-noauth@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Try token exchange without any client authentication
     let (status, body) = http_post_form(
@@ -768,7 +839,16 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
 
     let user = create_test_user(&state.store, "deactivated-exchange@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -814,7 +894,16 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
 
     let user = create_test_user(&state.store, "wif-basic@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -895,7 +984,16 @@ async fn test_rfc8693_id_token_audience_routing() {
 
     let user = create_test_user(&state.store, "wif-aud@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -936,7 +1034,16 @@ async fn test_rfc8693_id_token_default_audience_is_issuer() {
 
     let user = create_test_user(&state.store, "wif-default-aud@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -977,7 +1084,16 @@ async fn test_rfc8693_id_token_lifetime_capped_at_default() {
 
     let user = create_test_user(&state.store, "wif-ttl@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1028,7 +1144,16 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
 
     let user = create_test_user(&state.store, "wif-nosession@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1090,7 +1215,16 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
     )
     .await
     .expect("create authenticator with aaguid");
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1150,7 +1284,16 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
     .expect("create original authenticator");
 
     // Session captures the original AAGUID.
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1200,7 +1343,16 @@ async fn test_rfc8693_id_token_carries_hd_for_org_user() {
     let org = create_test_org(&state.store, "example.com").await;
     let user = create_test_user_in_org(&state.store, "hduser@example.com", &org.id, false).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1241,7 +1393,16 @@ async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
 
     let user = create_test_user(&state.store, "wif-regression@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1292,7 +1453,16 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
 
     let user = create_test_user(&state.store, "wif-deactivated@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1329,8 +1499,16 @@ async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "wif-bootstrap@example.com").await;
-    let token =
-        crate::test_utils::create_test_bootstrap_session(&state, &user.id, &user.email).await;
+    let token = crate::test_utils::create_test_session_with(
+        &state,
+        crate::test_utils::TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            verification: TestVerification::NotVerified,
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1541,7 +1719,16 @@ async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
             .to_string();
 
     // A session from a grant with no single-use code must survive the replay.
-    let unrelated = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let unrelated = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, _) = http_post_form(
         &app,

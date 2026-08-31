@@ -561,7 +561,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         (admin, token, member)
@@ -579,7 +588,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the admin
         crate::db::update_user_active_status(&state.store, &admin.id, false)
@@ -603,7 +621,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the user
         crate::db::update_user_active_status(&state.store, &admin.id, false)
@@ -696,7 +723,16 @@ mod tests {
         // Create a non-admin user with a session
         let user = create_test_user_in_org(&state.store, "user@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let target =
@@ -725,7 +761,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -749,7 +794,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -773,7 +827,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -797,7 +860,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -825,7 +897,16 @@ mod tests {
 
         let admin = create_test_user_in_org(&state.store, "admin@org1.com", &org1.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let other_user =
@@ -907,7 +988,16 @@ mod tests {
         let admin =
             create_test_user_in_org(&state.store, "admin1@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         // Create another admin to demote
@@ -968,7 +1058,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
         let target_email = "target@example.com";
         let target = create_test_user_in_org(&state.store, target_email, &org.id, false).await;

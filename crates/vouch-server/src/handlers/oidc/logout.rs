@@ -516,9 +516,9 @@ mod tests {
     use super::*;
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
-        TestClientSpec, create_test_authenticator, create_test_client, create_test_session,
-        create_test_user, http_get, http_post_form, test_app, test_app_state,
-        test_app_state_with_rsa_key,
+        TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
+        create_test_session_with, create_test_user, http_get, http_post_form, test_app,
+        test_app_state, test_app_state_with_rsa_key,
     };
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
@@ -698,7 +698,16 @@ mod tests {
         // Create a user + session.
         let user = create_test_user(&state.store, "logout-redirect@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create an OAuth client with a registered post_logout_redirect_uri.
         let post_logout_uri = "https://rp.example.com/logged-out";
@@ -745,7 +754,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "logout-inactive@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let post_logout_uri = "https://rp.example.com/logged-out";
         let client = create_test_client(

@@ -23,7 +23,16 @@ async fn test_session_bound_to_authenticator() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_get(
         &app,
@@ -63,7 +72,16 @@ async fn test_session_valid_after_registering_new_key() {
     let user = create_test_user(&state.store, "bind-a2@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify session works
     let (status, _) = http_get(
@@ -104,8 +122,26 @@ async fn test_multiple_sessions_different_keys() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token_a = create_test_session(&state, &user.id, &user.email, &auth_a).await;
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_a = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status_a, _) = http_get(
         &app,
@@ -138,7 +174,16 @@ async fn test_delete_non_session_key_preserves_session() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete Key B (not the session key)
     let (status, body) = http_delete(
@@ -186,7 +231,16 @@ async fn test_delete_session_key_invalidates_session() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let _auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete Key A (the session key) — this should succeed for the delete
     // itself but cascade-delete the session
@@ -233,10 +287,37 @@ async fn test_delete_key_revokes_all_sessions_for_that_key() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
     // Create two sessions bound to Key A
-    let token_a1 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
-    let token_a2 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a1 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_a2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
     // One session bound to Key B (the "admin" session that performs the delete)
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete Key A using session bound to Key B
     let (status, body) = http_delete(
@@ -299,7 +380,16 @@ async fn test_cannot_delete_last_key() {
     let user = create_test_user(&state.store, "del-b4@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_delete(
         &app,
@@ -331,11 +421,47 @@ async fn test_delete_returns_revoked_session_count() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
     // Create 3 sessions bound to Key A
-    let _t1 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
-    let _t2 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
-    let _t3 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let _t1 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
+    let _t2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
+    let _t3 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
     // Use Key B to perform the delete
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_delete(
         &app,
@@ -368,8 +494,19 @@ async fn test_stale_session_cannot_delete_key() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
     let stale_iat = jiff::Timestamp::now().as_second() - 600;
-    let token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_a, stale_iat).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            verification: TestVerification::Verified {
+                auth_time: Some(stale_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_delete_full(
         &app,
@@ -410,7 +547,16 @@ async fn test_fresh_session_can_delete_key() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_delete(
         &app,
@@ -438,8 +584,19 @@ async fn test_boundary_exactly_at_max_age() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
     let boundary_iat = jiff::Timestamp::now().as_second() - 59;
-    let token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_a, boundary_iat).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            verification: TestVerification::Verified {
+                auth_time: Some(boundary_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_delete(
         &app,
@@ -464,8 +621,19 @@ async fn test_one_second_over_max_age() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
     let over_iat = jiff::Timestamp::now().as_second() - 61;
-    let token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_a, over_iat).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            verification: TestVerification::Verified {
+                auth_time: Some(over_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_delete_full(
         &app,
@@ -563,7 +731,16 @@ async fn test_revoke_kills_all_user_sessions() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_a, &client).await;
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Revoke token_a — should kill ALL sessions for the user
     let auth_header = client.basic_auth_header();
@@ -615,7 +792,16 @@ async fn test_register_then_delete_original_key() {
     let user = create_test_user(&state.store, "cross-e1@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
 
-    let token_a = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // "Register" Key B
     let _auth_b = create_test_authenticator(&state.store, &user.id).await;
@@ -651,7 +837,16 @@ async fn test_delete_registered_key_preserves_original_session() {
     let user = create_test_user(&state.store, "cross-e2@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
 
-    let token_a = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // "Register" Key B
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
@@ -688,7 +883,16 @@ async fn test_delete_self_then_login_with_other_key() {
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let token_a = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete Key A (self-delete)
     let (status, _) = http_delete(
@@ -713,7 +917,16 @@ async fn test_delete_self_then_login_with_other_key() {
     );
 
     // Login with Key B
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
     let (status, body) = http_get(
         &app,
         "/v1/keys",
@@ -742,7 +955,16 @@ async fn test_full_lifecycle() {
 
     let user = create_test_user(&state.store, "cross-e5@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
-    let token_a = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Step 2: 1 key
     let (status, body) = http_get(
@@ -788,7 +1010,16 @@ async fn test_full_lifecycle() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Step 7: New session with Key B
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Step 8: Only Key B remains
     let (status, body) = http_get(
@@ -821,7 +1052,16 @@ async fn test_token_revocation_vs_key_deletion() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (token_a1, _) = issue_oauth_access_token(&app, &state, &user, &auth_a, &client).await;
-    let token_a2 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_a2 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Revoke token_a1 — kills ALL sessions for the user
     let auth_header = client.basic_auth_header();
@@ -861,8 +1101,26 @@ async fn test_token_revocation_vs_key_deletion() {
 
     // Key deletion is a separate mechanism — create fresh sessions and
     // verify key deletion cascades to sessions for that key
-    let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
-    let token_a3 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let token_b = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_b),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_a3 = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete Key A via session bound to Key B
     let (status, _) = http_delete(
@@ -907,8 +1165,19 @@ async fn test_step_up_recovery() {
 
     // Stale session
     let stale_iat = jiff::Timestamp::now().as_second() - 600;
-    let stale_token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_a, stale_iat).await;
+    let stale_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            verification: TestVerification::Verified {
+                auth_time: Some(stale_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete fails due to step-up
     let response = http_delete_full(
@@ -924,7 +1193,16 @@ async fn test_step_up_recovery() {
     );
 
     // Fresh re-login
-    let fresh_token = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let fresh_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete now succeeds
     let (status, body) = http_delete(

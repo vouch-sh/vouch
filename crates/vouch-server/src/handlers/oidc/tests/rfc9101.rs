@@ -195,7 +195,16 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     let user = create_test_user(&state.store, "jar-es256@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -239,7 +248,16 @@ async fn test_rfc9101_authorize_request_object_with_pkce() {
     let user = create_test_user(&state.store, "jar-pkce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -639,7 +657,16 @@ async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
 
     let user = create_test_user(&state.store, "jar-required@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (_pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -694,7 +721,16 @@ async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
 
     let user = create_test_user(&state.store, "jar-reqok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -979,7 +1015,16 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
 
     let user = create_test_user(&state.store, "jar-algok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -1152,7 +1197,16 @@ async fn test_rfc9101_state_from_request_object_preserved_in_response() {
     let user = create_test_user(&state.store, "jar-state@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1345,7 +1399,16 @@ async fn test_rfc9101_fapi2_matching_query_params_accepted() {
     let user = create_test_user(&state.store, "jar-fapi-match@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -2028,7 +2091,16 @@ async fn test_rfc9101_authorize_rejects_unsupported_prompt_in_request_object() {
     let user = create_test_user(&state.store, "jar-auth-badprompt@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let now = jiff::Timestamp::now().as_second();
@@ -2215,7 +2287,16 @@ async fn test_rfc9101_registration_rejects_pinned_alg_without_usable_key() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-unusable-reg@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -2251,7 +2332,16 @@ async fn test_rfc9101_registration_rejects_required_signing_without_any_key() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-no-keys-reg@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -2281,7 +2371,16 @@ async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-unusable-put@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR PUT App").await;
@@ -2314,7 +2413,16 @@ async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-rotate-put@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR Rotate App").await;
@@ -2346,7 +2454,16 @@ async fn test_rfc9101_admin_update_rejects_jwks_without_key_for_pinned_alg() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-admin-patch@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = format!("Bearer {session_token}");
 
     let (client_id, _reg_token, _pkcs8) =
@@ -2389,7 +2506,16 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-admin-form@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, _reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "Admin JAR Form App").await;

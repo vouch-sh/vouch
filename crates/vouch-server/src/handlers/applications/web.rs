@@ -827,7 +827,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-empty-name@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_oauth_client(&state.store, &user.id).await;
 
         // Submit the web update form with an empty name.
@@ -875,7 +884,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-empty-uris@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_oauth_client(&state.store, &user.id).await;
 
         // Submit with a valid name but blank redirect_uris textarea.
@@ -925,7 +943,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-fapi-exit@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_client(
             &state.store,
             &user.id,

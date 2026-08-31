@@ -1095,7 +1095,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "user@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1128,7 +1137,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "norsa@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1154,11 +1172,15 @@ mod tests {
 
         let user = create_test_user(&state.store, "bootstrap@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_bootstrap_session_with_authenticator(
+        let token = create_test_session_with(
             &state,
-            &user.id,
-            &user.email,
-            &auth_id,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1182,7 +1204,16 @@ mod tests {
         let (app, state) = test_app().await;
 
         let user = create_test_user(&state.store, "newuser@example.com").await;
-        let token = create_test_bootstrap_session(&state, &user.id, &user.email).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1206,7 +1237,16 @@ mod tests {
         let user =
             create_test_user_in_org(&state.store, "orguser@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1241,7 +1281,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "pinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1269,7 +1318,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "unpinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1295,7 +1353,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "badarn@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1317,7 +1384,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "userarn@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1365,7 +1441,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghstatus@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1385,7 +1470,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghnoorg@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1414,7 +1508,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghtoken@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let body = serde_json::json!({ "repositories": [] });
         let (status, resp_body) = http_post_json(
@@ -1457,7 +1560,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "deactivated-aws@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the user
         crate::db::update_user_active_status(&state.store, &user.id, false)
@@ -1483,7 +1595,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "deactivated-gh@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         crate::db::update_user_active_status(&state.store, &user.id, false)
             .await

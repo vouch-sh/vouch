@@ -377,7 +377,16 @@ async fn test_dpop_scheme_without_proof_rejected() {
 
     let user = create_test_user(&state.store, "dpop-noproof@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_get_full(
         &app,
@@ -1655,7 +1664,17 @@ async fn test_rfc9449_userinfo_multiple_dpop_headers_rejected() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let userinfo_uri = format!("{}/oauth/userinfo", state.config().base_url);
     let proof_a = create_dpop_proof(
@@ -1715,7 +1734,17 @@ async fn test_rfc9449_userinfo_mtls_and_dpop_combined_succeeds() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // mTLS cert is presented but the token is DPoP-bound (no x5t#S256 in cnf).
     let cert_der = make_test_cert_der("mtls-also-present");
@@ -1765,7 +1794,17 @@ async fn test_rfc9449_userinfo_dpop_bound_token_in_post_body_rejected() {
 
     let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body_str = format!("access_token={}", urlencoding::encode(&token));
     let (status, body) = http_post_form(&app, "/oauth/userinfo", &body_str, &[]).await;

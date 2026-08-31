@@ -95,7 +95,16 @@ impl TestHarness {
         email: &str,
         auth_id: &str,
     ) -> Result<String> {
-        let token = test_utils::create_test_session(&self.state, user_id, email, auth_id).await;
+        let token = test_utils::create_test_session_with(
+            &self.state,
+            test_utils::TestSessionSpec {
+                user_id,
+                email,
+                auth_id: Some(auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         Ok(token)
     }
 
@@ -111,12 +120,15 @@ impl TestHarness {
         auth_id: &str,
         client_id: &str,
     ) -> Result<String> {
-        let token = test_utils::create_test_session_for_client(
+        let token = test_utils::create_test_session_with(
             &self.state,
-            user_id,
-            email,
-            auth_id,
-            client_id,
+            test_utils::TestSessionSpec {
+                user_id,
+                email,
+                auth_id: Some(auth_id),
+                client_id: Some(client_id),
+                ..Default::default()
+            },
         )
         .await;
         Ok(token)
@@ -489,7 +501,16 @@ impl TestHarness {
     pub async fn create_expired_token(&self, user_id: &str, email: &str, auth_id: &str) -> String {
         use vouch_server::crypto::hash_token;
 
-        let token = test_utils::create_test_session(&self.state, user_id, email, auth_id).await;
+        let token = test_utils::create_test_session_with(
+            &self.state,
+            test_utils::TestSessionSpec {
+                user_id,
+                email,
+                auth_id: Some(auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let token_hash = hash_token(&token);
         db::delete_session_by_token_hash(&self.state.store, &token_hash)
