@@ -399,6 +399,8 @@ login-err-invalid-client =
 
 ## register command
 
+register-err-name-empty = Name cannot be empty
+register-err-name-long = Name must be 100 characters or less
 register-starting = Registering additional { -yubikey } '{ $name }'...
 register-contacting-server = Contacting server...
 register-contact-ok = ok

@@ -17,6 +17,7 @@ pub mod jwk;
 pub mod paths;
 pub mod posture;
 pub mod protocol;
+pub mod resource_label;
 pub(crate) mod url;
 
 #[cfg(test)]
@@ -41,13 +42,14 @@ pub use api::{
     BrowserRegisterStartResponse, CloudTokenResponse, DeleteKeyResponse, DeviceCodeRequest,
     DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, Fido2ChallengeResponse,
     GitHubAccountStatus, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse, KeyInfo,
-    ListKeysResponse, MAX_KEY_NAME_CHARS, OAuthError, RegisterCompleteRequest,
-    RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse, RenameKeyRequest,
-    RenameKeyResponse, SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest,
-    SshCertificateResponse, serialize_opt_secret_string, serialize_secret_string,
+    ListKeysResponse, OAuthError, RegisterCompleteRequest, RegisterCompleteResponse,
+    RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
+    SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    serialize_opt_secret_string, serialize_secret_string,
 };
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::ApiError;
+pub use resource_label::{ResourceLabel, ResourceLabelError};
 pub use url::{
     UrlSecurity, check_url_security, is_loopback_host, normalize_git_host, strip_default_https_port,
 };

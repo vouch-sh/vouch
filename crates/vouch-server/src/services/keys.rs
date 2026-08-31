@@ -11,7 +11,7 @@ use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
-use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
+use vouch_common::{KeyInfo, ResourceLabel, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
@@ -180,12 +180,14 @@ pub(crate) async fn list_keys_for_user(
 
 /// Rename a registered key.
 ///
-/// Validates ownership and name constraints before updating the key name.
+/// The new name arrives already validated as a [`ResourceLabel`] (trimmed,
+/// non-empty, within the length limit), so this function only checks the key id
+/// and ownership before updating.
 ///
 /// # Errors
 ///
 /// Returns:
-/// - `ServiceError::Validation` if the name is empty or too long.
+/// - `ServiceError::Validation` if `key_id` is not a valid UUID.
 /// - `ServiceError::NotFound` if the key does not exist *or* belongs to another
 ///   user. The two are deliberately indistinguishable: a 403 for someone else's
 ///   key would let any authenticated caller probe whether a given key id exists.
@@ -194,7 +196,7 @@ pub(crate) async fn rename_key(
     store: &DocumentStore,
     user_id: &str,
     key_id: &str,
-    new_name: &str,
+    new_name: &ResourceLabel,
 ) -> Result<String, ServiceError> {
     // Validate key_id is a UUID before DB lookup
     if uuid::Uuid::try_parse(key_id).is_err() {
@@ -203,20 +205,9 @@ pub(crate) async fn rename_key(
         ));
     }
 
-    // Validate name
-    let name = new_name.trim();
-    if name.is_empty() {
-        return Err(ServiceError::Validation(
-            Tr::new("keys-error-name-empty").to_string(),
-        ));
-    }
-    if name.chars().count() > MAX_KEY_NAME_CHARS {
-        return Err(ServiceError::Validation(
-            Tr::new("keys-error-name-too-long")
-                .arg("max", MAX_KEY_NAME_CHARS.to_string())
-                .to_string(),
-        ));
-    }
+    // The name is already trimmed and length-checked: `ResourceLabel` has no
+    // other constructor, so both callers had to validate before reaching here.
+    let name = new_name.as_str();
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(store, key_id)
@@ -460,12 +451,22 @@ mod tests {
         let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
         let absent_key = uuid::Uuid::now_v7().to_string();
 
-        let foreign = rename_key(&state.store, &caller.id, &owned_key, "renamed")
-            .await
-            .unwrap_err();
-        let missing = rename_key(&state.store, &caller.id, &absent_key, "renamed")
-            .await
-            .unwrap_err();
+        let foreign = rename_key(
+            &state.store,
+            &caller.id,
+            &owned_key,
+            &ResourceLabel::parse("renamed").unwrap(),
+        )
+        .await
+        .unwrap_err();
+        let missing = rename_key(
+            &state.store,
+            &caller.id,
+            &absent_key,
+            &ResourceLabel::parse("renamed").unwrap(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(foreign, ServiceError::NotFound("Key")),

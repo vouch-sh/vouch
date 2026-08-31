@@ -19,7 +19,7 @@ use uuid::Uuid;
 use vouch_common::{
     DeleteKeyResponse, ListKeysResponse, Raw, RegisterCompleteRequest, RegisterCompleteResponse,
     RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
-    fido2_types::Challenge,
+    ResourceLabel, fido2_types::Challenge,
 };
 
 use super::extractors::ValidJson;
@@ -36,7 +36,7 @@ use crate::crypto::webauthn_verify;
 struct RegistrationState {
     user_id: Uuid,
     user_name: String,
-    device_name: String,
+    device_name: ResourceLabel,
     challenge: Challenge<Raw>,
     rp_id: String,
     /// RFC 8725 §3.11: Issued at time for expiration enforcement.
@@ -179,10 +179,20 @@ pub(crate) async fn register_start(
     let exp = now
         .checked_add(jiff::Span::new().minutes(5))
         .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+    // Validate the user-supplied key name at the entry point. Storing it into
+    // a `ResourceLabel` field is what forces this parse; the rename path and
+    // the enrollment form apply the same 1..=100-character contract.
+    let device_name = ResourceLabel::parse(&req.name).map_err(|_| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Key name must be between 1 and 100 characters",
+        )
+    })?;
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),
-        device_name: req.name,
+        device_name,
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
         iat: now.as_second(),
@@ -343,7 +353,7 @@ pub(crate) async fn register_complete(
         &db::CreateAuthenticatorParams {
             user_id: &reg_state.user_id.to_string(),
             user_email: &reg_state.user_name,
-            name: &reg_state.device_name,
+            name: reg_state.device_name.as_str(),
             credential_id: &verified_cred_id,
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
@@ -408,16 +418,15 @@ pub(crate) async fn rename_key(
             "Key ID must be a valid UUID",
         ));
     }
-    let name = req.name.trim();
-    if name.is_empty() || name.chars().count() > vouch_common::MAX_KEY_NAME_CHARS {
-        return Err(ServiceError::api(
+    let name = ResourceLabel::parse(&req.name).map_err(|_| {
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
             "Key name must be between 1 and 100 characters",
-        ));
-    }
+        )
+    })?;
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, name).await?;
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -486,7 +495,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test-user".to_string(),
-            device_name: "test-device".to_string(),
+            device_name: ResourceLabel::parse("test-device").expect("valid label"),
             challenge,
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -500,7 +509,7 @@ mod tests {
 
         assert_eq!(decoded.user_id, Uuid::nil());
         assert_eq!(decoded.user_name, "test-user");
-        assert_eq!(decoded.device_name, "test-device");
+        assert_eq!(decoded.device_name.as_str(), "test-device");
         assert_eq!(decoded.rp_id, "test.example.com");
     }
 
@@ -512,7 +521,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test".to_string(),
-            device_name: "dev".to_string(),
+            device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -530,7 +539,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test".to_string(),
-            device_name: "dev".to_string(),
+            device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -725,6 +734,45 @@ mod tests {
         assert_eq!(error["message"], "User account is deactivated");
     }
 
+    #[tokio::test]
+    async fn test_register_start_rejects_invalid_name() {
+        // #1133: the CLI register path must enforce the same 1..=100-character
+        // key-name contract as rename; empty, whitespace-only, and over-long
+        // names are rejected before any state token is minted.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "register-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let over_long = "x".repeat(101);
+        for bad in ["", "   ", over_long.as_str()] {
+            let body = serde_json::json!({ "name": bad }).to_string();
+            let (status, resp) = http_post_json(
+                &app,
+                "/v1/keys/register/start",
+                &body,
+                &[("Authorization", &format!("Bearer {token}"))],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "name {bad:?} must be rejected"
+            );
+            let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+            assert_eq!(error["code"], "invalid_name", "name {bad:?}");
+        }
+    }
+
     // ========================================================================
     // Register Complete — Negative
     // ========================================================================
@@ -739,7 +787,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge: Challenge::from(vec![7u8; 32]),
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -936,7 +984,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: Uuid::new_v4(),
             user_name: "replay-test@example.com".to_string(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -1011,7 +1059,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -1081,7 +1129,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
