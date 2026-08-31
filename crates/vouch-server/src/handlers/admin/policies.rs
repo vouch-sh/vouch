@@ -502,19 +502,19 @@ pub(crate) async fn update_custom_policy(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to update policy: {e}")))?;
 
-    if result.is_none() {
+    let Some(stored) = result else {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Policy not found",
         ));
-    }
+    };
 
     let policy_hash = policy_text_hash(&form.policy_text);
     let data = CustomPolicyAdminData {
         action: "custom_policy_updated".to_string(),
         policy_id: &id,
-        policy_name: Some(&form.name),
+        policy_name: Some(&stored.name),
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
@@ -1662,6 +1662,156 @@ mod tests {
             "an over-long description must reject the whole update"
         );
         assert!(after.description.is_none());
+    }
+
+    /// Regression: the `custom_policy_updated` audit event must record the
+    /// stored (trimmed) policy name, not the raw `form.name`. The handler
+    /// trims the name before persisting it, so the audit's `policy_name`
+    /// must agree with the persisted row — otherwise the audit log names a
+    /// value no database row possesses whenever the admin submitted a name
+    /// with leading or trailing whitespace. Introduced alongside the
+    /// trimmed storage in 3bf28e98.
+    #[tokio::test]
+    async fn test_update_custom_policy_audit_records_stored_name() {
+        use serde_json::Value;
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let created = db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Original",
+                description: None,
+                policy_text: VALID_POLICY_TEXT,
+                org_id: &org_id,
+                builder_spec: None,
+            },
+        )
+        .await
+        .expect("create custom policy");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode(" My Policy "),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(stored.name, "My Policy", "stored name is trimmed");
+
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyUpdate.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one update -> one audit event");
+        let v: Value = serde_json::from_str(&events[0].data).expect("json");
+        let audit_name = v["policy_name"].as_str().expect("policy_name present");
+        assert_eq!(
+            audit_name,
+            stored.name.as_str(),
+            "audit must record the stored (trimmed) name, not raw form.name"
+        );
+        assert_eq!(
+            v["policy_id"].as_str().unwrap(),
+            stored.id.as_str(),
+            "audit policy_id must be the policy document id"
+        );
+        assert!(
+            v["policy_text_hash"].as_str().is_some(),
+            "audit text hash must be present on update"
+        );
+    }
+
+    /// The update-path audit name must also agree with the stored name when
+    /// the submitted name carries no surrounding whitespace, guarding
+    /// against a regression that swaps in a different wrong variable.
+    #[tokio::test]
+    async fn test_update_custom_policy_audit_records_name_without_whitespace() {
+        use serde_json::Value;
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let created = db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Original",
+                description: None,
+                policy_text: VALID_POLICY_TEXT,
+                org_id: &org_id,
+                builder_spec: None,
+            },
+        )
+        .await
+        .expect("create custom policy");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode("Renamed"),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(stored.name, "Renamed");
+
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyUpdate.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1);
+        let v: Value = serde_json::from_str(&events[0].data).expect("json");
+        assert_eq!(
+            v["policy_name"].as_str().unwrap(),
+            "Renamed",
+            "audit name must equal the stored name on the happy path"
+        );
     }
 
     #[tokio::test]

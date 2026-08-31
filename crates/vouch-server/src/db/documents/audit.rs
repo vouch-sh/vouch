@@ -658,6 +658,24 @@ mod tests {
                     "policy_text_hash": "abc123",
                 }),
             ),
+            // policies.rs custom update (name + hash), mirroring create
+            (
+                serde_json::to_value(CustomPolicyAdminData {
+                    action: "custom_policy_updated".to_string(),
+                    policy_id: "pol-1",
+                    policy_name: Some("Block exports"),
+                    admin_user_id: "u-admin",
+                    policy_text_hash: Some("abc123".to_string()),
+                })
+                .unwrap(),
+                json!({
+                    "action": "custom_policy_updated",
+                    "policy_id": "pol-1",
+                    "policy_name": "Block exports",
+                    "admin_user_id": "u-admin",
+                    "policy_text_hash": "abc123",
+                }),
+            ),
             (
                 serde_json::to_value(CustomPolicyAdminData {
                     action: "custom_policy_deleted".to_string(),
