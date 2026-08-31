@@ -489,8 +489,10 @@ pub struct RegistrationParams<'a> {
 /// 1. Parse `attestation_object` CBOR
 /// 2. Verify `authData`: RP ID hash, flags (UP+UV+AT), extract credential
 /// 3. Parse `clientDataJSON`: verify type=webauthn.create, challenge, origin
-/// 4. For `fmt="packed"` self-attestation: verify signature
-/// 5. For `fmt="none"`: accept (no attestation statement)
+/// 4. For `fmt="packed"`: verify the attestation signature (self or x5c)
+/// 5. For `fmt="fido-u2f"`: verify `attStmt.sig` over `0x00 || rpIdHash ||
+///    clientDataHash || credentialId || publicKeyU2F` with the leaf cert
+/// 6. For `fmt="none"`: accept (no attestation statement)
 ///
 /// Returns the server-verified credential ID, public key, and AAGUID.
 pub fn verify_registration(
@@ -502,6 +504,11 @@ pub fn verify_registration(
 /// Verify a WebAuthn registration with a custom COSE verifier.
 ///
 /// This is the testable version of [`verify_registration`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass WebAuthn L2 §7.1 registration verification; \
+              attestation-format dispatch is the bulk of the body"
+)]
 pub fn verify_registration_with_verifier<V: CoseVerifier>(
     params: &RegistrationParams<'_>,
     verifier: &V,
@@ -672,26 +679,47 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             // No attStmt with packed format is invalid, but we're lenient
             // since the COSE key is verified through usage anyway
         }
+        "fido-u2f" => {
+            // FIDO U2F attestation (WebAuthn Level 2 Section 8.3). The signature
+            // is over `0x00 || rpIdHash || clientDataHash || credentialId ||
+            // publicKeyU2F` (not packed's `authData || clientDataHash`), with
+            // `alg` fixed to ES256 — see `verify_fido_u2f_attestation`.
+            //
+            // Verifying `attStmt.sig` is what binds the credential to the
+            // captured certificate; without it the chokepoint's `cert_aaguid`
+            // is unearned (issue #1111 forgery against `fido-u2f`). The browser
+            // path is safe via webauthn-rs's `verify_fidou2f_attestation`; this
+            // arm mirrors it so both paths reject the same inputs. The chain
+            // itself is validated by the chokepoint, which owns chain policy.
+            let stmt_map = att_stmt.ok_or_else(|| {
+                VerifyError::InvalidClientData(
+                    "fido-u2f attestation requires an attStmt".to_string(),
+                )
+            })?;
+            verify_fido_u2f_attestation(
+                stmt_map,
+                &auth_data_bytes,
+                client_data_json,
+                &cose_key_bytes,
+                &credential_id,
+            )?;
+
+            // The authData AAGUID is not signed by a fido-u2f statement (CTAP
+            // 2.0 §7.2: AAGUID "Initialized with all zeros"), so it carries no
+            // model identity; the model comes from the certificate via the
+            // chokepoint.
+            aaguid = None;
+        }
         other => {
-            // No verification procedure is implemented for these formats, so
-            // nothing here signs the authData AAGUID and it is discarded. The
-            // credential itself is still verified through assertion on login.
-            //
-            // This is not the hardware-only gate, and passing through here is
-            // not acceptance. `validate_hardware_attestation` runs afterwards
-            // in `validate_registration_attestation` and is default-deny: it
-            // admits only `packed` and `fido-u2f`, rejecting `none` as a
-            // software passkey, `tpm`/`apple`/`android-key`/
-            // `android-safetynet` as platform authenticators, and any
-            // unrecognized identifier outright. `fido-u2f` is therefore the
-            // only format that reaches this arm and survives registration.
-            //
-            // CTAP 2.0 section 7.2 gives the authenticator data a platform
-            // synthesizes from a CTAP1/U2F response as carrying an AAGUID
-            // "Initialized with all zeros", so a conforming fido-u2f
-            // registration conveys no AAGUID in the first place and loses
-            // nothing here. A non-zero AAGUID under such a format did not come
-            // from a conforming authenticator.
+            // No verification procedure is implemented for these formats. The
+            // authData AAGUID is signed by nothing here, so it is discarded
+            // (defense-in-depth); the credential is verified later via
+            // assertion. This is not acceptance: the registration chokepoint
+            // (`validate_registration_attestation`) runs `validate_hardware_attestation` afterwards
+            // and is default-deny — these formats are rejected there. The
+            // historical note about CTAP 2.0 §7.2's all-zero AAGUID lives on
+            // the `fido-u2f` arm, which is the only other hardware format and
+            // has its own verifier now.
             if aaguid.is_some() {
                 tracing::warn!(
                     fmt = %other,
@@ -801,6 +829,152 @@ fn verify_packed_attestation<V: CoseVerifier>(
     // Verify signature using the credential's own public key (self-attestation)
     verifier.verify(cose_key_bytes, &signed_data, &sig)?;
     Ok(None)
+}
+
+/// Verify a FIDO U2F attestation statement (WebAuthn Level 2 Section 8.3).
+///
+/// Verifies `attStmt.sig` over the concatenation of `0x00 || rpIdHash ||
+/// clientDataHash || credentialId || publicKeyU2F` using the leaf attestation
+/// certificate's public key, with the algorithm fixed to ES256 (ECDSA P-256
+/// SHA-256) per the U2F protocol.
+///
+/// This is what binds the credential public key in `authData` to the
+/// attestation certificate — the property the registration chokepoint relies
+/// on when it stamps the certificate's AAGUID onto the authenticator row. The
+/// certificate chain itself is validated by the chokepoint; this function
+/// performs only the signature check the chokepoint does not.
+fn verify_fido_u2f_attestation(
+    stmt_map: &[(ciborium::Value, ciborium::Value)],
+    auth_data_bytes: &[u8],
+    client_data_json: &[u8],
+    cose_key_bytes: &[u8],
+    credential_id: &[u8],
+) -> Result<(), VerifyError> {
+    let x5c_certs = extract_x5c_certs(stmt_map).ok_or_else(|| {
+        VerifyError::AttestationChainInvalid(
+            "fido-u2f attestation requires an x5c certificate chain".to_string(),
+        )
+    })?;
+
+    // WebAuthn Level 2 Section 8.3, verification procedure step 1: "Verify
+    // that x5c has exactly one element, the attestation certificate." A
+    // conforming U2F statement carries only the leaf; a chain, if present, is
+    // not a U2F statement and is rejected here.
+    if x5c_certs.len() != 1 {
+        return Err(VerifyError::AttestationChainInvalid(format!(
+            "fido-u2f x5c must have exactly one element (the leaf attestation \
+             certificate), got {}",
+            x5c_certs.len()
+        )));
+    }
+    let leaf_der = x5c_certs
+        .first()
+        .ok_or_else(|| VerifyError::AttestationChainInvalid("fido-u2f x5c is empty".to_string()))?;
+
+    // FIDO U2F does not declare `alg` in the statement (CDDL has only `x5c`
+    // and `sig`); the algorithm is fixed by the protocol to ES256, so `sig`
+    // is the only attStmt member read here.
+    let sig = cbor_map_get_bytes_by_text(stmt_map, "sig")?;
+
+    // publicKeyU2F: the credential public key in SEC1 uncompressed form
+    // (0x04 || x || y), per Section 8.3. U2F authenticators register EC2/P-256
+    // keys exclusively, so the credential key is required to be one.
+    let public_key_u2f = cose_key_to_sec1_uncompressed(cose_key_bytes)?;
+
+    // Build the verification data per Section 8.3:
+    // 0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F.
+    let rp_id_hash = auth_data_bytes
+        .get(0..32)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    let client_data_hash = digest::digest(&SHA256, client_data_json);
+    let verification_data = build_fido_u2f_verification_data(
+        rp_id_hash,
+        client_data_hash.as_ref(),
+        credential_id,
+        &public_key_u2f,
+    );
+
+    // Verify the signature using the leaf certificate's public key. FIDO U2F
+    // fixes the algorithm to ES256; `verify_attestation_sig_with_leaf_cert`
+    // additionally requires the certificate's public key OID to be
+    // `id-ecPublicKey`, matching the P-256 key a U2F attestation certificate
+    // carries.
+    verify_attestation_sig_with_leaf_cert(leaf_der, &verification_data, &sig, cose::alg::ES256)?;
+
+    tracing::info!(
+        attestation_verified = true,
+        "fido-u2f attestation signature verified"
+    );
+    Ok(())
+}
+
+/// Build the FIDO U2F attestation signature verification data.
+///
+/// WebAuthn Level 2 Section 8.3: "Let verificationData be the concatenation of
+/// (0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F)."
+fn build_fido_u2f_verification_data(
+    rp_id_hash: &[u8],
+    client_data_hash: &[u8],
+    credential_id: &[u8],
+    public_key_u2f: &[u8],
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(
+        1usize
+            .saturating_add(rp_id_hash.len())
+            .saturating_add(client_data_hash.len())
+            .saturating_add(credential_id.len())
+            .saturating_add(public_key_u2f.len()),
+    );
+    data.push(0x00);
+    data.extend_from_slice(rp_id_hash);
+    data.extend_from_slice(client_data_hash);
+    data.extend_from_slice(credential_id);
+    data.extend_from_slice(public_key_u2f);
+    data
+}
+
+/// Convert a COSE-encoded credential public key to the SEC1 uncompressed
+/// point encoding `0x04 || x || y` required by FIDO U2F attestation
+/// verification (WebAuthn Level 2 Section 8.3: `publicKeyU2F`).
+///
+/// FIDO U2F authenticators register EC2/P-256 keys exclusively, so the
+/// credential key is required to be one; any other key type or curve is
+/// rejected as a non-conforming U2F registration rather than fed to a
+/// verifier it does not fit.
+fn cose_key_to_sec1_uncompressed(cose_key: &[u8]) -> Result<Vec<u8>, VerifyError> {
+    let parsed: ciborium::Value =
+        ciborium::from_reader(cose_key).map_err(|e| VerifyError::InvalidCoseKey(e.to_string()))?;
+    let ciborium::Value::Map(map) = parsed else {
+        return Err(VerifyError::InvalidCoseKey("Expected COSE map".to_string()));
+    };
+
+    let kty = get_cose_int(&map, 1)?;
+    if kty != cose::kty::EC2 {
+        return Err(VerifyError::InvalidCoseKey(format!(
+            "fido-u2f requires an EC2 credential key, got kty {kty}"
+        )));
+    }
+
+    let crv = get_cose_int(&map, -1)?;
+    if crv != cose::curve::P256 {
+        return Err(VerifyError::InvalidCoseKey(format!(
+            "fido-u2f requires a P-256 credential key, got crv {crv}"
+        )));
+    }
+
+    let x = get_cose_bytes(&map, -2)?;
+    let y = get_cose_bytes(&map, -3)?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(VerifyError::InvalidCoseKey(
+            "fido-u2f requires 32-byte P-256 coordinates".to_string(),
+        ));
+    }
+
+    let mut point = Vec::with_capacity(65);
+    point.push(0x04);
+    point.extend_from_slice(&x);
+    point.extend_from_slice(&y);
+    Ok(point)
 }
 
 /// Read the `alg` label (3) of a CBOR-encoded COSE key.
