@@ -8,8 +8,8 @@ use inquire::{
     ui::{RenderConfig, Styled},
 };
 use vouch_common::{
-    DeleteKeyResponse, KeyInfo, ListKeysResponse, MAX_KEY_NAME_CHARS, RenameKeyRequest,
-    RenameKeyResponse,
+    DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
+    ResourceLabel, ResourceLabelError,
 };
 
 use crate::client::VouchClient;
@@ -357,14 +357,13 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
 pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
-    // Validate name
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-        bail!(tr!("keys-err-name-empty"));
-    }
-    if new_name.chars().count() > MAX_KEY_NAME_CHARS {
-        bail!(tr!("keys-err-name-long"));
-    }
+    // Validate the name client-side before the round-trip; the server applies
+    // the same `ResourceLabel` contract authoritatively.
+    let new_name = match ResourceLabel::parse(new_name) {
+        Ok(name) => name,
+        Err(ResourceLabelError::Empty) => bail!(tr!("keys-err-name-empty")),
+        Err(ResourceLabelError::TooLong) => bail!(tr!("keys-err-name-long")),
+    };
 
     // First, verify the key exists
     let keys_response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -376,7 +375,7 @@ pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result
 
     // Rename the key
     let req = RenameKeyRequest {
-        name: new_name.to_string(),
+        name: new_name.into_string(),
     };
     let response: RenameKeyResponse = client
         .patch_authenticated(&format!("/v1/keys/{key_id}"), &req)
