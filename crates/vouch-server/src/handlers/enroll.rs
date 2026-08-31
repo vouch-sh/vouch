@@ -195,16 +195,6 @@ impl std::fmt::Debug for OidcTokenResponse {
     }
 }
 
-/// Client data JSON structure from `WebAuthn` response.
-#[derive(Deserialize)]
-#[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-struct ClientData {
-    challenge: String,
-    origin: String,
-    #[serde(rename = "type")]
-    typ: String,
-}
-
 /// Browser registration state stored between `WebAuthn` start and complete.
 #[derive(Debug, Serialize, Deserialize)]
 struct BrowserRegistrationState {
