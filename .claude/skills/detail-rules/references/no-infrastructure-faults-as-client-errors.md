@@ -18,7 +18,7 @@ Pattern to search for: catch-all `Err(e) =>` or `Err(_) =>` arms inside DB call 
 
 ### 2. Infrastructure error swallowed; partial write reported as success
 
-An `if let Err(e) = db_call() { tracing::warn!(...) }` (without `return`) or a `let Ok(…) = db_call() else { continue }` that silently discards a write failure, then proceeds to return `200 OK` / `201 Created`, is a violation. Every write that materially changes state must propagate its error.
+An `if let Err(e) = db_call() { tracing::warn!(...) }` (without `return`) or a `let Ok(…) = db_call() else { continue }` that silently discards a write failure, then proceeds to return `200 OK` / `201 Created`, is a violation. Every write that materially changes state must propagate its error (the deliberate best-effort exception is `db::delete_sessions_for_code_replay`, which logs and skips per-session delete failures so already-committed deletes still surface on its `Ok` arm for the caller's cache invalidation; see the `complete-and-ordered-deactivation-revocation` rule).
 
 Pattern to search for:
 - `if let Err(e) = db::add_scim_group_member(…) { tracing::warn!(…) }` with no early `return`
