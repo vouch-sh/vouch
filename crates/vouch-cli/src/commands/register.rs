@@ -8,9 +8,10 @@
 //! synchronous FIDO2 device operations run on separate threads. See the
 //! module-level docs in [`crate::fido2`] for why this separation is required.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use vouch_common::{
-    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    MAX_KEY_NAME_CHARS, RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest,
+    RegisterStartResponse,
 };
 
 use crate::client::VouchClient;
@@ -60,6 +61,16 @@ fn browser_register_fallback(server: &str) -> Result<()> {
 /// 3. Complete registration with the server (async)
 pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
     let name = name.unwrap_or("YubiKey");
+    // Validate the key name (mirroring `keys::rename`) before contacting the
+    // server or asking the user to insert their hardware key, so input the
+    // server would refuse does not waste a round-trip or a YubiKey prompt.
+    let name = name.trim();
+    if name.is_empty() {
+        bail!(tr!("register-err-name-empty"));
+    }
+    if name.chars().count() > MAX_KEY_NAME_CHARS {
+        bail!(tr!("register-err-name-long"));
+    }
     tr_println!("register-starting", name = name);
     println!();
 

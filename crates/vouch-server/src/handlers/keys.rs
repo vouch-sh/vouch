@@ -150,10 +150,23 @@ pub(crate) async fn register_start(
 
     let user = super::session::load_active_user(&state, &token.sub).await?;
 
+    // Validate the key name (mirroring `rename_key`): trimmed, non-empty,
+    // and <= MAX_KEY_NAME_CHARS. `register_complete` persists this value
+    // verbatim into the authenticator row, so the bound must be enforced
+    // here at the source.
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > vouch_common::MAX_KEY_NAME_CHARS {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Key name must be between 1 and 100 characters",
+        ));
+    }
+
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
         redact_email(&user.email),
-        req.name
+        name
     );
 
     // Get existing credentials to exclude
@@ -182,7 +195,7 @@ pub(crate) async fn register_start(
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),
-        device_name: req.name,
+        device_name: name.to_string(),
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
         iat: now.as_second(),
@@ -723,6 +736,120 @@ mod tests {
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(error["code"], "unauthorized");
         assert_eq!(error["message"], "User account is deactivated");
+    }
+
+    // ========================================================================
+    // Register Start — Name Validation
+    //
+    // `register_start` must enforce the same 1–100 Unicode-character contract
+    // as `rename_key` (and the CLI rename path, the key service, and the
+    // enrollment-form `maxlength`). These tests guard the asymmetry fixed in
+    // this handler; before the fix, every case below returned 200 OK and
+    // baked the unvalidated name into the signed state token.
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_start_rejects_empty_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "reg-empty@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            r#"{"name":""}"#,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_start_rejects_name_over_shared_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "reg-long@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // One character over the shared 100-char limit.
+        let name = "a".repeat(101);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            &body,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    // The guard measures Unicode characters, not UTF-8 bytes, so a multibyte
+    // name is bounded by the same 100-character count the error message names.
+    #[tokio::test]
+    async fn test_register_start_rejects_multibyte_name_exceeding_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "reg-cjk-long@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // 101 CJK characters = 303 UTF-8 bytes: one character over the cap.
+        let name = "名".repeat(101);
+        assert_eq!(name.chars().count(), 101);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            &body,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+    }
+
+    // Surrounding whitespace is trimmed before the name is stored: the signed
+    // state token — and therefore the authenticator row `register_complete`
+    // persists from it — carries the trimmed value, not the raw input.
+    #[tokio::test]
+    async fn test_register_start_trims_surrounding_whitespace_in_state() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "reg-trim@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            r#"{"name":"  My Key  "}"#,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let state_token = json["state"].as_str().expect("response must have state");
+        let reg_state = RegistrationState::decode(state_token, &state.state_signer)
+            .await
+            .expect("state token must decode");
+        assert_eq!(reg_state.device_name, "My Key");
     }
 
     // ========================================================================

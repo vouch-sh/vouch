@@ -441,6 +441,8 @@ register-manual-block =
       2. Sign in (if prompted) and complete the WebAuthn ceremony.
 
     After registration, run `{ -cmd } keys` to verify.
+register-err-name-empty = Name cannot be empty
+register-err-name-long = Name must be 100 characters or less
 
 ## logout command
 
