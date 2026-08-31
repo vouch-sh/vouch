@@ -139,18 +139,8 @@ pub enum OAuthErrorCode {
     UnauthorizedClient,
     /// RFC 6749 Section 5.2: The authorization grant type is not supported.
     UnsupportedGrantType,
-    /// RFC 6749 Section 5.2: The requested scope is invalid or unknown.
-    InvalidScope,
     /// RFC 6749 Section 4.1.2.1: The authorization server encountered an unexpected condition.
     ServerError,
-    /// RFC 6749 Section 4.1.2.1: The authorization server is temporarily unavailable.
-    TemporarilyUnavailable,
-    /// RFC 8628 Section 3.5: The authorization request is still pending.
-    AuthorizationPending,
-    /// RFC 8628 Section 3.5: Polling too frequently.
-    SlowDown,
-    /// RFC 8628 Section 3.5: The device code has expired.
-    ExpiredToken,
     /// RFC 6749 Section 4.1.2.1: Access denied by the resource owner or authorization server.
     AccessDenied,
     /// RFC 6749 Section 4.1.2.1: The response type is not supported.
@@ -211,7 +201,6 @@ impl OAuthErrorCode {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::InvalidRequest
-            | Self::InvalidScope
             | Self::InvalidDpopProof
             | Self::InvalidTarget
             | Self::UnmetAuthenticationRequirements
@@ -231,12 +220,9 @@ impl OAuthErrorCode {
             Self::InvalidGrant
             | Self::UnsupportedGrantType
             | Self::UnsupportedResponseType
-            | Self::AuthorizationPending
-            | Self::SlowDown
-            | Self::ExpiredToken
             | Self::AccessDenied => StatusCode::BAD_REQUEST,
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
-            Self::ServerError | Self::TemporarilyUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UseDpopNonce => StatusCode::BAD_REQUEST,
         }
     }
@@ -251,12 +237,7 @@ impl OAuthErrorCode {
             Self::UnauthorizedClient => "unauthorized_client",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::UnsupportedResponseType => "unsupported_response_type",
-            Self::InvalidScope => "invalid_scope",
             Self::ServerError => "server_error",
-            Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::AuthorizationPending => protocol::ERROR_AUTHORIZATION_PENDING,
-            Self::SlowDown => protocol::ERROR_SLOW_DOWN,
-            Self::ExpiredToken => protocol::ERROR_EXPIRED_TOKEN,
             Self::AccessDenied => protocol::ERROR_ACCESS_DENIED,
             Self::InvalidToken => "invalid_token",
             Self::InvalidDpopProof => "invalid_dpop_proof",
@@ -577,10 +558,6 @@ mod tests {
     fn test_oauth_error_codes() {
         assert_eq!(OAuthErrorCode::InvalidRequest.as_str(), "invalid_request");
         assert_eq!(OAuthErrorCode::InvalidClient.as_str(), "invalid_client");
-        assert_eq!(
-            OAuthErrorCode::AuthorizationPending.as_str(),
-            "authorization_pending"
-        );
     }
 
     #[test]
