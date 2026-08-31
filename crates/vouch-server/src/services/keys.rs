@@ -103,38 +103,29 @@ pub(crate) fn require_recent_hardware_verification(
     require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
 }
 
-/// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds
-/// of the server's current wall clock and not in the future.
+/// Require the given issued-at or auth timestamp to be within `max_age_secs`
+/// seconds of the server's current wall clock and not in the future.
 ///
-/// Returns `ServiceError::StepUpRequired` if the timestamp is too old *or* is in
-/// the future relative to `now`. Used by delete key operations to enforce
-/// recency of authentication.
-///
-/// `i64::saturating_sub` returns the true signed difference for in-range inputs
-/// (it saturates only at `i64::MIN`/`i64::MAX`, not at `0`), so a future
-/// `issued_at` yields a *negative* `session_age`. The lone `session_age >
-/// max_age_secs` check would admit that as "age 0" fresh — which is wrong for a
-/// freshness gate, where a ceremony dated after `now` is impossible and must
-/// fail closed, mirroring the `unwrap_or(0)` epoch fallback the caller already
-/// applies for an absent timestamp.
+/// A step-up ceremony dated after now is impossible, so no clock skew is
+/// tolerated: both a too-old and a future-dated timestamp fail closed (issue
+/// #1144). The bounds check is the [`crate::services::RecencyWindow`] shared
+/// with the DPoP proof-age gate.
 ///
 /// # Errors
 ///
 /// Returns `ServiceError::StepUpRequired` when `issued_at` is older than
-/// `max_age_secs` or is later than `now` (a future-dated timestamp).
+/// `max_age_secs` or is later than now (a future-dated timestamp).
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
 ) -> Result<(), ServiceError> {
-    let now = jiff::Timestamp::now().as_second();
-    let session_age = now.saturating_sub(issued_at);
-    if session_age < 0 || session_age > max_age_secs {
-        return Err(ServiceError::StepUpRequired {
-            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
-            max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
-        });
+    if crate::services::RecencyWindow::no_skew(max_age_secs).accepts(issued_at) {
+        return Ok(());
     }
-    Ok(())
+    Err(ServiceError::StepUpRequired {
+        acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+        max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
+    })
 }
 
 /// List all registered keys for a user.
