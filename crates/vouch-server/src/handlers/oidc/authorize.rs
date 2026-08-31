@@ -182,6 +182,10 @@ impl ResolvedClient {
     /// Used for Direct, PAR, and pending_auth flows.
     /// `oauth_state` is the request's `state` parameter, which RFC 6749
     /// Section 4.1.2.1 requires on the error response this may produce.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Err is an HTTP Response; size is acceptable in error path"
+    )]
     async fn resolve(
         state: &Arc<AppState>,
         client_id: &str,
@@ -263,6 +267,10 @@ impl ResolvedClient {
     /// default first and narrow it here. Splitting it this way is what lets
     /// an unrecognized mode be reported by redirect — RFC 6749 Section
     /// 4.1.2.1 — instead of being silently replaced with `query`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Err is an HTTP Response; size is acceptable in error path"
+    )]
     async fn with_requested_response_mode(
         self,
         state: &Arc<AppState>,
@@ -330,6 +338,10 @@ enum AuthFlowKind {
 ///
 /// All errors redirect to the validated `resolved.redirect_uri`. Returns `Ok(())`
 /// if all checks pass, or `Err(Response)` on the first failure.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn run_security_pipeline(
     state: &Arc<AppState>,
     validated: &ValidatedAuthRequest,
@@ -810,6 +822,10 @@ async fn handle_jar_request(
 ///
 /// The fallback-redirect path validates `fallback_redirect_uri` against the client's
 /// registered URIs before issuing any 302 (RFC 9126 §7.2, RFC 6749 §4.1.2.1).
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn lookup_par(
     state: &Arc<AppState>,
     ctx: ParRequestContext<'_>,
@@ -1036,6 +1052,10 @@ async fn handle_request_uri_fetch(
 ///
 /// Returns `Ok((ResolvedClient, AuthorizeRequestParams))` on success,
 /// or `Err(Response)` (always an error page) on failure.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn fetch_and_resolve_request_uri(
     state: &Arc<AppState>,
     request_uri: &str,
@@ -1370,6 +1390,10 @@ async fn complete_pending_auth(
 /// Look up a client by client_id and verify it is active.
 ///
 /// Returns `Err(Response)` with an error page on any failure.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn lookup_and_check_active(
     state: &Arc<AppState>,
     client_id: &str,

@@ -4,7 +4,7 @@
 # Used by docker-bake.hcl targets (ci, cli, server, reproduce).
 # The existing Dockerfile (server Docker image) is NOT replaced by this file.
 
-FROM rust:1.97.1-alpine AS base
+FROM rust:1.98.0-alpine AS base
 RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers \
     openssl-dev openssl-libs-static perl eudev-dev
 ENV AWS_LC_FIPS_SYS_CC=clang

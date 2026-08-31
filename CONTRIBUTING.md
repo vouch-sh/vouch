@@ -20,7 +20,7 @@ Be respectful and constructive. We're building security software — thoughtful 
 
 ### Prerequisites
 
-- **Rust** 1.97+ (install via [rustup](https://rustup.rs/), pinned in `rust-toolchain.toml`)
+- **Rust** 1.98+ (install via [rustup](https://rustup.rs/), pinned in `rust-toolchain.toml`)
 - **YubiKey 5 series** for testing FIDO2 flows (use a dedicated test key, not your primary)
 - **Docker** for building and running the server image
 - **TailwindCSS CLI** for CSS compilation (`make css-build`)

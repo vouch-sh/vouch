@@ -373,6 +373,10 @@ const GROUP_ATTRIBUTES: &[Attribute<GroupPatch>] = &[
 /// rather than through [`GROUP_ATTRIBUTES`]. `add` and `replace` carry the
 /// member set in the operation's value; `remove` names a single member with
 /// a value filter (`members[value eq "…"]`).
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn apply_member_op(
     db: &crate::db::store::DocumentStore,
     group_id: &str,

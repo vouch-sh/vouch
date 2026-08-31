@@ -297,6 +297,10 @@ pub(crate) struct ClientAuthOutcome {
 /// for client_secret_basic/post). mTLS verification is performed separately
 /// by the handler via [`validate_mtls_client_auth`] because it requires the
 /// client certificate from the request extractor.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 pub(crate) async fn complete_client_auth(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
