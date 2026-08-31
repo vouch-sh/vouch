@@ -960,3 +960,266 @@ async fn test_update_github_installation_repos_not_found_returns_false() {
         "missing installation must return false from update_repos"
     );
 }
+
+// ---- revoke_registration_access_token (RFC 7592 §2.1/2.2/2.3) ----
+
+/// Create a minimal dynamically-registered web client holding the given
+/// registration access token hash. Returns `(OAuthClient, client_id)`. The
+/// helper centralizes the `CreateOAuthClientParams` literal so the three
+/// revoke tests below share one fixture with no secrets, keys, or org.
+pub(super) async fn seed_dynamic_client_with_reg_token(
+    store: &DocumentStore,
+    reg_token_hash: &str,
+) -> (OAuthClient, String) {
+    use crate::crypto::alg::JwsAlgorithm;
+
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+    create_oauth_client(
+        store,
+        &CreateOAuthClientParams {
+            user_id: None,
+            name: "Dynamic Reg Test",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
+            keys: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Dynamic,
+            registration_access_token_hash: Some(reg_token_hash),
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("create dynamic client")
+}
+
+/// `revoke_registration_access_token` sequentially clears the stored hash of
+/// the client whose registration access token hashes to `token_hash` — the
+/// core RFC 7592 §2.1 "misdirected token SHOULD be revoked" behavior. This
+/// anchors the helper's intended effect so the concurrent regression below
+/// is contrasted against a known-good baseline (the fix does not weaken the
+/// revocation the `SHOULD` requires).
+#[tokio::test]
+async fn test_revoke_registration_access_token_revokes_presented_hash() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let t_old = "vouch_reg_OLD_TOKEN".to_string();
+    let old_hash = hash_token(&t_old);
+    let (client, client_id) = seed_dynamic_client_with_reg_token(&store, &old_hash).await;
+    let victim_id = client.id.clone();
+
+    let revoked_owner = revoke_registration_access_token(&store, &old_hash)
+        .await
+        .expect("revoke must not error");
+    assert_eq!(
+        revoked_owner.as_deref(),
+        Some(victim_id.as_str()),
+        "the owning client's doc id must be returned"
+    );
+
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get after")
+        .expect("victim must still exist");
+    assert_eq!(
+        after.data.registration_access_token_hash, None,
+        "the presented token's hash must be cleared"
+    );
+
+    let looked_up = get_oauth_client_by_client_id(&store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    assert_eq!(
+        looked_up.registration_access_token_hash, None,
+        "the client_id lookup must observe the revoked token"
+    );
+}
+
+/// `revoke_registration_access_token` with a hash no client holds returns
+/// `Ok(None)` and disturbs nothing — the overwhelmingly common path, since
+/// the caller only reaches it after a `client_id` miss.
+#[tokio::test]
+async fn test_revoke_registration_access_token_unknown_hash_returns_none() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let keeper_hash = hash_token("vouch_reg_KEEPER");
+    let (keeper, _) = seed_dynamic_client_with_reg_token(&store, &keeper_hash).await;
+
+    let unknown = hash_token("vouch_reg_NO_SUCH_TOKEN");
+    let revoked_owner = revoke_registration_access_token(&store, &unknown)
+        .await
+        .expect("revoke must not error");
+    assert!(revoked_owner.is_none(), "unknown hash must return None");
+
+    let keeper_after = store
+        .get::<OAuthClientDoc>(&keeper.id)
+        .await
+        .expect("get keeper")
+        .expect("keeper must exist");
+    assert_eq!(
+        keeper_after.data.registration_access_token_hash.as_deref(),
+        Some(keeper_hash.as_str()),
+        "an unrelated client's token must be untouched"
+    );
+}
+
+/// Regression: a racing RFC 7592 PUT that rotates a client's registration
+/// access token while an attacker's misdirected-token revoke is in flight must
+/// NOT clear the freshly rotated token. The revoke's `find_one` only resolves
+/// the presented (pre-rotation) hash to an owner id; the actual clear happens
+/// inside `store.modify`, which re-reads the latest document on every OCC
+/// attempt — either because the PUT committed between `find_one` and
+/// `modify`'s internal read, or because it committed between that read and
+/// `modify`'s compare-and-update (forcing an OCC retry). Clearing
+/// unconditionally on retry wipes the rotated hash the owner just received and
+/// locks them out of all RFC 7592 operations until an administrator reissues a
+/// token. The fix conditions the clear on the stored hash still equaling the
+/// presented hash, making a rotate-then-racing-revoke a no-op.
+///
+/// This test forces the OCC-retry interleaving deterministically using the
+/// `set_modify_test_hook` seam: the victim's `update_oauth_client_registration`
+/// PUT runs inside the attacker's `modify`'s first attempt, bumping the
+/// document version so the attacker's first compare-and-update loses the
+/// version race and the loop retries against the freshly rotated document.
+#[tokio::test]
+async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rotated_token() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    // The victim holds the about-to-be-leaked T_old. The attacker has captured
+    // T_old and replays it against a non-existent client_id while the victim
+    // rotates to T_new via a legitimate PUT.
+    let t_old = "vouch_reg_OLD_TOKEN_leaked".to_string();
+    let t_new = "vouch_reg_NEW_TOKEN_rotated".to_string();
+    let old_hash = hash_token(&t_old);
+    let new_hash = hash_token(&t_new);
+
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+    let (client, client_id) = seed_dynamic_client_with_reg_token(&store, &old_hash).await;
+    let victim_id = client.id.clone();
+
+    // Hookless writer clone for the victim's PUT — must not re-enter the hook
+    // when it writes through the store.
+    let writer = store.clone();
+    let mut hooked = store.clone();
+    let new_hash_for_hook = new_hash.clone();
+    let redirect_uris_for_hook = redirect_uris.clone();
+    let victim_id_for_hook = victim_id.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let new_hash = new_hash_for_hook.clone();
+        let redirect_uris = redirect_uris_for_hook.clone();
+        let victim_id = victim_id_for_hook.clone();
+        Box::pin(async move {
+            // Run the victim's RFC 7592 PUT (rotating to T_new) exactly once,
+            // inside the attacker's first modify attempt — after it read the
+            // pre-rotation doc but before its compare-and-update. The PUT
+            // commits version V+1 (hash T_new), so the attacker's first CAS
+            // loses the version race and the modify loop retries against the
+            // freshly rotated document.
+            if attempt != 0 {
+                return;
+            }
+            update_oauth_client_registration(
+                &writer,
+                &victim_id,
+                &UpdateClientRegistrationParams {
+                    redirect_uris: &redirect_uris,
+                    grant_types: None,
+                    response_types: None,
+                    keys: None,
+                    registration_access_token_hash: &new_hash,
+                    registration_metadata: None,
+                    userinfo_signed_response_alg: None,
+                    request_uris: None,
+                    post_logout_redirect_uris: None,
+                    client_name: None,
+                    software_id: None,
+                    software_version: None,
+                    id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+                    authorization_signed_response_alg: None,
+                    introspection_signed_response_alg: None,
+                    request_object_signing_alg: None,
+                    require_signed_request_object: None,
+                    tls_client_auth_subject_dn: None,
+                    tls_client_auth_san_dns: None,
+                    tls_client_auth_san_uri: None,
+                    tls_client_auth_san_ip: None,
+                    tls_client_auth_san_email: None,
+                },
+            )
+            .await
+            .expect("victim PUT must rotate the token");
+        })
+    }));
+
+    // The attacker replays the leaked T_old against a non-existent client_id;
+    // the misdirected-token path revokes whichever client holds hash(T_old).
+    let revoked_owner = revoke_registration_access_token(&hooked, &old_hash)
+        .await
+        .expect("revoke must not error");
+    assert_eq!(
+        revoked_owner.as_deref(),
+        Some(victim_id.as_str()),
+        "the revocation still names the owner it found by hash, even if the \
+         clear turns out to be a no-op against a rotated token"
+    );
+
+    // The rotated token T_new — which only the legitimate owner holds — must
+    // survive, so the owner can still authenticate against their real client.
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get after")
+        .expect("victim must still exist");
+    assert_eq!(
+        after.data.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "the concurrently rotated token must not be wiped by the racing revoke; \
+         otherwise the legitimate owner is locked out of all RFC 7592 operations"
+    );
+
+    // Cross-check via the client_id lookup that the live state reflects T_new.
+    let looked_up = get_oauth_client_by_client_id(&store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    assert_eq!(
+        looked_up.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "client_id lookup must observe the rotated token"
+    );
+}
