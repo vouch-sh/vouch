@@ -29,6 +29,7 @@ use crate::handlers::extractors::ValidJson;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
 use crate::redact_email;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
@@ -220,7 +221,7 @@ impl LoginCompletion {
             ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_user_handle",
-                "Invalid user handle format",
+                Tr::new("login-error-invalid-user-handle").to_string(),
             )
         })?;
 
@@ -236,7 +237,7 @@ impl LoginCompletion {
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "expired",
-                "Authentication session expired",
+                Tr::new("login-error-session-expired").to_string(),
             ));
         }
 
@@ -441,7 +442,7 @@ pub(crate) async fn browser_login_start(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
-            "Failed to generate challenge",
+            Tr::new("login-error-challenge-failed").to_string(),
         )
     })?;
     let now = Timestamp::now();
@@ -451,7 +452,7 @@ pub(crate) async fn browser_login_start(
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "time_error",
-                "Time calculation overflow",
+                Tr::new("login-error-time-overflow").to_string(),
             )
         })?
         .as_second();
@@ -519,7 +520,7 @@ pub(crate) async fn browser_login_complete(
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
-                "Authentication state has already been used",
+                Tr::new("login-error-state-already-used").to_string(),
             ));
         }
         Err(e) => {
@@ -579,7 +580,7 @@ pub(crate) async fn browser_login_complete(
         ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
-            "Authentication failed",
+            Tr::new("login-error-auth-failed").to_string(),
         )
     })?;
 
@@ -616,7 +617,7 @@ pub(crate) async fn browser_login_complete(
         ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
-            "Authentication failed",
+            Tr::new("login-error-auth-failed").to_string(),
         )
     })?;
 
@@ -658,7 +659,7 @@ pub(crate) async fn browser_login_complete(
                 ServiceError::api(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "device_auth_failed",
-                    "Failed to complete CLI authorization",
+                    Tr::new("login-error-device-auth-failed").to_string(),
                 )
             })?;
 
@@ -699,7 +700,7 @@ pub(crate) async fn browser_login_complete(
                 ServiceError::api(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "db_error",
-                    "Failed to create session",
+                    Tr::new("login-error-session-create-failed").to_string(),
                 )
             })?
     } else {
@@ -717,8 +718,9 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(auth_now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_now.as_second()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: authenticator.aaguid.as_deref(),
@@ -801,7 +803,7 @@ pub(crate) fn validate_origin(
             ServiceError::api(
                 StatusCode::FORBIDDEN,
                 "missing_origin",
-                "Origin header required",
+                Tr::new("login-error-missing-origin").to_string(),
             )
         })?;
 
@@ -814,7 +816,7 @@ pub(crate) fn validate_origin(
         return Err(ServiceError::api(
             StatusCode::FORBIDDEN,
             "invalid_origin",
-            "Request origin mismatch",
+            Tr::new("login-error-origin-mismatch").to_string(),
         ));
     }
 

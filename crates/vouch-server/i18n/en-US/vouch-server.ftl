@@ -306,6 +306,39 @@ enroll-error-missing-state = Missing state parameter
 enroll-error-invalid-state = Invalid state parameter
 enroll-error-state-expired = Invalid or expired state
 enroll-error-state-verify-failed = Failed to verify state
+
+## Browser key management and WebAuthn errors.
+##
+## These reach the browser as the `message` field of a JSON error body, which
+## keys.js and login.js alert verbatim, so they are page text rather than
+## protocol text. The machine-readable `code` beside each one stays ASCII.
+keys-error-invalid-id = Invalid key ID format
+keys-error-name-empty = Name cannot be empty
+keys-error-name-too-long = Name must be { $max } characters or less
+keys-error-last-key = Cannot delete your last key. Register another key first.
+keys-error-delete-conflict = Key deletion conflicted with a concurrent operation. Please try again.
+keys-error-rename-failed =
+    Could not rename key. Please choose a name between 1 and { $max } characters.
+enroll-error-session-invalid = Invalid or expired session
+enroll-error-session-lookup-failed = Failed to look up enrollment session
+enroll-error-registration-link-used = This registration link has already been used
+# { $detail } is the verifier's own diagnostic, passed through as written.
+enroll-error-attestation-failed = Attestation verification failed: { $detail }
+enroll-error-key-already-registered = This security key is already registered
+enroll-error-key-serialize-failed = Failed to serialize key
+enroll-error-invalid-session-hours = Invalid session hours
+enroll-error-browser-session-create-failed = Failed to create session
+enroll-error-render-failed = Failed to render template
+login-error-invalid-user-handle = Invalid user handle format
+login-error-session-expired = Authentication session expired
+login-error-challenge-failed = Failed to generate challenge
+login-error-time-overflow = Time calculation overflow
+login-error-state-already-used = Authentication state has already been used
+login-error-auth-failed = Authentication failed
+login-error-device-auth-failed = Failed to complete CLI authorization
+login-error-session-create-failed = Failed to create session
+login-error-missing-origin = Origin header required
+login-error-origin-mismatch = Request origin mismatch
 enroll-error-auth-complete-failed = Failed to complete authentication
 enroll-error-token-verify-failed = Failed to verify identity token
 enroll-error-domain-not-allowed-title = Domain Not Allowed

@@ -830,6 +830,19 @@ pub async fn create_test_user_in_org(
         .expect("Test user not found after creation")
 }
 
+/// Delete a test authenticator, cascading to its sessions.
+///
+/// `db::delete_authenticator` takes a transaction so its cascade cannot land
+/// half-applied; tests that just need a key gone go through here rather than
+/// repeating begin/commit at each call site.
+pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
+    let mut tx = store.begin().await.expect("Failed to start transaction");
+    crate::db::delete_authenticator(&mut tx, authenticator_id)
+        .await
+        .expect("Failed to delete authenticator");
+    tx.commit().await.expect("Failed to commit deletion");
+}
+
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
     crate::db::create_authenticator(
@@ -910,8 +923,9 @@ pub async fn create_test_session(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -971,8 +985,9 @@ pub async fn create_test_session_with_audience(
             binding: TokenBinding::Bearer,
             act: None,
             audience: Some(audience),
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -996,9 +1011,12 @@ pub async fn create_test_session_with_audience(
 /// Create a test session backed by a non-hardware-verified access token.
 ///
 /// Mirrors the enrollment-bootstrap shape in `handlers/enroll.rs`: a real
-/// user, a persisted session, but `HardwareVerification::NotVerified`.
-/// Used to verify that paths gated on hardware attestation reject these
-/// sessions (e.g., the RFC 8693 ID-token fork).
+/// user, a persisted session, but `HardwareVerification::NotVerified` and
+/// `auth_time: None` (no FIDO2 authentication occurred; the session was
+/// minted right after upstream IdP sign-in). Used to verify that paths
+/// gated on hardware attestation reject these sessions (e.g., the RFC 8693
+/// ID-token fork), and that freshness-gated destructive operations fail
+/// closed instead of treating the IdP login time as recent FIDO2.
 pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
     use crate::services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
@@ -1020,7 +1038,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
+            // `NotVerified` carries no `auth_time` — see `handlers/enroll.rs`.
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1049,7 +1067,9 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
 /// This reproduces the #451 token-laundering scenario: a re-enrollment
 /// bootstrap session for a user who already has a registered security
 /// key has `authenticator_id = Some(_)` and `hardware_verified = false`.
-/// Hardware-gated handlers must reject it.
+/// As in production, `auth_time` is `None` (no FIDO2 assertion happened on
+/// a direct browser sign-in), so the destructive-key freshness gate must
+/// reject this session. Hardware-gated handlers must reject it.
 pub async fn create_test_bootstrap_session_with_authenticator(
     state: &AppState,
     user_id: &str,
@@ -1077,7 +1097,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
+            // `NotVerified` carries no `auth_time` — see `handlers/enroll.rs`.
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1103,6 +1123,75 @@ pub async fn create_test_bootstrap_session_with_authenticator(
 ///
 /// Used for step-up authentication tests (RFC 9470) where the auth_time
 /// relative to now determines whether the operation is allowed.
+/// Mint an access token in the shape issue #1114 exploited: `auth_time` fresh,
+/// `hardware_verified` false.
+///
+/// `HardwareVerification` no longer lets that combination be constructed —
+/// `NotVerified` has nowhere to put a timestamp — so this cannot go through
+/// `create_oauth_access_token`. That is the point: it produces a token this
+/// deployment's issuer cannot mint, which is what an older server's token, or
+/// a future regression, would put in front of the key handlers.
+///
+/// Rather than restate `AccessTokenClaims`, it mints a real bootstrap token,
+/// decodes it, and changes the single field under test. Every other claim is
+/// whatever the production issuer produced, so a claim added later travels
+/// here automatically instead of silently diverging.
+///
+/// Leaves two session rows for the user: the base token's and this one's. The
+/// returned token is the mutated one.
+pub async fn create_test_session_unverified_with_fresh_auth_time(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+) -> String {
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let base =
+        create_test_bootstrap_session_with_authenticator(state, user_id, email, auth_id).await;
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(&base, &state.oidc_key, &state.config().base_url)
+            .expect("the bootstrap token this deployment just minted must decode");
+
+    assert!(
+        !claims.hardware_verified,
+        "the base token must be unverified for this fixture to mean anything"
+    );
+    // The one deviation: a session that ran no ceremony, carrying the instant
+    // one would have been recorded at.
+    claims.auth_time = Some(jiff::Timestamp::now().as_second());
+    claims.jti = uuid::Uuid::now_v7().to_string();
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the pre-fix-shaped access token");
+
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+    let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash: &crate::crypto::hash_token(&token),
+            authenticator_id: Some(auth_id),
+            expires_at,
+            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("Failed to persist the pre-fix-shaped session");
+
+    token
+}
+
 pub async fn create_test_session_with_iat(
     state: &AppState,
     user_id: &str,
@@ -1131,8 +1220,9 @@ pub async fn create_test_session_with_iat(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(iat),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(iat),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1185,8 +1275,9 @@ pub async fn create_test_session_for_client(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1245,8 +1336,9 @@ pub async fn create_test_session_with_dpop(
             binding: TokenBinding::new(Some(&dpop_proof), None),
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1299,8 +1391,9 @@ pub async fn create_test_session_with_mtls(
             binding: TokenBinding::new(None, Some(mtls_cert_thumbprint)),
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),

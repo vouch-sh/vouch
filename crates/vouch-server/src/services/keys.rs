@@ -10,6 +10,7 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
@@ -53,6 +54,53 @@ pub(crate) async fn consume_registration_state(
             ))
         }
     }
+}
+
+/// Require proof that the caller exercised their security key, and did so
+/// recently, before a destructive key operation.
+///
+/// The two halves are separate claims and both are load-bearing:
+///
+/// * `hardware_verified` — whether a FIDO2 assertion backs this session at
+///   all. An enrollment bootstrap session, minted from an upstream IdP
+///   sign-in with no ceremony, is `false`.
+/// * `auth_time` — *when* that assertion happened. Sessions last hours;
+///   deleting a key is a step-up action that wants a ceremony from seconds
+///   ago.
+///
+/// Asking only about recency reads a timestamp as evidence a ceremony
+/// occurred. That inference is sound today only because
+/// `HardwareVerification` no longer lets an unverified token carry an
+/// `auth_time` — it is one refactor away from being wrong again, and it was
+/// wrong in issue #1114. Ask the question directly instead.
+///
+/// Enforced by the `SteppedUpToken` extractor, which is what makes a handler
+/// unable to skip it; this function is the rule that extractor applies.
+///
+/// # Errors
+///
+/// Returns `ServiceError::StepUpRequired` when the session is not
+/// hardware-verified, or when its FIDO2 assertion is older than
+/// [`KEY_DELETE_MAX_AGE_SECS`].
+pub(crate) fn require_recent_hardware_verification(
+    token: &crate::services::auth::ValidatedResourceToken,
+) -> Result<(), ServiceError> {
+    if !token.hardware_verified {
+        tracing::warn!(
+            target: "security",
+            user_id = %token.sub,
+            "refusing a destructive key operation on a session that never \
+             exercised the security key"
+        );
+        return Err(ServiceError::StepUpRequired {
+            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+            max_age: Some(u64::try_from(KEY_DELETE_MAX_AGE_SECS).unwrap_or(60)),
+        });
+    }
+
+    // A hardware-verified session always records when. Epoch is the
+    // fail-closed reading for a token that somehow lacks it.
+    require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
 }
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
@@ -140,18 +188,22 @@ pub(crate) async fn rename_key(
     // Validate key_id is a UUID before DB lookup
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
     // Validate name
     let name = new_name.trim();
     if name.is_empty() {
-        return Err(ServiceError::Validation("Name cannot be empty".to_string()));
+        return Err(ServiceError::Validation(
+            Tr::new("keys-error-name-empty").to_string(),
+        ));
     }
     if name.chars().count() > MAX_KEY_NAME_CHARS {
         return Err(ServiceError::Validation(
-            "Name must be 100 characters or less".to_string(),
+            Tr::new("keys-error-name-too-long")
+                .arg("max", MAX_KEY_NAME_CHARS.to_string())
+                .to_string(),
         ));
     }
 
@@ -218,7 +270,7 @@ pub(crate) async fn delete_key(
     // Validate key_id is a UUID before opening a transaction.
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
@@ -267,7 +319,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -279,7 +331,7 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to count sessions"))?;
 
         // Cascade-delete the authenticator (device_auth refs, sessions, doc).
-        db::delete_authenticator_in_tx(&mut tx, key_id)
+        db::delete_authenticator(&mut tx, key_id)
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to delete key"))?;
 
@@ -295,7 +347,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -326,7 +378,7 @@ pub(crate) async fn delete_key(
         ServiceError::OccConflict => ServiceError::api(
             axum::http::StatusCode::CONFLICT,
             "conflict",
-            "Key deletion conflicted with a concurrent operation. Please retry.",
+            Tr::new("keys-error-delete-conflict").to_string(),
         ),
         other => other,
     })
@@ -450,6 +502,26 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "a refused cross-user delete must leave the key in place"
+        );
+    }
+
+    /// Epoch (0) is the value `delete_key` feeds to the freshness gate when
+    /// `auth_time` is absent — i.e. an enrollment bootstrap session that
+    /// never performed FIDO2 (`auth_time.unwrap_or(0)`). It must fail closed
+    /// so the gate demands a step-up instead of treating a no-FIDO2 session
+    /// as freshly authenticated.
+    #[test]
+    fn test_require_fresh_timestamp_epoch_is_rejected() {
+        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired for epoch (auth_time absent), got: {err:?}"
         );
     }
 }

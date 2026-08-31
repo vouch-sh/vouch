@@ -925,6 +925,15 @@ pub(crate) async fn complete_enrollment_after_identity(
     // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
     // FIDO2 WebAuthn registration — do NOT claim AAL3 or FIDO2 amr here.
     // The proper FIDO2 claims are set later in browser_register_complete.
+    //
+    // `auth_time` is deliberately `None`: per the codebase-wide semantics it
+    // records when FIDO2 authentication occurred, not when the upstream IdP
+    // authenticated the person. No FIDO2 assertion happened here (the user is
+    // either a first-time enrollee or a returning user on a direct browser
+    // sign-in), so the destructive-key freshness gate in
+    // `handlers/enroll_keys::delete_key` — which anchors on
+    // `auth_time.unwrap_or(0)` — must see Unix epoch and step up, rather
+    // than accept the IdP login time as proof of recent FIDO2.
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         state,
@@ -937,7 +946,6 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(now.as_second()),
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1171,7 +1179,7 @@ pub(crate) async fn browser_register_start(
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
-                "Invalid or expired session",
+                Tr::new("enroll-error-session-invalid").to_string(),
             )
         })?;
 
@@ -1217,7 +1225,7 @@ pub(crate) async fn browser_register_start(
                         ServiceError::api(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "db_error",
-                            "Failed to look up enrollment session",
+                            Tr::new("enroll-error-session-lookup-failed").to_string(),
                         )
                     })?;
             enrollment_session
@@ -1403,7 +1411,7 @@ pub(crate) async fn browser_register_complete(
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
-                "This registration link has already been used",
+                Tr::new("enroll-error-registration-link-used").to_string(),
             ));
         }
     };
@@ -1446,7 +1454,9 @@ pub(crate) async fn browser_register_complete(
             ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "attestation_failed",
-                format!("Attestation verification failed: {e}"),
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
             )
         })?;
 
@@ -1462,7 +1472,7 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "credential_already_registered",
-            "This security key is already registered",
+            Tr::new("enroll-error-key-already-registered").to_string(),
         ));
     }
 
@@ -1475,7 +1485,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cbor_error",
-            "Failed to serialize key",
+            Tr::new("enroll-error-key-serialize-failed").to_string(),
         )
     })?;
 
@@ -1568,7 +1578,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
-            "Invalid session hours",
+            Tr::new("enroll-error-invalid-session-hours").to_string(),
         )
     })?;
 
@@ -1584,7 +1594,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            "Failed to create session",
+            Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
     let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
@@ -1619,8 +1629,9 @@ pub(crate) async fn browser_register_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(auth_now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_now.as_second()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: validated.aaguid.as_deref(),
@@ -1652,7 +1663,7 @@ pub(crate) async fn browser_register_complete(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "render_error",
-            "Failed to render template",
+            Tr::new("enroll-error-render-failed").to_string(),
         )
     })?;
 

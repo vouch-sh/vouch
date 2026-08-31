@@ -1453,3 +1453,91 @@ async fn test_rfc6749_authorize_pending_auth_store_error_is_not_auth_failure() {
         "store failure must render the server-error message: {body}"
     );
 }
+
+// ========================================================================
+// Session assurance at the authorization endpoint
+//
+// An enrollment bootstrap session — upstream IdP sign-in, no FIDO2 — carries
+// an `authenticator_id` for any returning user, so gating this endpoint on
+// authenticator presence let it issue a code. The resulting tokens claim
+// `acr: aal3` and `amr: [hwk, pin, user]`, because the authorization-code
+// grant stamps `HardwareVerification::Verified` unconditionally. Same unsound
+// inference as issue #1114, different path.
+// ========================================================================
+
+/// Build a valid authorize URL for `client`, with PKCE.
+fn authorize_url(client_id: &str, state_param: &str) -> String {
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    format!(
+        "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+         &code_challenge={}&code_challenge_method=S256&state={}",
+        client_id,
+        urlencoding::encode("https://example.com/callback"),
+        challenge,
+        state_param,
+    )
+}
+
+#[tokio::test]
+async fn test_authorize_refuses_bootstrap_session_and_issues_no_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-bootstrap@example.com").await;
+    // A returning user: the key on record is what gives the bootstrap session
+    // its `authenticator_id`.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token =
+        create_test_bootstrap_session_with_authenticator(&state, &user.id, &user.email, &auth_id)
+            .await;
+
+    let response = http_get_full(
+        &app,
+        &authorize_url(&client.client_id, "teststate-bootstrap"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        !location.contains("code="),
+        "a session that never asserted must not receive an authorization code, \
+         got redirect to: {location}"
+    );
+    assert!(
+        location.starts_with("/login"),
+        "the user must be sent to assert with their key, got: {location}"
+    );
+}
+
+/// The companion success case. Without it the assertion above would pass even
+/// if the endpoint refused every session.
+#[tokio::test]
+async fn test_authorize_still_issues_a_code_for_a_verified_session() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-verified@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let response = http_get_full(
+        &app,
+        &authorize_url(&client.client_id, "teststate-verified"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        location.contains("code="),
+        "a hardware-verified session must still receive a code, got: {location}"
+    );
+}

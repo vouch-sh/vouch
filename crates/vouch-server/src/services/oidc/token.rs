@@ -371,8 +371,9 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
@@ -404,8 +405,9 @@ pub(crate) async fn exchange_authorization_code(
             expires_in,
             binding: params.binding,
             scope: &auth_code.scope,
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -917,9 +919,8 @@ struct IdTokenParams<'a> {
     /// key receives the same confirmation on both tokens of one response.
     binding: TokenBinding<'a>,
     scope: &'a ScopeSet,
-    /// Time when the user authenticated (FIDO2 session creation time).
-    auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `amr` and `acr`.
+    /// Authentication assurance level — bundles `auth_time`, `amr`, and `acr`,
+    /// so the `auth_time` claim cannot outlive the assertion that earned it.
     hardware_verification: crate::services::auth::HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
@@ -953,7 +954,7 @@ async fn generate_id_token(
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())
@@ -1228,7 +1229,15 @@ pub struct OidcValidatedSession {
     pub session: Session,
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
+    ///
+    /// Presence means only that the user has a key on record — an enrollment
+    /// bootstrap session for a returning user carries one while no assertion
+    /// has occurred. Read [`Self::hardware_verified`] to learn whether a
+    /// ceremony actually happened.
     pub authenticator: Option<Authenticator>,
+    /// Whether a FIDO2 assertion backs this session, from the access token's
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1305,8 +1314,10 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let client_id = match &decoded {
-        crate::services::auth::DecodedToken::AccessToken(c) => Some(c.client_id.clone()),
+    let (client_id, hardware_verified) = match &decoded {
+        crate::services::auth::DecodedToken::AccessToken(c) => {
+            (Some(c.client_id.clone()), c.hardware_verified)
+        }
     };
 
     Ok(Some(OidcValidatedSession {
@@ -1315,6 +1326,7 @@ pub async fn validate_session_token(
         authenticator,
         scope: decoded.scope().cloned(),
         client_id,
+        hardware_verified,
     }))
 }
 
