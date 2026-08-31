@@ -2039,3 +2039,165 @@ async fn test_rfc7592_registration_access_token_does_not_expire_while_registered
         );
     }
 }
+
+// =========================================================================
+// RFC 7592 §2.1 — end-to-end (full axum router) regression for the
+// misdirected-token revoke vs. concurrent PUT rotation race.
+//
+// `db::revoke_registration_access_token` resolves the owner of a presented
+// token by hash, then clears the stored hash inside `store.modify`. The OCC
+// loop re-reads the latest document on every attempt, so a client that
+// concurrently rotates its registration access token via a PUT can land a
+// fresh hash between the revoke's read and its compare-and-update. With the
+// pre-fix unconditional clear, the retry wiped the rotated token — locking
+// the legitimate owner out of all RFC 7592 operations until an admin
+// reissued a token. The fix conditions the clear on the stored hash still
+// equaling the presented hash, making a rotate-then-racing-revoke a no-op.
+//
+// This test drives the race through the real HTTP handler path
+// (`GET /oauth/register/<nonexistent>` → `lookup_and_verify_registration_token`
+// → `revoke_token_for_unknown_client` → `revoke_registration_access_token`),
+// using `test_app_with_modify_hook` to rotate the victim's token inside the
+// revoke's OCC window deterministically. It is the HTTP-layer analogue of
+// `db::tests::occ_modify::test_revoke_registration_access_token_does_not_clobber_concurrently_rotated_token`.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e2e() {
+    use std::sync::{Arc, Mutex};
+
+    // The victim rotates from T_old (the token the server mints at registration,
+    // captured by the attacker) to T_new (chosen by the test, known only to the
+    // legitimate owner after the PUT returns it).
+    let t_new = "vouch_reg_NEW_TOKEN_rotated_e2e".to_string();
+    let new_hash = crate::crypto::hash_token(&t_new);
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+
+    // The victim's internal doc id is only known after registration, which
+    // runs after the app (and hook) are built. The hook gates on this slot so
+    // it only fires for the victim doc, and only while the slot is set.
+    let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot_for_hook = Arc::clone(&slot);
+    let new_hash_for_hook = new_hash.clone();
+    let redirect_uris_for_hook = redirect_uris.clone();
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        // Hookless writer clone for the in-hook rotation: must not re-enter
+        // the hook when it writes through the store.
+        let writer = store.clone();
+        let new_hash = new_hash_for_hook.clone();
+        let redirect_uris = redirect_uris_for_hook.clone();
+        let slot = Arc::clone(&slot_for_hook);
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let new_hash = new_hash.clone();
+            let redirect_uris = redirect_uris.clone();
+            let slot = Arc::clone(&slot);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                // Only rotate the victim doc, and only once the slot is set.
+                let victim = slot.lock().expect("slot lock").clone();
+                if victim.as_deref() != Some(doc_id.as_str()) {
+                    return;
+                }
+                // Run the victim's RFC 7592 PUT (rotating to T_new) inside the
+                // attacker's revoke `modify`'s first attempt — after it read
+                // the pre-rotation doc but before its compare-and-update. The
+                // PUT commits version V+1 (hash T_new), so the revoke's first
+                // CAS loses the version race and the modify loop retries
+                // against the freshly rotated document.
+                crate::db::update_oauth_client_registration(
+                    &writer,
+                    &doc_id,
+                    &crate::db::UpdateClientRegistrationParams {
+                        redirect_uris: &redirect_uris,
+                        grant_types: None,
+                        response_types: None,
+                        keys: None,
+                        registration_access_token_hash: &new_hash,
+                        registration_metadata: None,
+                        userinfo_signed_response_alg: None,
+                        request_uris: None,
+                        post_logout_redirect_uris: None,
+                    },
+                )
+                .await
+                .expect("hook rotation must succeed");
+            })
+        }));
+    })
+    .await;
+
+    // Register the victim dynamically; the server mints T_old, which the
+    // attacker has captured.
+    let (client_id, t_old) = register_dynamic_client(&app).await;
+
+    // Resolve the victim's internal doc id and arm the hook slot.
+    let victim = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    let victim_id = victim.id.clone();
+    *slot.lock().expect("slot lock") = Some(victim_id.clone());
+
+    // The attacker replays the leaked T_old against a non-existent client_id;
+    // the misdirected-token path revokes whichever client holds hash(T_old),
+    // racing the victim's concurrent rotation. The 401 is uniform regardless.
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "misdirected live token (e2e race)",
+        misdirected.status,
+        &misdirected.body,
+        www_authenticate(&misdirected),
+    );
+
+    // The owner must NOT be locked out: the rotated T_new — which only the
+    // legitimate owner holds — must still authenticate against the real
+    // client.
+    let after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {t_new}"))],
+    )
+    .await;
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "the concurrently rotated T_new must not be wiped by the racing revoke; \
+         otherwise the legitimate owner is locked out of all RFC 7592 operations: {}",
+        after.body,
+    );
+
+    // Rotation still neutralises the leaked T_old: it must now fail with the
+    // uniform 401 `invalid_token`.
+    let old_after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "old token after rotation (e2e race)",
+        old_after.status,
+        &old_after.body,
+        www_authenticate(&old_after),
+    );
+
+    // The stored hash must reflect the rotated token, not None.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup after")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "the stored registration_access_token_hash must be hash(T_new), not None"
+    );
+}

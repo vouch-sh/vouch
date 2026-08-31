@@ -1661,14 +1661,34 @@ pub async fn update_oauth_client_registration(
 /// Revoke whichever client holds `token_hash` as its registration access token.
 ///
 /// RFC 7592 §2.1/2.2/2.3: when a client configuration request names a
-/// `client_id` that does not exist, "the registration access token used to make
-/// this request SHOULD be immediately revoked". The presented token may still be
+/// `client_id` that does not exist, "the registration access token used to
+/// make this request SHOULD be immediately revoked". The presented token may still be
 /// a live credential for some *other* client, so it is looked up by hash and
 /// cleared wherever it is found.
 ///
+/// The clear is performed inside the OCC-protected `modify` closure and is
+/// conditioned on the stored hash still equaling `token_hash`. The preceding
+/// `find_one` only *resolves* the presented hash to an owner id; it shares no
+/// transaction or version with the write, so a client that concurrently
+/// rotates its registration access token via a successful RFC 7592 PUT can
+/// commit a fresh hash between the lookup and `modify`'s internal re-read (or
+/// between that re-read and its compare-and-update, forcing a retry). Clearing
+/// unconditionally on retry would wipe the freshly rotated token — which the
+/// caller was never presented with — and lock the legitimate owner out of all
+/// RFC 7592 operations until an administrator reissues a token. Re-checking
+/// the hash inside the closure makes the revoke idempotent with respect to the
+/// presented token: a rotate-then-racing-revoke becomes a no-op, leaving the
+/// rotated token intact.
+///
 /// Returns the internal document id of the client whose token was cleared, or
 /// `None` when the hash matches no client — the overwhelmingly common case,
-/// since the caller reaches this path only after a `client_id` miss.
+/// since the caller reaches this path only after a `client_id` miss. The id
+/// is still returned when the closure turns out to be a no-op (the stored hash
+/// was rotated away before `modify` committed): the presented token *was*
+/// found to belong to that client, and the caller's log message ("revoked the
+/// registration access token of client {owner_id}") remains accurate — the
+/// token is no longer usable against its real owner either way, having been
+/// superseded by the rotation.
 pub async fn revoke_registration_access_token(
     store: &DocumentStore,
     token_hash: &str,
@@ -1681,9 +1701,15 @@ pub async fn revoke_registration_access_token(
     };
 
     let id = doc.id;
+    // Only clear the hash we were presented with. The closure is re-run on OCC
+    // retries against the latest document, so a concurrent rotation that has
+    // already replaced the hash turns this into a no-op rather than wiping the
+    // rotated credential.
     store
         .modify::<OAuthClientDoc, _>(&id, |data| {
-            data.registration_access_token_hash = None;
+            if data.registration_access_token_hash.as_deref() == Some(token_hash) {
+                data.registration_access_token_hash = None;
+            }
         })
         .await?;
 
