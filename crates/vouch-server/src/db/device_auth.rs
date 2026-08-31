@@ -129,20 +129,6 @@ fn stored_device_auth_id(stored: String) -> Option<String> {
     (!stored.is_empty()).then_some(stored)
 }
 
-impl From<Document<OidcStateDoc>> for OidcState {
-    fn from(doc: Document<OidcStateDoc>) -> Self {
-        Self {
-            id: doc.id,
-            state: doc.data.state,
-            device_auth_id: stored_device_auth_id(doc.data.device_auth_id),
-            nonce: doc.data.nonce,
-            code_verifier: doc.data.code_verifier,
-            expires_at: doc.data.expires_at,
-            provider_id: doc.data.provider_id,
-        }
-    }
-}
-
 /// Witness that an OIDC state record was atomically transitioned to
 /// `consumed_at = Some(now)` by this caller. Construction is private to
 /// this module — the only path to an instance is a successful return from
@@ -483,12 +469,6 @@ pub async fn create_oidc_state(
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
-}
-
-/// Get an OIDC state by state value.
-pub async fn get_oidc_state(store: &DocumentStore, state: &str) -> Result<Option<OidcState>> {
-    let doc = store.find_one::<OidcStateDoc>("state", state).await?;
-    Ok(doc.map(OidcState::from))
 }
 
 /// Atomically consume an OIDC state record.

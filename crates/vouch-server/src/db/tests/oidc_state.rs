@@ -9,58 +9,6 @@
 use super::*;
 
 // ========================================================================
-// OIDC State Tests
-// ========================================================================
-
-#[tokio::test]
-async fn test_oidc_state_lifecycle() {
-    let (store, _audit) = test_db().await;
-
-    // Create device auth request first (FK reference)
-    let device_auth_id = create_device_auth_request(
-        &store,
-        "device_hash_for_oidc",
-        "OIDC-1234",
-        None,
-        "2099-12-31T23:59:59Z".parse().unwrap(),
-        5,
-    )
-    .await
-    .expect("Failed to create device auth");
-
-    // Create OIDC state
-    let state = "random_state_12345";
-    let nonce = "nonce_67890";
-    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
-
-    let id = create_oidc_state(
-        &store,
-        state,
-        Some(&device_auth_id),
-        nonce,
-        "",
-        expires_at,
-        "",
-    )
-    .await
-    .expect("Failed to create OIDC state");
-    assert!(!id.is_empty());
-
-    // Get OIDC state
-    let oidc_state = get_oidc_state(&store, state)
-        .await
-        .expect("Failed to get OIDC state")
-        .expect("Should exist");
-
-    assert_eq!(oidc_state.state, state);
-    assert_eq!(
-        oidc_state.device_auth_id.as_deref(),
-        Some(device_auth_id.as_str())
-    );
-    assert_eq!(oidc_state.nonce, nonce);
-}
-
-// ========================================================================
 // OIDC state — atomic consume + concurrent-replay regression coverage
 // ========================================================================
 

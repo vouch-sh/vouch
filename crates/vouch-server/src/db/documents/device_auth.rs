@@ -85,7 +85,7 @@ impl DocumentType for DeviceAuthRequestDoc {
 
 /// An OIDC state for the device auth browser flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OidcStateDoc {
+pub(crate) struct OidcStateDoc {
     pub state: String,
     pub device_auth_id: String,
     pub nonce: String,
