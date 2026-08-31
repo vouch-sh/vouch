@@ -36,6 +36,7 @@ use crate::services::auth::{
     TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
+use crate::services::oidc::authorization::{Prompt, PromptSet};
 use askama::Template;
 use axum::{
     Json,
@@ -337,10 +338,18 @@ pub(crate) async fn login_page(
         }
     };
 
-    let requires_reauth = pending
-        .as_ref()
-        .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some())
-        || device_auth_pending;
+    // `prompt` is a space-delimited set (OIDC Core 3.1.2.1), so `login` can
+    // arrive alongside other values (e.g. `login consent`). Parse it with the
+    // same `PromptSet` the authorize handler uses rather than matching the
+    // whole string, so any set containing `login` forces the assertion form.
+    let requires_reauth = pending.as_ref().is_some_and(|p| {
+        let prompt_requests_login = p
+            .prompt
+            .as_deref()
+            .and_then(|raw| PromptSet::parse(raw).ok())
+            .is_some_and(|set| set.contains(Prompt::Login));
+        prompt_requests_login || p.max_age.is_some()
+    }) || device_auth_pending;
 
     if auth.authenticated && !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
@@ -967,6 +976,72 @@ mod tests {
             resp.status,
             axum::http::StatusCode::OK,
             "prompt=login must show login page even with valid session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_prompt_login_consent_forces_reauth_with_idp_session() {
+        // OIDC Core 3.1.2.1: `prompt` is a space-delimited set, so `login`
+        // within `login consent` requests re-auth exactly as a bare `login`
+        // does. With an IdP-only (not hardware-verified) session the authorize
+        // endpoint stores the combined prompt verbatim; /login must recognise
+        // `login` inside the set and show the assertion form.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "idp-reauth@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: crate::test_utils::TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: None,
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: Some("login consent"),
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: Default::default(),
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "prompt=login within `login consent` must show the login form; \
+             got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
         );
     }
 
