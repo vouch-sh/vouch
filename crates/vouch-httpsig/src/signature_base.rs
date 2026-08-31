@@ -5,7 +5,7 @@
 //! Each covered component contributes one line: `"component-id": value\n`.
 //! The final line is `"@signature-params": (inner-list)` with NO trailing newline.
 
-use crate::component::ComponentIdentifier;
+use crate::component::{ComponentIdentifier, ComponentParam};
 use crate::error::HttpSigError;
 use crate::signature_params::SignatureParams;
 
@@ -64,7 +64,7 @@ pub fn build_response_base_with_params_str<T, U>(
 /// outputting a signature base."
 struct BaseBuilder {
     base: Vec<u8>,
-    seen: Vec<String>,
+    seen: Vec<(String, Vec<ComponentParam>)>,
 }
 
 impl BaseBuilder {
@@ -80,8 +80,15 @@ impl BaseBuilder {
         let id = component.serialize_id();
 
         // Step 2.1: "If the component identifier (including its parameters) has
-        // already been added to the signature base, produce an error."
-        if self.seen.contains(&id) {
+        // already been added to the signature base, produce an error." RFC 9421
+        // §2 defines identifier equality order-insensitively —
+        // `"foo";bar;baz` "cannot be in the same message as `"foo";baz;bar`,
+        // since these two component identifiers are equivalent" — so the key is
+        // the name plus the sorted parameter set, not `serialize_id`, which
+        // preserves the parameter order the signer wrote and would let an
+        // order-permuted duplicate slip through.
+        let dedup_key = component.dedup_key();
+        if self.seen.contains(&dedup_key) {
             return Err(HttpSigError::BaseConstruction(format!(
                 "component identifier {id} appears more than once in the covered components"
             )));
@@ -101,7 +108,7 @@ impl BaseBuilder {
         self.base.extend_from_slice(b": ");
         self.base.extend_from_slice(value.as_bytes());
         self.base.push(b'\n');
-        self.seen.push(id);
+        self.seen.push(dedup_key);
 
         Ok(())
     }
@@ -347,6 +354,43 @@ mod tests {
 
         assert!(base_for(&req, vec![keyed("a"), keyed("a")]).is_err());
         assert!(base_for(&req, vec![keyed("a"), keyed("b")]).is_ok());
+    }
+
+    // RFC 9421 §2: `"foo";bar;baz` "cannot be in the same message as
+    // `"foo";baz;bar`, since these two component identifiers are equivalent" —
+    // the parameter order is not significant for equality. Read with §2.5
+    // step 2.1 (an already-added component identifier produces an error), a
+    // covered-components list carrying an order-equivalent duplicate — same
+    // name, same parameter set, different parameter order — MUST fail base
+    // construction. The dedup key is the name plus the sorted parameter set,
+    // not the order-preserving serialization, which would let such a duplicate
+    // through.
+    #[test]
+    fn order_equivalent_duplicate_component_identifier_is_an_error() {
+        let req = make_request("GET", "https://example.com/p", &[("x-dict", "a=1, b=2")]);
+
+        let key_then_sf = ComponentIdentifier::Field {
+            name: "x-dict".into(),
+            params: ComponentParams::from_iter([
+                ComponentParam::Key("a".into()),
+                ComponentParam::Sf,
+            ]),
+        };
+        let sf_then_key = ComponentIdentifier::Field {
+            name: "x-dict".into(),
+            params: ComponentParams::from_iter([
+                ComponentParam::Sf,
+                ComponentParam::Key("a".into()),
+            ]),
+        };
+
+        let result = base_for(&req, vec![key_then_sf, sf_then_key]);
+        assert!(
+            matches!(result, Err(HttpSigError::BaseConstruction(_))),
+            "RFC 9421 §2 + §2.5 step 2.1 require an order-equivalent duplicate \
+             (same name, same parameter set, different parameter order) to fail \
+             base construction; got {result:?}"
+        );
     }
 
     // RFC 9421 §2.5 step 4: "Produce an error if the output string contains any
