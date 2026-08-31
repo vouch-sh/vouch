@@ -94,6 +94,35 @@ pub struct InvalidIndexValue {
     pub field: &'static str,
 }
 
+/// Maximum documents per `update_by_index` batch.
+///
+/// Both [`DocumentStore::update_by_index`] and [`StoreTransaction::update_by_index`]
+/// process matching documents in groups of this size. The standalone form
+/// commits each batch; the transactional form keeps every batch within the
+/// caller's single transaction but performs each batch's index maintenance
+/// with one set-based `DELETE` and one multi-row `INSERT`, so the operation's
+/// statement count tracks the number of documents (roughly one `UPDATE` per
+/// doc) rather than ~5× it. 500 docs × ~3 statements keeps a transaction
+/// well within DSQL's 3,000-statement-per-transaction budget.
+const UPDATE_BY_INDEX_BATCH: usize = 500;
+
+/// Reject an index entry whose value contains a NUL (0x00) byte.
+///
+/// Postgres and Aurora DSQL reject 0x00 in `text` columns while SQLite stores
+/// it, so the store refuses it up front to behave identically on every
+/// backend and crypto mode. Shared by the per-entry [`build_index_insert`]
+/// and the batched multi-row insert in [`StoreTransaction::update_by_index`].
+///
+/// # Errors
+///
+/// Returns [`InvalidIndexValue`] if the entry's value contains a NUL byte.
+fn validate_index_entry(entry: &super::document_type::IndexEntry) -> Result<()> {
+    if entry.value.contains('\0') {
+        return Err(InvalidIndexValue { field: entry.field }.into());
+    }
+    Ok(())
+}
+
 /// Build an INSERT statement for a single document index entry.
 ///
 /// Used by both `DocumentStore` and `StoreTransaction` write paths to avoid
@@ -107,9 +136,7 @@ fn build_index_insert(
     doc_id: &str,
     entry: &super::document_type::IndexEntry,
 ) -> Result<sea_query::InsertStatement> {
-    if entry.value.contains('\0') {
-        return Err(InvalidIndexValue { field: entry.field }.into());
-    }
+    validate_index_entry(entry)?;
     let index_id = uuid::Uuid::now_v7().to_string();
     let hashed_value = crypto.hmac_index(&entry.value);
     let stmt = Query::insert()
@@ -411,6 +438,8 @@ impl DocumentStore {
         Ok(StoreTransaction {
             tx,
             crypto: &self.crypto,
+            #[cfg(test)]
+            statement_count: 0,
         })
     }
 
@@ -943,7 +972,7 @@ impl DocumentStore {
         crate::with_dsql_retry!(async {
             let mut docs = self.find_all::<T>(field, value).await?;
             let count = docs.len() as u64;
-            for batch in docs.chunks_mut(500) {
+            for batch in docs.chunks_mut(UPDATE_BY_INDEX_BATCH) {
                 let mut tx = self.begin().await?;
                 for doc in batch.iter_mut() {
                     modifier(&mut doc.data);
@@ -1252,6 +1281,12 @@ impl std::fmt::Debug for DocumentStore {
 pub struct StoreTransaction<'a> {
     tx: super::pool::Transaction<'a>,
     crypto: &'a Arc<dyn DocumentCrypto>,
+    /// Test-only count of write statements issued by [`Self::update_by_index`],
+    /// so the budget-regression test can assert the cascade's statement count
+    /// scales with the document count (~1 per doc) rather than ~5× it.
+    /// Compiled out of non-test builds.
+    #[cfg(test)]
+    statement_count: u64,
 }
 
 impl StoreTransaction<'_> {
@@ -1659,11 +1694,28 @@ impl StoreTransaction<'_> {
     /// Update all documents matching an index within this transaction.
     ///
     /// Decrypts each matching document, applies the modifier, re-encrypts,
-    /// and updates. Returns the number of documents updated.
+    /// and updates. Index maintenance is performed once per batch with
+    /// set-based SQL — one `DELETE … WHERE document_id IN (…)` plus one
+    /// multi-row `INSERT` — rather than once per document, mirroring
+    /// [`Self::delete_by_index`]. This keeps the whole operation inside the
+    /// caller's single transaction (preserving the all-or-nothing atomicity
+    /// the revocation cascade relies on — a half-applied revoke must not
+    /// leave working keys) while bounding the transaction's statement count
+    /// to roughly the number of documents instead of roughly five times it,
+    /// so the cascade stays within DSQL's 3,000-statement-per-transaction
+    /// budget on the realistic in-flight device-auth sizes the revoke path
+    /// reaches. The standalone [`DocumentStore::update_by_index`] performs
+    /// the same 500-doc batching with per-batch `commit()` boundaries for
+    /// callers that do not require cross-batch atomicity.
+    ///
+    /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
-    /// Returns an error if any read/write operation fails.
+    /// Returns an error if any read/write operation fails, or if a modified
+    /// document emits an index value containing a NUL byte ([`InvalidIndexValue`]).
+    /// Any error aborts the caller's transaction — the transaction is rolled
+    /// back when dropped, so no partial batch is ever persisted.
     pub async fn update_by_index<T, F>(
         &mut self,
         field: &str,
@@ -1674,13 +1726,114 @@ impl StoreTransaction<'_> {
         T: DocumentType,
         F: Fn(&mut T),
     {
-        let docs = self.find_all::<T>(field, value).await?;
+        let mut docs = self.find_all::<T>(field, value).await?;
         let count = docs.len() as u64;
-        for mut doc in docs {
-            modifier(&mut doc.data);
-            self.update(&doc.id, &doc.data).await?;
+        let now_str = Timestamp::now().to_string();
+
+        for batch in docs.chunks_mut(UPDATE_BY_INDEX_BATCH) {
+            // Apply the modifier and serialise each document before issuing
+            // any writes for the batch. A serialisation error or a NUL index
+            // value (see [`validate_index_entry`]) therefore fails fast and
+            // leaves the transaction untouched for this batch.
+            let mut prepared: Vec<(String, SerializedDoc)> = Vec::with_capacity(batch.len());
+            for doc in batch.iter_mut() {
+                modifier(&mut doc.data);
+                let serialized = serialize_and_encrypt(self.crypto, &doc.id, &doc.data)?;
+                for entry in &serialized.indexes {
+                    validate_index_entry(entry)?;
+                }
+                prepared.push((doc.id.clone(), serialized));
+            }
+
+            // Per-document `UPDATE`: each document's re-encrypted data differs,
+            // so this cannot be collapsed into one statement the way the index
+            // maintenance below can.
+            for (id, serialized) in &prepared {
+                let encapped: Option<&str> = serialized.encrypted.encapped_key.as_deref();
+                let expires_ref: Option<&str> = serialized.expires_str.as_deref();
+                let update_stmt = {
+                    let mut q = Query::update();
+                    q.table(Documents::Table)
+                        .value(
+                            Documents::Data,
+                            Expr::val(serialized.encrypted.data.as_str()),
+                        )
+                        .value(Documents::EncappedKey, Expr::val(encapped))
+                        .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                        .value(
+                            Documents::SchemaVersion,
+                            Expr::val(T::CURRENT_VERSION.cast_signed()),
+                        )
+                        .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
+                        .value(Documents::Version, Expr::col(Documents::Version).add(1))
+                        .and_where(Expr::col(Documents::Id).eq(id.as_str()));
+                    q.to_owned()
+                };
+                crate::tx_execute!(self.tx, update_stmt)?;
+                #[cfg(test)]
+                {
+                    self.statement_count = self.statement_count.saturating_add(1);
+                }
+            }
+
+            // One set-based `DELETE` of every old index row for the batch.
+            let ids: Vec<sea_query::Value> =
+                prepared.iter().map(|(id, _)| id.as_str().into()).collect();
+            let delete_idx_stmt = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids))
+                .to_owned();
+            crate::tx_execute!(self.tx, delete_idx_stmt)?;
+            #[cfg(test)]
+            {
+                self.statement_count = self.statement_count.saturating_add(1);
+            }
+
+            // One multi-row `INSERT` of every new index row for the batch.
+            // Guarded by `total_entries` so a document type that emits no
+            // index entries does not produce an empty `INSERT`.
+            let total_entries: usize = prepared.iter().map(|(_, s)| s.indexes.len()).sum();
+            if total_entries > 0 {
+                let mut insert_idx_stmt = Query::insert()
+                    .into_table(DocumentIndexes::Table)
+                    .columns([
+                        DocumentIndexes::Id,
+                        DocumentIndexes::DocumentId,
+                        DocumentIndexes::IndexField,
+                        DocumentIndexes::IndexValue,
+                    ])
+                    .to_owned();
+                for (id, serialized) in &prepared {
+                    for entry in &serialized.indexes {
+                        let index_id = uuid::Uuid::now_v7().to_string();
+                        let hashed = self.crypto.hmac_index(&entry.value);
+                        insert_idx_stmt.values([
+                            index_id.as_str().into(),
+                            id.as_str().into(),
+                            entry.field.into(),
+                            hashed.as_str().into(),
+                        ])?;
+                    }
+                }
+                crate::tx_execute!(self.tx, insert_idx_stmt)?;
+                #[cfg(test)]
+                {
+                    self.statement_count = self.statement_count.saturating_add(1);
+                }
+            }
         }
+
         Ok(count)
+    }
+
+    /// Test-only count of write statements issued by the most recent
+    /// [`Self::update_by_index`] call on this transaction, used by the
+    /// budget-regression test to assert the cascade's statement count scales
+    /// with the document count rather than ~5× it. Compiled out of non-test
+    /// builds.
+    #[cfg(test)]
+    pub(crate) fn update_by_index_statement_count(&self) -> u64 {
+        self.statement_count
     }
 
     // ========================================================================
