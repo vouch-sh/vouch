@@ -838,7 +838,31 @@ pub async fn check_session_for_authorization(
 
     match validate_session_token(state, token).await? {
         Some(validated) => {
-            // Authorization flow requires an authenticator (hardware verification)
+            // Two separate facts, and the authorization flow needs both.
+            //
+            // `authenticator` says the user has a key on record. That alone
+            // used to gate this path, but an enrollment bootstrap session —
+            // upstream IdP sign-in, no ceremony — carries an authenticator for
+            // any returning user while `hardware_verified` is false. Issuing a
+            // code from one produced tokens claiming `acr: aal3` and
+            // `amr: [hwk, pin, user]` to the relying party for an
+            // authentication where no key was touched, because
+            // `exchange_authorization_code` stamps the grant as `Verified`
+            // unconditionally.
+            //
+            // This is the same unsound inference as issue #1114, which read a
+            // fresh `auth_time` as evidence of a ceremony. Ask directly.
+            // Sending the user to `/login` to assert is what PAR/FAPI clients
+            // already get from `ReauthPolicy::Always`; this extends it to the
+            // flows that use `ReauthPolicy::OnDemand`.
+            if !validated.hardware_verified {
+                tracing::info!(
+                    target: "security",
+                    user_id = %validated.user.id,
+                    "authorization requires an assertion: session is not hardware-verified"
+                );
+                return Ok(AuthorizationSessionState::NeedsAuth);
+            }
             let Some(authenticator) = validated.authenticator else {
                 return Ok(AuthorizationSessionState::NeedsAuth);
             };

@@ -1229,7 +1229,15 @@ pub struct OidcValidatedSession {
     pub session: Session,
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
+    ///
+    /// Presence means only that the user has a key on record — an enrollment
+    /// bootstrap session for a returning user carries one while no assertion
+    /// has occurred. Read [`Self::hardware_verified`] to learn whether a
+    /// ceremony actually happened.
     pub authenticator: Option<Authenticator>,
+    /// Whether a FIDO2 assertion backs this session, from the access token's
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1306,8 +1314,10 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let client_id = match &decoded {
-        crate::services::auth::DecodedToken::AccessToken(c) => Some(c.client_id.clone()),
+    let (client_id, hardware_verified) = match &decoded {
+        crate::services::auth::DecodedToken::AccessToken(c) => {
+            (Some(c.client_id.clone()), c.hardware_verified)
+        }
     };
 
     Ok(Some(OidcValidatedSession {
@@ -1316,6 +1326,7 @@ pub async fn validate_session_token(
         authenticator,
         scope: decoded.scope().cloned(),
         client_id,
+        hardware_verified,
     }))
 }
 
