@@ -103,21 +103,32 @@ pub(crate) fn require_recent_hardware_verification(
     require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
 }
 
-/// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
+/// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds
+/// of the server's current wall clock and not in the future.
 ///
-/// Returns `ServiceError::StepUpRequired` if the timestamp is too old.
-/// Used by delete key operations to enforce recency of authentication.
+/// Returns `ServiceError::StepUpRequired` if the timestamp is too old *or* is in
+/// the future relative to `now`. Used by delete key operations to enforce
+/// recency of authentication.
+///
+/// `i64::saturating_sub` returns the true signed difference for in-range inputs
+/// (it saturates only at `i64::MIN`/`i64::MAX`, not at `0`), so a future
+/// `issued_at` yields a *negative* `session_age`. The lone `session_age >
+/// max_age_secs` check would admit that as "age 0" fresh — which is wrong for a
+/// freshness gate, where a ceremony dated after `now` is impossible and must
+/// fail closed, mirroring the `unwrap_or(0)` epoch fallback the caller already
+/// applies for an absent timestamp.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than `max_age_secs`.
+/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than
+/// `max_age_secs` or is later than `now` (a future-dated timestamp).
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
 ) -> Result<(), ServiceError> {
     let now = jiff::Timestamp::now().as_second();
     let session_age = now.saturating_sub(issued_at);
-    if session_age > max_age_secs {
+    if session_age < 0 || session_age > max_age_secs {
         return Err(ServiceError::StepUpRequired {
             acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
             max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
@@ -523,5 +534,39 @@ mod tests {
             ),
             "Expected StepUpRequired for epoch (auth_time absent), got: {err:?}"
         );
+    }
+
+    /// Mirror of the epoch test for the other impossible-timestamp direction:
+    /// a future-dated `auth_time` (e.g. when the server wall clock has
+    /// regressed past the token's `auth_time`). `i64::saturating_sub` returns
+    /// the negative signed difference (not `0` — it only saturates at
+    /// `i64::MIN`/`MAX`), so without a lower bound the `session_age >
+    /// max_age_secs` check would admit `-N` as "age 0" fresh and let an
+    /// impossibly-timed ceremony satisfy the step-up gate. A freshness gate
+    /// must reject it, mirroring the fail-closed `unwrap_or(0)` handling the
+    /// caller already applies for an absent `auth_time`.
+    #[test]
+    fn test_require_fresh_timestamp_future_is_rejected() {
+        let future_iat = jiff::Timestamp::now().as_second() + 3600; // 1 h ahead
+        let err = require_fresh_timestamp(future_iat, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired for future-dated auth_time, got: {err:?}"
+        );
+    }
+
+    /// A timestamp exactly at `now` (age 0) is the fresh edge case and must
+    /// still pass after the new `session_age < 0` lower bound is added — the
+    /// bound rejects only strictly-future timestamps, not `now` itself.
+    #[test]
+    fn test_require_fresh_timestamp_now_passes() {
+        let now = jiff::Timestamp::now().as_second();
+        assert!(require_fresh_timestamp(now, KEY_DELETE_MAX_AGE_SECS).is_ok());
     }
 }
