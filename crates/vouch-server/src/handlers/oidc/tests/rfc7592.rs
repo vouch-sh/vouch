@@ -886,6 +886,62 @@ async fn test_rfc7592_put_omitting_signed_response_algs_clears_them() {
 }
 
 #[tokio::test]
+async fn test_rfc7592_put_omitting_id_token_alg_keeps_the_registered_one() {
+    // A server with an RSA key defaults new registrations to RS256 (OIDC Core
+    // Section 3.1.3.7), which every deployment has — `oidc_rsa_key` is always
+    // initialized at startup. Re-deriving that default for a PUT that omits
+    // the field would move a client that chose ES256 onto RS256, so an
+    // omitted value keeps what the client registered instead. RFC 7592 §2.2:
+    // "The authorization server MAY ignore any null or empty value in the
+    // request just as any other value."
+    let state = crate::test_utils::test_app_state_with_rsa_key().await;
+    let config = state.config();
+    let app = crate::infra::router::build_app(state.clone(), &config)
+        .expect("Failed to build test app router");
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "ES256 Client",
+        "id_token_signed_response_alg": "ES256"
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Registration failed: {reg_body}"
+    );
+    let reg: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    assert_eq!(
+        reg["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "setup: the client must start on ES256, not the RS256 default: {reg}"
+    );
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let token = rotated_token(&reg);
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback2"]
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "a PUT that omits id_token_signed_response_alg must not downgrade the \
+         client from ES256 to the server's RS256 default: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "the registered algorithm must survive the update: {stored}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc7592_put_rejects_invalid_id_token_signing_alg() {
     // RFC 7592 §2.2: "If the client attempts to set an invalid metadata field
     // and the authorization server does not set a default value, the

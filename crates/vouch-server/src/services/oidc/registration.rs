@@ -429,7 +429,9 @@ pub async fn register_client(
         RsaSigningKey::Unavailable
     };
     let algs = validate_signed_response_algs(&request, rsa_key, fapi_profile)?;
-    let id_token_alg = algs.id_token;
+    // A new client that names no algorithm gets the server default.
+    let id_token_alg =
+        resolve_id_token_alg(algs.id_token, fapi_profile, default_id_token_alg(rsa_key));
 
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
     let validated_request_uris = validate_request_uris(request.request_uris.as_deref())?;
@@ -696,54 +698,78 @@ fn validate_userinfo_signed_response_alg(
     }
 }
 
-/// Validate `id_token_signed_response_alg` and resolve the effective algorithm.
+/// Validate an explicit `id_token_signed_response_alg`.
 ///
-/// OIDC Core §3.1.3.7 names RS256 the default; this server falls back to ES256
-/// when no RSA signing key is configured. FAPI 2.0 §5.4 pins FAPI clients to
-/// ES256, but an explicit RS256 is still refused rather than quietly downgraded.
-///
-/// The column is non-nullable, so an omitted field resolves to the server
-/// default rather than clearing — which is also what makes this safe to call
-/// on the RFC 7592 update path, where omission means "delete".
+/// Returns the parsed algorithm, or `None` when the field is absent — the
+/// caller supplies the fallback, because initial registration and an RFC 7592
+/// update fall back to different values. See [`resolve_id_token_alg`].
 fn validate_id_token_signed_response_alg(
     raw: Option<&str>,
     rsa_key: RsaSigningKey,
     fapi_profile: FapiProfile,
-) -> Result<JwsAlgorithm, ServiceError> {
-    let unsupported = |s: &str| {
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let unsupported = || {
         ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             format!("Unsupported id_token_signed_response_alg: '{s}'. Supported: RS256, ES256"),
         )
     };
-    let explicit = match raw {
-        None => None,
-        Some(s) => {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| unsupported(s))?;
-            // Only RS256 and ES256 are accepted for ID tokens.
-            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
-                return Err(unsupported(s));
-            }
-            // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-            reject_rs256_for_fapi(parsed, fapi_profile, "id_token_signed_response_alg")?;
-            if parsed == JwsAlgorithm::Rs256 && rsa_key == RsaSigningKey::Unavailable {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "RS256 is not available (no RSA signing key configured)",
-                ));
-            }
-            Some(parsed)
-        }
-    };
-
-    // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
-    if fapi_profile != FapiProfile::None {
-        return Ok(JwsAlgorithm::Es256);
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| unsupported())?;
+    // Only RS256 and ES256 are accepted for ID tokens.
+    if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+        return Err(unsupported());
     }
-    Ok(explicit.unwrap_or(match rsa_key {
+    // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+    reject_rs256_for_fapi(parsed, fapi_profile, "id_token_signed_response_alg")?;
+    if parsed == JwsAlgorithm::Rs256 && rsa_key == RsaSigningKey::Unavailable {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "RS256 is not available (no RSA signing key configured)",
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+/// The ID token signing algorithm a client ends up with.
+///
+/// `fallback` is what an omitted field resolves to. The `id_token_signed_
+/// response_alg` column is non-nullable, so "omitted" has no cleared state to
+/// fall back to and each path picks its own:
+///
+/// * Initial registration falls back to the server default — OIDC Core
+///   §3.1.3.7 names RS256, and this server substitutes ES256 when it has no
+///   RSA signing key.
+/// * An RFC 7592 update falls back to the algorithm the client registered.
+///   §2.2 asks that an omitted field be deleted, but immediately allows the
+///   other reading: "The authorization server MAY ignore any null or empty
+///   value in the request just as any other value." Re-deriving the server
+///   default instead would move a client that chose ES256 onto RS256 on any
+///   PUT that did not restate the field — a silent downgrade of ID token
+///   signing, on a server that always has an RSA key available. Ignoring the
+///   omission is the conformant reading that does not weaken the client.
+///
+/// FAPI 2.0 §5.4 pins FAPI clients to ES256 either way.
+fn resolve_id_token_alg(
+    explicit: Option<JwsAlgorithm>,
+    fapi_profile: FapiProfile,
+    fallback: JwsAlgorithm,
+) -> JwsAlgorithm {
+    if fapi_profile != FapiProfile::None {
+        return JwsAlgorithm::Es256;
+    }
+    explicit.unwrap_or(fallback)
+}
+
+/// The ID token signing algorithm a new registration gets when it names none.
+///
+/// OIDC Core §3.1.3.7 names RS256 the default; ES256 stands in when the
+/// server has no RSA signing key.
+fn default_id_token_alg(rsa_key: RsaSigningKey) -> JwsAlgorithm {
+    match rsa_key {
         RsaSigningKey::Available => JwsAlgorithm::Rs256,
         RsaSigningKey::Unavailable => JwsAlgorithm::Es256,
-    }))
+    }
 }
 
 /// Validate `authorization_signed_response_alg` (JARM §2.3.2).
@@ -813,7 +839,10 @@ fn validate_introspection_signed_response_alg(
 /// The signed-response algorithms a client registers.
 #[derive(Debug, Clone, Copy)]
 struct SignedResponseAlgs {
-    id_token: JwsAlgorithm,
+    /// The explicitly requested value, if any. Unlike the other three, this
+    /// one has no cleared state, so the caller resolves an omission with
+    /// [`resolve_id_token_alg`].
+    id_token: Option<JwsAlgorithm>,
     authorization: Option<JwsAlgorithm>,
     introspection: Option<JwsAlgorithm>,
     userinfo: Option<JwsAlgorithm>,
@@ -1614,6 +1643,14 @@ pub async fn update_client_configuration(
         RsaSigningKey::Unavailable
     };
     let algs = validate_signed_response_algs(&mutable_request, rsa_key, client.fapi_profile)?;
+    // An update that names no algorithm keeps the one the client registered,
+    // rather than re-deriving the server default and moving an ES256 client
+    // onto RS256 — see resolve_id_token_alg.
+    let id_token_alg = resolve_id_token_alg(
+        algs.id_token,
+        client.fapi_profile,
+        client.id_token_signed_response_alg,
+    );
 
     // The RFC 9101 Request Object commitment and the JWKS backing it are both
     // replaced by this request, so they are checked against each other rather
@@ -1671,7 +1708,7 @@ pub async fn update_client_configuration(
             client_name: mutable_request.client_name.as_deref(),
             software_id: mutable_request.software_id.as_deref(),
             software_version: mutable_request.software_version.as_deref(),
-            id_token_signed_response_alg: algs.id_token,
+            id_token_signed_response_alg: id_token_alg,
             authorization_signed_response_alg: algs.authorization,
             introspection_signed_response_alg: algs.introspection,
             request_object_signing_alg: request_object.alg,
