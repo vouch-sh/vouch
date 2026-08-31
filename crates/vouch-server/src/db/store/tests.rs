@@ -769,3 +769,262 @@ fn index_value_condition_nul_never_binds_raw_value() {
         );
     }
 }
+
+// ========================================================================
+// StoreTransaction::update_by_index — batched set-based index maintenance.
+//
+// The transactional form powers the credential-revocation cascade
+// (`delete_authenticator` → detach device-auth approvals). It keeps every
+// matching document's update inside the caller's single transaction
+// (atomicity) but rebuilds index entries once per 500-doc batch with
+// set-based SQL (one `DELETE … IN (…)` plus one multi-row `INSERT`) so the
+// transaction's statement count tracks the document count rather than ~5×
+// it — keeping the cascade within DSQL's 3,000-statement-per-transaction
+// budget. These tests pin the functional, atomicity, index-rebuild, and
+// statement-budget properties of that path; there was previously no direct
+// coverage of `StoreTransaction::update_by_index` at all.
+// ========================================================================
+
+#[tokio::test]
+async fn tx_update_by_index_updates_every_document_across_batch_boundary() {
+    // More than one 500-doc batch so the second batch's documents are also
+    // updated, not silently dropped at the batch boundary.
+    let store = test_store().await;
+    let n: usize = 600;
+    for _ in 0..n {
+        let doc = TestDoc {
+            name: "shared".to_string(),
+            value: 0,
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<TestDoc, _>("name", "shared", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, n as u64);
+    tx.commit().await.unwrap();
+
+    let docs = store.find_all::<TestDoc>("name", "shared").await.unwrap();
+    assert_eq!(
+        docs.len(),
+        n,
+        "every document must remain reachable by its (unchanged) index"
+    );
+    for doc in &docs {
+        assert_eq!(
+            doc.data.value, 100,
+            "every document across both batches must be updated exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tx_update_by_index_rebuilds_changed_and_unchanged_indexes() {
+    // `MultiIndexDoc` emits two index entries (`org_id`, `role`). The
+    // modifier changes only `role`, so the batched index rebuild must drop
+    // the old `role` rows, insert the new `role` rows, AND re-insert the
+    // unchanged `org_id` rows — otherwise `find_all` by `org_id` would lose
+    // every document.
+    let store = test_store().await;
+    for _ in 0..3 {
+        let doc = MultiIndexDoc {
+            org_id: "org-A".into(),
+            role: "member".into(),
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<MultiIndexDoc, _>("org_id", "org-A", |d| {
+            d.role = "senior".to_string();
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 3);
+    tx.commit().await.unwrap();
+
+    // Old `role` index is gone; new `role` index is present.
+    assert!(
+        store
+            .find_all::<MultiIndexDoc>("role", "member")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let seniors = store
+        .find_all::<MultiIndexDoc>("role", "senior")
+        .await
+        .unwrap();
+    assert_eq!(seniors.len(), 3);
+
+    // Unchanged `org_id` index was re-inserted and still resolves every doc.
+    let org_docs = store
+        .find_all::<MultiIndexDoc>("org_id", "org-A")
+        .await
+        .unwrap();
+    assert_eq!(
+        org_docs.len(),
+        3,
+        "unchanged index entries must be rebuilt, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_is_atomic_on_nul_index_value() {
+    // A modifier that emits a NUL index value must abort the caller's
+    // transaction and persist nothing — no half-updated documents, no
+    // partially-rewritten index rows.
+    let store = test_store().await;
+    for i in 0..5 {
+        let doc = TestDoc {
+            name: "shared".to_string(),
+            value: i,
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let err = tx
+        .update_by_index::<TestDoc, _>("name", "shared", |d| {
+            d.name = "bad\0name".to_string();
+        })
+        .await
+        .unwrap_err();
+    // Dropping `tx` here rolls the transaction back.
+    drop(tx);
+
+    assert!(
+        err.downcast_ref::<InvalidIndexValue>().is_some(),
+        "error must be InvalidIndexValue, got: {err:?}"
+    );
+
+    // Every document must be untouched: original name and value.
+    let docs = store.find_all::<TestDoc>("name", "shared").await.unwrap();
+    assert_eq!(
+        docs.len(),
+        5,
+        "no document may have its index rewritten to the NUL value"
+    );
+    let mut values: Vec<i32> = docs.iter().map(|d| d.data.value).collect();
+    values.sort();
+    assert_eq!(
+        values,
+        vec![0, 1, 2, 3, 4],
+        "no document's data may be modified"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_statement_count_scales_with_doc_count_not_per_index_entry() {
+    // The budget-regression test for the revocation cascade. The prior
+    // implementation issued one `UPDATE` plus a per-row index `DELETE` and
+    // one `INSERT` per index entry for every document — ~4 statements/doc for
+    // a 2-index doc, ~5 for a device-auth row — all inside the caller's one
+    // transaction. At 800 matching rows that is ~3,200 statements, already
+    // over DSQL's 3,000-statement-per-transaction budget. The set-based
+    // batched rebuild issues one `UPDATE` per doc plus one `DELETE` and one
+    // multi-row `INSERT` per 500-doc batch, so the count tracks the number
+    // of documents.
+    let store = test_store().await;
+    let n: usize = 800;
+    for _ in 0..n {
+        let doc = MultiIndexDoc {
+            org_id: "org-A".into(),
+            role: "member".into(),
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<MultiIndexDoc, _>("org_id", "org-A", |d| {
+            d.role = "senior".to_string();
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, n as u64);
+    let stmts = tx.update_by_index_statement_count();
+    tx.commit().await.unwrap();
+
+    let batches = n.div_ceil(UPDATE_BY_INDEX_BATCH);
+    // Per batch: B `UPDATE`s + 1 set-based `DELETE` + 1 multi-row `INSERT`.
+    let expected = (n + batches * 2) as u64;
+    assert_eq!(
+        stmts, expected,
+        "set-based index maintenance must issue ~1 statement per doc (n + 2 per batch), got {stmts}"
+    );
+    // The prior per-row implementation would have issued ~4 * n = 3,200 at
+    // this scale, exceeding the 3,000-statement budget; the fix keeps the
+    // single transaction well within it.
+    assert!(
+        stmts < 3_000,
+        "transaction must stay within DSQL's 3,000-statement-per-transaction budget, got {stmts}"
+    );
+
+    // And the result is still correct end-to-end.
+    assert!(
+        store
+            .find_all::<MultiIndexDoc>("role", "member")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .find_all::<MultiIndexDoc>("role", "senior")
+            .await
+            .unwrap()
+            .len(),
+        n
+    );
+    assert_eq!(
+        store
+            .find_all::<MultiIndexDoc>("org_id", "org-A")
+            .await
+            .unwrap()
+            .len(),
+        n,
+        "unchanged index entries must be rebuilt, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_with_no_matches_issues_no_writes() {
+    let store = test_store().await;
+    store
+        .insert(&TestDoc {
+            name: "only".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<TestDoc, _>("name", "nonexistent", |d| {
+            d.value += 1;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 0);
+    assert_eq!(
+        tx.update_by_index_statement_count(),
+        0,
+        "no matching documents must issue zero write statements"
+    );
+    tx.commit().await.unwrap();
+
+    // The one existing document is untouched.
+    let doc = store
+        .find_one::<TestDoc>("name", "only")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.data.value, 1);
+}
