@@ -244,6 +244,70 @@ async fn test_rfc7644_patch_user_deactivate() {
 }
 
 #[tokio::test]
+async fn test_patch_user_deactivate_revokes_ssh_certificates() {
+    // #1116: SCIM deactivation must revoke previously-issued SSH certificates,
+    // not merely flip active=false. `revoke_then_persist` runs revocation
+    // before the active=false write commits.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-revoke", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "revoke-cert@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_000_003,
+        &user_id,
+        "revoke-cert@test-org.example.com",
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no revocations yet"
+    );
+
+    let (status, _body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "SCIM deactivation must revoke the user's SSH certificate"
+    );
+}
+
+#[tokio::test]
 async fn test_patch_user_active_string_rejected() {
     // PATCH with `"active": "false"` (string, not bool) must return 400
     // invalidValue per RFC 7643 §2.2 — it must never be coerced to a

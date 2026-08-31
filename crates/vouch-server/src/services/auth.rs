@@ -1140,6 +1140,51 @@ pub(crate) async fn revoke_user_access(
     Ok(())
 }
 
+/// Which step of [`revoke_then_persist`] failed.
+pub(crate) enum DeactivationError<E> {
+    /// [`revoke_user_access`] failed; the caller's state change was **not**
+    /// persisted, so the user is left active and the operation is safe to retry.
+    Revoke(ServiceError),
+    /// Revocation succeeded but persisting the state change failed afterward.
+    Persist(E),
+}
+
+/// Revoke a user's live credentials, then persist a deactivation — in that
+/// order, and only persisting if revocation succeeded.
+///
+/// Deactivating a user must withdraw sessions and certificates **before** the
+/// `active = false` write commits. If the write landed first and revocation
+/// then failed, the user would be marked inactive while previously-issued SSH
+/// certificates stayed valid until they expire — and, on the SCIM path, the
+/// deactivation transition gate would not fire again on retry, so no retry
+/// would re-attempt revocation (issue #1116). Revoking first means a revocation
+/// failure leaves the user active and recoverable by an IdP or admin retry.
+///
+/// `persist` runs exactly when [`revoke_user_access`] returns `Ok`; a caller
+/// therefore cannot persist the state change ahead of revocation.
+///
+/// # Errors
+///
+/// Returns [`DeactivationError::Revoke`] if revocation fails (in which case
+/// `persist` does not run), or [`DeactivationError::Persist`] if the state
+/// change fails after a successful revocation.
+pub(crate) async fn revoke_then_persist<T, E, F, Fut>(
+    state: &AppState,
+    user_id: &str,
+    reason: &str,
+    revoked_by: &str,
+    persist: F,
+) -> Result<T, DeactivationError<E>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    revoke_user_access(state, user_id, reason, revoked_by)
+        .await
+        .map_err(DeactivationError::Revoke)?;
+    persist().await.map_err(DeactivationError::Persist)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -1149,7 +1194,56 @@ pub(crate) async fn revoke_user_access(
 )]
 mod tests {
     use super::*;
-    use crate::test_utils::{TEST_ISSUER, make_test_access_token, make_test_oidc_key};
+    use crate::test_utils::{
+        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key, test_app,
+    };
+
+    #[tokio::test]
+    async fn revoke_then_persist_revokes_before_running_persist() {
+        // #1116: `revoke_then_persist` must withdraw the user's live
+        // credentials before the caller's persist step runs, so a deactivation
+        // is never committed while credentials are still valid. The persist
+        // closure observes an already-revoked certificate.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-order@example.com").await;
+
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        crate::db::record_ssh_certificate_issuance(
+            &state.store,
+            42_000_002,
+            &user.id,
+            &user.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+
+        let revoked_at_persist = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&revoked_at_persist);
+        let state_ref = &state;
+        let outcome: Result<(), ()> =
+            revoke_then_persist(&state, &user.id, "test", "test", || async {
+                let revoked = crate::db::get_revoked_ssh_certificates(&state_ref.store)
+                    .await
+                    .expect("list revoked");
+                flag.store(!revoked.is_empty(), Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .await
+            .map_err(|_| ());
+
+        assert!(outcome.is_ok(), "revocation and persist both succeed");
+        assert!(
+            revoked_at_persist.load(Ordering::SeqCst),
+            "the certificate must already be revoked when persist runs"
+        );
+    }
 
     #[tokio::test]
     async fn test_decode_token_routes_es256_to_access_token() {

@@ -274,21 +274,25 @@ pub(crate) async fn deactivate_member(
         ));
     }
 
-    let updated = db::update_user_active_status(&state.store, &target_id, false).await?;
-    if !updated {
-        return Err(member_gone());
-    }
-
-    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
-    // request fails — reporting a deactivation that left credentials live
-    // would tell the admin access is gone when it is not.
-    crate::services::auth::revoke_user_access(
+    // Revoke sessions, SSH certificates, and the GitHub refresh token BEFORE
+    // the active=false write commits. If the write landed first and revocation
+    // then failed, the member would be left inactive with live SSH certificates
+    // (#1116); revoking first leaves them active and retryable on failure.
+    let updated = crate::services::auth::revoke_then_persist(
         &state,
         &target_id,
         "User deactivated by admin",
         &admin.id,
+        || db::update_user_active_status(&state.store, &target_id, false),
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        crate::services::auth::DeactivationError::Revoke(err) => err,
+        crate::services::auth::DeactivationError::Persist(err) => ServiceError::from(err),
+    })?;
+    if !updated {
+        return Err(member_gone());
+    }
 
     let data = AdminMemberActionData {
         action: "deactivate",
