@@ -1587,6 +1587,19 @@ pub(super) mod test_helpers {
 }
 
 /// Parameters for updating a client via RFC 7592 PUT.
+///
+/// Every field here is a full replacement: RFC 7592 §2.2 states that "Valid
+/// values of client metadata fields in this request MUST replace, not augment,
+/// the values previously associated with this client" and that "Omitted fields
+/// MUST be treated as null or empty values by the server, indicating the
+/// client's request to delete them from the client's registration". A `None`
+/// therefore clears the stored value rather than preserving it.
+///
+/// The fields absent from this struct are the ones a PUT may not change:
+/// `client_id`, `token_endpoint_auth_method`, `application_type`,
+/// `fapi_profile`, and the two sender-constraining flags that derive it. The
+/// update path refuses a request that tries to change any of them instead of
+/// dropping the value silently.
 pub struct UpdateClientRegistrationParams<'a> {
     pub redirect_uris: &'a [String],
     pub grant_types: Option<&'a [String]>,
@@ -1599,12 +1612,53 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub request_uris: Option<&'a [String]>,
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
     pub post_logout_redirect_uris: Option<Vec<String>>,
+    /// RFC 7591 §2: Human-readable name of the client.
+    ///
+    /// `None` reverts to the registration default `"Unnamed Client"` rather
+    /// than clearing outright, because the `name` column is non-nullable —
+    /// the same fallback `register_client` applies to an omitted
+    /// `client_name`.
+    pub client_name: Option<&'a str>,
+    /// RFC 7591 §2: Unique identifier for the client software.
+    ///
+    /// Indexed, so a value carrying a NUL byte is refused by the store; the
+    /// caller maps that to `invalid_client_metadata`.
+    pub software_id: Option<&'a str>,
+    /// RFC 7591 §2: Version of the client software.
+    pub software_version: Option<&'a str>,
+    /// OIDC Core §3.1.3.7: ID token signing algorithm.
+    ///
+    /// Not an `Option`: the column is non-nullable and the caller has already
+    /// resolved an omitted field to the server default.
+    pub id_token_signed_response_alg: JwsAlgorithm,
+    /// JARM §2.3.2: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9701 §6.1: Introspection response signing algorithm.
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Algorithm for Request Object signing.
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Whether this client requires signed Request Objects.
+    pub require_signed_request_object: Option<bool>,
+    /// RFC 8705 §2.1.1: subject DN for `tls_client_auth`.
+    pub tls_client_auth_subject_dn: Option<&'a str>,
+    /// RFC 8705 §2.1.1: SAN DNS name for `tls_client_auth`.
+    pub tls_client_auth_san_dns: Option<&'a str>,
+    /// RFC 8705 §2.1.1: SAN URI for `tls_client_auth`.
+    pub tls_client_auth_san_uri: Option<&'a str>,
+    /// RFC 8705 §2.1.1: SAN IP for `tls_client_auth`.
+    pub tls_client_auth_san_ip: Option<&'a str>,
+    /// RFC 8705 §2.1.1: SAN email for `tls_client_auth`.
+    pub tls_client_auth_san_email: Option<&'a str>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
 ///
-/// Updates mutable registration fields. Immutable fields (client_id,
-/// token_endpoint_auth_method, fapi_profile) are preserved.
+/// Writes every mutable registration field as a full replacement. The fields
+/// that fix a client's security class — `client_id`,
+/// `token_endpoint_auth_method`, `application_type`, `fapi_profile`, and the
+/// `dpop_bound_access_tokens` / `tls_client_certificate_bound_access_tokens`
+/// pair that derives it — are preserved; the caller has already refused any
+/// request that tried to change them.
 pub async fn update_oauth_client_registration(
     store: &DocumentStore,
     id: &str,
@@ -1647,6 +1701,22 @@ pub async fn update_oauth_client_registration(
             data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
             data.request_uris = params.request_uris.map(|u| u.to_vec());
             data.post_logout_redirect_uris = params.post_logout_redirect_uris.clone();
+            // `client_name` maps to the non-nullable `name` column; an omitted
+            // value reverts to the registration default, the same fallback
+            // `register_client` applies for an initial registration.
+            data.name = params.client_name.unwrap_or("Unnamed Client").to_string();
+            data.software_id = params.software_id.map(String::from);
+            data.software_version = params.software_version.map(String::from);
+            data.id_token_signed_response_alg = params.id_token_signed_response_alg;
+            data.authorization_signed_response_alg = params.authorization_signed_response_alg;
+            data.introspection_signed_response_alg = params.introspection_signed_response_alg;
+            data.request_object_signing_alg = params.request_object_signing_alg;
+            data.require_signed_request_object = params.require_signed_request_object;
+            data.tls_client_auth_subject_dn = params.tls_client_auth_subject_dn.map(String::from);
+            data.tls_client_auth_san_dns = params.tls_client_auth_san_dns.map(String::from);
+            data.tls_client_auth_san_uri = params.tls_client_auth_san_uri.map(String::from);
+            data.tls_client_auth_san_ip = params.tls_client_auth_san_ip.map(String::from);
+            data.tls_client_auth_san_email = params.tls_client_auth_san_email.map(String::from);
         })
         .await?;
 
