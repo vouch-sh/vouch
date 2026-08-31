@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
+use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
 use crate::handlers::browser_login::validate_origin;
@@ -30,11 +31,6 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 
 /// Maximum number of custom policies per org (active + inactive).
 const MAX_CUSTOM_POLICIES: usize = 20;
-
-/// Maximum length of a policy name, in Unicode characters. Matches the
-/// `maxlength` the admin form advertises, which the browser counts in
-/// characters rather than UTF-8 bytes.
-const MAX_POLICY_NAME_CHARS: usize = 100;
 
 /// Maximum length of a policy description, in Unicode characters. Matches the
 /// `maxlength` the admin form advertises.
@@ -336,13 +332,12 @@ pub(crate) async fn create_custom_policy(
     validate_origin(&headers, &state.config().base_url)?;
 
     // Validate inputs before auth
-    let name = form.name.trim();
-    if name.is_empty() || name.chars().count() > MAX_POLICY_NAME_CHARS {
+    let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
-    }
+    };
 
     if form.policy_text.is_empty()
         || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
@@ -392,7 +387,7 @@ pub(crate) async fn create_custom_policy(
     let policy = db::create_custom_policy(
         &state.store,
         db::CreateCustomPolicyParams {
-            name,
+            name: name.as_str(),
             description: description.as_deref(),
             policy_text: &form.policy_text,
             org_id: &org_id,
@@ -444,13 +439,12 @@ pub(crate) async fn update_custom_policy(
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let name = form.name.trim();
-    if name.is_empty() || name.chars().count() > MAX_POLICY_NAME_CHARS {
+    let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
-    }
+    };
 
     if form.policy_text.is_empty()
         || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
@@ -487,7 +481,7 @@ pub(crate) async fn update_custom_policy(
         &id,
         &org_id,
         db::UpdateCustomPolicyParams {
-            name: Some(name),
+            name: Some(name.as_str()),
             description: description
                 .as_deref()
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
@@ -514,7 +508,9 @@ pub(crate) async fn update_custom_policy(
     let data = CustomPolicyAdminData {
         action: "custom_policy_updated".to_string(),
         policy_id: &id,
-        policy_name: Some(&form.name),
+        // Record the same trimmed name that was persisted, not the raw form
+        // input, so the audit row never names a value no policy row holds.
+        policy_name: Some(name.as_str()),
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
@@ -849,11 +845,12 @@ pub(crate) async fn validate_policy_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{MAX_POLICY_DESCRIPTION_CHARS, MAX_POLICY_NAME_CHARS, PolicyRow, posture};
+    use super::{MAX_POLICY_DESCRIPTION_CHARS, PolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
     use std::sync::Arc;
+    use vouch_common::ResourceLabel;
 
     fn admin_cookie(token: &str) -> String {
         format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
@@ -879,6 +876,74 @@ mod tests {
 
     /// Policy text that parses, for tests whose subject is a different field.
     const VALID_POLICY_TEXT: &str = "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };";
+
+    #[tokio::test]
+    async fn test_update_custom_policy_audit_records_trimmed_name() {
+        // #1135: the update audit event must name the value actually persisted
+        // (trimmed), not the raw form input — otherwise it names a value no
+        // policy row holds. Parsing once into a ResourceLabel and using it for
+        // both the write and the audit is what keeps them from diverging.
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let created = db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Original",
+                description: None,
+                policy_text: VALID_POLICY_TEXT,
+                org_id: &org_id,
+                builder_spec: None,
+            },
+        )
+        .await
+        .expect("create custom policy");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode(" My Policy "),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(stored.name, "My Policy", "stored name is trimmed");
+
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyUpdate.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one update -> one audit event");
+        let v: serde_json::Value = serde_json::from_str(&events[0].data).expect("json");
+        assert_eq!(
+            v["policy_name"].as_str().expect("policy_name present"),
+            stored.name.as_str(),
+            "audit records the persisted (trimmed) name, not raw form.name",
+        );
+    }
 
     // ── Validation API — accepted input ──────────────────────────────────────
 
@@ -1513,7 +1578,7 @@ mod tests {
         // 90 CJK characters = 270 bytes; 400 CJK characters = 1200 bytes.
         let name = "名".repeat(90);
         let description = "説".repeat(400);
-        assert!(name.len() > MAX_POLICY_NAME_CHARS);
+        assert!(name.len() > ResourceLabel::MAX_CHARS);
         assert!(description.len() > MAX_POLICY_DESCRIPTION_CHARS);
 
         let form = format!(

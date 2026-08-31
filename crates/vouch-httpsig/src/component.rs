@@ -41,7 +41,7 @@ pub enum DerivedComponent {
 /// "a parameter that is unknown or does not apply to the component identifier
 /// to which it is attached", so anything outside this enum has no
 /// representation — [`ComponentIdentifier::from_sfv_item`] rejects it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum ComponentParam {
     /// `;sf` — serialize the field value with the strict Structured Field
@@ -430,6 +430,30 @@ impl ComponentIdentifier {
     #[must_use]
     pub fn serialize_id(&self) -> String {
         crate::sfv::serialize::serialize_item(&self.to_sfv_item())
+    }
+
+    /// A canonical, order-insensitive key for RFC 9421 §2 component-identifier
+    /// equality.
+    ///
+    /// RFC 9421 §2: "The order of parameters is not significant when comparing
+    /// two component identifiers for equality checks", so `"foo";bar;baz` and
+    /// `"foo";baz;bar` are equivalent and — per §2.5 step 2.1 — cannot both
+    /// appear in one covered-components list. `serialize_id` preserves the
+    /// parameter order the signer wrote (§2.5 step 2.2, RFC 8941 §4.1.1.2),
+    /// which the signature base needs, so it cannot serve as this comparison
+    /// key: two order-permuted equivalents serialize differently. This method
+    /// returns the bare component name together with a normalized (sorted)
+    /// view of the parameter set, which two §2-equivalent identifiers share
+    /// regardless of parameter order.
+    #[must_use]
+    pub(crate) fn dedup_key(&self) -> (String, Vec<ComponentParam>) {
+        let (name, params) = match self {
+            Self::Field { name, params } => (name.clone(), params),
+            Self::Derived { component, params } => (derived_name(component).to_string(), params),
+        };
+        let mut sorted: Vec<ComponentParam> = params.iter().cloned().collect();
+        sorted.sort_unstable();
+        (name, sorted)
     }
 }
 

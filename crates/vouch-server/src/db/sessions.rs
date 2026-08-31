@@ -147,8 +147,21 @@ pub async fn delete_expired_sessions(store: &DocumentStore, _now: &str) -> Resul
 /// unrelated applications. Sessions issued from other codes, and sessions from
 /// grants with no single-use code (FIDO2, browser login), are left intact.
 ///
-/// Returns the token hashes of the deleted sessions in insertion order so
-/// the caller can invalidate each cache entry by key.
+/// Best-effort on per-session failures: each session is deleted in its own
+/// committed transaction, so a fault partway through the loop leaves the
+/// earlier deletes already committed in the database. To keep the session
+/// cache in sync with those committed deletes, a per-session delete failure is
+/// logged (target `security`) and the loop continues — the token hashes of
+/// every session actually deleted are still returned on the `Ok` arm so the
+/// caller's existing `Ok`-arm invalidation drops them from the cache. Only a
+/// failure of the initial `find_all` returns `Err`; in that case no session was
+/// deleted and there is nothing for the caller to invalidate, so its log-only
+/// `Err` arm is correct. Returning the committed deletes' hashes here — rather
+/// than propagating `Err` and dropping them — is what prevents a DB-deleted
+/// session from staying cached as a stale `Hit` for up to the cache TTL.
+///
+/// Returns the token hashes of the sessions actually deleted, in insertion
+/// order, so the caller can invalidate each cache entry by key.
 pub async fn delete_sessions_for_code_replay(
     store: &DocumentStore,
     code_hash: &str,
@@ -159,7 +172,18 @@ pub async fn delete_sessions_for_code_replay(
     let mut token_hashes = Vec::with_capacity(sessions.len());
     for session in &sessions {
         if session.data.session_type == SessionPurpose::OAuthAccessToken {
-            store.delete(&session.id).await?;
+            if let Err(e) = store.delete(&session.id).await {
+                tracing::error!(
+                    target: "security",
+                    code_hash,
+                    session_id = %session.id,
+                    error = %e,
+                    "delete_sessions_for_code_replay: per-session delete failed; \
+                     already-committed deletes remain and the caller still \
+                     invalidates their cache entries from the returned hashes",
+                );
+                continue;
+            }
             token_hashes.push(session.data.token_hash.clone());
         }
     }

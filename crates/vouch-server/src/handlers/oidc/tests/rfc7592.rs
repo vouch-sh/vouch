@@ -491,6 +491,13 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         uris[0].as_str().unwrap(),
         "https://new-callback.example.com/callback"
     );
+    // The PUT body includes `client_name`; it MUST be echoed back rather
+    // than silently ignored (RFC 7592 §2.2 — accepted fields replace).
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client",
+        "PUT must persist the client_name it accepted"
+    );
     // PUT must return a new registration_access_token (token rotation)
     let new_token = json["registration_access_token"]
         .as_str()
@@ -511,6 +518,669 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         get_json["redirect_uris"][0].as_str().unwrap(),
         "https://new-callback.example.com/callback",
         "Stored redirect_uri should match the PUT update"
+    );
+}
+
+/// Register a dynamically registered client whose `client_name` is `name`,
+/// returning `(client_id, registration_access_token)`.
+async fn register_named_client(app: &axum::Router, name: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": name
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_client_name() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Original Client Name").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Updated Client Name"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "PUT response must echo updated client_name"
+    );
+
+    // The rotated token must be used to read back the persisted name.
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token")
+        .to_string();
+
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "Stored client_name must match the PUT update"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_client_name_reverts_to_default() {
+    // RFC 7592 §2.2 is a full replacement: a PUT that omits `client_name`
+    // clears it. The `name` column is non-nullable, so the server reverts
+    // to the registration default ("Unnamed Client"), the same fallback
+    // `register_client` applies for an initial registration.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Branded Client").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Omitting client_name on a full-replacement PUT must revert to the default"
+    );
+
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // Read back via GET to confirm the default was persisted, not just echoed.
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Persisted client_name must be the default after being omitted on PUT"
+    );
+}
+
+// ========================================================================
+// RFC 7592 §2.2 full replacement — every metadata field with a dedicated
+// column, and the fields a PUT may not change.
+// ========================================================================
+
+/// PUT `body` to a client's configuration endpoint, returning `(status, body)`.
+async fn put_client_config(
+    app: &axum::Router,
+    client_id: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> (StatusCode, String) {
+    http_request(
+        app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await
+}
+
+/// GET a client's configuration with `token`, returning the parsed body.
+async fn get_client_config(app: &axum::Router, client_id: &str, token: &str) -> serde_json::Value {
+    let (status, body) = http_request(
+        app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET failed: {body}");
+    serde_json::from_str(&body).expect("Valid JSON")
+}
+
+/// The rotated registration access token from a successful PUT response.
+fn rotated_token(response: &serde_json::Value) -> String {
+    response["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token")
+        .to_string()
+}
+
+/// Register a client carrying every metadata field with a dedicated column
+/// that an RFC 7592 PUT may replace. Returns `(client_id, token)`.
+async fn register_fully_specified_client(app: &axum::Router) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Fully Specified Client",
+        "software_id": "urn:example:software",
+        "software_version": "1.0.0",
+        "id_token_signed_response_alg": "ES256",
+        "authorization_signed_response_alg": "ES256",
+        "introspection_signed_response_alg": "ES256",
+        "tls_client_auth_subject_dn": "CN=original.example.com",
+        "tls_client_auth_san_dns": "original.example.com",
+        "tls_client_auth_san_uri": "https://original.example.com/id",
+        "tls_client_auth_san_ip": "198.51.100.1",
+        "tls_client_auth_san_email": "original@example.com"
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_software_id_and_version() {
+    // RFC 7592 §2.2: "Valid values of client metadata fields in this request
+    // MUST replace, not augment, the values previously associated with this
+    // client."
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "software_id": "urn:example:software-v2",
+        "software_version": "2.5.1"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["software_id"].as_str(),
+        Some("urn:example:software-v2"),
+        "PUT response must echo the updated software_id: {json}"
+    );
+    assert_eq!(
+        json["software_version"].as_str(),
+        Some("2.5.1"),
+        "PUT response must echo the updated software_version: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["software_id"].as_str(),
+        Some("urn:example:software-v2"),
+        "software_id must be persisted, not just echoed: {stored}"
+    );
+    assert_eq!(
+        stored["software_version"].as_str(),
+        Some("2.5.1"),
+        "software_version must be persisted, not just echoed: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_software_fields_clears_them() {
+    // RFC 7592 §2.2: "Omitted fields MUST be treated as null or empty values
+    // by the server, indicating the client's request to delete them from the
+    // client's registration."
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in ["software_id", "software_version"] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be cleared by a PUT that omits it, got: {stored}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_software_id_containing_nul() {
+    // software_id is an indexed field and the store refuses a NUL byte in an
+    // index value. That is a malformed metadata value, so it is reported as
+    // RFC 7591 Section 3.2.2 `invalid_client_metadata`, not as a server fault.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "software_id": "urn:example:soft\u{0}ware"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a NUL byte in software_id is a client error, not a 500: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_signed_response_algs() {
+    // RFC 7592 §2.2 replacement applied to the JARM Section 2.3.2 and
+    // RFC 9701 Section 6.1 signing algorithms, which have dedicated columns.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "id_token_signed_response_alg": "ES256",
+        "authorization_signed_response_alg": "ES256",
+        "introspection_signed_response_alg": "ES256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in [
+        "id_token_signed_response_alg",
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+    ] {
+        assert_eq!(
+            stored[field].as_str(),
+            Some("ES256"),
+            "{field} must be persisted by PUT: {stored}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_signed_response_algs_clears_them() {
+    // The JARM and RFC 9701 algorithms are nullable and clear on omission.
+    // `id_token_signed_response_alg` cannot: OIDC Core Section 3.1.3.7 gives it a
+    // default, so an omitted field resolves to the server default (ES256
+    // here, with no RSA signing key configured) rather than to null.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in [
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be cleared by a PUT that omits it, got: {stored}"
+        );
+    }
+    assert_eq!(
+        stored["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "id_token_signed_response_alg must fall back to the server default: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_id_token_alg_keeps_the_registered_one() {
+    // A server with an RSA key defaults new registrations to RS256 (OIDC Core
+    // Section 3.1.3.7), which every deployment has — `oidc_rsa_key` is always
+    // initialized at startup. Re-deriving that default for a PUT that omits
+    // the field would move a client that chose ES256 onto RS256, so an
+    // omitted value keeps what the client registered instead. RFC 7592 §2.2:
+    // "The authorization server MAY ignore any null or empty value in the
+    // request just as any other value."
+    let state = crate::test_utils::test_app_state_with_rsa_key().await;
+    let config = state.config();
+    let app = crate::infra::router::build_app(state.clone(), &config)
+        .expect("Failed to build test app router");
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "ES256 Client",
+        "id_token_signed_response_alg": "ES256"
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Registration failed: {reg_body}"
+    );
+    let reg: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    assert_eq!(
+        reg["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "setup: the client must start on ES256, not the RS256 default: {reg}"
+    );
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let token = rotated_token(&reg);
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback2"]
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "a PUT that omits id_token_signed_response_alg must not downgrade the \
+         client from ES256 to the server's RS256 default: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "the registered algorithm must survive the update: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_id_token_signing_alg() {
+    // RFC 7592 §2.2: "If the client attempts to set an invalid metadata field
+    // and the authorization server does not set a default value, the
+    // authorization server responds with an error as described in [RFC7591]."
+    // PS256 parses as a JWS algorithm but is not offered for ID tokens.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "id_token_signed_response_alg": "PS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unsupported id_token_signed_response_alg must be rejected, not \
+         accepted and dropped: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_introspection_signing_alg() {
+    // RFC 9701 Section 6.1 responses are signed with the server's P-256 key, so
+    // ES256 is the only value this server accepts.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "introspection_signed_response_alg": "RS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unsupported introspection_signed_response_alg must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_rs256_id_token_alg_for_fapi_client() {
+    // FAPI 2.0 Section 5.4 forbids RS256 for a FAPI client. The profile is fixed at
+    // registration, so the update path re-applies the restriction.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "private_key_jwt",
+        serde_json::json!({"keys": [es256_jwk()]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "jwks": {"keys": [es256_jwk()]},
+        "id_token_signed_response_alg": "RS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "RS256 must stay refused for a FAPI client on PUT: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_mtls_client_auth_fields() {
+    // RFC 8705 Section 2.1.1 certificate-matching metadata. Each has a
+    // dedicated column, so RFC 7592 §2.2 replacement applies to all five.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "tls_client_auth_subject_dn": "CN=rotated.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com",
+        "tls_client_auth_san_uri": "https://rotated.example.com/id",
+        "tls_client_auth_san_ip": "203.0.113.9",
+        "tls_client_auth_san_email": "rotated@example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    // These five are not echoed in the client information response, so the
+    // stored record is the only place the update is observable.
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=rotated.example.com")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_dns.as_deref(),
+        Some("rotated.example.com")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_uri.as_deref(),
+        Some("https://rotated.example.com/id")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_ip.as_deref(),
+        Some("203.0.113.9")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_email.as_deref(),
+        Some("rotated@example.com")
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_mtls_client_auth_fields_clears_them() {
+    // RFC 7592 §2.2 full replacement, applied to the RFC 8705 Section 2.1.1 fields.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(stored.tls_client_auth_subject_dn, None);
+    assert_eq!(stored.tls_client_auth_san_dns, None);
+    assert_eq!(stored.tls_client_auth_san_uri, None);
+    assert_eq!(stored.tls_client_auth_san_ip, None);
+    assert_eq!(stored.tls_client_auth_san_email, None);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_restated_immutable_fields() {
+    // RFC 7592 §2.2: "This request MUST include all client metadata fields as
+    // returned to the client from a previous registration, read, or update
+    // operation." A conforming client restates the immutable fields on every
+    // update, so restating them must succeed.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "application_type": "web",
+        "dpop_bound_access_tokens": false,
+        "tls_client_certificate_bound_access_tokens": false
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "restating a client's registered immutable values must not be an error: {body}"
+    );
+}
+
+/// Every field an RFC 7592 PUT refuses to change, with the value that differs
+/// from what `register_dynamic_client` registers.
+///
+/// Each fixes the client's security class rather than describing it, so a PUT
+/// that changes one is refused with RFC 7591 Section 3.2.2 `invalid_client_metadata`
+/// instead of returning 200 for an update that did nothing.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_changed_immutable_fields() {
+    let (app, _state) = test_app().await;
+
+    let changes = [
+        ("token_endpoint_auth_method", serde_json::json!("none")),
+        ("application_type", serde_json::json!("native")),
+        ("dpop_bound_access_tokens", serde_json::json!(true)),
+        (
+            "tls_client_certificate_bound_access_tokens",
+            serde_json::json!(true),
+        ),
+    ];
+
+    for (field, changed) in changes {
+        let (client_id, token) = register_dynamic_client(&app).await;
+        let mut update_body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"]
+        });
+        update_body[field] = changed.clone();
+
+        let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "changing {field} to {changed} must be refused, not silently \
+             dropped behind a 200: {body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            json["error"].as_str(),
+            Some("invalid_client_metadata"),
+            "changing {field} must report invalid_client_metadata: {json}"
+        );
+        assert!(
+            json["error_description"]
+                .as_str()
+                .is_some_and(|d| d.contains(field)),
+            "the error must name the field that was refused: {json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_native_redirect_scheme_for_web_client() {
+    // `application_type` is immutable, so a web client cannot declare itself
+    // native to slip a private-use URI scheme past the redirect URI rules
+    // (OIDC Core Section 3.1.2.1 permits the scheme for native clients only).
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["com.example.app://callback"],
+        "application_type": "native"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a web client must not register a private-use URI scheme by \
+         redeclaring itself native: {body}"
     );
 }
 

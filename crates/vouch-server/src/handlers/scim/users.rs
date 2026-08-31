@@ -449,17 +449,40 @@ pub(crate) async fn patch_user(
         }
     }
 
-    // Update user in database
-    match db::update_scim_user(
-        &state.store,
-        &id,
-        &auth.org_id,
-        patched.name.as_deref(),
-        patched.external_id.as_deref(),
-        patched.active,
-    )
-    .await
-    {
+    // A deactivation must revoke live credentials BEFORE the active=false write
+    // commits: if the write landed first and revocation then failed, the user
+    // would be left inactive with live SSH certificates, and the deactivation
+    // transition gate would never re-fire revocation on retry (#1116). A
+    // non-deactivating PATCH just persists its field changes.
+    let persist = || {
+        db::update_scim_user(
+            &state.store,
+            &id,
+            &auth.org_id,
+            patched.name.as_deref(),
+            patched.external_id.as_deref(),
+            patched.active,
+        )
+    };
+    let result = if patched.deactivated {
+        tracing::info!(
+            "User {} deactivated via SCIM: revoking sessions and SSH certificates before persisting",
+            id
+        );
+        crate::services::auth::revoke_then_persist(
+            &state,
+            &id,
+            "User deactivated via SCIM",
+            "scim",
+            persist,
+        )
+        .await
+    } else {
+        persist()
+            .await
+            .map_err(crate::services::auth::DeactivationError::Persist)
+    };
+    match result {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -468,7 +491,14 @@ pub(crate) async fn patch_user(
             )
                 .into_response();
         }
-        Err(e) => {
+        Err(crate::services::auth::DeactivationError::Revoke(_)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to revoke user access")),
+            )
+                .into_response();
+        }
+        Err(crate::services::auth::DeactivationError::Persist(e)) => {
             if let Some(resp) = super::invalid_index_value_response(&e) {
                 return resp.into_response();
             }
@@ -476,29 +506,6 @@ pub(crate) async fn patch_user(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ScimError::new(500, "Failed to update user")),
-            )
-                .into_response();
-        }
-    }
-
-    // If user was deactivated, invalidate all their sessions and revoke SSH certificates
-    if patched.deactivated {
-        tracing::info!(
-            "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
-            id
-        );
-        if crate::services::auth::revoke_user_access(
-            &state,
-            &id,
-            "User deactivated via SCIM",
-            "scim",
-        )
-        .await
-        .is_err()
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ScimError::new(500, "Failed to revoke user access")),
             )
                 .into_response();
         }

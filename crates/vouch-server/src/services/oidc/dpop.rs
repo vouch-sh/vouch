@@ -339,13 +339,10 @@ pub fn validate_dpop_claims(
         return Err(DpopError::UriMismatch);
     }
 
-    // Check timestamp (not too old, not in future)
-    let age = now.saturating_sub(claims.iat);
-    if age < -60 {
-        // Allow 60 seconds clock skew into future
-        return Err(DpopError::Expired);
-    }
-    if age > max_age_seconds {
+    // Not too old, and not more than 60 seconds into the future — RFC 9449
+    // permits limited clock skew. Same bounds check the key-deletion step-up
+    // gate uses (there with no skew); `now` was stamped once at the entry point.
+    if !crate::services::RecencyWindow::with_skew(max_age_seconds, 60).accepts_at(now, claims.iat) {
         return Err(DpopError::Expired);
     }
 

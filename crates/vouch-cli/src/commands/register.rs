@@ -8,9 +8,10 @@
 //! synchronous FIDO2 device operations run on separate threads. See the
 //! module-level docs in [`crate::fido2`] for why this separation is required.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use vouch_common::{
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    ResourceLabel, ResourceLabelError,
 };
 
 use crate::client::VouchClient;
@@ -59,8 +60,15 @@ fn browser_register_fallback(server: &str) -> Result<()> {
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, register)
 /// 3. Complete registration with the server (async)
 pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
-    let name = name.unwrap_or("YubiKey");
-    tr_println!("register-starting", name = name);
+    // Validate the name before any hardware interaction or network round-trip,
+    // so input the server would reject does not cost a YubiKey PIN prompt. The
+    // default "YubiKey" always parses, so an omitted --name never bails.
+    let name = match ResourceLabel::parse(name.unwrap_or("YubiKey")) {
+        Ok(name) => name,
+        Err(ResourceLabelError::Empty) => bail!(tr!("register-err-name-empty")),
+        Err(ResourceLabelError::TooLong) => bail!(tr!("register-err-name-long")),
+    };
+    tr_println!("register-starting", name = name.as_str());
     println!();
 
     // Pre-flight: if Chrome is running on macOS, the CTAP-HID flow will fail

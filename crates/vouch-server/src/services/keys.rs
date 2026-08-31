@@ -11,7 +11,7 @@ use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
-use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
+use vouch_common::{KeyInfo, ResourceLabel, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
@@ -103,27 +103,29 @@ pub(crate) fn require_recent_hardware_verification(
     require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
 }
 
-/// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
+/// Require the given issued-at or auth timestamp to be within `max_age_secs`
+/// seconds of the server's current wall clock and not in the future.
 ///
-/// Returns `ServiceError::StepUpRequired` if the timestamp is too old.
-/// Used by delete key operations to enforce recency of authentication.
+/// A step-up ceremony dated after now is impossible, so no clock skew is
+/// tolerated: both a too-old and a future-dated timestamp fail closed (issue
+/// #1144). The bounds check is the [`crate::services::RecencyWindow`] shared
+/// with the DPoP proof-age gate.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than `max_age_secs`.
+/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than
+/// `max_age_secs` or is later than now (a future-dated timestamp).
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
 ) -> Result<(), ServiceError> {
-    let now = jiff::Timestamp::now().as_second();
-    let session_age = now.saturating_sub(issued_at);
-    if session_age > max_age_secs {
-        return Err(ServiceError::StepUpRequired {
-            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
-            max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
-        });
+    if crate::services::RecencyWindow::no_skew(max_age_secs).accepts(issued_at) {
+        return Ok(());
     }
-    Ok(())
+    Err(ServiceError::StepUpRequired {
+        acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+        max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
+    })
 }
 
 /// List all registered keys for a user.
@@ -169,12 +171,14 @@ pub(crate) async fn list_keys_for_user(
 
 /// Rename a registered key.
 ///
-/// Validates ownership and name constraints before updating the key name.
+/// The new name arrives already validated as a [`ResourceLabel`] (trimmed,
+/// non-empty, within the length limit), so this function only checks the key id
+/// and ownership before updating.
 ///
 /// # Errors
 ///
 /// Returns:
-/// - `ServiceError::Validation` if the name is empty or too long.
+/// - `ServiceError::Validation` if `key_id` is not a valid UUID.
 /// - `ServiceError::NotFound` if the key does not exist *or* belongs to another
 ///   user. The two are deliberately indistinguishable: a 403 for someone else's
 ///   key would let any authenticated caller probe whether a given key id exists.
@@ -183,7 +187,7 @@ pub(crate) async fn rename_key(
     store: &DocumentStore,
     user_id: &str,
     key_id: &str,
-    new_name: &str,
+    new_name: &ResourceLabel,
 ) -> Result<String, ServiceError> {
     // Validate key_id is a UUID before DB lookup
     if uuid::Uuid::try_parse(key_id).is_err() {
@@ -192,20 +196,9 @@ pub(crate) async fn rename_key(
         ));
     }
 
-    // Validate name
-    let name = new_name.trim();
-    if name.is_empty() {
-        return Err(ServiceError::Validation(
-            Tr::new("keys-error-name-empty").to_string(),
-        ));
-    }
-    if name.chars().count() > MAX_KEY_NAME_CHARS {
-        return Err(ServiceError::Validation(
-            Tr::new("keys-error-name-too-long")
-                .arg("max", MAX_KEY_NAME_CHARS.to_string())
-                .to_string(),
-        ));
-    }
+    // The name is already trimmed and length-checked: `ResourceLabel` has no
+    // other constructor, so both callers had to validate before reaching here.
+    let name = new_name.as_str();
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(store, key_id)
@@ -449,12 +442,22 @@ mod tests {
         let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
         let absent_key = uuid::Uuid::now_v7().to_string();
 
-        let foreign = rename_key(&state.store, &caller.id, &owned_key, "renamed")
-            .await
-            .unwrap_err();
-        let missing = rename_key(&state.store, &caller.id, &absent_key, "renamed")
-            .await
-            .unwrap_err();
+        let foreign = rename_key(
+            &state.store,
+            &caller.id,
+            &owned_key,
+            &ResourceLabel::parse("renamed").unwrap(),
+        )
+        .await
+        .unwrap_err();
+        let missing = rename_key(
+            &state.store,
+            &caller.id,
+            &absent_key,
+            &ResourceLabel::parse("renamed").unwrap(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(foreign, ServiceError::NotFound("Key")),
@@ -523,5 +526,39 @@ mod tests {
             ),
             "Expected StepUpRequired for epoch (auth_time absent), got: {err:?}"
         );
+    }
+
+    /// Mirror of the epoch test for the other impossible-timestamp direction:
+    /// a future-dated `auth_time` (e.g. when the server wall clock has
+    /// regressed past the token's `auth_time`). `i64::saturating_sub` returns
+    /// the negative signed difference (not `0` — it only saturates at
+    /// `i64::MIN`/`MAX`), so without a lower bound the `session_age >
+    /// max_age_secs` check would admit `-N` as "age 0" fresh and let an
+    /// impossibly-timed ceremony satisfy the step-up gate. A freshness gate
+    /// must reject it, mirroring the fail-closed `unwrap_or(0)` handling the
+    /// caller already applies for an absent `auth_time`.
+    #[test]
+    fn test_require_fresh_timestamp_future_is_rejected() {
+        let future_iat = jiff::Timestamp::now().as_second() + 3600; // 1 h ahead
+        let err = require_fresh_timestamp(future_iat, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired for future-dated auth_time, got: {err:?}"
+        );
+    }
+
+    /// A timestamp exactly at `now` (age 0) is the fresh edge case and must
+    /// still pass after the new `session_age < 0` lower bound is added — the
+    /// bound rejects only strictly-future timestamps, not `now` itself.
+    #[test]
+    fn test_require_fresh_timestamp_now_passes() {
+        let now = jiff::Timestamp::now().as_second();
+        assert!(require_fresh_timestamp(now, KEY_DELETE_MAX_AGE_SECS).is_ok());
     }
 }

@@ -187,6 +187,73 @@ async fn delete_rejects_stale_session() {
 }
 
 #[tokio::test]
+async fn delete_rejects_future_dated_session() {
+    // Mirror of `delete_rejects_stale_session` for the other
+    // impossible-timestamp direction. The cookie route `/enroll/keys/{id}`
+    // has no HTTP-signature timestamp layer in front of the freshness gate,
+    // so a future-dated `auth_time` reaches `require_fresh_timestamp`
+    // directly. If the server wall clock regresses past the token's
+    // `auth_time` (NTP step-back, VM migration, stale-RTC container restart),
+    // a hardware-verified session whose real age already exceeds the 60 s
+    // step-up window must still be refused — an impossible future ceremony
+    // is not proof of a recent one.
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("future-delete@example.com")
+        .await
+        .expect("create user");
+    let auth_id = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create authenticator");
+
+    // auth_time one hour *ahead* of the server clock: an impossible ceremony
+    // the gate must not treat as age-0 fresh.
+    let future_iat = jiff::Timestamp::now().as_second().saturating_add(3600);
+    let token = test_utils::create_test_session_with(
+        &harness.state,
+        test_utils::TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: test_utils::TestVerification::Verified {
+                auth_time: Some(future_iat),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let resp = delete_key(&harness, &token, &auth_id).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "future-dated session should be rejected, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("insufficient_user_authentication"),
+        "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // The key must survive the refused deletion.
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| k.get("id").and_then(Value::as_str).unwrap_or(""))
+        .collect();
+    assert!(
+        ids.contains(&auth_id.as_str()),
+        "key must survive the rejected deletion, got ids: {ids:?}"
+    );
+}
+
+#[tokio::test]
 async fn delete_with_fresh_session_succeeds() {
     let harness = TestHarness::new().await;
     let user = harness

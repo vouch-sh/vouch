@@ -23,7 +23,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
-use vouch_common::{DeleteKeyResponse, ListKeysResponse};
+use vouch_common::{DeleteKeyResponse, ListKeysResponse, ResourceLabel, ResourceLabelError};
 
 use super::session::{SteppedUpToken, extract_session_from_cookie};
 
@@ -68,15 +68,33 @@ pub(crate) async fn rename_key_form(
         Err(_) => return Redirect::to("/enroll/start").into_response(),
     };
 
-    match key_svc::rename_key(&state.store, &token.sub, &key_id, &form.name).await {
+    let name = match ResourceLabel::parse(&form.name) {
+        Ok(name) => name,
+        Err(err) => {
+            let message = match err {
+                ResourceLabelError::Empty => Tr::new("keys-error-name-empty").to_string(),
+                ResourceLabelError::TooLong => Tr::new("keys-error-name-too-long")
+                    .arg("max", ResourceLabel::MAX_CHARS.to_string())
+                    .to_string(),
+            };
+            let jar = crate::handlers::admin::flash::set_err_at(
+                jar,
+                &message,
+                crate::handlers::admin::flash::KEYS_PATH,
+            );
+            return (jar, Redirect::to("/enroll/keys")).into_response();
+        }
+    };
+
+    match key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await {
         Ok(_) => Redirect::to("/enroll/keys").into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "rename_key_form: rename failed");
-            // A generic, user-safe message: the common failures (empty / too
-            // long) are also constrained by the form, and we must not surface
-            // internal error detail.
+            // Name-shape failures are handled above with specific messages; the
+            // remaining errors get a generic message that surfaces no internal
+            // detail.
             let message = Tr::new("keys-error-rename-failed")
-                .arg("max", vouch_common::MAX_KEY_NAME_CHARS.to_string())
+                .arg("max", ResourceLabel::MAX_CHARS.to_string())
                 .to_string();
             let jar = crate::handlers::admin::flash::set_err_at(
                 jar,
