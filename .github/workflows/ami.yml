@@ -114,8 +114,8 @@ jobs:
         id: regions
         run: |
           # Target regions to copy AMIs to (source region is us-east-1)
-          echo 'copy_regions=["us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
-          echo 'all_regions=["us-east-1","us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
+          echo 'copy_regions=["us-west-2"]' >> "$GITHUB_OUTPUT"
+          echo 'all_regions=["us-east-1","us-west-2"]' >> "$GITHUB_OUTPUT"
 
       - name: Set S3 paths
         id: s3
@@ -155,8 +155,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            instance_type: m5.xlarge
           - arch: arm64
             instance_type: m6g.xlarge
     outputs:
@@ -427,7 +425,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64]
+        arch: [arm64]
         region: ${{ fromJSON(needs.prepare.outputs.copy_regions) }}
 
     steps:
@@ -510,7 +508,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64]
+        arch: [arm64]
         region: ${{ fromJSON(needs.prepare.outputs.all_regions) }}
 
     steps:
@@ -604,7 +602,7 @@ jobs:
           EOF
 
           for region in $(echo "$ALL_REGIONS" | jq -r '.[]'); do
-            for arch in x86_64 arm64; do
+            for arch in arm64; do
               AMI_ID=$(aws ec2 describe-images \
                 --region "${region}" \
                 --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
@@ -622,7 +620,7 @@ jobs:
           |--------------|--------------------|--------------------------|-----------------------|
           EOF
 
-          for arch in x86_64 arm64; do
+          for arch in arm64; do
             AMI_ID=$(aws ec2 describe-images \
               --region us-east-1 \
               --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
@@ -662,7 +660,7 @@ jobs:
           # Launch instance with configuration
           aws ec2 run-instances \
             --image-id <AMI_ID> \
-            --instance-type t3.medium \
+            --instance-type m6g.large \
             --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchConfigParameter,Value=/vouch-server/config}]'
           ```
@@ -673,13 +671,12 @@ jobs:
 
           | Parameter | Description |
           |-----------|-------------|
-          | `/vouch-server/ami/x86_64/latest` | Latest x86_64 AMI ID |
           | `/vouch-server/ami/arm64/latest` | Latest arm64 AMI ID |
 
           ```bash
           # Query latest AMI in your region
           AMI_ID=$(aws ssm get-parameter \
-            --name "/vouch-server/ami/x86_64/latest" \
+            --name "/vouch-server/ami/arm64/latest" \
             --query 'Parameter.Value' --output text)
           ```
           EOF
