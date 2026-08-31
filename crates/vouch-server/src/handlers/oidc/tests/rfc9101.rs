@@ -1743,9 +1743,15 @@ async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR PUT App").await;
 
+    // RFC 7592 Section 2.2: "This request MUST include all client metadata fields as
+    // returned to the client from a previous registration, read, or update
+    // operation." The client keeps its Request Object commitment, so the
+    // replacement JWKS is checked against it.
     let put_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_id": client_id,
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
         "jwks": rsa_only_jwks(),
     });
     let (put_status, put_resp) = http_put_json(
@@ -1766,6 +1772,55 @@ async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
 }
 
 #[tokio::test]
+async fn test_rfc9101_update_omitting_signing_alg_drops_the_commitment() {
+    // RFC 7592 Section 2.2: "Omitted fields MUST be treated as null or empty values
+    // by the server, indicating the client's request to delete them from the
+    // client's registration." A PUT that drops both RFC 9101 fields drops the
+    // commitment, so a JWKS that could not satisfy it is no longer a conflict
+    // — and the client is left accepting unsigned authorization requests.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-drop-put@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (client_id, reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "JAR Drop App").await;
+
+    let put_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_id": client_id,
+        "jwks": rsa_only_jwks(),
+    });
+    let (put_status, put_resp) = http_put_json(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &put_body.to_string(),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "a PUT omitting both RFC 9101 fields clears them, so the replacement JWKS \
+         has no pinned algorithm to be incompatible with. Got {put_status}: {put_resp}"
+    );
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.request_object_signing_alg, None,
+        "request_object_signing_alg must be cleared by a PUT that omits it"
+    );
+    assert_eq!(
+        stored.require_signed_request_object, None,
+        "require_signed_request_object must be cleared by a PUT that omits it"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
     // The rotation the check must not block: a new EC key, same pinned alg.
     let (app, state) = test_app().await;
@@ -1780,6 +1835,8 @@ async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
     let put_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_id": client_id,
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
         "jwks": { "keys": [new_ec_jwk] },
     });
     let (put_status, put_resp) = http_put_json(
