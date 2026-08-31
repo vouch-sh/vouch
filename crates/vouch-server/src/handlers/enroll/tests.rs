@@ -8,8 +8,8 @@
 
 use super::*;
 use crate::test_utils::{
-    create_test_authenticator, create_test_session, create_test_user, http_delete_full,
-    http_get_full, http_post_json, test_app, test_app_state,
+    TestSessionSpec, create_test_authenticator, create_test_session_with, create_test_user,
+    http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -1405,7 +1405,16 @@ async fn test_browser_register_start_refuses_deactivated_user() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-start@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     crate::db::update_user_active_status(&state.store, &user.id, false)
         .await

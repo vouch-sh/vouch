@@ -61,7 +61,16 @@ async fn test_cookie_session_normal_token_succeeds() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "cookie-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
     let (status, _body) = http_get(&app, "/api/v1/applications", &[("Cookie", &cookie)]).await;
@@ -75,12 +84,15 @@ async fn test_cookie_session_dpop_bound_token_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "cookie-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -101,12 +113,15 @@ async fn test_bearer_dpop_bound_token_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bearer-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -128,12 +143,17 @@ async fn test_mtls_bound_token_without_cert_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bearer-mtls@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_mtls(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &crate::services::oidc::mtls::compute_cert_thumbprint(b"fake-cert-der"),
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&crate::services::oidc::mtls::compute_cert_thumbprint(
+                b"fake-cert-der",
+            )),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -161,9 +181,17 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
         crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
     // Issue a token bound to this cert's thumbprint
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &cert.thumbprint)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&cert.thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Call extract_resource_token directly with the matching cert
     let mut headers = axum::http::HeaderMap::new();
@@ -207,9 +235,17 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
         crate::services::oidc::mtls::parse_client_certificate(&cert_b_der).expect("parse cert B");
 
     // Token is bound to cert_a's thumbprint
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &cert_a.thumbprint)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&cert_a.thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present cert_b (wrong cert)
     let mut headers = axum::http::HeaderMap::new();
@@ -251,12 +287,15 @@ async fn test_dpop_takes_precedence_over_mtls() {
 
     // Create a DPoP-bound token (jkt is set; mTLS thumbprint is not set via
     // create_oauth_access_token because dpop_jkt takes precedence)
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-dpop-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-dpop-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -369,7 +408,17 @@ async fn setup_dpop_resource_token(
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
     let resource_uri = format!("{}/api/v1/applications", state.config().base_url);
     (key, jwk, token, resource_uri)
 }

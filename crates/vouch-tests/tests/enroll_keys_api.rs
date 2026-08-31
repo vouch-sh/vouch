@@ -156,12 +156,17 @@ async fn delete_rejects_stale_session() {
     // KEY_DELETE_MAX_AGE_SECS is 60. A session with auth_time an hour in the
     // past must fail the freshness gate.
     let stale_iat = jiff::Timestamp::now().as_second() - 3600;
-    let token = test_utils::create_test_session_with_iat(
+    let token = test_utils::create_test_session_with(
         &harness.state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        stale_iat,
+        test_utils::TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: test_utils::TestVerification::Verified {
+                auth_time: Some(stale_iat),
+            },
+            ..Default::default()
+        },
     )
     .await;
 
@@ -286,11 +291,15 @@ async fn delete_rejects_bootstrap_session_without_fido2_auth_time() {
     // The helper mirrors the (fixed) production bootstrap session: a
     // returning user with an existing key gets `authenticator_id = Some(kept)`,
     // `hardware_verified = false`, and `auth_time = None`.
-    let token = test_utils::create_test_bootstrap_session_with_authenticator(
+    let token = test_utils::create_test_session_with(
         &harness.state,
-        &user.id,
-        &user.email,
-        &kept,
+        test_utils::TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&kept),
+            verification: test_utils::TestVerification::NotVerified,
+            ..Default::default()
+        },
     )
     .await;
 

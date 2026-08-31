@@ -19,8 +19,17 @@ async fn test_userinfo_mtls_bound_token_without_cert_returns_401() {
     let cert_der = make_test_cert_der("client-a");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // No client certificate — should be rejected.
     let (status, body) = http_get_with_cert(
@@ -52,8 +61,17 @@ async fn test_userinfo_mtls_bound_token_with_wrong_cert_returns_401() {
     // Token is bound to cert A's thumbprint.
     let cert_a_der = make_test_cert_der("client-a");
     let thumbprint_a = cert_thumbprint(&cert_a_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present cert B — a different certificate.
     let cert_b_der = make_test_cert_der("client-b");
@@ -86,8 +104,17 @@ async fn test_userinfo_mtls_bound_token_with_matching_cert_succeeds() {
     let cert_der = make_test_cert_der("client-match");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present the correct certificate.
     let (status, body) = http_get_with_cert(
@@ -120,7 +147,16 @@ async fn test_userinfo_non_mtls_token_works_without_cert() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Plain token — no cert binding.
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // No client certificate — should succeed because token is not cert-bound.
     let (status, body) = http_get_with_cert(
@@ -156,8 +192,17 @@ async fn test_rfc8705_cnf_claim_present_in_mtls_bound_token() {
     let cert_der = make_test_cert_der("client-cnf");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Decode the JWT and inspect the cnf claim
     let claims = decode_jwt_payload(&token);
@@ -673,8 +718,17 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
 
     let cert_der = make_test_cert_der("mtls-token-dpop-scheme");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // DPoP authorization scheme but no DPoP header.
     let (status, body) = http_get_with_cert(

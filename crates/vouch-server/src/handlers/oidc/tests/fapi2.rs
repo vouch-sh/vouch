@@ -1477,7 +1477,16 @@ async fn test_fapi2_token_exchange_rejects_unbound_fapi_client() {
 
     let user = create_test_user(&state.store, "fapi2-exchange-unbound@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let assertion = build_client_assertion(
@@ -1516,7 +1525,16 @@ async fn test_fapi2_token_exchange_with_dpop_issues_bound_token() {
 
     let user = create_test_user(&state.store, "fapi2-exchange-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();

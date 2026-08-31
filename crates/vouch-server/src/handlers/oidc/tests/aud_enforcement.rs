@@ -20,13 +20,16 @@ async fn test_narrowed_token_accepted_at_named_resource() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
     let audience = format!("{base_url}/v1/keys");
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &audience,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&audience),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -60,13 +63,16 @@ async fn test_narrowed_token_rejected_at_other_resource() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
     let audience = format!("{base_url}/api/v1/applications");
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &audience,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&audience),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -119,13 +125,16 @@ async fn test_narrowed_token_covers_subpath_not_sibling() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
     let audience = format!("{base_url}/v1/keys");
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &audience,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&audience),
+            ..Default::default()
+        },
     )
     .await;
     let auth = format!("Bearer {token}");
@@ -171,13 +180,16 @@ async fn test_root_scoped_audience_accepted_everywhere() {
     // Trailing slash: differs from client_id byte-wise (so the enforcement
     // path runs) but still names the deployment root.
     let audience = format!("{base_url}/");
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &audience,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&audience),
+            ..Default::default()
+        },
     )
     .await;
     let auth = format!("Bearer {token}");
@@ -206,13 +218,16 @@ async fn test_external_audience_rejected_at_resource_endpoints() {
     let user = create_test_user(&state.store, "aud-external@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        "https://api.example.com",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some("https://api.example.com"),
+            ..Default::default()
+        },
     )
     .await;
     let auth = format!("Bearer {token}");
@@ -240,13 +255,16 @@ async fn test_logical_audience_rejected_at_resource_endpoints() {
     let user = create_test_user(&state.store, "aud-logical@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        "kubernetes",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some("kubernetes"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -274,13 +292,16 @@ async fn test_external_audience_exempt_at_userinfo_and_introspect() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     // Bind to the registered client so the RFC 7662 cross-client check passes.
-    let token = create_test_session_with_audience(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &client.client_id,
-        "https://api.example.com",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            audience: Some("https://api.example.com"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -323,7 +344,16 @@ async fn test_default_audience_token_accepted_everywhere() {
 
     let user = create_test_user(&state.store, "aud-default@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = format!("Bearer {token}");
 
     let (status, body) = http_get(&app, "/v1/keys", &[("Authorization", &auth)]).await;
@@ -407,13 +437,16 @@ async fn test_cookie_only_path_rejects_narrowed_token() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let base_url = state.config().base_url.clone();
 
-    let narrowed = create_test_session_with_audience(
+    let narrowed = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &format!("{base_url}/v1/keys"),
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&format!("{base_url}/v1/keys")),
+            ..Default::default()
+        },
     )
     .await;
     let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, narrowed));
@@ -423,13 +456,16 @@ async fn test_cookie_only_path_rejects_narrowed_token() {
         "narrowed token must be rejected on cookie-only paths"
     );
 
-    let root_scoped = create_test_session_with_audience(
+    let root_scoped = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &base_url,
-        &format!("{base_url}/"),
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&base_url),
+            audience: Some(&format!("{base_url}/")),
+            ..Default::default()
+        },
     )
     .await;
     let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, root_scoped));

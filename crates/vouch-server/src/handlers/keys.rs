@@ -555,7 +555,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "list@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -574,7 +583,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "listkey@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -628,7 +646,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "start@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_json(
             &app,
@@ -669,7 +696,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-register@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         crate::db::update_user_active_status(&state.store, &user.id, false)
             .await
@@ -726,7 +762,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, email).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let (state_jwt, exp) = make_reg_state(&state, &user).await;
 
         let body = serde_json::json!({
@@ -822,7 +867,16 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "invalid-state@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // All Raw fields deserialize as Vec<u8> (JSON arrays), and their length
         // bounds are applied there, so the binary fields must be in range for
@@ -861,7 +915,16 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "replay-session@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Build a valid RegistrationState JWT with a far-future expiry.
         let signer = &state.state_signer;
@@ -926,7 +989,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         // Build a valid RegistrationState JWT for an (initially) active user.
@@ -988,7 +1060,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "active-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         let signer = &state.state_signer;
@@ -1047,7 +1128,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "rename@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, _body) = http_request(
             &app,
@@ -1090,7 +1180,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1114,7 +1213,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renameempty@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1138,7 +1246,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renametoolong@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let long_name = "a".repeat(257);
         let body_str = format!(r#"{{"name":"{long_name}"}}"#);
@@ -1166,7 +1283,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamecjk@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // 90 CJK characters = 270 UTF-8 bytes: within the 100-character limit
         // the handler and service share, so the rename succeeds end to end.
@@ -1200,7 +1326,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamecjklong@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // 101 CJK characters = 303 bytes: one character over the cap.
         let name = "名".repeat(101);
@@ -1235,7 +1370,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamemidrange@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let name = "a".repeat(150);
         let body = serde_json::json!({ "name": name }).to_string();
@@ -1279,7 +1423,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deletebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_delete(
             &app,
@@ -1331,9 +1484,17 @@ mod tests {
         let _key_b = create_test_authenticator(&state.store, &user.id).await;
         // The browser's cookie is a bearer token; presenting it over the
         // Authorization header must not buy more than presenting it as a cookie.
-        let token =
-            create_test_bootstrap_session_with_authenticator(&state, &user.id, &user.email, &key_a)
-                .await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
 
         let resp = http_delete_full(
             &app,
@@ -1361,8 +1522,19 @@ mod tests {
         let stale = jiff::Timestamp::now()
             .as_second()
             .saturating_sub(key_svc::KEY_DELETE_MAX_AGE_SECS.saturating_mul(10));
-        let token =
-            create_test_session_with_iat(&state, &user.id, &user.email, &key_a, stale).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::Verified {
+                    auth_time: Some(stale),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
 
         let resp = http_delete_full(
             &app,
@@ -1386,11 +1558,17 @@ mod tests {
         let user = create_test_user(&state.store, "unverified-fresh@example.com").await;
         let key_a = create_test_authenticator(&state.store, &user.id).await;
         let _key_b = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session_unverified_with_fresh_auth_time(
+        let token = create_test_session_with(
             &state,
-            &user.id,
-            &user.email,
-            &key_a,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerifiedForgedAuthTime {
+                    auth_time: jiff::Timestamp::now().as_second(),
+                },
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1418,7 +1596,16 @@ mod tests {
         let user = create_test_user(&state.store, "fresh-delete@example.com").await;
         let key_a = create_test_authenticator(&state.store, &user.id).await;
         let key_b = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &key_a).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_delete(
             &app,

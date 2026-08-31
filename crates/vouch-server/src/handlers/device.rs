@@ -1532,7 +1532,16 @@ mod tests {
 
         // Create a pre-existing OAuth session for the user. Its survival
         // after a race-loser AlreadyConsumed is the regression we test for.
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let token_hash = {
             use aws_lc_rs::digest::{self, SHA256};
             URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())

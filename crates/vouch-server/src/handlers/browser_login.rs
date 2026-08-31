@@ -918,8 +918,16 @@ mod tests {
         let user = crate::test_utils::create_test_user(&state.store, "reauth@example.com").await;
         let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
         let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create a pending auth with prompt=login
         let pending_id = crate::db::create_pending_oauth_authorization(
@@ -971,8 +979,16 @@ mod tests {
         let user = crate::test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
         let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
         let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create a pending auth WITHOUT prompt=login
         let pending_id = crate::db::create_pending_oauth_authorization(
@@ -1036,8 +1052,16 @@ mod tests {
         let user =
             crate::test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
         let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let expires: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
         let device_auth_id = crate::db::create_device_auth_request(

@@ -848,7 +848,16 @@ async fn test_rfc9126_authorize_resolves_request_uri() {
     let user = create_test_user(&state.store, "par-resolve@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -953,7 +962,16 @@ async fn test_rfc9126_request_uri_is_single_use() {
     let user = create_test_user(&state.store, "par-single@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -1014,7 +1032,16 @@ async fn test_rfc9126_request_uri_is_client_bound() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Create PAR with client_a
     let request_uri = create_par_request(&app, &client_a).await;
@@ -1054,7 +1081,16 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client_a).await;
 
@@ -1104,7 +1140,16 @@ async fn test_rfc9126_authorize_rejects_expired_request_uri() {
     let user = create_test_user(&state.store, "par-expired@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let _session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let _session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -1449,7 +1494,16 @@ async fn test_rfc9126_par_not_consumed_when_reauth_required() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     // User has a valid session — but PAR flow always requires re-auth.
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Create PAR without prompt=none — will trigger re-auth under ReauthPolicy::Always.
     let request_uri = create_par_request(&app, &client).await;
@@ -1505,7 +1559,16 @@ async fn test_rfc9126_par_consumed_when_code_issued_after_login() {
     let user = create_test_user(&state.store, "par-deferred@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client).await;
     let cookie = format!("__Host-vouch_session={session_token}");
@@ -1594,7 +1657,16 @@ async fn test_rfc9126_par_reuse_succeeds_after_reauth_redirect() {
     let user = create_test_user(&state.store, "par-reauth-replay@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client).await;
 
@@ -3354,7 +3426,16 @@ async fn test_rfc9126_authorize_extends_par_ttl_and_survives_cleanup() {
 
     // Step 4: Complete the deferred flow — return to /oauth/authorize?pending_auth=<id>
     // with a valid session cookie. complete_pending_auth must consume the PAR and issue a code.
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let completion = http_get_full(
         &app,
         &format!(

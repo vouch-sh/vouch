@@ -1033,7 +1033,16 @@ async fn test_rfc6749_code_replay_revocation_is_scoped_to_that_code() {
     let token_b = token_from_code(&app, &client, &code_b).await;
     // A session from a grant with no single-use code. It carries the server's
     // own audience, so `/v1/keys` is its probe.
-    let token_c = create_test_session(&state, &user.id, &user.email, &auth).await;
+    let token_c = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth),
+            ..Default::default()
+        },
+    )
+    .await;
 
     assert_eq!(
         userinfo_status(&app, &token_b).await,

@@ -194,7 +194,16 @@ async fn test_rfc8628_device_code_replay_revokes_only_that_code_s_token() {
         .to_string();
 
     // A session from a grant with no single-use code.
-    let token_c = create_test_session(&state, &user.id, &user.email, &auth).await;
+    let token_c = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = poll_device_token(&app, &device_code_a).await;
     assert_eq!(
