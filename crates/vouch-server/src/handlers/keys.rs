@@ -753,7 +753,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "reg-empty@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_json(
             &app,
@@ -777,7 +786,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "reg-long@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // One character over the shared 100-char limit.
         let name = "a".repeat(101);
@@ -806,7 +824,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "reg-cjk-long@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // 101 CJK characters = 303 UTF-8 bytes: one character over the cap.
         let name = "名".repeat(101);
@@ -833,7 +860,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "reg-trim@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_json(
             &app,
