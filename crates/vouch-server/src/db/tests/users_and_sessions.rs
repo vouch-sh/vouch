@@ -400,3 +400,200 @@ async fn test_replay_revocation_for_unknown_code_is_noop() {
         "unrelated session must be untouched"
     );
 }
+
+/// Regression test for the cache/DB desync fixed by making
+/// `delete_sessions_for_code_replay` best-effort.
+///
+/// When at least two OAuth sessions share a `source_code_hash` (the
+/// ≥2-session shape produced by RFC 8693 token exchange at
+/// `services/oidc/exchange.rs`) and a per-session delete fails partway through
+/// the revocation loop, the committed deletes' token hashes must still be
+/// returned on the `Ok` arm so the caller's `Ok`-arm cache invalidation runs.
+/// The old code propagated `Err` on the failing delete and discarded the
+/// already-committed deletes' hashes, so the caller's log-only `Err` arm left a
+/// DB-deleted session cached as a stale `Hit` for up to the cache TTL — a
+/// request presenting that token then authenticated against a row the server
+/// had already deleted.
+///
+/// `set_delete_remaining_successes(1)` faults the *second* `store.delete` in
+/// the loop, exercising the "one delete commits, a later delete fails before
+/// committing" control-flow shape without a real DB outage. The assertions
+/// below pin the post-fix behavior; under the old code this test fails at
+/// `result.is_ok()` (the function used to return `Err`).
+#[tokio::test]
+async fn test_replay_revocation_partial_failure_still_invalidates_committed_deletes() {
+    let (mut store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "partial-replay@example.com", None)
+        .await
+        .expect("create user");
+
+    // Two OAuth access-token sessions issued from the same replayed code "code-P"
+    // — the ≥2-session shape that makes a mid-loop delete failure observable.
+    create_oauth_session(
+        &store,
+        &user_id,
+        "partial-replay@example.com",
+        "hash-p1",
+        Some("code-P"),
+    )
+    .await;
+    create_oauth_session(
+        &store,
+        &user_id,
+        "partial-replay@example.com",
+        "hash-p2",
+        Some("code-P"),
+    )
+    .await;
+
+    // Populate the session cache with `Hit`s for both, mirroring the
+    // precondition an RFC 8693 exchange establishes when it looks up the
+    // subject token: that lookup freshly populates the subject session's
+    // cache entry at the instant the second session is created.
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "hash-p1")
+            .await
+            .expect("cache lookup p1")
+            .is_some(),
+        "hash-p1 must start as a cache Hit"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "hash-p2")
+            .await
+            .expect("cache lookup p2")
+            .is_some(),
+        "hash-p2 must start as a cache Hit"
+    );
+
+    // Fault the second `store.delete` so the first delete commits and the
+    // second returns a non-retryable `Err` before opening its transaction.
+    store.set_delete_remaining_successes(1);
+
+    // Run the real caller match logic from `services/oidc/token.rs`: invalidate
+    // each returned hash on `Ok`, log only on `Err`.
+    let result = delete_sessions_for_code_replay(&store, "code-P").await;
+    assert!(
+        result.is_ok(),
+        "best-effort revocation must return Ok on partial delete failure, not \
+         discard the already-committed deletes' hashes: {result:?}"
+    );
+    let token_hashes = result.expect("checked Ok above");
+    assert_eq!(
+        token_hashes.len(),
+        1,
+        "only the one successfully-deleted session's hash is returned: {token_hashes:?}"
+    );
+    let committed_hash = token_hashes
+        .first()
+        .expect("len == 1 checked above")
+        .as_str();
+    let surviving_hash = if committed_hash == "hash-p1" {
+        "hash-p2"
+    } else {
+        "hash-p1"
+    };
+
+    // The committed-deleted session is gone from the DB; the session whose
+    // delete failed is still present.
+    assert!(
+        get_session_by_token_hash(&store, committed_hash, jiff::Timestamp::now())
+            .await
+            .expect("db lookup committed")
+            .is_none(),
+        "the committed delete must be gone from the DB"
+    );
+    assert!(
+        get_session_by_token_hash(&store, surviving_hash, jiff::Timestamp::now())
+            .await
+            .expect("db lookup surviving")
+            .is_some(),
+        "the session whose delete failed must remain in the DB"
+    );
+
+    // Run the caller's `Ok`-arm cache invalidation against the returned hash.
+    cache.invalidate(committed_hash);
+
+    // The committed-deleted session is no longer served as a stale `Hit`: the
+    // cache misses through to the DB, which returns `None`. Under the old code
+    // the function returned `Err` and the caller never invalidated, so this
+    // lookup would return `Some` from the stale `Hit` (the bug).
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, committed_hash)
+            .await
+            .expect("cache re-lookup committed")
+            .is_none(),
+        "a DB-deleted session must not be served from a stale cache Hit"
+    );
+
+    // The session whose delete failed stays cached — it is still a valid row.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, surviving_hash)
+            .await
+            .expect("cache re-lookup surviving")
+            .is_some(),
+        "the session whose delete failed must remain a cache Hit"
+    );
+}
+
+/// A per-session delete failure on the *first* iteration (budget 0) deletes
+/// nothing, returns an empty `Ok`, and leaves both sessions cached + in the
+/// DB — the no-progress extreme of the best-effort loop, mirroring the
+/// "replay of a code whose sessions were never enumerated before the fault"
+/// edge of the contract.
+#[tokio::test]
+async fn test_replay_revocation_first_delete_fails_is_empty_ok() {
+    let (mut store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "first-fail@example.com", None)
+        .await
+        .expect("create user");
+    create_oauth_session(
+        &store,
+        &user_id,
+        "first-fail@example.com",
+        "hash-f1",
+        Some("code-F"),
+    )
+    .await;
+    create_oauth_session(
+        &store,
+        &user_id,
+        "first-fail@example.com",
+        "hash-f2",
+        Some("code-F"),
+    )
+    .await;
+
+    // Fault every delete (budget 0): no delete commits.
+    store.set_delete_remaining_successes(0);
+
+    let result = delete_sessions_for_code_replay(&store, "code-F").await;
+    assert!(
+        result.is_ok(),
+        "best-effort revocation must return Ok even when no delete succeeds: {result:?}"
+    );
+    assert!(
+        result.as_ref().expect("Ok").is_empty(),
+        "no successful deletes means no hashes returned"
+    );
+
+    // Both sessions survive in the DB.
+    assert!(
+        get_session_by_token_hash(&store, "hash-f1", jiff::Timestamp::now())
+            .await
+            .expect("lookup f1")
+            .is_some(),
+        "no deletes committed, so hash-f1 must remain"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-f2", jiff::Timestamp::now())
+            .await
+            .expect("lookup f2")
+            .is_some(),
+        "no deletes committed, so hash-f2 must remain"
+    );
+}

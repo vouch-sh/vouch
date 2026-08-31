@@ -306,6 +306,14 @@ pub struct DocumentStore {
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
+    /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
+    /// next `n` `delete` calls succeed (each consuming one unit), after which
+    /// every subsequent `delete` returns a non-retryable `Err` before opening
+    /// its transaction. Mirrors the existing test hook pattern and is compiled
+    /// out of non-test builds, so production behavior is unchanged. See
+    /// [`Self::set_delete_remaining_successes`].
+    #[cfg(test)]
+    delete_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -348,6 +356,8 @@ impl DocumentStore {
             modify_test_hook: None,
             #[cfg(test)]
             delete_test_hook: None,
+            #[cfg(test)]
+            delete_remaining_successes: None,
         }
     }
 
@@ -372,6 +382,48 @@ impl DocumentStore {
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful `delete`
+    /// calls to `successes`, after which every subsequent `delete` returns a
+    /// non-retryable `Err` before opening its transaction. The fault fires at
+    /// the entry to `delete`, so the exercised control-flow shape is "one
+    /// delete commits, a later delete fails before committing" — exactly the
+    /// shape `delete_sessions_for_code_replay` must handle to avoid leaving a
+    /// DB-deleted session cached as a stale `Hit`. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_delete_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.delete_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only delete-success budget, returning
+    /// `Ok` while budget remains and a non-retryable `Err` once it is
+    /// exhausted. No-op (`Ok`) when [`Self::set_delete_remaining_successes`]
+    /// was not called (no budget installed). The CAS loop avoids underflow if
+    /// a budget is shared via [`Clone`]. See [`Self::set_delete_remaining_successes`].
+    #[cfg(test)]
+    fn consume_delete_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.delete_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected delete fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
     }
 
@@ -965,6 +1017,10 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.consume_delete_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let mut tx = self.begin().await?;
             tx.delete(id).await?;
