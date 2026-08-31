@@ -24,10 +24,6 @@ This pattern is a blind read-modify-write: the `get` reads a snapshot, the calle
 
 3. **`find_one` + `store.update` on the same document**: using `store.find_one` to resolve a document then calling `store.update` on it has the same race as `get` + `update`.
 
-4. **`AtomicBool` success flag not reset at the top of a `store.modify` closure**: each OCC retry re-invokes the closure; if a prior attempt set the flag and then lost the version race, the flag stays set and a subsequent retry that bails early (e.g., org-scope check fails) reports success instead of skipping.
-
-5. **State check using stale snapshot data inside the closure**: a candidate set built from a paginated snapshot before `store.modify`, then applied inside the closure (e.g., via `retain()`) without re-checking whether entries have since transitioned state (e.g., `Pending → Verified`). The membership test runs against fresh data, but the decision was made against stale data.
-
 **What is safe (not a violation):**
 
 - `store.get()` used purely to read a document for the caller to return/display (no write follows).
@@ -36,10 +32,6 @@ This pattern is a blind read-modify-write: the `get` reads a snapshot, the calle
 - `store.update()` inside test helper functions under `#[cfg(test)]` or `mod test_helpers` — these are test scaffolding, not production paths.
 - `store.update_by_index()` — this is a bulk updater with internal batching, not a single document read-modify-write.
 - `compare_and_update()` called with a freshly-read version — this is the OCC mechanism itself.
-- `store.update_last_used_at()` — updates only a metadata timestamp, no semantic fields.
-- `tx.update()` — writes inside an explicit `StoreTransaction`; atomicity is handled by the transaction.
-- Documents that are never mutated concurrently (e.g., write-once records like `DpopJtiDoc`). Use judgment; prefer `store.modify()` when in doubt.
-- `set_preconfigured_active` (posture_policies.rs): uses a full-replace pattern with caller-controlled `active_slugs`; the caller is authoritative for the entire field.
 
 **Document types at highest risk** (all have concurrent writers):
 - `UserDoc` — admin status and active flag mutated by org admin + SCIM
@@ -118,37 +110,6 @@ repos.retain(|r| !removed.contains(r));
 update_github_installation_repos(store, installation_id, &repos).await
 ```
 
-**AtomicBool not reset between OCC retries (scim.rs / posture_policies.rs, fixed in c63387d)**
-
-```rust
-// VIOLATION: applied flag not reset at top of closure; if attempt N sets it
-// then loses the version race, attempt N+1 that bails early still reports success
-let applied = std::sync::atomic::AtomicBool::new(false);
-let found = store
-    .modify::<UserDoc, _>(user_id, |data| {
-        // BUG: missing `applied.store(false, ...)` reset here
-        if data.org_id.as_deref() == Some(org_id) {
-            data.name = name.map(String::from);
-            applied.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    })
-    .await?;
-```
-
-**State check using snapshot data inside modify closure (organizations.rs, fixed in d9fccba)**
-
-```rust
-// VIOLATION: domains_to_drop was built from a paginated snapshot; by the time
-// the modify closure runs, an entry may have flipped Pending → Verified and
-// must be preserved, but the code blindly removes based on the stale snapshot
-// name set without re-checking current state
-let domains_to_drop: HashSet<String> = to_remove.iter().map(|(d, _)| d.clone()).collect();
-store.modify::<OrganizationDoc, _>(&org.id, |doc| {
-    doc.additional_domains
-        .retain(|ad| !domains_to_drop.contains(&ad.domain));  // never re-checks state
-})
-```
-
 ## Correct patterns
 
 **Use `store.modify` — only touch the target fields**
@@ -209,25 +170,11 @@ let found = store
 Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
 ```
 
-**Re-check live state inside the modify closure**
-
-```rust
-store.modify::<OrganizationDoc, _>(&org.id, |doc| {
-    doc.additional_domains.retain(|ad| {
-        // Never remove a Verified entry, even if it was Pending in the snapshot
-        if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
-            return true;
-        }
-        !drop_candidates.contains_key(&ad.domain)
-    });
-})
-```
-
 ## Scope
 
 **In scope** — all production database functions in:
 - `crates/vouch-server/src/db/*.rs` (users.rs, authenticators.rs, github.rs, scim.rs, posture_policies.rs, oauth.rs, organizations/mod.rs, organizations/domains.rs, organizations/issuer.rs, enrollment.rs, device_auth.rs, credentials.rs)
-- `crates/vouch-server/src/services/*.rs` and `crates/vouch-server/src/handlers/` if they call `store.get` + `store.update` directly
+- `crates/vouch-server/src/services/*.rs` if they call `store.get` + `store.update` directly
 
 **Out of scope:**
 - `crates/vouch-server/src/db/store.rs` itself (the implementation)
