@@ -19,10 +19,10 @@ on:
         description: 'Architecture to build and boot-test'
         required: true
         type: choice
-        default: x86_64
+        default: arm64
         options:
-          - x86_64
           - arm64
+          - x86_64
       keep_ami:
         description: 'Keep the test AMI and snapshot after verification'
         required: false
