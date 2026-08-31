@@ -251,7 +251,7 @@ pub(crate) fn generate(spec: &RuleSpec) -> Result<String, RuleError> {
         "forbid (principal, action == {}, resource)\n{clause} {{\n    {body}\n}};",
         spec.decision.action_literal(),
     );
-    if text.len() > MAX_POLICY_TEXT_LEN {
+    if text.chars().count() > MAX_POLICY_TEXT_LEN {
         return Err(RuleError::TooLong);
     }
     Ok(text)

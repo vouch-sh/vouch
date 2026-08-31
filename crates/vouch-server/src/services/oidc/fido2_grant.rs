@@ -279,9 +279,9 @@ pub(crate) async fn exchange_fido2_assertion(
             "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
             user_id
         );
-        // P3.5: a failed assertion — including clone detection (counter
-        // regression) — is a high-signal security event. Record it in the
-        // audit trail with the credential and user IDs and the failure reason.
+        // A failed assertion — including clone detection (counter regression)
+        // — is a high-signal security event. Record it in the audit trail with
+        // the credential and user IDs and the failure reason.
         let failure_event = AuthEventParams {
             user_id: user.id.clone(),
             event_type: AuthEventType::LoginFailed,
@@ -400,12 +400,14 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
-            auth_time: Some(now),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(now),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
             hardware_aaguid: authenticator.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         proof,
     )

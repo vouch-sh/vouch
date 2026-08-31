@@ -114,7 +114,6 @@ pub fn test_config() -> ServerConfig {
         aws_use_fips_endpoint: None,
         jwt_assertion_max_lifetime_seconds: 300,
         allowed_aaguids: vouch_common::AaguidPolicy::Any,
-        require_attestation_cert: false,
         log_format: crate::config::LogFormat::Text,
         trusted_proxies: Vec::new(),
         metrics_bearer_token: None,
@@ -373,8 +372,8 @@ static TEST_HTTPSIG: std::sync::LazyLock<TestHttpSig> = std::sync::LazyLock::new
 
 /// Register the first-party OAuth client used by test sessions.
 ///
-/// `create_test_session*` mint tokens whose `client_id` is the server
-/// `base_url`. The `/v1/*` routes now require an RFC 9421 signature, and the
+/// [`create_test_session_with`] mints tokens whose `client_id` is the server
+/// `base_url` unless the spec names one. The `/v1/*` routes require an RFC 9421 signature, and the
 /// server resolves the verifying key from the token client's registered JWKS.
 /// Registering a client keyed to `base_url` with the shared test signing key
 /// lets [`build_test_request`] transparently sign `/v1/*` requests so existing
@@ -831,6 +830,19 @@ pub async fn create_test_user_in_org(
         .expect("Test user not found after creation")
 }
 
+/// Delete a test authenticator, cascading to its sessions.
+///
+/// `db::delete_authenticator` takes a transaction so its cascade cannot land
+/// half-applied; tests that just need a key gone go through here rather than
+/// repeating begin/commit at each call site.
+pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
+    let mut tx = store.begin().await.expect("Failed to start transaction");
+    crate::db::delete_authenticator(&mut tx, authenticator_id)
+        .await
+        .expect("Failed to delete authenticator");
+    tx.commit().await.expect("Failed to commit deletion");
+}
+
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
     crate::db::create_authenticator(
@@ -879,373 +891,184 @@ async fn resolve_session_snapshot(
     (hardware_aaguid, org_domain)
 }
 
+/// How a test session's access token is bound to the party that may present
+/// it, named the way a fixture site knows it: by thumbprint.
+///
+/// The production `TokenBinding` takes a
+/// `ValidatedDpopProof` witness rather than a bare `jkt`, so a sender-constrained
+/// token cannot be minted from a string that never passed proof validation.
+/// [`create_test_session_with`] stands that witness up.
+pub enum TestBinding<'a> {
+    /// A bearer token: whoever holds it may present it.
+    Bearer,
+    /// RFC 9449 §6: `cnf.jkt` set to this JWK thumbprint.
+    Dpop(&'a str),
+    /// RFC 8705 §3.1: `cnf.x5t#S256` set to this certificate thumbprint.
+    Mtls(&'a crate::services::oidc::mtls::CertThumbprint),
+}
+
+/// The authentication assurance a test session's token claims.
+///
+/// The first two variants map onto `HardwareVerification` and travel the
+/// ordinary issuance path. The third does not — see its docs.
+pub enum TestVerification {
+    /// A FIDO2 assertion happened: `hardware_verified: true`, `amr: [hwk, pin,
+    /// user]`, `acr: aal3`. `auth_time` is when it happened; `None` models
+    /// verification inherited from another token (RFC 8693 token exchange runs
+    /// no ceremony of its own).
+    Verified {
+        /// When the assertion happened, in Unix seconds.
+        auth_time: Option<i64>,
+    },
+    /// No FIDO2 assertion: `hardware_verified: false`, no `auth_time`, no
+    /// `amr`/`acr`. The enrollment-bootstrap shape in `handlers/enroll.rs` —
+    /// a real user and a persisted session minted right after upstream IdP
+    /// sign-in.
+    NotVerified,
+    /// A token this deployment's issuer cannot produce: `hardware_verified`
+    /// false alongside an `auth_time` a freshness gate would read as recent
+    /// FIDO2. `HardwareVerification::NotVerified` has nowhere to put a
+    /// timestamp, so the combination is unrepresentable by design (issue
+    /// #1114) and this variant reaches it by mutating a minted token's claims
+    /// and re-signing.
+    ///
+    /// That is the point: it produces what an older server's token, or a
+    /// future regression, would put in front of the key handlers. Every claim
+    /// other than `auth_time` and `jti` is whatever the production issuer
+    /// produced, so a claim added later travels here automatically instead of
+    /// silently diverging.
+    ///
+    /// Leaves two session rows for the user: the base token's and the mutated
+    /// one's. [`create_test_session_with`] returns the mutated token.
+    NotVerifiedForgedAuthTime {
+        /// The `auth_time` to stamp on a session that ran no ceremony.
+        auth_time: i64,
+    },
+}
+
+/// Knobs that test-session fixture sites actually vary.
+///
+/// The canonical way to build a session; [`create_test_session_with`] is the
+/// only place a `CreateOAuthTokenParams` literal is spelled out for tests.
+/// `Default` supplies the ordinary hardware-verified bearer session, so a test
+/// names only the axis it is about:
+///
+/// ```rust,ignore
+/// let token = create_test_session_with(&state, TestSessionSpec {
+///     user_id: &user.id,
+///     email: &user.email,
+///     auth_id: Some(&auth_id),
+///     binding: TestBinding::Dpop(&jkt),
+///     ..Default::default()
+/// })
+/// .await;
+/// ```
+pub struct TestSessionSpec<'a> {
+    /// Subject of the token. Required — the default is empty and rejected.
+    pub user_id: &'a str,
+    /// Email claim and session-row email. Required — the default is empty and
+    /// rejected.
+    pub email: &'a str,
+    /// Authenticator establishing the session, recorded server-side on the
+    /// session row and used to resolve the `hardware_aaguid` snapshot.
+    /// Default: `None`, the shape of a session minted before any key exists.
+    pub auth_id: Option<&'a str>,
+    /// OAuth client the token is issued to. Default: `None`, meaning this
+    /// deployment's own `base_url` (first-party CLI/UI sessions).
+    pub client_id: Option<&'a str>,
+    /// RFC 8707 resource / RFC 8693 audience narrowing. Default: `None`,
+    /// meaning `aud == client_id`.
+    pub audience: Option<&'a str>,
+    /// Sender-constraining. Default: [`TestBinding::Bearer`].
+    pub binding: TestBinding<'a>,
+    /// Authentication assurance. Default: [`TestVerification::Verified`] with
+    /// `auth_time` now.
+    pub verification: TestVerification,
+}
+
+impl Default for TestSessionSpec<'_> {
+    fn default() -> Self {
+        Self {
+            user_id: "",
+            email: "",
+            auth_id: Option::None,
+            client_id: Option::None,
+            audience: Option::None,
+            binding: TestBinding::Bearer,
+            verification: TestVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
+        }
+    }
+}
+
 /// Create a test session with an OAuth access token stored in the database.
 ///
 /// Returns the raw access token string. Uses the real `create_oauth_access_token`
 /// service function with ES256 signing so the token validates through the full
-/// token validation pipeline.
-pub async fn create_test_session(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-) -> String {
+/// token validation pipeline, and resolves the `hardware_aaguid` / `org_domain`
+/// snapshot the way production call sites do.
+pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_>) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session whose access token is narrowed to an explicit
-/// audience (RFC 8707 resource / RFC 8693 audience).
-///
-/// Mirrors [`create_test_session`] but passes `audience: Some(..)`, so the
-/// minted token has `aud != client_id` and exercises the audience-coverage
-/// enforcement in `extract_resource_token` without driving the full
-/// authorization-code flow. `client_id` is explicit so tests can bind the
-/// token to a registered OAuth client (e.g. for the introspection
-/// cross-client check); pass `&state.config().base_url` to mirror
-/// [`create_test_session`].
-pub async fn create_test_session_with_audience(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    client_id: &str,
-    audience: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: Some(audience),
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create audience-narrowed test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session backed by a non-hardware-verified access token.
-///
-/// Mirrors the enrollment-bootstrap shape in `handlers/enroll.rs`: a real
-/// user, a persisted session, but `HardwareVerification::NotVerified`.
-/// Used to verify that paths gated on hardware attestation reject these
-/// sessions (e.g., the RFC 8693 ID-token fork).
-pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (_, org_domain) = resolve_session_snapshot(state, user_id, None).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: None,
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: None,
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create bootstrap test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Like [`create_test_bootstrap_session`], but with an `authenticator_id`
-/// attached so the access token's `hardware_verified` claim is `false`
-/// while the session record still references a key.
-///
-/// This reproduces the #451 token-laundering scenario: a re-enrollment
-/// bootstrap session for a user who already has a registered security
-/// key has `authenticator_id = Some(_)` and `hardware_verified = false`.
-/// Hardware-gated handlers must reject it.
-pub async fn create_test_bootstrap_session_with_authenticator(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create bootstrap test session with authenticator");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session with a custom `iat`-equivalent auth_time.
-///
-/// Used for step-up authentication tests (RFC 9470) where the auth_time
-/// relative to now determines whether the operation is allowed.
-pub async fn create_test_session_with_iat(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    iat: i64,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(iat),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session bound to a specific OAuth client.
-///
-/// Used for tests that require the token's `client_id` to match a specific
-/// OAuth client (e.g., introspection cross-client checks).
-pub async fn create_test_session_for_client(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    client_id: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session with a DPoP binding (sender-constrained token).
-///
-/// The token will have a `cnf.jkt` claim, making it a sender-constrained
-/// token that requires DPoP proof for validation.
-pub async fn create_test_session_with_dpop(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    dpop_jkt: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification,
+        SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
     use secrecy::ExposeSecret;
 
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+    assert!(
+        !spec.user_id.is_empty() && !spec.email.is_empty(),
+        "TestSessionSpec requires user_id and email; struct-update syntax defaults them to empty"
+    );
 
-    // Fixtures name the binding by thumbprint, so stand up the witness the
-    // issuance path now requires. Only reachable under `cfg(test)` /
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
+
+    let config = state.config();
+    let client_id = spec.client_id.unwrap_or(&config.base_url);
+
+    // Fixtures name a DPoP binding by thumbprint, so stand up the witness the
+    // issuance path requires. Only reachable under `cfg(test)` /
     // `feature = "test-utils"`.
-    let dpop_proof =
-        ValidatedDpopProof::for_testing(dpop_jkt.to_string(), format!("test-jti-{dpop_jkt}"), None);
+    let dpop_witness = match spec.binding {
+        TestBinding::Dpop(jkt) => Some(ValidatedDpopProof::for_testing(
+            jkt.to_string(),
+            format!("test-jti-{jkt}"),
+            Option::None,
+        )),
+        TestBinding::Bearer | TestBinding::Mtls(_) => Option::None,
+    };
+    let mtls_thumbprint = match spec.binding {
+        TestBinding::Mtls(thumbprint) => Some(thumbprint),
+        TestBinding::Bearer | TestBinding::Dpop(_) => Option::None,
+    };
+
+    let hardware_verification = match spec.verification {
+        TestVerification::Verified { auth_time } => HardwareVerification::Verified { auth_time },
+        // The forged variant mints an unverified token and mutates it below;
+        // the issuer has no way to stamp the `auth_time` it wants.
+        TestVerification::NotVerified | TestVerification::NotVerifiedForgedAuthTime { .. } => {
+            HardwareVerification::NotVerified
+        }
+    };
 
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
+            user_id: spec.user_id,
+            email: spec.email,
+            authenticator_id: spec.auth_id,
+            client_id,
             scope: Some(ScopeSet::all()),
-            binding: TokenBinding::new(Some(&dpop_proof), None),
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            binding: TokenBinding::new(dpop_witness.as_ref(), mtls_thumbprint),
+            act: Option::None,
+            audience: spec.audience,
+            hardware_verification,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
+            authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: Option::None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -1256,62 +1079,69 @@ pub async fn create_test_session_with_dpop(
         },
     )
     .await
-    .expect("Failed to create DPoP-bound test session");
+    .expect("Failed to create test session");
 
-    result.token.expose_secret().to_string()
+    let token = result.token.expose_secret().to_string();
+
+    let TestVerification::NotVerifiedForgedAuthTime { auth_time } = spec.verification else {
+        return token;
+    };
+    forge_auth_time(state, &spec, &token, auth_time).await
 }
 
-/// Create an mTLS certificate-bound access token for testing.
+/// Re-sign `base` with `auth_time` stamped onto claims the issuer produced
+/// without one, and persist a session row for the result.
 ///
-/// The token includes `cnf.x5t#S256` set to `mtls_cert_thumbprint`, binding it to
-/// the certificate identified by that thumbprint per RFC 8705 Section 3.1.
-pub async fn create_test_session_with_mtls(
+/// Split out because it is the whole of
+/// [`TestVerification::NotVerifiedForgedAuthTime`]: derive from a real token,
+/// change the single field under test, leave everything else alone.
+async fn forge_auth_time(
     state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    mtls_cert_thumbprint: &crate::services::oidc::mtls::CertThumbprint,
+    spec: &TestSessionSpec<'_>,
+    base: &str,
+    auth_time: i64,
 ) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(base, &state.oidc_key, &state.config().base_url)
+            .expect("the token this deployment just minted must decode");
+
+    assert!(
+        !claims.hardware_verified,
+        "the base token must be unverified for this fixture to mean anything"
+    );
+    claims.auth_time = Some(auth_time);
+    claims.jti = uuid::Uuid::now_v7().to_string();
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the forged-auth_time access token");
 
     let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::new(None, Some(mtls_cert_thumbprint)),
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
+        resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
+    let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id: spec.user_id,
+            user_email: spec.email,
+            token_hash: &crate::crypto::hash_token(&token),
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
+            source_code_hash: Option::None,
         },
     )
     .await
-    .expect("Failed to create mTLS-bound test session");
+    .expect("Failed to persist the forged-auth_time session");
 
-    result.token.expose_secret().to_string()
+    token
 }
 
 /// Create an organization API token for testing, bound to the given org,

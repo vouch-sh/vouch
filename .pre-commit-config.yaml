@@ -47,6 +47,7 @@ repos:
             crates/vouch-server/src/infra/s3_config\.rs|
             crates/vouch-server/src/crypto/keys\.rs|
             crates/vouch-server/src/crypto/pem\.rs|
+            crates/vouch-server/src/infra/jwks\.rs|
             crates/vouch-tests/tests/pq_tls\.rs
           )$
       - id: mixed-line-ending

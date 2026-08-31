@@ -371,12 +371,17 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            // Link this session to the consumed authorization code so replay
+            // detection (enforce_single_use_code above) can revoke only this
+            // code's tokens per RFC 6749 Section 10.5.
+            source_code_hash: Some(&code_hash),
         },
         proof,
     )
@@ -400,8 +405,9 @@ pub(crate) async fn exchange_authorization_code(
             expires_in,
             binding: params.binding,
             scope: &auth_code.scope,
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+            },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -537,9 +543,20 @@ struct ResolvedGrants {
 /// RFC 6749 Section 10.5: Enforce single-use authorization codes.
 ///
 /// Atomically consumes the code; on success returns an [`crate::db::AuthCodeClaim`]
-/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes all tokens
-/// for the user the original code was issued to before returning the OAuth
-/// `invalid_grant` error.
+/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes only the tokens
+/// issued from **that** authorization code (RFC 6749 Section 10.5) before
+/// returning the OAuth `invalid_grant` error.
+///
+/// The consume here and the session insert in
+/// [`exchange_authorization_code`] are separate writes, so a replay arriving
+/// between them finds no session carrying the code hash and revokes nothing —
+/// the legitimate exchange then completes and its token survives. Closing the
+/// window means issuing the session in the same transaction that consumes the
+/// code, which DSQL's optimistic concurrency cannot express across the two
+/// document types. Section 10.5 states the revocation as a SHOULD ("the
+/// authorization server SHOULD attempt to revoke"), and the MUST — denying the
+/// replayed request — holds regardless, since the deny is driven by the
+/// consume, not by the revocation.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
@@ -548,28 +565,34 @@ async fn enforce_single_use_code(
     match db::try_consume_authorization_code(&state.store, code_hash).await {
         Ok(claim) => Ok(claim),
         Err(db::claim::ClaimError::AlreadyConsumed) => {
-            if let Ok(Some((user_id, _client_id))) =
-                db::get_consumed_code_owner(&state.store, code_hash).await
-            {
-                tracing::warn!(
-                    target: "security",
-                    client_id = %auth_code.client_id,
-                    "Authorization code replay detected — code already consumed"
-                );
-                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
-                    Ok(count) if count > 0 => {
-                        state.session_cache.invalidate_for_user(&user_id);
-                        tracing::warn!(
-                            target: "security",
-                            user_id = %user_id,
-                            revoked_count = count,
-                            "Revoked OAuth tokens due to authorization code replay"
-                        );
+            tracing::warn!(
+                target: "security",
+                client_id = %auth_code.client_id,
+                user_id = %auth_code.user_id,
+                "Authorization code replay detected — code already consumed"
+            );
+            // RFC 6749 Section 10.5: revoke "all access tokens already granted
+            // based on the compromised authorization code" — which bounds the
+            // revocation to this code rather than widening it to every session
+            // for the user. Sessions store `source_code_hash = code_hash` at
+            // issuance, so this targets exactly the compromised code's tokens
+            // and leaves the user's other sessions (other codes, FIDO2,
+            // browser login, …) intact.
+            match db::delete_sessions_for_code_replay(&state.store, code_hash).await {
+                Ok(token_hashes) if !token_hashes.is_empty() => {
+                    for token_hash in &token_hashes {
+                        state.session_cache.invalidate(token_hash);
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
-                    }
+                    tracing::warn!(
+                        target: "security",
+                        user_id = %auth_code.user_id,
+                        revoked_count = token_hashes.len(),
+                        "Revoked OAuth tokens issued from the replayed authorization code"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to revoke tokens during replay detection: {e}");
                 }
             }
             Err(ServiceError::oauth(
@@ -896,9 +919,8 @@ struct IdTokenParams<'a> {
     /// key receives the same confirmation on both tokens of one response.
     binding: TokenBinding<'a>,
     scope: &'a ScopeSet,
-    /// Time when the user authenticated (FIDO2 session creation time).
-    auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `amr` and `acr`.
+    /// Authentication assurance level — bundles `auth_time`, `amr`, and `acr`,
+    /// so the `auth_time` claim cannot outlive the assertion that earned it.
     hardware_verification: crate::services::auth::HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
@@ -932,7 +954,7 @@ async fn generate_id_token(
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())
@@ -1207,7 +1229,15 @@ pub struct OidcValidatedSession {
     pub session: Session,
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
+    ///
+    /// Presence means only that the user has a key on record — an enrollment
+    /// bootstrap session for a returning user carries one while no assertion
+    /// has occurred. Read [`Self::hardware_verified`] to learn whether a
+    /// ceremony actually happened.
     pub authenticator: Option<Authenticator>,
+    /// Whether a FIDO2 assertion backs this session, from the access token's
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1284,8 +1314,10 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let client_id = match &decoded {
-        crate::services::auth::DecodedToken::AccessToken(c) => Some(c.client_id.clone()),
+    let (client_id, hardware_verified) = match &decoded {
+        crate::services::auth::DecodedToken::AccessToken(c) => {
+            (Some(c.client_id.clone()), c.hardware_verified)
+        }
     };
 
     Ok(Some(OidcValidatedSession {
@@ -1294,6 +1326,7 @@ pub async fn validate_session_token(
         authenticator,
         scope: decoded.scope().cloned(),
         client_id,
+        hardware_verified,
     }))
 }
 

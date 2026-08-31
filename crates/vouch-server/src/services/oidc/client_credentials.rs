@@ -80,12 +80,12 @@ pub(crate) async fn exchange_client_credentials(
             binding,
             act: None,
             audience: None,
-            auth_time: None,
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         proof,
     )

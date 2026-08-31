@@ -413,6 +413,13 @@ pub struct DeleteKeyResponse {
     pub current_session_revoked: bool,
 }
 
+/// Maximum length of a security key name, in Unicode characters.
+///
+/// Counted in characters rather than UTF-8 bytes so the limit means the same
+/// thing for every script. The CLI, the JSON API handler, the key service, and
+/// the `maxlength` on the enrollment form all enforce or state this number.
+pub const MAX_KEY_NAME_CHARS: usize = 100;
+
 /// Request to rename a security key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RenameKeyRequest {

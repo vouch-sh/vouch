@@ -82,11 +82,7 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.counter, 42);
 
     // Delete authenticator
-    let deleted = delete_authenticator(&store, &auth_id)
-        .await
-        .expect("Failed to delete authenticator");
-
-    assert_eq!(deleted, 1);
+    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     // Verify deleted
     let auth = get_authenticator_by_id(&store, &auth_id)

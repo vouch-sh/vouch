@@ -23,7 +23,7 @@ use vouch_common::{
 };
 
 use super::extractors::ValidJson;
-use super::session::AuthenticatedToken;
+use super::session::{AuthenticatedToken, SteppedUpToken};
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
 
@@ -126,9 +126,15 @@ impl RegistrationCompletion {
 /// Start registration - generate challenge and return to client
 /// (WebAuthn Level 2 Section 7.1, Step 1-3).
 ///
-/// Requires an OAuth access token (FAPI 2.0). Users must first enroll via OIDC
-/// (`vouch enroll`) to register their first key. After that, they can add
-/// additional keys via this endpoint after logging in with an existing key.
+/// Requires an OAuth access token (FAPI 2.0), but deliberately *not* a
+/// hardware-verified one. Registering a key is the recovery path: a user whose
+/// security key is lost or broken signs in through the upstream IdP and enrolls
+/// a replacement, so requiring possession of an existing key here would lock
+/// out exactly the people who need it. The compensating control is the
+/// `KeyRegistered` audit event, not a gate.
+///
+/// Key *deletion* is gated, because it is destructive and has no recovery
+/// argument — see `SteppedUpToken`.
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
@@ -315,20 +321,15 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info)
-    let mut validated = validate_registration_attestation(
-        &req.attestation_object,
-        &config.allowed_aaguids,
-        config.require_attestation_cert,
-    )?;
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the browser path in `enroll.rs`, so the two
+    // agree by construction.
+    let validated =
+        validate_registration_attestation(&req.attestation_object, &config.allowed_aaguids)?;
 
-    // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation.is_some() {
-        validated.attestation = verified.attestation;
-    }
-
-    // Use server-verified AAGUID if available, fall back to client-provided
-    let aaguid = verified.aaguid.or(validated.aaguid);
+    // The AAGUID comes from the attestation certificate, never from the
+    // client-supplied authData that `verified.aaguid` reports.
+    let aaguid = validated.aaguid;
 
     // Use server-verified public key from authData
     let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
@@ -347,7 +348,7 @@ pub(crate) async fn register_complete(
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
         },
     )
     .await?;
@@ -408,11 +409,11 @@ pub(crate) async fn rename_key(
         ));
     }
     let name = req.name.trim();
-    if name.is_empty() || name.len() > 256 {
+    if name.is_empty() || name.chars().count() > vouch_common::MAX_KEY_NAME_CHARS {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "Key name must be between 1 and 256 characters",
+            "Key name must be between 1 and 100 characters",
         ));
     }
 
@@ -424,7 +425,7 @@ pub(crate) async fn rename_key(
 /// Delete a registered key.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
@@ -436,12 +437,6 @@ pub(crate) async fn delete_key(
             "Key ID must be a valid UUID",
         ));
     }
-
-    // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
-    key_svc::require_fresh_timestamp(
-        token.auth_time.unwrap_or(0),
-        key_svc::KEY_DELETE_MAX_AGE_SECS,
-    )?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -560,7 +555,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "list@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -579,7 +583,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "listkey@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -633,7 +646,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "start@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_json(
             &app,
@@ -674,7 +696,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-register@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         crate::db::update_user_active_status(&state.store, &user.id, false)
             .await
@@ -731,7 +762,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, email).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let (state_jwt, exp) = make_reg_state(&state, &user).await;
 
         let body = serde_json::json!({
@@ -827,7 +867,16 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "invalid-state@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // All Raw fields deserialize as Vec<u8> (JSON arrays), and their length
         // bounds are applied there, so the binary fields must be in range for
@@ -866,7 +915,16 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "replay-session@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Build a valid RegistrationState JWT with a far-future expiry.
         let signer = &state.state_signer;
@@ -931,7 +989,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         // Build a valid RegistrationState JWT for an (initially) active user.
@@ -993,7 +1060,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "active-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         let signer = &state.state_signer;
@@ -1052,7 +1128,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "rename@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, _body) = http_request(
             &app,
@@ -1095,7 +1180,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1119,7 +1213,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renameempty@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1143,7 +1246,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renametoolong@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let long_name = "a".repeat(257);
         let body_str = format!(r#"{{"name":"{long_name}"}}"#);
@@ -1162,6 +1274,134 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_name");
+    }
+
+    // The guard measures Unicode characters, not UTF-8 bytes, so a multibyte
+    // name is bounded by the same number the error message names.
+    #[tokio::test]
+    async fn test_rename_key_accepts_multibyte_name_within_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjk@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // 90 CJK characters = 270 UTF-8 bytes: within the 100-character limit
+        // the handler and service share, so the rename succeeds end to end.
+        let name = "名".repeat(90);
+        assert_eq!(name.chars().count(), 90);
+        assert!(name.len() > 256);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "multibyte name within limits must be accepted: {resp_body}"
+        );
+    }
+
+    // The character-based guard still bounds multibyte names: a 101-character
+    // CJK name is rejected by the handler, before the service sees it.
+    #[tokio::test]
+    async fn test_rename_key_rejects_multibyte_name_exceeding_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjklong@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // 101 CJK characters = 303 bytes: one character over the cap.
+        let name = "名".repeat(101);
+        assert_eq!(name.chars().count(), 101);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    // The handler guard and the service limit are the same number, so no name
+    // clears the handler only to be rejected by the service under a different
+    // message. The range the error names is the range the endpoint accepts.
+    #[tokio::test]
+    async fn test_rename_key_rejects_name_over_shared_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamemidrange@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let name = "a".repeat(150);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
     }
 
     // ========================================================================
@@ -1183,7 +1423,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deletebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_delete(
             &app,
@@ -1195,5 +1444,177 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_key_id");
+    }
+
+    // ========================================================================
+    // Step-up on key deletion (issue #1114)
+    //
+    // The cookie route is covered by the enroll_keys_api integration tests;
+    // these pin the Bearer route, which reaches the same `SteppedUpToken`
+    // extractor over the Authorization header.
+    // ========================================================================
+
+    /// RFC 9470 Section 3: the challenge names what was missing so the client
+    /// can re-authenticate and retry, which is what the keys page does.
+    fn assert_step_up_challenge(resp: &HttpResponse) {
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "body: {}", resp.body);
+        let challenge = resp
+            .headers
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.contains("insufficient_user_authentication"),
+            "expected an RFC 9470 challenge, got: {challenge}"
+        );
+    }
+
+    async fn surviving_keys(state: &AppState, user_id: &str) -> usize {
+        crate::db::get_authenticators_for_user(&state.store, user_id)
+            .await
+            .expect("list keys")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_bootstrap_session_over_bearer() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // The browser's cookie is a bearer token; presenting it over the
+        // Authorization header must not buy more than presenting it as a cookie.
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "no key may be deleted without a recent assertion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_stale_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "stale-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // Asserted with a key, but long ago: possession is proven, recency is
+        // not, and deleting a key demands both.
+        let stale = jiff::Timestamp::now()
+            .as_second()
+            .saturating_sub(key_svc::KEY_DELETE_MAX_AGE_SECS.saturating_mul(10));
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::Verified {
+                    auth_time: Some(stale),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(surviving_keys(&state, &user.id).await, 2);
+    }
+
+    /// The gate must ask whether a ceremony happened rather than infer it from
+    /// a timestamp. `HardwareVerification` makes a fresh `auth_time` on an
+    /// unverified session unconstructible, so this signs one directly: if that
+    /// invariant ever breaks, or an older server's token arrives during a
+    /// rolling deploy, deletion must still refuse it.
+    #[tokio::test]
+    async fn test_delete_key_rejects_fresh_auth_time_without_hardware_verification() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "unverified-fresh@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerifiedForgedAuthTime {
+                    auth_time: jiff::Timestamp::now().as_second(),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "a fresh timestamp is not evidence a ceremony occurred"
+        );
+    }
+
+    /// The companion success case: a session that did assert, recently, still
+    /// deletes. Without this the three rejections above would pass even if the
+    /// extractor refused everything.
+    #[tokio::test]
+    async fn test_delete_key_allows_recent_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "fresh-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{key_b}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(surviving_keys(&state, &user.id).await, 1);
     }
 }

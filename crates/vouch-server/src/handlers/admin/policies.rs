@@ -31,6 +31,15 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 /// Maximum number of custom policies per org (active + inactive).
 const MAX_CUSTOM_POLICIES: usize = 20;
 
+/// Maximum length of a policy name, in Unicode characters. Matches the
+/// `maxlength` the admin form advertises, which the browser counts in
+/// characters rather than UTF-8 bytes.
+const MAX_POLICY_NAME_CHARS: usize = 100;
+
+/// Maximum length of a policy description, in Unicode characters. Matches the
+/// `maxlength` the admin form advertises.
+const MAX_POLICY_DESCRIPTION_CHARS: usize = 500;
+
 /// Size bound on a stored builder spec. A legitimate spec is well under
 /// this; anything larger is dropped rather than stored.
 const MAX_BUILDER_SPEC_LEN: usize = 8192;
@@ -327,14 +336,16 @@ pub(crate) async fn create_custom_policy(
     validate_origin(&headers, &state.config().base_url)?;
 
     // Validate inputs before auth
-    if form.name.is_empty() || form.name.len() > 100 {
+    let name = form.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_POLICY_NAME_CHARS {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
     }
 
-    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    if form.policy_text.is_empty()
+        || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
     {
         return Ok(redirect_error(
             jar,
@@ -346,7 +357,7 @@ pub(crate) async fn create_custom_policy(
     }
 
     if let Some(ref desc) = form.description
-        && desc.len() > 500
+        && desc.chars().count() > MAX_POLICY_DESCRIPTION_CHARS
     {
         return Ok(redirect_error(
             jar,
@@ -381,7 +392,7 @@ pub(crate) async fn create_custom_policy(
     let policy = db::create_custom_policy(
         &state.store,
         db::CreateCustomPolicyParams {
-            name: &form.name,
+            name,
             description: description.as_deref(),
             policy_text: &form.policy_text,
             org_id: &org_id,
@@ -433,14 +444,16 @@ pub(crate) async fn update_custom_policy(
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    if form.name.is_empty() || form.name.len() > 100 {
+    let name = form.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_POLICY_NAME_CHARS {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
     }
 
-    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    if form.policy_text.is_empty()
+        || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
     {
         return Ok(redirect_error(
             jar,
@@ -448,6 +461,15 @@ pub(crate) async fn update_custom_policy(
                 "Policy text must be between 1 and {} characters",
                 posture::catalog::MAX_POLICY_TEXT_LEN
             ),
+        ));
+    }
+
+    if let Some(ref desc) = form.description
+        && desc.chars().count() > MAX_POLICY_DESCRIPTION_CHARS
+    {
+        return Ok(redirect_error(
+            jar,
+            "Description must be 500 characters or less",
         ));
     }
 
@@ -465,7 +487,7 @@ pub(crate) async fn update_custom_policy(
         &id,
         &org_id,
         db::UpdateCustomPolicyParams {
-            name: Some(&form.name),
+            name: Some(name),
             description: description
                 .as_deref()
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
@@ -781,7 +803,8 @@ pub(crate) async fn validate_policy_api(
         },
     };
 
-    if policy_text.is_empty() || policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN {
+    if policy_text.is_empty() || policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
+    {
         return Ok(invalid(
             Some(policy_text),
             format!(
@@ -826,7 +849,7 @@ pub(crate) async fn validate_policy_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{PolicyRow, posture};
+    use super::{MAX_POLICY_DESCRIPTION_CHARS, MAX_POLICY_NAME_CHARS, PolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
@@ -841,9 +864,21 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         (admin, token)
     }
+
+    /// Policy text that parses, for tests whose subject is a different field.
+    const VALID_POLICY_TEXT: &str = "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };";
 
     // ── Validation API — accepted input ──────────────────────────────────────
 
@@ -1193,7 +1228,16 @@ mod tests {
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
@@ -1325,7 +1369,16 @@ mod tests {
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, _body) = http_get(&app, "/admin/policies", &[("Cookie", &cookie)]).await;
@@ -1444,6 +1497,171 @@ mod tests {
             StatusCode::SEE_OTHER,
             "Empty name must result in redirect"
         );
+    }
+
+    // The name and description guards count Unicode characters, not UTF-8
+    // bytes, so a multibyte value within the limit the form advertises is
+    // stored rather than rejected.
+    #[tokio::test]
+    async fn test_create_custom_policy_accepts_multibyte_name_and_description() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        // 90 CJK characters = 270 bytes; 400 CJK characters = 1200 bytes.
+        let name = "名".repeat(90);
+        let description = "説".repeat(400);
+        assert!(name.len() > MAX_POLICY_NAME_CHARS);
+        assert!(description.len() > MAX_POLICY_DESCRIPTION_CHARS);
+
+        let form = format!(
+            "policy_name={}&policy_description={}&policy_text={}",
+            urlencoding::encode(&name),
+            urlencoding::encode(&description),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == name)
+            .expect("multibyte name within the character limit must be stored");
+        assert_eq!(stored.description.as_deref(), Some(description.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_multibyte_name_over_char_limit() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let name = "名".repeat(101);
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode(&name),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        assert!(
+            db::list_custom_policies(&state.store, &org_id)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a name over the character limit must not be stored"
+        );
+    }
+
+    // A name of only whitespace is empty once trimmed, and the trimmed form is
+    // what gets stored.
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_whitespace_only_name() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode("   "),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        assert!(
+            db::list_custom_policies(&state.store, &org_id)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a whitespace-only name must not be stored"
+        );
+    }
+
+    // The update path bounds the description too, so a policy cannot be given
+    // an unbounded description after creation.
+    #[tokio::test]
+    async fn test_update_custom_policy_rejects_description_over_char_limit() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode("Original"),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let created = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == "Original")
+            .expect("created");
+
+        let long_description = "x".repeat(501);
+        let form = format!(
+            "policy_name={}&policy_description={}&policy_text={}",
+            urlencoding::encode("Renamed"),
+            urlencoding::encode(&long_description),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let after = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(
+            after.name, "Original",
+            "an over-long description must reject the whole update"
+        );
+        assert!(after.description.is_none());
     }
 
     #[tokio::test]

@@ -19,8 +19,17 @@ async fn test_userinfo_mtls_bound_token_without_cert_returns_401() {
     let cert_der = make_test_cert_der("client-a");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // No client certificate — should be rejected.
     let (status, body) = http_get_with_cert(
@@ -52,8 +61,17 @@ async fn test_userinfo_mtls_bound_token_with_wrong_cert_returns_401() {
     // Token is bound to cert A's thumbprint.
     let cert_a_der = make_test_cert_der("client-a");
     let thumbprint_a = cert_thumbprint(&cert_a_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present cert B — a different certificate.
     let cert_b_der = make_test_cert_der("client-b");
@@ -86,8 +104,17 @@ async fn test_userinfo_mtls_bound_token_with_matching_cert_succeeds() {
     let cert_der = make_test_cert_der("client-match");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present the correct certificate.
     let (status, body) = http_get_with_cert(
@@ -120,7 +147,16 @@ async fn test_userinfo_non_mtls_token_works_without_cert() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Plain token — no cert binding.
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // No client certificate — should succeed because token is not cert-bound.
     let (status, body) = http_get_with_cert(
@@ -156,8 +192,17 @@ async fn test_rfc8705_cnf_claim_present_in_mtls_bound_token() {
     let cert_der = make_test_cert_der("client-cnf");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Decode the JWT and inspect the cnf claim
     let claims = decode_jwt_payload(&token);
@@ -216,42 +261,6 @@ async fn create_mtls_client_with_cert_binding(
     .client_id
 }
 
-/// Issue an authorization code for the given client + user using standard scope.
-async fn issue_test_authorization_code(
-    state: &std::sync::Arc<crate::AppState>,
-    client_id: &str,
-    user: &db::User,
-    auth_id: &str,
-    dpop_jkt: Option<&str>,
-) -> String {
-    let scope = ScopeSet::parse("openid email");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("issue authorization code")
-}
-
 /// RFC 8705 §2.1 + §3: mTLS-authenticated client exchanges authorization code
 /// at `/oauth/token`, presenting a matching client certificate, and receives
 /// a cert-bound (`cnf.x5t#S256`) Bearer access token.
@@ -276,7 +285,7 @@ async fn test_rfc8705_token_mtls_authorization_code_succeeds() {
     )
     .await;
 
-    let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
+    let code = issue_code(&state, &user, &auth_id, &client_id, TestCodeSpec::default()).await;
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
         urlencoding::encode("https://example.com/callback"),
@@ -322,7 +331,7 @@ async fn test_rfc8705_token_mtls_invalid_grant_when_code_already_used() {
     )
     .await;
 
-    let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
+    let code = issue_code(&state, &user, &auth_id, &client_id, TestCodeSpec::default()).await;
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
         urlencoding::encode("https://example.com/callback"),
@@ -368,7 +377,7 @@ async fn test_rfc8705_token_mtls_invalid_client_when_cert_mismatch() {
     )
     .await;
 
-    let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
+    let code = issue_code(&state, &user, &auth_id, &client_id, TestCodeSpec::default()).await;
 
     // Caller presents cert B — different subject DN.
     let cert_b_der = make_test_cert_der("imposter");
@@ -411,7 +420,7 @@ async fn test_rfc8705_token_mtls_invalid_request_when_dpop_required_but_missing(
     )
     .await;
 
-    let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
+    let code = issue_code(&state, &user, &auth_id, &client_id, TestCodeSpec::default()).await;
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
         urlencoding::encode("https://example.com/callback"),
@@ -465,7 +474,17 @@ async fn test_rfc8705_token_mtls_plus_dpop_succeeds() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
-    let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
         urlencoding::encode("https://example.com/callback"),
@@ -522,8 +541,17 @@ async fn test_rfc8705_token_mtls_plus_dpop_invalid_grant_when_jkt_mismatch() {
     // Authorization bound to key A.
     let (_key_a, jwk_a) = generate_dpop_key_pair();
     let jkt_a = dpop_jkt(&jwk_a);
-    let code =
-        issue_test_authorization_code(&state, &client_id, &user, &auth_id, Some(&jkt_a)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Token request signs with a different key B.
     let (key_b, jwk_b) = generate_dpop_key_pair();
@@ -589,8 +617,14 @@ async fn test_rfc8705_token_mtls_plus_private_key_jwt_succeeds() {
     let cert_der = make_test_cert_der("pkjwt-mtls-ok");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let code =
-        issue_test_authorization_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
 
@@ -636,8 +670,14 @@ async fn test_rfc8705_token_mtls_plus_private_key_jwt_invalid_client_when_jwt_ba
         create_private_key_jwt_client_with_cert_binding(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("pkjwt-mtls-badjwt");
-    let code =
-        issue_test_authorization_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     // Sign the assertion with a wrong key.
     let (wrong_pkcs8, _wrong_jwk) = generate_es256_signing_key();
@@ -678,8 +718,17 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
 
     let cert_der = make_test_cert_der("mtls-token-dpop-scheme");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // DPoP authorization scheme but no DPoP header.
     let (status, body) = http_get_with_cert(
@@ -730,8 +779,14 @@ async fn test_rfc8705_id_token_carries_the_same_binding_as_the_access_token() {
     let cert_der = make_test_cert_der("mtls-id-token-cnf");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let code =
-        issue_test_authorization_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
 

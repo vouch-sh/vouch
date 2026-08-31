@@ -76,7 +76,16 @@ async fn test_oauth_token_works_at_management_endpoints() {
 
     let user = create_test_user(&state.store, "oauth-mgmt@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Call key listing endpoint with OAuth access token (should succeed)
     let (status, _body) = http_get(
@@ -215,10 +224,10 @@ async fn test_access_token_optional_scope_field() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_create_test_session_for_client_produces_client_bound_token() {
-    // Verify the new create_test_session_for_client helper creates a token
-    // whose client_id claim matches the given client_id, not the server base_url.
-    // This is critical for introspection cross-client tests.
+async fn test_session_spec_client_id_produces_client_bound_token() {
+    // A `TestSessionSpec` naming a `client_id` must produce a token whose
+    // `client_id` claim is that client, not the server base_url. Introspection
+    // cross-client tests depend on it.
     use crate::services::auth::{DecodedToken, decode_token};
 
     let (_app, state) = test_app().await;
@@ -227,10 +236,17 @@ async fn test_create_test_session_for_client_produces_client_bound_token() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    // Use the helper — token's client_id must match client.client_id
-    let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let config = state.config();
     let decoded = decode_token(&token, &state.oidc_key, &config.base_url)
@@ -254,7 +270,16 @@ async fn test_unified_token_hardware_verified_claim_always_set() {
 
     let user = create_test_user(&state.store, "hw-verified@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let config = state.config();
     let decoded = decode_token(&token, &state.oidc_key, &config.base_url)
@@ -270,14 +295,23 @@ async fn test_unified_token_hardware_verified_claim_always_set() {
 #[tokio::test]
 async fn test_unified_token_typ_header_is_at_jwt() {
     // RFC 9068 Section 2.1 + Step 9 migration: the single surviving token type
-    // is ES256 with typ "at+jwt". Verify this is what create_test_session produces.
+    // is ES256 with typ "at+jwt". Verify this is what a default TestSessionSpec produces.
     use crate::crypto::jwt::JwtType;
 
     let (_app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "typ-header@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Peek at the header without full validation
     let header = jsonwebtoken::decode_header(&token).expect("Valid JWT header");
@@ -302,7 +336,16 @@ async fn test_legacy_register_routes_removed() {
 
     let user = create_test_user(&state.store, "legacy-route@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = format!("Bearer {token}");
 
     // Legacy path: /v1/auth/register/start — must not exist
@@ -375,7 +418,16 @@ async fn test_decoded_token_enum_single_variant_destructuring() {
 
     let user = create_test_user(&state.store, "enum-destr@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let config = state.config();
     let decoded =

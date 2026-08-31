@@ -1728,6 +1728,38 @@ pub async fn update_oauth_client_registration(
     Ok(OAuthClient::from(updated))
 }
 
+/// Revoke whichever client holds `token_hash` as its registration access token.
+///
+/// RFC 7592 §2.1/2.2/2.3: when a client configuration request names a
+/// `client_id` that does not exist, "the registration access token used to make
+/// this request SHOULD be immediately revoked". The presented token may still be
+/// a live credential for some *other* client, so it is looked up by hash and
+/// cleared wherever it is found.
+///
+/// Returns the internal document id of the client whose token was cleared, or
+/// `None` when the hash matches no client — the overwhelmingly common case,
+/// since the caller reaches this path only after a `client_id` miss.
+pub async fn revoke_registration_access_token(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<String>> {
+    let Some(doc) = store
+        .find_one::<OAuthClientDoc>("registration_access_token_hash", token_hash)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let id = doc.id;
+    store
+        .modify::<OAuthClientDoc, _>(&id, |data| {
+            data.registration_access_token_hash = None;
+        })
+        .await?;
+
+    Ok(Some(id))
+}
+
 // ============================================================================
 // JWT Assertion JTI Operations (RFC 7523)
 // ============================================================================

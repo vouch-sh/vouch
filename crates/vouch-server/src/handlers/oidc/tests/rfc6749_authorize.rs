@@ -18,7 +18,16 @@ async fn test_rfc6749_authorize_authenticated_user_redirects_with_code() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Create a valid session stored in the DB (cookie-based auth)
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Build a valid PKCE challenge
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -401,8 +410,16 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
     // Create a different user who will try to authorize
     let other_user = create_test_user(&state.store, "authorize-other@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &other_user.id).await;
-    let session_token =
-        create_test_session(&state, &other_user.id, &other_user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &other_user.id,
+            email: &other_user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -467,7 +484,16 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
     )
     .await;
 
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -592,7 +618,16 @@ async fn test_rfc6749_authorize_state_preserved_across_redirect() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -702,7 +737,16 @@ async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -747,7 +791,7 @@ async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
 }
 
 // ========================================================================
-// P1: RFC 6749 — Authorization Endpoint Additional Tests
+// RFC 6749 — Authorization Endpoint Additional Tests
 // ========================================================================
 
 #[tokio::test]
@@ -874,7 +918,16 @@ async fn test_response_mode_form_post_returns_html_form() {
     let user = create_test_user(&state.store, "form-post-test@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -1155,5 +1208,442 @@ async fn test_rfc6749_authorize_empty_parameter_is_treated_as_omitted() {
         !location(&empty).contains("error="),
         "`prompt=` must not be rejected as an unsupported value: {}",
         location(&empty)
+    );
+}
+
+// ========================================================================
+// response_mode — unrecognized values
+//
+// OAuth 2.0 Multiple Response Type Encoding Practices §2.1 defines
+// `response_mode` and says what an absent one means — "If `response_mode` is
+// not present in a request, the default Response Mode mechanism specified by
+// the Response Type is used" — but is silent on an unrecognized value. The
+// choice is therefore ours, and substituting the default is the one answer
+// that cannot be right: a client asking for `form_post` or `jwt` is not
+// listening on a query redirect, so it would receive an authorization
+// response it never reads. The PAR endpoint has always rejected these; these
+// tests hold the authorization endpoint to the same answer.
+// ========================================================================
+
+#[tokio::test]
+async fn test_authorize_rejects_unrecognized_response_mode() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "bad-response-mode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256\
+             &response_mode=formpost&state=rm-state",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        !location.contains("code="),
+        "an unrecognized response_mode must not issue an authorization code: {location}"
+    );
+    assert!(
+        location.contains("error=invalid_request"),
+        "an unrecognized response_mode must be rejected: {} {location}",
+        response.status
+    );
+    // RFC 6749 §4.1.2.1: the error response carries the request's `state`.
+    assert!(
+        location.contains("state=rm-state"),
+        "the error response must echo state: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_authorize_accepts_every_advertised_response_mode() {
+    // The rejection above must not cost a mode the discovery document
+    // advertises: `response_modes_supported` and the parser read one table.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "good-response-mode@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let advertised = doc["response_modes_supported"]
+        .as_array()
+        .expect("discovery must advertise response_modes_supported");
+    assert!(!advertised.is_empty(), "discovery must list some mode");
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    for mode in advertised {
+        let mode = mode.as_str().expect("response mode must be a string");
+        let response = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={challenge}&code_challenge_method=S256&response_mode={}",
+                client.client_id,
+                urlencoding::encode("https://example.com/callback"),
+                urlencoding::encode(mode),
+            ),
+            &[],
+        )
+        .await;
+
+        let location = response
+            .headers
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !location.contains("error=invalid_request"),
+            "advertised response_mode {mode:?} must be accepted: {location}"
+        );
+    }
+}
+
+// ========================================================================
+// RFC 6749 Section 4.1.2.1 — a failed session lookup is `server_error`
+//
+// A store failure while checking the session says nothing about whether the
+// user is authenticated. Collapsing it into the "not authenticated" branch
+// reports a server fault as `login_required` (or walks the user into a login
+// form whose pending-authorization write hits the same broken store).
+//
+// The `SessionCache::inject_fault` seam faults only the session token's own
+// hash, so client resolution and request validation still run against the
+// live pool and the failure is isolated to the lookup under test.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc6749_authorize_session_store_error_returns_server_error() {
+    // RFC 6749 Section 4.1.2.1: `server_error` is "an unexpected condition
+    // that prevented it from fulfilling the request. (This error code is
+    // needed because a 500 Internal Server Error HTTP status code cannot be
+    // returned to the client via an HTTP redirect.)" — which is exactly a
+    // store failure during the session lookup. `login_required` would instead
+    // tell the client to retry interactively against the broken store.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-store-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+    let state_param = "store-fault-state";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256&prompt=none&state={state_param}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "store failure must still be reported over the redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("error=server_error"),
+        "store failure during the session lookup must return server_error: {location}"
+    );
+    assert!(
+        !location.contains("error=login_required"),
+        "store failure must not be reported as login_required: {location}"
+    );
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_session_store_error_does_not_redirect_to_login() {
+    // Without prompt=none the pre-fix code sent the user to /login, where
+    // storing the pending authorization would fail against the same store.
+    // The client must learn the request failed instead.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-store-fault-ui@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        !location.starts_with("/login"),
+        "store failure must not be masked as a login redirect: {location}"
+    );
+    assert!(
+        location.contains("error=server_error"),
+        "store failure must return server_error to the client: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_pending_auth_store_error_is_not_auth_failure() {
+    // Returning from /login, a store failure must not render "Authentication
+    // failed" — the sign-in was never the problem, and that message invites
+    // the user to repeat a ceremony that cannot help.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pending-store-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    // Unauthenticated first leg: stores the pending authorization and hands
+    // back its id in the /login redirect.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8")
+        .to_string();
+    let pending_id = location
+        .split("pending_auth=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("login redirect must carry pending_auth");
+
+    // Second leg: the user now has a session, but its lookup faults.
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    state
+        .session_cache
+        .inject_fault(crate::crypto::hash_token(&session_token));
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the denied page is rendered inline, got: {status}"
+    );
+    assert!(
+        !body.contains("Authentication failed"),
+        "store failure must not be reported as a failed authentication: {body}"
+    );
+    assert!(
+        body.contains("could not complete the request"),
+        "store failure must render the server-error message: {body}"
+    );
+}
+
+// ========================================================================
+// Session assurance at the authorization endpoint
+//
+// An enrollment bootstrap session — upstream IdP sign-in, no FIDO2 — carries
+// an `authenticator_id` for any returning user, so gating this endpoint on
+// authenticator presence let it issue a code. The resulting tokens claim
+// `acr: aal3` and `amr: [hwk, pin, user]`, because the authorization-code
+// grant stamps `HardwareVerification::Verified` unconditionally. Same unsound
+// inference as issue #1114, different path.
+// ========================================================================
+
+/// Build a valid authorize URL for `client`, with PKCE.
+fn authorize_url(client_id: &str, state_param: &str) -> String {
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    format!(
+        "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+         &code_challenge={}&code_challenge_method=S256&state={}",
+        client_id,
+        urlencoding::encode("https://example.com/callback"),
+        challenge,
+        state_param,
+    )
+}
+
+#[tokio::test]
+async fn test_authorize_refuses_bootstrap_session_and_issues_no_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-bootstrap@example.com").await;
+    // A returning user: the key on record is what gives the bootstrap session
+    // its `authenticator_id`.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::NotVerified,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let response = http_get_full(
+        &app,
+        &authorize_url(&client.client_id, "teststate-bootstrap"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        !location.contains("code="),
+        "a session that never asserted must not receive an authorization code, \
+         got redirect to: {location}"
+    );
+    assert!(
+        location.starts_with("/login"),
+        "the user must be sent to assert with their key, got: {location}"
+    );
+}
+
+/// The companion success case. Without it the assertion above would pass even
+/// if the endpoint refused every session.
+#[tokio::test]
+async fn test_authorize_still_issues_a_code_for_a_verified_session() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-verified@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let response = http_get_full(
+        &app,
+        &authorize_url(&client.client_id, "teststate-verified"),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        location.contains("code="),
+        "a hardware-verified session must still receive a code, got: {location}"
     );
 }

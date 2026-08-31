@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Key management handlers during enrollment (using cookie-based authentication).
+//! Key management handlers during enrollment (browser UI).
 //!
-//! These endpoints allow users to manage their security keys via browser UI.
-//! Authentication is via the session cookie containing an OAuth access token.
+//! These endpoints let users manage their security keys from the enrollment
+//! pages. `list_keys` and `rename_key_form` read the session cookie only.
+//! `delete_key` takes the `SteppedUpToken` extractor, which consults the
+//! `Authorization` header before falling back to the cookie — so it also
+//! accepts a bearer token. That grants nothing new: `DELETE /v1/keys/{id}`
+//! already accepts the same token and performs the same deletion. Pinning this
+//! route back to cookies would mean special-casing the extractor for one
+//! handler, which is worse than the asymmetry.
 
 use crate::AppState;
 use crate::db;
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use crate::services::keys as key_svc;
 use axum::{
     Form, Json,
@@ -18,7 +25,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{DeleteKeyResponse, ListKeysResponse};
 
-use super::session::extract_session_from_cookie;
+use super::session::{SteppedUpToken, extract_session_from_cookie};
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
@@ -68,9 +75,12 @@ pub(crate) async fn rename_key_form(
             // A generic, user-safe message: the common failures (empty / too
             // long) are also constrained by the form, and we must not surface
             // internal error detail.
+            let message = Tr::new("keys-error-rename-failed")
+                .arg("max", vouch_common::MAX_KEY_NAME_CHARS.to_string())
+                .to_string();
             let jar = crate::handlers::admin::flash::set_err_at(
                 jar,
-                "Could not rename key. Please choose a name between 1 and 100 characters.",
+                &message,
                 crate::handlers::admin::flash::KEYS_PATH,
             );
             (jar, Redirect::to("/enroll/keys")).into_response()
@@ -83,17 +93,10 @@ pub(crate) async fn rename_key_form(
 /// Authentication is via session cookie.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
-
-    // Require a recent authentication for destructive key operations.
-    // Use auth_time (when FIDO2 occurred) if available, otherwise fall back to iat.
-    let auth_timestamp = token.auth_time.unwrap_or(0);
-    key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
-
     // Whether we just deleted the key this very session is bound to (so the
     // browser knows to re-authenticate rather than reload into a dead session).
     let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());

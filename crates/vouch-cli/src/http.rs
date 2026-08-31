@@ -829,4 +829,51 @@ mod tests {
         let parsed: TestResponse = resp.json().unwrap();
         assert_eq!(parsed.message, "hello");
     }
+
+    /// RFC 7592 §5: "When using TLS, the client MUST perform a TLS/SSL server
+    /// certificate check, per RFC 6125 [RFC6125]."
+    ///
+    /// Vouch's CLI is a client of its own RFC 7592 configuration endpoint, and
+    /// it carries the registration access token there in clear text under TLS.
+    /// reqwest verifies server certificates by default, so the requirement is
+    /// met by *not* opting out — which is exactly the kind of guarantee that
+    /// disappears silently in a one-line change. This scans the CLI's own
+    /// sources for any such opt-out.
+    #[test]
+    fn no_source_file_disables_tls_certificate_verification() {
+        // Split so the needles never appear verbatim in this file — otherwise
+        // the scanner's own source is its first hit.
+        const CERTS: &str = concat!("danger_accept_invalid_", "certs(");
+        const HOSTNAMES: &str = concat!("danger_accept_invalid_", "hostnames(");
+
+        fn scan(dir: &std::path::Path, needles: &[&str], findings: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, needles, findings);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    for (n, line) in text.lines().enumerate() {
+                        if needles.iter().any(|needle| line.contains(needle)) {
+                            findings.push(format!("{}:{}", path.display(), n.saturating_add(1)));
+                        }
+                    }
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut findings = Vec::new();
+        scan(&src, &[CERTS, HOSTNAMES], &mut findings);
+
+        assert!(
+            findings.is_empty(),
+            "TLS certificate verification must never be disabled (RFC 7592 §5), found: {findings:?}"
+        );
+    }
 }

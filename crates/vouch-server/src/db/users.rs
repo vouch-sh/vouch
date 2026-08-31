@@ -274,7 +274,7 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         //    no-op delete is cheap and keeps the cascade logic in one place.
         let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
         for auth in &authenticators {
-            super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;
+            super::authenticators::delete_authenticator(&mut tx, &auth.id).await?;
         }
 
         // 4. Delete SSH issued certificate records

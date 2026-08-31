@@ -316,7 +316,9 @@ pub(crate) async fn detail_application_page(
         .collect();
     let secrets_count = secrets.iter().filter(|s| s.active).count();
 
-    // Get usage stats
+    // Get usage stats. A failure renders the page without them rather than
+    // failing the whole detail view, but "no usage" and "stats unavailable"
+    // look identical to the reader, so log the cause.
     let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id, None).await {
         Ok(stats) => stats
             .into_iter()
@@ -325,7 +327,10 @@ pub(crate) async fn detail_application_page(
                 count: s.count,
             })
             .collect(),
-        Err(_) => vec![],
+        Err(e) => {
+            tracing::warn!(error = %e, app_id, "Usage stats lookup failed; rendering page without them");
+            vec![]
+        }
     };
 
     ApplicationDetailTemplate {
@@ -822,7 +827,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-empty-name@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_oauth_client(&state.store, &user.id).await;
 
         // Submit the web update form with an empty name.
@@ -870,7 +884,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-empty-uris@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_oauth_client(&state.store, &user.id).await;
 
         // Submit with a valid name but blank redirect_uris textarea.
@@ -920,7 +943,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-fapi-exit@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let client = create_test_client(
             &state.store,
             &user.id,

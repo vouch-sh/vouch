@@ -503,7 +503,16 @@ mod tests {
         let user =
             create_test_user_in_org(&state.store, "regular@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         let (status, _body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
@@ -518,7 +527,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "noorg@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         let (status, _body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
@@ -534,7 +552,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
@@ -551,7 +578,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         let (status, _body) =
@@ -569,7 +605,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         // Unknown filters are treated as no filter — page still loads
@@ -597,7 +642,16 @@ mod tests {
         let admin =
             create_test_user_in_org(&state.store, "admin@corp.example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         // Seed an audit event with a mixed-case email domain, as an IdP might
@@ -632,7 +686,16 @@ mod tests {
         let target =
             create_test_user_in_org(&state.store, "target@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
 
         let data = serde_json::json!({ "target_user_id": target.id }).to_string();

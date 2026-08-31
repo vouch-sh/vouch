@@ -1062,9 +1062,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     );
 
     // Delete the authenticator — this triggers the cascade.
-    delete_authenticator(&store, &auth_id)
-        .await
-        .expect("delete authenticator");
+    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     // The approval's evidence is gone, so the request must read as denied
     // rather than stay redeemable (RFC 8628 §3.5 access_denied).

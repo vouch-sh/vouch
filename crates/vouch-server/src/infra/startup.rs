@@ -25,6 +25,13 @@ use crate::{
     services::integrations::github::GitHubApp,
 };
 
+/// Maximum size of an upstream IdP's SAML metadata document (1 MB).
+///
+/// A single-entity descriptor with several signing certificates is a few tens
+/// of kilobytes; 1 MB leaves room for a verbose issuer without letting the
+/// metadata host decide how much memory boot allocates.
+const MAX_SAML_METADATA_SIZE: usize = 1024 * 1024;
+
 /// All components needed to run the server after initialization.
 pub struct ServerComponents {
     /// Validated server configuration.
@@ -688,7 +695,7 @@ async fn build_configured_idp(
             ))
         }
         crate::config::IdpConfig::Saml(saml_cfg) => {
-            let metadata_xml = http_client
+            let metadata_response = http_client
                 .get(&saml_cfg.metadata_url)
                 .send()
                 .await
@@ -701,15 +708,16 @@ async fn build_configured_idp(
                         "SAML metadata fetch returned error for IdP '{}'",
                         saml_cfg.id
                     )
-                })?
-                .text()
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to read SAML metadata body for IdP '{}'",
-                        saml_cfg.id
-                    )
                 })?;
+            let metadata_xml =
+                crate::infra::egress::read_capped_text(metadata_response, MAX_SAML_METADATA_SIZE)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to read SAML metadata body for IdP '{}'",
+                            saml_cfg.id
+                        )
+                    })?;
             let idp_metadata =
                 crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
                     .with_context(|| {
@@ -864,11 +872,7 @@ fn log_authenticator_policy(config: &config::ServerConfig) {
             format!("allowlist ({} AAGUIDs)", set.len())
         }
     };
-    tracing::info!(
-        "Authenticator policy: aaguid={}, require_attestation_cert={}",
-        aaguid_policy,
-        config.require_attestation_cert,
-    );
+    tracing::info!("Authenticator policy: aaguid={}", aaguid_policy);
 }
 
 /// Timeout configuration for AWS KMS API calls.

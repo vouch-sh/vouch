@@ -345,18 +345,17 @@ pub(crate) async fn exchange_token(
 
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
-        if !matches!(
-            state
-                .session_cache
-                .get_session_by_token_hash(&state.store, &actor_token_hash)
-                .await,
-            Ok(Some(_))
-        ) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Actor token session not found or revoked",
-            ));
-        }
+        let _actor_session = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &actor_token_hash)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Actor token session not found or revoked",
+                )
+            })?;
 
         // Always load the actor user to check the active flag (#550).
         // Also use the canonical email from the DB when it is absent from the JWT.
@@ -514,11 +513,10 @@ pub(crate) async fn exchange_token(
             binding: params.binding,
             act: actor_claim,
             audience,
-            // Token exchange does not carry auth_time from the subject token
-            auth_time: None,
             // Propagate hardware verification from the subject token so
             // non-FIDO2 tokens (e.g., JWT bearer) cannot be laundered into
-            // hardware-verified tokens via exchange.
+            // hardware-verified tokens via exchange. The reconstruction drops
+            // `auth_time` — the exchange runs no ceremony of its own.
             hardware_verification: subject_decoded.hardware_verification(),
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
@@ -527,6 +525,13 @@ pub(crate) async fn exchange_token(
             // after the user rotates keys or changes orgs.
             hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
             org_domain: subject_session.org_domain.as_deref(),
+            // RFC 6749 Section 10.5 asks the server to revoke "all access
+            // tokens already granted based on the compromised authorization
+            // code". An exchanged token derives its authority from the subject
+            // token, so it inherits the subject's code and is revoked with it;
+            // inheriting rather than clearing also keeps a chain of exchanges
+            // linked back to the code that started it.
+            source_code_hash: subject_session.source_code_hash.as_deref(),
         },
         proof,
     )

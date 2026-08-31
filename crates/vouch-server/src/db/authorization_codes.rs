@@ -87,20 +87,6 @@ pub async fn try_consume_authorization_code(
     }
 }
 
-/// Check if consumed and return owner info for revocation.
-pub async fn get_consumed_code_owner(
-    store: &DocumentStore,
-    code_hash: &str,
-) -> Result<Option<(String, String)>> {
-    let doc = store
-        .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
-        .await?;
-    match doc {
-        Some(d) if d.data.consumed_at.is_some() => Ok(Some((d.data.user_id, d.data.client_id))),
-        _ => Ok(None),
-    }
-}
-
 /// Get the authorization_details for an authorization code (RFC 9396).
 ///
 /// Used after consuming the code to retrieve server-side stored

@@ -8,8 +8,8 @@
 
 use super::*;
 use crate::test_utils::{
-    create_test_authenticator, create_test_session, create_test_user, http_post_json, test_app,
-    test_app_state,
+    TestSessionSpec, create_test_authenticator, create_test_session_with, create_test_user,
+    http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -59,6 +59,19 @@ fn valid_client_data_json() -> String {
     let json =
         r#"{"type":"webauthn.create","challenge":"abc","origin":"https://test.example.com"}"#;
     URL_SAFE_NO_PAD.encode(json.as_bytes())
+}
+
+/// Decode the payload claims of a JWT without verifying the signature.
+///
+/// Splits the token on `.`, base64url-decodes the second part (payload),
+/// and parses it as a JSON object. Used only in tests to inspect claims.
+fn decode_jwt_payload_claims(token: &str) -> serde_json::Value {
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have exactly 3 parts");
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("Failed to base64url-decode JWT payload");
+    serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
 }
 
 // ── test_enrollment_complete_missing_state ───────────────────────────────
@@ -446,6 +459,141 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
     assert!(
         approvals.is_empty(),
         "direct sign-in must not emit device_auth_approved"
+    );
+}
+
+// ── Regression: bootstrap session must NOT delete keys without FIDO2 ────
+//
+// The enrollment bootstrap session minted after upstream IdP sign-in (no
+// FIDO2 assertion) must carry `auth_time: None`. The destructive-key
+// freshness gate in `handlers::enroll_keys::delete_key` anchors on
+// `auth_time.unwrap_or(0)`; with the fix it sees Unix epoch and demands a
+// step-up. Before the fix the bootstrap session carried the IdP login
+// time, so an attacker who hijacked the victim's IdP session could sign
+// in directly via the browser, land on `/enroll/keys`, and delete the
+// victim's keys (n-1) within the 60-second window without ever touching a
+// security key.
+//
+// This drives the real `complete_enrollment_after_identity` handler for a
+// returning user with existing keys on a direct browser sign-in (no CLI),
+// extracts the issued session cookie, decodes the JWT to assert `auth_time`
+// is absent, then issues `DELETE /enroll/keys/{id}` through the router with
+// that cookie and asserts it is rejected with `insufficient_user_authentication`.
+#[tokio::test]
+async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
+    let (app, state) = test_app().await;
+    // Two keys: the "last key" guard refuses to delete the only key, so a
+    // deletion that *would* be allowed by the freshness gate needs a spare
+    // to reach the delete step at all.
+    let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+    let kept = create_test_authenticator(&state.store, &user.id).await;
+    let doomed = create_test_authenticator(&state.store, &user.id).await;
+
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bootstrap-delete-state", None).await;
+    let identity = IdentityResult {
+        email: "bootstrap-delete@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // The exploit relies on landing on `/enroll/keys` (a direct web sign-in
+    // with no CLI waiting is NOT sent to `/login` for a FIDO2 assertion).
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location")
+        .to_string();
+    assert_eq!(
+        location, "/enroll/keys",
+        "direct returning-user sign-in must redirect to the keys page, got {location}"
+    );
+
+    // Extract the session cookie value the handler just issued.
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("Set-Cookie header must be present")
+        .to_str()
+        .expect("ascii Set-Cookie");
+    let cookie_value = set_cookie
+        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
+        .and_then(|(_, rest)| rest.split(';').next())
+        .expect("extract cookie value");
+
+    // G1: the bootstrap session JWT MUST NOT carry `auth_time` — no FIDO2
+    // authentication occurred on this direct IdP sign-in.
+    let jwt_payload = decode_jwt_payload_claims(cookie_value);
+    assert!(
+        matches!(
+            jwt_payload.get("auth_time"),
+            None | Some(serde_json::Value::Null)
+        ),
+        "bootstrap session must not carry auth_time (no FIDO2 occurred): {jwt_payload}"
+    );
+    // The session is also not hardware-verified (sanity-check the shape).
+    assert_eq!(
+        jwt_payload
+            .get("hardware_verified")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "bootstrap session hardware_verified must be false: {jwt_payload}"
+    );
+
+    // Drive DELETE /enroll/keys/{doomed} through the router with the cookie.
+    let cookie_header = format!("{}={}", vouch_common::SESSION_COOKIE_NAME, cookie_value);
+    let resp = http_delete_full(
+        &app,
+        &format!("/enroll/keys/{doomed}"),
+        &[("Cookie", &cookie_header)],
+    )
+    .await;
+
+    // G2: the destructive-key freshness gate must fail closed — the
+    // bootstrap session has no recent FIDO2 auth_time, so step-up is
+    // required rather than letting the IdP login time authorize deletion.
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "bootstrap session must not be able to delete keys, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("insufficient_user_authentication"),
+        "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // G3: the victim's keys survive. List via the same cookie and confirm
+    // both `kept` and `doomed` are still present (no partial deletion).
+    let resp = http_get_full(&app, "/enroll/keys/api", &[("Cookie", &cookie_header)]).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "list keys failed: {}",
+        resp.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| {
+            k.get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        })
+        .collect();
+    assert!(
+        ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
+        "both keys must survive the rejected deletion, got ids: {ids:?}"
     );
 }
 
@@ -1054,24 +1202,27 @@ async fn device_verify_page_ignores_invalid_user_code() {
     );
 }
 
-// ── Regression: browser_register_complete sets auth_time ────────────────
+// ── browser_register_complete requires a verified attestation chain ─────
 //
-// The `browser_register_complete` handler issues a `HardwareVerification::Verified`
-// session after FIDO2 WebAuthn registration. Before the fix it left `auth_time: None`,
-// which caused the `require_fresh_timestamp(token.auth_time.unwrap_or(0), ...)`
-// freshness gate on key deletion to treat the fresh session as Unix epoch, failing
-// every immediate delete with `StepUpRequired`.
+// Issue #1111: a self-attested registration used to be accepted, and the
+// AAGUID the client put in authData became the `hardware_aaguid` claim that
+// relying parties use to gate access by authenticator model. Registration now
+// requires an x5c chain that validates against a pinned Yubico root, with no
+// setting to relax it, so the forgery has nowhere to enter.
 //
-// This test drives the full handler with a cryptographically valid packed
-// self-attestation (signed by a software ES256 key), then decodes the issued
-// session JWT and asserts that `auth_time` is present, recent, and consistent
-// with the `amr`/`acr`/`hardware_verified` claims.
+// This drives the real endpoint with a well-formed, correctly signed
+// self-attestation — everything a forger could produce — and asserts it is
+// refused.
+//
+// This test previously asserted the opposite: that the same object enrolled
+// successfully and that the resulting session JWT carried `auth_time`,
+// `hardware_verified`, `amr` and `acr` (the regression guard from #1124). That
+// success path is no longer reachable from a test, because minting a
+// certificate under a pinned Yubico root is exactly what the change makes
+// impossible. The claim mapping those assertions covered now lives in
+// `services::auth::tests::test_verified_hardware_sets_amr_acr_and_flag`.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "hand-built WebAuthn packed attestation payload is inherently linear"
-)]
-async fn test_browser_register_complete_sets_auth_time_on_session() {
+async fn test_browser_register_complete_rejects_self_attestation() {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
     let (app, state) = test_app().await;
@@ -1232,86 +1383,19 @@ async fn test_browser_register_complete_sets_auth_time_on_session() {
 
     assert_eq!(
         resp.status,
-        StatusCode::OK,
-        "browser_register_complete should succeed, body: {}",
+        StatusCode::BAD_REQUEST,
+        "a self-attested registration must be refused, body: {}",
         resp.body
     );
-
-    // 10. Extract the Set-Cookie header and decode the JWT payload.
-    let set_cookie = resp
-        .headers
-        .get(axum::http::header::SET_COOKIE)
-        .expect("Set-Cookie header must be present")
-        .to_str()
-        .expect("ascii Set-Cookie");
     assert!(
-        set_cookie.contains(vouch_common::SESSION_COOKIE_NAME),
-        "Set-Cookie must set the session cookie: {set_cookie}"
+        resp.body.contains("attestation_cert_required"),
+        "expected attestation_cert_required, body: {}",
+        resp.body
     );
-    // Cookie value is between `<cookie_name>=` and the first `;`.
-    let cookie_value = set_cookie
-        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
-        .and_then(|(_, rest)| rest.split(';').next())
-        .expect("extract cookie value");
-    let jwt_payload = decode_jwt_payload_claims(cookie_value);
-
-    // G4: auth_time is present, recent, non-null.
-    let auth_time = jwt_payload
-        .get("auth_time")
-        .and_then(|v| v.as_i64())
-        .expect("auth_time must be present on the enrollment session JWT");
-    let skew = 10_i64;
-    let now_secs = jiff::Timestamp::now().as_second();
     assert!(
-        (now_secs - skew..=now_secs + skew).contains(&auth_time),
-        "auth_time ({auth_time}) should be within ±{skew}s of now ({now_secs})"
+        resp.headers.get(axum::http::header::SET_COOKIE).is_none(),
+        "a refused registration must not establish a session"
     );
-
-    // G4: hardware_verified, amr, acr are consistent with Verified FIDO2.
-    assert_eq!(
-        jwt_payload
-            .get("hardware_verified")
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "hardware_verified must be true: {jwt_payload}"
-    );
-    let amr = jwt_payload
-        .get("amr")
-        .and_then(|v| v.as_array())
-        .expect("amr must be present");
-    let amr_values: Vec<&str> = amr.iter().map(|v| v.as_str().unwrap_or("")).collect();
-    assert!(
-        amr_values.contains(&"hwk") && amr_values.contains(&"pin") && amr_values.contains(&"user"),
-        "amr must include hwk, pin, user: {amr:?}"
-    );
-    assert_eq!(
-        jwt_payload.get("acr").and_then(|v| v.as_str()),
-        Some(crate::services::auth::ACR_AAL3),
-        "acr must be AAL3: {jwt_payload}"
-    );
-
-    // 11. G1: the fresh session must pass the freshness gate on key delete.
-    // The "last key" guard refuses to delete the only key, so we cannot
-    // drive DELETE to 200 here without a second authenticator — but the
-    // freshness check itself runs *before* the last-key guard, so a 401
-    // StepUpRequired response would prove the gate fails. Instead, we
-    // verify via the unit-test coverage of `require_fresh_timestamp` plus
-    // the auth_time claim being recent (above), which together pin the
-    // fix. A stale-auth_time session (the bug) would have produced
-    // auth_time=null and been rejected; here auth_time is present and
-    // recent, so `unwrap_or(0)` is never taken.
-}
-
-/// Decode a JWT's payload (middle segment) as a JSON object without
-/// verifying the signature — test-only helper for asserting claim values.
-fn decode_jwt_payload_claims(jwt: &str) -> serde_json::Value {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    assert!(parts.len() >= 2, "JWT must have at least 2 parts");
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
-        .expect("decode JWT payload");
-    serde_json::from_slice(&payload_bytes).expect("parse JWT payload JSON")
 }
 
 #[tokio::test]
@@ -1321,7 +1405,16 @@ async fn test_browser_register_start_refuses_deactivated_user() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-start@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     crate::db::update_user_active_status(&state.store, &user.id, false)
         .await

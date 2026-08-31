@@ -1699,3 +1699,67 @@ fn test_attestation_format_identifiers_match_case_sensitively() {
         "a case variant must not be treated as the packed format"
     );
 }
+
+// =========================================================================
+// Unverified attestation formats do not convey an AAGUID
+// =========================================================================
+
+/// Run registration over an attestation of `fmt` whose authData carries
+/// `aaguid`, and return the AAGUID the verifier reports.
+fn aaguid_reported_for(fmt: &str, aaguid: [u8; 16]) -> Option<String> {
+    let rp_id = "example.com";
+    let challenge = "test-challenge";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, aaguid, b"cred-id", &cose_key);
+    let attestation = make_attestation_object(fmt, self_att_stmt(Some(-8)), &auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .unwrap()
+    .aaguid
+}
+
+/// `fido-u2f` has no verification procedure here, so its authData AAGUID is
+/// signed by nothing and must not be reported as the authenticator's identity.
+///
+/// CTAP 2.0 §7.2 gives the authenticator data a platform synthesizes from a
+/// CTAP1/U2F response as carrying an AAGUID "Initialized with all zeros", so a
+/// conforming fido-u2f registration conveys no AAGUID to begin with and this
+/// costs real U2F hardware nothing. A non-zero value there did not come from a
+/// conforming authenticator.
+#[test]
+fn test_unverified_format_does_not_convey_an_aaguid() {
+    let forged = [
+        0x28, 0x96, 0x9c, 0x24, 0x04, 0x87, 0x4a, 0x46, 0xbe, 0x39, 0x37, 0xbc, 0x63, 0x37, 0xa2,
+        0x4f,
+    ];
+    assert_eq!(
+        aaguid_reported_for("fido-u2f", forged),
+        None,
+        "an AAGUID from an unverified attestation format must be discarded"
+    );
+}
+
+/// The packed path still reports its AAGUID: §8.2 step 3 verifies the
+/// self-attestation signature, so the value is at least bound to the
+/// credential key. Guards against the suppression above being applied too
+/// broadly.
+#[test]
+fn test_packed_still_conveys_its_aaguid() {
+    assert_eq!(
+        aaguid_reported_for("packed", [1; 16]),
+        Some("01010101-0101-0101-0101-010101010101".to_string())
+    );
+}

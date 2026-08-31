@@ -278,6 +278,52 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
         );
     }
 
+    /// RFC 7592 §5: "The server MUST support TLS 1.2 [RFC5246] and MAY support
+    /// additional transport-layer security mechanisms meeting its security
+    /// requirements."
+    ///
+    /// The listener negotiates TLS 1.3 and TLS 1.2 only. TLS 1.2 support is
+    /// carried by the BCP 195 provider's ECDHE+AEAD suites — drop those and
+    /// TLS 1.2 stops being negotiable even though the version is still listed.
+    #[test]
+    fn test_tls_provider_supports_tls12_per_rfc7592() {
+        let provider = bcp195_crypto_provider();
+
+        let tls12_suites: Vec<_> = provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| cs.version().version == rustls::ProtocolVersion::TLSv1_2)
+            .collect();
+        assert!(
+            !tls12_suites.is_empty(),
+            "RFC 7592 §5 requires TLS 1.2 support, but no TLS 1.2 cipher suite is offered"
+        );
+
+        let tls13_suites: Vec<_> = provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| cs.version().version == rustls::ProtocolVersion::TLSv1_3)
+            .collect();
+        assert!(
+            !tls13_suites.is_empty(),
+            "TLS 1.3 is the preferred version and must remain available"
+        );
+
+        // MAY support additional mechanisms — but nothing below TLS 1.2, which
+        // BCP 195 forbids.
+        for suite in &provider.cipher_suites {
+            let version = suite.version().version;
+            assert!(
+                matches!(
+                    version,
+                    rustls::ProtocolVersion::TLSv1_2 | rustls::ProtocolVersion::TLSv1_3
+                ),
+                "no suite may predate TLS 1.2, found {version:?} for {:?}",
+                suite.suite()
+            );
+        }
+    }
+
     #[test]
     fn test_build_server_config_rejects_malformed_cert_pem() {
         // Passes the validate_pem check (contains "CERTIFICATE") but has

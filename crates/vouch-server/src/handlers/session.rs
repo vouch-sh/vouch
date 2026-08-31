@@ -6,6 +6,7 @@ use crate::crypto::hash_token;
 use crate::db;
 use crate::error::ServiceError;
 use crate::services::auth::ValidatedResourceToken;
+use crate::services::keys as key_svc;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -341,6 +342,20 @@ pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
 /// while `hardware_verified` is false.
 pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
 
+/// An access token whose session exercised the security key *recently*.
+///
+/// [`HardwareVerifiedToken`] asks whether a ceremony ever backed this session;
+/// this asks whether one happened within
+/// [`key_svc::KEY_DELETE_MAX_AGE_SECS`]. Deleting a key wants both, because a
+/// session lives for hours and a destructive action should rest on a touch
+/// from seconds ago.
+///
+/// Rejects with RFC 9470 `insufficient_user_authentication` (401) rather than
+/// the 403 `HardwareVerifiedToken` uses: the caller's correct response is to
+/// re-authenticate and retry, and the key-management page drives an inline
+/// FIDO2 step-up off exactly that challenge.
+pub(crate) struct SteppedUpToken(pub(crate) ValidatedResourceToken);
+
 /// Run the shared validation for both extractors.
 ///
 /// The path comes from `OriginalUri` so it is the path the client actually
@@ -447,6 +462,19 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
                 "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
             ));
         }
+        Ok(Self(token))
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_token_from_parts(parts, state).await?;
+        key_svc::require_recent_hardware_verification(&token)?;
         Ok(Self(token))
     }
 }
@@ -668,26 +696,38 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
             None => return AuthContext::unauthenticated(),
         };
 
-    // Verify session exists in DB
+    // Verify session exists in DB. This helper returns an infallible
+    // `AuthContext`, so a store failure can only be reported as
+    // unauthenticated — log it so an outage is distinguishable from a
+    // revoked session rather than surfacing as a silently logged-out UI.
     let token_hash = hash_token(token);
-    let session_exists = matches!(
-        state
-            .session_cache
-            .get_session_by_token_hash(&state.store, &token_hash)
-            .await,
-        Ok(Some(_))
-    );
-
-    if !session_exists {
-        return AuthContext::unauthenticated();
+    match state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return AuthContext::unauthenticated(),
+        Err(e) => {
+            tracing::error!(error = %e, "Session lookup failed; treating UI request as unauthenticated");
+            return AuthContext::unauthenticated();
+        }
     }
 
     let user_id = decoded.sub().to_string();
     let user_email = decoded.email().map(String::from);
 
-    // Look up user to check active status, org membership, and admin status
-    let Ok(user) = load_active_user(state, &user_id).await else {
-        return AuthContext::unauthenticated();
+    // Look up user to check active status, org membership, and admin status.
+    // A deactivated or deleted user is an ordinary unauthenticated outcome;
+    // only a store failure (`Internal`) is worth an error line.
+    let user = match load_active_user(state, &user_id).await {
+        Ok(user) => user,
+        Err(e) => {
+            if matches!(e, ServiceError::Internal(_)) {
+                tracing::error!(error = %e, "User lookup failed; treating UI request as unauthenticated");
+            }
+            return AuthContext::unauthenticated();
+        }
     };
     let (has_org, is_org_admin) = (user.org_id.is_some(), user.is_org_admin);
 

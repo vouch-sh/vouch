@@ -59,17 +59,16 @@ pub use users::{upsert_user, upsert_user_with_org};
 // Re-export session types and functions
 pub use sessions::{
     CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
-    delete_expired_sessions, delete_oauth_sessions_for_user, delete_session_by_token_hash,
+    delete_expired_sessions, delete_session_by_token_hash, delete_sessions_for_code_replay,
     delete_sessions_for_user, get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions
 pub use authenticators::{
     Authenticator, AuthenticatorWithUser, CreateAuthenticatorParams, count_authenticators_for_user,
-    create_authenticator, delete_authenticator, delete_authenticator_in_tx,
-    get_authenticator_by_credential_id, get_authenticator_by_id,
-    get_authenticator_with_user_by_credential_id, get_authenticators_for_user,
-    update_authenticator_counter, update_authenticator_name,
+    create_authenticator, delete_authenticator, get_authenticator_by_credential_id,
+    get_authenticator_by_id, get_authenticator_with_user_by_credential_id,
+    get_authenticators_for_user, update_authenticator_counter, update_authenticator_name,
 };
 
 // Re-export organization types and functions
@@ -147,9 +146,9 @@ pub use oauth::{
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
     get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
     is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
-    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
-    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
-    validate_oauth_client_credentials, validate_redirect_uri,
+    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, revoke_registration_access_token,
+    store_jwt_assertion_jti, update_oauth_client, update_oauth_client_last_used,
+    update_oauth_client_registration, validate_oauth_client_credentials, validate_redirect_uri,
 };
 
 // Re-export test-only OAuth client helpers
@@ -215,8 +214,8 @@ pub(crate) use claim::ClaimError;
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub(crate) use authorization_codes::AuthCodeClaim;
 pub use authorization_codes::{
-    delete_expired_authorization_codes, get_authorization_code_details, get_consumed_code_owner,
-    store_authorization_code, try_consume_authorization_code,
+    delete_expired_authorization_codes, get_authorization_code_details, store_authorization_code,
+    try_consume_authorization_code,
 };
 
 // Re-export enrollment types and functions

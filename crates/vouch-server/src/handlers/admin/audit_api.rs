@@ -567,7 +567,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         (org.id, admin.id, token)
     }
 
@@ -663,7 +672,16 @@ mod tests {
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, _body) =
             http_get(&app, PATH, &[("Authorization", &format!("Bearer {token}"))]).await;

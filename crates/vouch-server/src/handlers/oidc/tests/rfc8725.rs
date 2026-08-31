@@ -35,7 +35,16 @@ async fn test_rfc8725_cross_type_token_substitution() {
     // Valid OAuth access token (ES256, at+jwt) should work
     let user = create_test_user(&state.store, "cross-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, _body) = http_get(
         &app,
@@ -193,7 +202,16 @@ async fn test_rfc8725_access_token_not_accepted_at_par_as_id_token() {
     let user = create_test_user(&state.store, "par-hint@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Submit an access token as id_token_hint to PAR endpoint
     // (the token is valid ES256 but the endpoint should not be confused)

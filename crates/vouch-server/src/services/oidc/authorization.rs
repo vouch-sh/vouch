@@ -8,8 +8,8 @@
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{
-    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, Session, TokenEndpointAuthMethod,
-    User,
+    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode, Session,
+    TokenEndpointAuthMethod, User,
 };
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
@@ -84,35 +84,36 @@ pub enum Prompt {
 }
 
 impl Prompt {
-    /// Every accepted `prompt` value, in the order shown to clients.
+    /// Every value OIDC Core Section 3.1.2.1 defines, paired with the
+    /// behavior Vouch offers for it.
     ///
-    /// [`parse`](Self::parse) and [`supported_values`](Self::supported_values)
-    /// both read this table, so an accepted value cannot be missing from the
+    /// `select_account` is defined by the specification but has no `Prompt`
+    /// variant: Vouch authenticates a single identity per session and has no
+    /// account chooser, so it can never obtain the account selection the
+    /// value asks for. Section 3.1.2.1 covers exactly that case — "If it
+    /// cannot obtain an account selection choice made by the End-User, it
+    /// MUST return an error, typically `account_selection_required`" — which
+    /// is why it is listed here as defined-but-unhonored rather than left out
+    /// to be reported as an unrecognized value.
+    ///
+    /// [`PromptSet::parse`] and [`supported_values`](Self::supported_values)
+    /// both read this table, so an honored value cannot be missing from the
     /// error message that lists them and a listed value cannot be
     /// unparseable. Keeping them as separate literals is how the message came
     /// to advertise fewer values than the parser accepted.
-    const ACCEPTED: &'static [(&'static str, Self)] = &[
-        ("login", Self::Login),
-        ("none", Self::Silent),
-        ("consent", Self::Consent),
+    const DEFINED: &'static [(&'static str, Option<Self>)] = &[
+        ("login", Some(Self::Login)),
+        ("none", Some(Self::Silent)),
+        ("consent", Some(Self::Consent)),
+        ("select_account", None),
     ];
 
-    /// Parse a prompt value from a string.
-    ///
-    /// Returns `None` for unsupported values (e.g., `select_account`).
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ACCEPTED
-            .iter()
-            .find(|(value, _)| *value == s)
-            .map(|(_, prompt)| *prompt)
-    }
-
-    /// Comma-separated list of accepted values, for error messages.
+    /// Comma-separated list of the honored values, for error messages.
     #[must_use]
     pub fn supported_values() -> String {
-        Self::ACCEPTED
+        Self::DEFINED
             .iter()
+            .filter(|(_, prompt)| prompt.is_some())
             .map(|(value, _)| *value)
             .collect::<Vec<_>>()
             .join(", ")
@@ -133,6 +134,163 @@ impl fmt::Display for Prompt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The set of values carried by one `prompt` parameter.
+///
+/// OIDC Core Section 3.1.2.1 defines `prompt` as a "Space-delimited,
+/// case-sensitive list of ASCII string values", so `prompt=login consent` is
+/// a single request for two behaviors rather than an unrecognized value. The
+/// set is the parsed form of that list; [`parse`](Self::parse) is the only
+/// way to build one, so a `PromptSet` in hand has already been checked
+/// against every rule the section states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PromptSet {
+    login: bool,
+    silent: bool,
+    consent: bool,
+}
+
+impl PromptSet {
+    /// Parse the `prompt` request parameter.
+    ///
+    /// # Errors
+    ///
+    /// - `account_selection_required` when `select_account` is requested, per
+    ///   the OIDC Core Section 3.1.2.1 sentence quoted on [`Prompt::DEFINED`].
+    ///   Callers that cannot return a user-interaction error code — the PAR
+    ///   endpoint, per RFC 9126 Section 2.3 — translate it at their boundary.
+    /// - `invalid_request` when `none` appears alongside another value:
+    ///   "If this parameter contains `none` with any other value, an error is
+    ///   returned."
+    /// - `invalid_request` for a value outside the defined set. The same
+    ///   section permits either answer — "it MAY return an error or it MAY
+    ///   ignore it" — and Vouch returns one so that a client learns its
+    ///   request was not understood.
+    pub fn parse(raw: &str) -> ServiceResult<Self> {
+        let mut set = Self::default();
+        let mut others = false;
+
+        for token in raw.split_whitespace() {
+            match Prompt::DEFINED.iter().find(|(value, _)| *value == token) {
+                Some((_, Some(Prompt::Login))) => {
+                    set.login = true;
+                    others = true;
+                }
+                Some((_, Some(Prompt::Silent))) => set.silent = true,
+                Some((_, Some(Prompt::Consent))) => {
+                    set.consent = true;
+                    others = true;
+                }
+                Some((_, None)) => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::AccountSelectionRequired,
+                        "prompt=select_account is not supported: this authorization server \
+                         authenticates a single account per session",
+                    ));
+                }
+                None => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidRequest,
+                        format!(
+                            "Unsupported prompt value. Supported values: {}",
+                            Prompt::supported_values()
+                        ),
+                    ));
+                }
+            }
+        }
+
+        if set.silent && others {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "prompt=none must not be combined with other prompt values",
+            ));
+        }
+
+        Ok(set)
+    }
+
+    /// A set holding exactly one value.
+    #[must_use]
+    pub fn of(prompt: Prompt) -> Self {
+        let mut set = Self::default();
+        match prompt {
+            Prompt::Login => set.login = true,
+            Prompt::Silent => set.silent = true,
+            Prompt::Consent => set.consent = true,
+        }
+        set
+    }
+
+    /// Whether the request asked for this behavior.
+    #[must_use]
+    pub fn contains(self, prompt: Prompt) -> bool {
+        match prompt {
+            Prompt::Login => self.login,
+            Prompt::Silent => self.silent,
+            Prompt::Consent => self.consent,
+        }
+    }
+
+    /// Whether the parameter carried no values at all.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        !self.login && !self.silent && !self.consent
+    }
+
+    /// The set in the wire form `prompt` uses, for storage and re-parsing.
+    #[must_use]
+    pub fn to_space_separated(self) -> String {
+        let mut values = Vec::new();
+        for (value, prompt) in Prompt::DEFINED {
+            if prompt.is_some_and(|p| self.contains(p)) {
+                values.push(*value);
+            }
+        }
+        values.join(" ")
+    }
+}
+
+impl fmt::Display for PromptSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_space_separated())
+    }
+}
+
+/// Resolve the `response_mode` request parameter into the mode the
+/// authorization response will use.
+///
+/// An absent parameter yields the default for the `code` response type
+/// (OAuth 2.0 Multiple Response Type Encoding Practices Section 2.1: "For
+/// purposes of this specification, the default Response Mode for the OAuth
+/// 2.0 `code` Response Type is the `query` encoding").
+///
+/// Every entry point that turns a client-supplied `response_mode` into a
+/// [`ResponseMode`] goes through here, because the alternative — reading
+/// [`ResponseMode::parse`] and substituting the default when it returns
+/// `None` — silently answers a `form_post` or `jwt` request with a bare query
+/// redirect, delivering the authorization code by a mechanism the client is
+/// not listening on. The specification says nothing about unrecognized
+/// values, so rejecting one is our decision rather than a requirement; it is
+/// the one answer that cannot hand a client a response it will not see.
+///
+/// # Errors
+///
+/// Returns `invalid_request` when the value is not a supported mode.
+pub fn parse_response_mode(value: Option<&str>) -> ServiceResult<ResponseMode> {
+    let Some(value) = value else {
+        return Ok(ResponseMode::Query);
+    };
+    ResponseMode::parse(value).ok_or_else(|| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            format!(
+                "Unsupported response_mode. Supported values: {}",
+                ResponseMode::supported_values()
+            ),
+        )
+    })
 }
 
 /// Parameters for creating an authorization code.
@@ -216,8 +374,10 @@ pub struct AuthorizeRequestParams {
     pub acr_values: Option<String>,
     /// RFC 9470 / OIDC Core Section 3.1.2.1: Maximum authentication age in seconds.
     pub max_age: Option<u64>,
-    /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
-    pub prompt: Option<Prompt>,
+    /// OIDC Core Section 3.1.2.1: Requested prompt behavior (raw
+    /// space-delimited string from the request, validated into a
+    /// [`PromptSet`]).
+    pub prompt: Option<String>,
     /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
     pub dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details (raw JSON string from request).
@@ -246,7 +406,7 @@ pub struct ValidatedAuthRequest {
     /// RFC 9470: Maximum authentication age in seconds.
     max_age: Option<u64>,
     /// OIDC Core: Requested prompt behavior.
-    prompt: Option<Prompt>,
+    prompt: Option<PromptSet>,
     /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
     dpop_jkt: Option<String>,
     /// RFC 9396: Validated authorization details.
@@ -316,8 +476,18 @@ impl ValidatedAuthRequest {
 
     /// OIDC Core: Requested prompt behavior.
     #[must_use]
-    pub fn prompt(&self) -> Option<Prompt> {
+    pub fn prompt(&self) -> Option<PromptSet> {
         self.prompt
+    }
+
+    /// Whether the request asked for a particular prompt behavior.
+    ///
+    /// `prompt` is a list, so asking whether it *equals* one value is the
+    /// wrong question: `prompt=login consent` asks for `login` just as much
+    /// as `prompt=login` does.
+    #[must_use]
+    pub fn has_prompt(&self, prompt: Prompt) -> bool {
+        self.prompt.is_some_and(|set| set.contains(prompt))
     }
 
     /// RFC 9449 Section 10: DPoP JWK thumbprint.
@@ -534,8 +704,19 @@ pub fn validate_authorize_request(
         ));
     }
 
-    // prompt is already validated by Prompt::parse() at the handler level;
-    // the enum type ensures only valid values reach here.
+    // OIDC Core Section 3.1.2.1: validate `prompt` here rather than at each
+    // handler. RFC 9101 Section 6.3 has a Request Object's parameters
+    // "validated ... as specified in OAuth 2.0", i.e. the same way a plain
+    // request's are, so a plain body, a pushed request, and a signed Request
+    // Object all reach this one check and answer alike. An empty list is the
+    // same as no parameter at all.
+    let prompt = match params.prompt.as_deref() {
+        Some(raw) => {
+            let set = PromptSet::parse(raw)?;
+            (!set.is_empty()).then_some(set)
+        }
+        None => None,
+    };
 
     // RFC 9700 Section 2.1.1: PKCE with S256 is required for all clients.
     let parsed_method = if let Some(ref method_str) = params.code_challenge_method {
@@ -595,7 +776,7 @@ pub fn validate_authorize_request(
         resource: params.resource,
         acr_values: params.acr_values,
         max_age: params.max_age,
-        prompt: params.prompt,
+        prompt,
         dpop_jkt: params.dpop_jkt,
         authorization_details: parsed_authorization_details,
     })
@@ -657,7 +838,31 @@ pub async fn check_session_for_authorization(
 
     match validate_session_token(state, token).await? {
         Some(validated) => {
-            // Authorization flow requires an authenticator (hardware verification)
+            // Two separate facts, and the authorization flow needs both.
+            //
+            // `authenticator` says the user has a key on record. That alone
+            // used to gate this path, but an enrollment bootstrap session —
+            // upstream IdP sign-in, no ceremony — carries an authenticator for
+            // any returning user while `hardware_verified` is false. Issuing a
+            // code from one produced tokens claiming `acr: aal3` and
+            // `amr: [hwk, pin, user]` to the relying party for an
+            // authentication where no key was touched, because
+            // `exchange_authorization_code` stamps the grant as `Verified`
+            // unconditionally.
+            //
+            // This is the same unsound inference as issue #1114, which read a
+            // fresh `auth_time` as evidence of a ceremony. Ask directly.
+            // Sending the user to `/login` to assert is what PAR/FAPI clients
+            // already get from `ReauthPolicy::Always`; this extends it to the
+            // flows that use `ReauthPolicy::OnDemand`.
+            if !validated.hardware_verified {
+                tracing::info!(
+                    target: "security",
+                    user_id = %validated.user.id,
+                    "authorization requires an assertion: session is not hardware-verified"
+                );
+                return Ok(AuthorizationSessionState::NeedsAuth);
+            }
             let Some(authenticator) = validated.authenticator else {
                 return Ok(AuthorizationSessionState::NeedsAuth);
             };
@@ -873,6 +1078,7 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -1508,7 +1714,7 @@ mod tests {
             resource: None,
             acr_values: None,
             max_age: None,
-            prompt: Some(Prompt::Login),
+            prompt: Some("login".to_string()),
             dpop_jkt: None,
             authorization_details: None,
             response_mode: None,
@@ -1517,7 +1723,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.prompt(), Some(Prompt::Login));
+        assert_eq!(validated.prompt(), Some(PromptSet::of(Prompt::Login)));
     }
 
     // OIDC Core §3.1.2.1: prompt=none forbids any user interaction.
@@ -1535,7 +1741,7 @@ mod tests {
             resource: None,
             acr_values: None,
             max_age: None,
-            prompt: Some(Prompt::Silent),
+            prompt: Some("none".to_string()),
             dpop_jkt: None,
             authorization_details: None,
             response_mode: None,
@@ -1544,7 +1750,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.prompt(), Some(Prompt::Silent));
+        assert_eq!(validated.prompt(), Some(PromptSet::of(Prompt::Silent)));
     }
 
     // RFC 9470 §4: the acr_values parameter is bounded.
@@ -1572,14 +1778,102 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // OIDC Core §3.1.2.1: prompt is a space-delimited list of values.
+    /// Extract the OAuth error code from a failed [`PromptSet::parse`].
+    fn prompt_error(raw: &str) -> OAuthErrorCode {
+        match PromptSet::parse(raw) {
+            Ok(set) => panic!("{raw:?} should have been rejected, parsed as {set}"),
+            Err(ServiceError::OAuth { code, .. }) => code,
+            Err(e) => panic!("expected an OAuth error for {raw:?}, got {e:?}"),
+        }
+    }
+
+    // OIDC Core §3.1.2.1: each honored value parses on its own.
     #[test]
-    fn test_prompt_parse() {
-        assert_eq!(Prompt::parse("login"), Some(Prompt::Login));
-        assert_eq!(Prompt::parse("none"), Some(Prompt::Silent));
-        assert_eq!(Prompt::parse("consent"), Some(Prompt::Consent));
-        assert_eq!(Prompt::parse("select_account"), None);
-        assert_eq!(Prompt::parse(""), None);
+    fn test_prompt_parse_single_values() {
+        for (raw, prompt) in [
+            ("login", Prompt::Login),
+            ("none", Prompt::Silent),
+            ("consent", Prompt::Consent),
+        ] {
+            assert_eq!(
+                PromptSet::parse(raw).unwrap(),
+                PromptSet::of(prompt),
+                "{raw:?} should parse as the {prompt} behavior"
+            );
+        }
+    }
+
+    // OIDC Core §3.1.2.1: prompt is a "Space-delimited, case-sensitive list of
+    // ASCII string values", so more than one value in one parameter is a
+    // request for both behaviors, not an unrecognized value.
+    #[test]
+    fn test_prompt_parse_accepts_multiple_values() {
+        let set = PromptSet::parse("login consent").unwrap();
+        assert!(set.contains(Prompt::Login), "login must be honored");
+        assert!(set.contains(Prompt::Consent), "consent must be honored");
+        assert!(!set.contains(Prompt::Silent));
+
+        // Order is the client's choice; the parsed set is the same either way.
+        assert_eq!(set, PromptSet::parse("consent login").unwrap());
+    }
+
+    // OIDC Core §3.1.2.1: "If this parameter contains none with any other
+    // value, an error is returned."
+    #[test]
+    fn test_prompt_parse_rejects_none_with_other_values() {
+        assert_eq!(prompt_error("none login"), OAuthErrorCode::InvalidRequest);
+        assert_eq!(prompt_error("consent none"), OAuthErrorCode::InvalidRequest);
+    }
+
+    // OIDC Core §3.1.2.1: for select_account, "If it cannot obtain an account
+    // selection choice made by the End-User, it MUST return an error,
+    // typically account_selection_required." Vouch authenticates one account
+    // per session, so it never can.
+    #[test]
+    fn test_prompt_parse_rejects_select_account() {
+        assert_eq!(
+            prompt_error("select_account"),
+            OAuthErrorCode::AccountSelectionRequired
+        );
+        assert_eq!(
+            prompt_error("login select_account"),
+            OAuthErrorCode::AccountSelectionRequired
+        );
+    }
+
+    // OIDC Core §3.1.2.1 permits either answer for a value outside the defined
+    // set — "it MAY return an error or it MAY ignore it". Vouch returns one.
+    #[test]
+    fn test_prompt_parse_rejects_undefined_values() {
+        assert_eq!(prompt_error("x_vendor_ext"), OAuthErrorCode::InvalidRequest);
+        assert_eq!(
+            prompt_error("login x_vendor_ext"),
+            OAuthErrorCode::InvalidRequest
+        );
+        // Case-sensitive: "Login" is not "login".
+        assert_eq!(prompt_error("Login"), OAuthErrorCode::InvalidRequest);
+    }
+
+    // RFC 6749 §3.1: "Parameters sent without a value MUST be treated as if
+    // they were omitted from the request." An empty list carries no values.
+    #[test]
+    fn test_prompt_parse_empty_is_no_values() {
+        assert!(PromptSet::parse("").unwrap().is_empty());
+        assert!(PromptSet::parse("   ").unwrap().is_empty());
+    }
+
+    // The stored form has to survive a round trip: a PAR record's prompt is
+    // re-parsed when the request_uri is redeemed at the authorize endpoint.
+    #[test]
+    fn test_prompt_set_round_trips_through_its_wire_form() {
+        for raw in ["login", "none", "consent", "login consent"] {
+            let set = PromptSet::parse(raw).unwrap();
+            assert_eq!(
+                PromptSet::parse(&set.to_space_separated()).unwrap(),
+                set,
+                "{raw:?} did not survive a round trip"
+            );
+        }
     }
 
     /// Every value the error message advertises must actually parse. This is
@@ -1592,15 +1886,17 @@ mod tests {
         assert!(!advertised.is_empty(), "message must list something");
         for value in advertised.split(", ") {
             assert!(
-                Prompt::parse(value).is_some(),
+                PromptSet::parse(value).is_ok(),
                 "advertised prompt {value:?} does not parse"
             );
         }
-        // And every accepted value is advertised.
-        for (value, _) in Prompt::ACCEPTED {
-            assert!(
+        // And every honored value is advertised. `select_account` is defined
+        // but not honored, so it is deliberately absent from the list.
+        for (value, prompt) in Prompt::DEFINED {
+            assert_eq!(
                 advertised.contains(value),
-                "accepted prompt {value:?} is missing from the advertised list"
+                prompt.is_some(),
+                "advertised list disagrees with the parser about {value:?}"
             );
         }
     }

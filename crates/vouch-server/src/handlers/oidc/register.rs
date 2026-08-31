@@ -74,7 +74,8 @@ pub(crate) async fn register(
 ///
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 200 with current client metadata
-/// on success, 401 if the token is invalid, 404 if the client does not exist.
+/// on success, 401 if the token is invalid or the client does not exist
+/// (RFC 7592 §2.1/§5 keep these cases indistinguishable).
 pub(crate) async fn read_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
@@ -136,7 +137,8 @@ pub(crate) async fn update_client(
 ///
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 204 No Content on success,
-/// 401 if the token is invalid, 404 if the client does not exist.
+/// 401 if the token is invalid or the client does not exist (RFC 7592
+/// §2.3/§5 keep these cases indistinguishable).
 pub(crate) async fn delete_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,

@@ -297,6 +297,21 @@ covered without hardware through the `CoseVerifier` seam
   doc lists every submodule's scope — put new db tests in the file whose scope matches,
   and add a new file (listed in that doc) when none does.
 
+**Build fixtures from the spec structs, never from hand-rolled parameter
+literals.** `test_utils.rs` has one factory per fixture kind, each taking a
+spec struct whose `Default` is the ordinary case, so a test spells out only the
+axis it is about:
+
+- Sessions → `create_test_session_with(&state, TestSessionSpec { .. })`. Vary
+  `auth_id`, `client_id`, `audience`, `binding` (`TestBinding`), and
+  `verification` (`TestVerification`).
+- OAuth clients → `create_test_client(&store, &user_id, TestClientSpec { .. })`.
+
+If a field the test needs is missing, add it to the spec — do not reach past
+the factory to `CreateOAuthTokenParams` / `CreateOAuthClientParams`. Those
+literals are spelled out once, inside the factory, so adding a field to either
+does not touch a single test.
+
 **Cite the requirement a test pins.** A test that verifies a normative
 statement names the spec and section in a comment above it or in its assertion
 message:

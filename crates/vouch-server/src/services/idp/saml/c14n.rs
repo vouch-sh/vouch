@@ -245,7 +245,7 @@ fn collect_namespaces(
         {
             result.insert((lookup_prefix.to_string(), uri.to_string()));
         }
-        // If the prefix is not in scope, silently skip it (per C4 fix).
+        // If the prefix is not in scope, silently skip it.
     }
 
     // Exclude pairs whose prefix's current ancestor binding is the same URI.
@@ -279,7 +279,7 @@ fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&
         for ns in n.namespaces() {
             if ns.uri() == uri {
                 let prefix = ns.name().unwrap_or("");
-                // A2 fix: never return the xml prefix via this path.
+                // Never return the xml prefix via this path.
                 // xml: is implicitly bound; it must never appear in ns declarations output.
                 if prefix != "xml" {
                     candidates.push((prefix, depth));
@@ -345,7 +345,7 @@ fn resolve_prefix_in_scope<'a>(node: roxmltree::Node<'a, 'a>, prefix: &str) -> O
 /// If the element is in a default namespace (no prefix), returns just `"localname"`.
 /// If the element has no namespace, returns just `"localname"`.
 ///
-/// Note: The `xml:` prefix is never returned by `find_prefix_for_uri` (see A2 fix).
+/// Note: The `xml:` prefix is never returned by `find_prefix_for_uri`.
 /// Element names with the xml namespace would be extremely unusual (elements in
 /// http://www.w3.org/XML/1998/namespace). In practice this never occurs in SAML.
 fn node_qualified_name(node: roxmltree::Node<'_, '_>) -> String {
@@ -566,7 +566,7 @@ mod tests {
         );
     }
 
-    /// C1: Multiple unprefixed attributes must sort alphabetically by local name.
+    /// Multiple unprefixed attributes must sort alphabetically by local name.
     #[test]
     fn multiple_unprefixed_attributes_sort_alphabetically() {
         let result = c14n(
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(result, r#"<child xmlns="urn:default">text</child>"#);
     }
 
-    /// C2: Namespace re-declaration with different URI must re-emit the declaration.
+    /// Namespace re-declaration with different URI must re-emit the declaration.
     #[test]
     fn namespace_redeclaration_with_different_uri() {
         let xml = r#"<root xmlns:a="urn:one"><child xmlns:a="urn:two"><a:elem/></child></root>"#;
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(result, r#"<a:elem xmlns:a="urn:two"></a:elem>"#);
     }
 
-    /// C4: InclusiveNamespaces with prefixes not in scope must be silently skipped.
+    /// InclusiveNamespaces with prefixes not in scope must be silently skipped.
     #[test]
     fn inclusive_prefixes_out_of_scope_silently_skipped() {
         let xml = r##"<root xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:Info/></root>"##;
@@ -744,7 +744,7 @@ mod tests {
 </n0:local>"#;
         let result = c14n(xml, "elem2", &[]);
         // n1:elem2 is visibly utilized so xmlns:n1 appears.
-        // xml:lang renders the attribute but NOT xmlns:xml (A2 fix).
+        // xml:lang renders the attribute but NOT xmlns:xml.
         // n3 is not visibly utilized by elem2 itself, so NOT rendered on elem2.
         // n3:stuff has n3 visibly utilized, so it DOES re-declare xmlns:n3.
         assert!(

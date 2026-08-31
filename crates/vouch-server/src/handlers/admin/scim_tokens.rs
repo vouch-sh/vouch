@@ -29,6 +29,11 @@ use crate::handlers::{ValidPath, ValidUuid};
 // SCIM Token Management API
 // ============================================================================
 
+/// Maximum length of a SCIM token description, in Unicode characters. Matches
+/// the `maxlength` the admin form advertises, which the browser counts in
+/// characters rather than UTF-8 bytes.
+const MAX_SCIM_TOKEN_DESCRIPTION_CHARS: usize = 256;
+
 /// The four SCIM provisioning scopes plus, if requested, `audit:read`.
 /// Shared by the API and UI create handlers so the scope set granted to a
 /// new token can't drift between the two entry points.
@@ -117,7 +122,7 @@ pub(crate) async fn create_scim_token(
 ) -> Result<Json<CreateScimTokenResponse>, ServiceError> {
     // Validate inputs before auth to fail fast on obviously bad requests
     if let Some(ref desc) = req.description
-        && desc.len() > 256
+        && desc.chars().count() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS
     {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -380,7 +385,7 @@ pub(crate) async fn admin_create_scim_token(
 
     // Validate inputs before auth to fail fast on obviously bad requests
     if let Some(ref desc) = form.description
-        && desc.len() > 256
+        && desc.chars().count() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS
     {
         return Ok(redirect_error(
             jar,
@@ -540,6 +545,7 @@ pub(crate) async fn admin_revoke_scim_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use super::MAX_SCIM_TOKEN_DESCRIPTION_CHARS;
     use axum::http::StatusCode;
     use secrecy::ExposeSecret;
 
@@ -633,6 +639,43 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "Invalid input must return 400 before auth check"
         );
+    }
+
+    // The description guard counts Unicode characters, not UTF-8 bytes, so a
+    // multibyte description under the limit the form advertises clears
+    // validation and fails only on auth.
+    #[tokio::test]
+    async fn test_create_scim_token_multibyte_description_within_char_limit() {
+        let (app, _state) = test_app().await;
+
+        // 200 CJK characters = 600 UTF-8 bytes.
+        let desc = "説".repeat(200);
+        assert_eq!(desc.chars().count(), 200);
+        assert!(desc.len() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS);
+        let body_json =
+            serde_json::json!({ "description": desc, "expires_in_days": 30 }).to_string();
+
+        let (status, body) = http_post_json(&app, "/api/v1/org/scim-tokens", &body_json, &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "multibyte description within the character limit must pass validation: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_multibyte_description_over_char_limit() {
+        let (app, _state) = test_app().await;
+
+        let desc = "説".repeat(257);
+        let body_json =
+            serde_json::json!({ "description": desc, "expires_in_days": 30 }).to_string();
+
+        let (status, _body) =
+            http_post_json(&app, "/api/v1/org/scim-tokens", &body_json, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -737,7 +780,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         let (status, body) = http_post_json(
@@ -773,7 +825,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         let (status, body) = http_post_json(
@@ -831,7 +892,16 @@ mod tests {
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         let (status, _body) = http_post_json(
@@ -851,7 +921,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         // Create first token
@@ -899,7 +978,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         let (status, body) = http_get(
@@ -921,7 +1009,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         // Create a token
@@ -994,7 +1091,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         // Create a token to delete
@@ -1034,7 +1140,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let auth_header = format!("Bearer {token}");
 
         let nonexistent_id = uuid::Uuid::now_v7();

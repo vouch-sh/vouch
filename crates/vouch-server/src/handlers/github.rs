@@ -1039,7 +1039,16 @@ mod tests {
         let org = create_test_org(&state.store, domain).await;
         let user = create_test_user_in_org(&state.store, email, &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(state, &user.id, email, &auth_id).await;
+        let session_token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let token_hash = crate::crypto::hash_token(&session_token);
         (user.id, org.id, session_token, token_hash)
     }

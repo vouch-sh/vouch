@@ -68,7 +68,7 @@ async fn test_revoke_without_client_auth_returns_401() {
 }
 
 // ========================================================================
-// P2: RFC 7009 — Token Revocation
+// RFC 7009 — Token Revocation
 // ========================================================================
 
 #[tokio::test]

@@ -10,7 +10,8 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
-use vouch_common::{KeyInfo, lookup_device_model};
+use crate::infra::i18n::Tr;
+use vouch_common::{KeyInfo, MAX_KEY_NAME_CHARS, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
@@ -53,6 +54,53 @@ pub(crate) async fn consume_registration_state(
             ))
         }
     }
+}
+
+/// Require proof that the caller exercised their security key, and did so
+/// recently, before a destructive key operation.
+///
+/// The two halves are separate claims and both are load-bearing:
+///
+/// * `hardware_verified` — whether a FIDO2 assertion backs this session at
+///   all. An enrollment bootstrap session, minted from an upstream IdP
+///   sign-in with no ceremony, is `false`.
+/// * `auth_time` — *when* that assertion happened. Sessions last hours;
+///   deleting a key is a step-up action that wants a ceremony from seconds
+///   ago.
+///
+/// Asking only about recency reads a timestamp as evidence a ceremony
+/// occurred. That inference is sound today only because
+/// `HardwareVerification` no longer lets an unverified token carry an
+/// `auth_time` — it is one refactor away from being wrong again, and it was
+/// wrong in issue #1114. Ask the question directly instead.
+///
+/// Enforced by the `SteppedUpToken` extractor, which is what makes a handler
+/// unable to skip it; this function is the rule that extractor applies.
+///
+/// # Errors
+///
+/// Returns `ServiceError::StepUpRequired` when the session is not
+/// hardware-verified, or when its FIDO2 assertion is older than
+/// [`KEY_DELETE_MAX_AGE_SECS`].
+pub(crate) fn require_recent_hardware_verification(
+    token: &crate::services::auth::ValidatedResourceToken,
+) -> Result<(), ServiceError> {
+    if !token.hardware_verified {
+        tracing::warn!(
+            target: "security",
+            user_id = %token.sub,
+            "refusing a destructive key operation on a session that never \
+             exercised the security key"
+        );
+        return Err(ServiceError::StepUpRequired {
+            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+            max_age: Some(u64::try_from(KEY_DELETE_MAX_AGE_SECS).unwrap_or(60)),
+        });
+    }
+
+    // A hardware-verified session always records when. Epoch is the
+    // fail-closed reading for a token that somehow lacks it.
+    require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
 }
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
@@ -127,8 +175,9 @@ pub(crate) async fn list_keys_for_user(
 ///
 /// Returns:
 /// - `ServiceError::Validation` if the name is empty or too long.
-/// - `ServiceError::NotFound` if the key does not exist.
-/// - `ServiceError::Forbidden` if the key does not belong to the user.
+/// - `ServiceError::NotFound` if the key does not exist *or* belongs to another
+///   user. The two are deliberately indistinguishable: a 403 for someone else's
+///   key would let any authenticated caller probe whether a given key id exists.
 /// - `ServiceError::Internal` on database errors.
 pub(crate) async fn rename_key(
     store: &DocumentStore,
@@ -139,18 +188,22 @@ pub(crate) async fn rename_key(
     // Validate key_id is a UUID before DB lookup
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
     // Validate name
     let name = new_name.trim();
     if name.is_empty() {
-        return Err(ServiceError::Validation("Name cannot be empty".to_string()));
-    }
-    if name.chars().count() > 100 {
         return Err(ServiceError::Validation(
-            "Name must be 100 characters or less".to_string(),
+            Tr::new("keys-error-name-empty").to_string(),
+        ));
+    }
+    if name.chars().count() > MAX_KEY_NAME_CHARS {
+        return Err(ServiceError::Validation(
+            Tr::new("keys-error-name-too-long")
+                .arg("max", MAX_KEY_NAME_CHARS.to_string())
+                .to_string(),
         ));
     }
 
@@ -163,13 +216,12 @@ pub(crate) async fn rename_key(
         })?
         .ok_or(ServiceError::NotFound("Key"))?;
 
-    // Verify the key belongs to the user
+    // Verify the key belongs to the user. Another user's key is reported as
+    // "not found", identically to a key id that does not exist — the caller is
+    // authenticated but has no business learning which key ids are real.
     if authenticator.user_id != user_id {
-        return Err(ServiceError::api(
-            axum::http::StatusCode::FORBIDDEN,
-            "forbidden",
-            "Key does not belong to this user",
-        ));
+        tracing::debug!("Rename refused: key {key_id} does not belong to user {user_id}");
+        return Err(ServiceError::NotFound("Key"));
     }
 
     // Update the name
@@ -203,8 +255,10 @@ pub(crate) async fn rename_key(
 /// # Errors
 ///
 /// Returns:
-/// - `ServiceError::NotFound` if the key (or user) does not exist.
-/// - `ServiceError::Forbidden` if the key does not belong to the user.
+/// - `ServiceError::NotFound` if the key (or user) does not exist, or if the key
+///   belongs to another user. The last two are deliberately indistinguishable:
+///   a 403 for someone else's key would let any authenticated caller probe
+///   whether a given key id exists.
 /// - `ServiceError::Api(400 "last_key")` if this is the user's last key.
 /// - `ServiceError::Api(409 "conflict")` if the retry budget is exhausted.
 /// - `ServiceError::Internal` on database errors.
@@ -216,7 +270,7 @@ pub(crate) async fn delete_key(
     // Validate key_id is a UUID before opening a transaction.
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
-            "Invalid key ID format".to_string(),
+            Tr::new("keys-error-invalid-id").to_string(),
         ));
     }
 
@@ -244,12 +298,12 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to retrieve key"))?
             .ok_or(ServiceError::NotFound("Key"))?;
 
+        // Another user's key is reported as "not found", identically to a key
+        // id that does not exist — the caller is authenticated but has no
+        // business learning which key ids are real.
         if auth_doc.data.user_id != user_id {
-            return Err(ServiceError::api(
-                axum::http::StatusCode::FORBIDDEN,
-                "forbidden",
-                "Key does not belong to this user",
-            ));
+            tracing::debug!("Delete refused: key {key_id} does not belong to user {user_id}");
+            return Err(ServiceError::NotFound("Key"));
         }
         let key_name = auth_doc.data.name.clone();
 
@@ -265,7 +319,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -277,7 +331,7 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to count sessions"))?;
 
         // Cascade-delete the authenticator (device_auth refs, sessions, doc).
-        db::delete_authenticator_in_tx(&mut tx, key_id)
+        db::delete_authenticator(&mut tx, key_id)
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to delete key"))?;
 
@@ -293,7 +347,7 @@ pub(crate) async fn delete_key(
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
                 "last_key",
-                "Cannot delete your last key. Register another key first.",
+                Tr::new("keys-error-last-key").to_string(),
             ));
         }
 
@@ -324,7 +378,7 @@ pub(crate) async fn delete_key(
         ServiceError::OccConflict => ServiceError::api(
             axum::http::StatusCode::CONFLICT,
             "conflict",
-            "Key deletion conflicted with a concurrent operation. Please retry.",
+            Tr::new("keys-error-delete-conflict").to_string(),
         ),
         other => other,
     })
@@ -379,6 +433,95 @@ mod tests {
         assert!(
             matches!(err, ServiceError::StepUpRequired { .. }),
             "Expected StepUpRequired for timestamp 1 second over max_age"
+        );
+    }
+
+    /// A key belonging to another user and a key id that does not exist must
+    /// produce the same error. Distinguishing them turns `/v1/keys/{id}` into
+    /// an oracle telling any authenticated caller which key ids are real.
+    #[tokio::test]
+    async fn rename_reports_another_users_key_as_not_found() {
+        let state = crate::test_utils::test_app_state().await;
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "rename-owner@example.com").await;
+        let caller =
+            crate::test_utils::create_test_user(&state.store, "rename-caller@example.com").await;
+        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let absent_key = uuid::Uuid::now_v7().to_string();
+
+        let foreign = rename_key(&state.store, &caller.id, &owned_key, "renamed")
+            .await
+            .unwrap_err();
+        let missing = rename_key(&state.store, &caller.id, &absent_key, "renamed")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(foreign, ServiceError::NotFound("Key")),
+            "another user's key must be reported as not found, got: {foreign:?}"
+        );
+        assert!(
+            matches!(missing, ServiceError::NotFound("Key")),
+            "a nonexistent key must be reported as not found, got: {missing:?}"
+        );
+    }
+
+    /// Same uniformity requirement on the delete path. The ownership check runs
+    /// before the last-key guard, so a foreign key never reaches the 400
+    /// `last_key` branch that would itself be a distinguisher.
+    #[tokio::test]
+    async fn delete_reports_another_users_key_as_not_found() {
+        let state = crate::test_utils::test_app_state().await;
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "delete-owner@example.com").await;
+        let caller =
+            crate::test_utils::create_test_user(&state.store, "delete-caller@example.com").await;
+        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let absent_key = uuid::Uuid::now_v7().to_string();
+
+        let foreign = delete_key(&state.store, &caller.id, &owned_key)
+            .await
+            .unwrap_err();
+        let missing = delete_key(&state.store, &caller.id, &absent_key)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(foreign, ServiceError::NotFound("Key")),
+            "another user's key must be reported as not found, got: {foreign:?}"
+        );
+        assert!(
+            matches!(missing, ServiceError::NotFound("Key")),
+            "a nonexistent key must be reported as not found, got: {missing:?}"
+        );
+
+        // The victim's key must still exist — a refused delete must not delete.
+        assert!(
+            crate::db::get_authenticator_by_id(&state.store, &owned_key)
+                .await
+                .unwrap()
+                .is_some(),
+            "a refused cross-user delete must leave the key in place"
+        );
+    }
+
+    /// Epoch (0) is the value `delete_key` feeds to the freshness gate when
+    /// `auth_time` is absent — i.e. an enrollment bootstrap session that
+    /// never performed FIDO2 (`auth_time.unwrap_or(0)`). It must fail closed
+    /// so the gate demands a step-up instead of treating a no-FIDO2 session
+    /// as freshly authenticated.
+    #[test]
+    fn test_require_fresh_timestamp_epoch_is_rejected() {
+        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired for epoch (auth_time absent), got: {err:?}"
         );
     }
 }
