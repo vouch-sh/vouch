@@ -289,12 +289,16 @@ resolved address.
 ## Resource side: the extractor is the policy
 
 The handler signature states the authentication a route demands.
-`extract_resource_token` is private to its module, so a handler has exactly two ways to
-obtain a token. `AuthenticatedToken` means the token validated; an enrollment bootstrap
-session satisfies it. `HardwareVerifiedToken` additionally requires
-`hardware_verified == true` and returns 403 otherwise. All three credential-issuance
-endpoints name the second; `/v1/credentials/github/status` is a public read route and
-names `AuthenticatedToken`.
+`extract_resource_token` is private to its module, so a handler obtains a validated
+token through one of the extractors below; the choice declares the strength required.
+`AuthenticatedToken` means the token validated; an enrollment bootstrap session
+satisfies it. `HardwareVerifiedToken` additionally requires
+`hardware_verified == true` and returns 403 otherwise. `SteppedUpToken` additionally
+requires a FIDO2 assertion within `KEY_DELETE_MAX_AGE_SECS`, so a destructive action
+rests on a touch from seconds ago rather than the hours a session lives; it rejects
+with RFC 9470 `insufficient_user_authentication` (401) instead, and both key-deletion
+handlers name it. All three credential-issuance endpoints name `HardwareVerifiedToken`;
+`/v1/credentials/github/status` is a public read route and names `AuthenticatedToken`.
 
 ```mermaid
 flowchart TB
