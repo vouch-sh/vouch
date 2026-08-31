@@ -1127,43 +1127,40 @@ pub async fn create_test_bootstrap_session_with_authenticator(
 /// `hardware_verified` false.
 ///
 /// `HardwareVerification` no longer lets that combination be constructed —
-/// `NotVerified` has nowhere to put a timestamp — so the claims are signed
-/// directly rather than through `create_oauth_access_token`. That is the
-/// point: it produces a token this deployment's issuer cannot mint, which is
-/// what an older server's token, or a future regression, would put in front of
-/// the key handlers.
+/// `NotVerified` has nowhere to put a timestamp — so this cannot go through
+/// `create_oauth_access_token`. That is the point: it produces a token this
+/// deployment's issuer cannot mint, which is what an older server's token, or
+/// a future regression, would put in front of the key handlers.
+///
+/// Rather than restate `AccessTokenClaims`, it mints a real bootstrap token,
+/// decodes it, and changes the single field under test. Every other claim is
+/// whatever the production issuer produced, so a claim added later travels
+/// here automatically instead of silently diverging.
+///
+/// Leaves two session rows for the user: the base token's and this one's. The
+/// returned token is the mutated one.
 pub async fn create_test_session_unverified_with_fresh_auth_time(
     state: &AppState,
     user_id: &str,
     email: &str,
     auth_id: &str,
 ) -> String {
-    use crate::services::auth::AccessTokenClaims;
-    use crate::services::oidc::ScopeSet;
+    use crate::services::auth::{DecodedToken, decode_token};
 
-    let now = jiff::Timestamp::now().as_second();
-    let client_id = state.config().base_url.to_string();
-    let claims = AccessTokenClaims {
-        iss: client_id.clone(),
-        sub: user_id.to_string(),
-        aud: client_id.clone(),
-        exp: now.saturating_add(3600),
-        iat: now,
-        nbf: Some(now),
-        jti: uuid::Uuid::now_v7().to_string(),
-        client_id,
-        scope: Some(ScopeSet::all()),
-        email: Some(email.to_string()),
-        email_verified: Some(true),
-        // The defect: a session that ran no ceremony, carrying the instant one
-        // would have been recorded at.
-        hardware_verified: false,
-        auth_time: Some(now),
-        cnf: None,
-        act: None,
-        amr: None,
-        acr: None,
-    };
+    let base =
+        create_test_bootstrap_session_with_authenticator(state, user_id, email, auth_id).await;
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(&base, &state.oidc_key, &state.config().base_url)
+            .expect("the bootstrap token this deployment just minted must decode");
+
+    assert!(
+        !claims.hardware_verified,
+        "the base token must be unverified for this fixture to mean anything"
+    );
+    // The one deviation: a session that ran no ceremony, carrying the instant
+    // one would have been recorded at.
+    claims.auth_time = Some(jiff::Timestamp::now().as_second());
+    claims.jti = uuid::Uuid::now_v7().to_string();
 
     let token = state
         .oidc_key
