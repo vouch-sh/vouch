@@ -39,7 +39,11 @@ struct RegistrationState {
     device_name: ResourceLabel,
     challenge: Challenge<Raw>,
     rp_id: String,
-    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
+    iat: i64,
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
     exp: i64,
 }
 
@@ -193,6 +197,7 @@ pub(crate) async fn register_start(
         device_name,
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
+        iat: now.as_second(),
         exp,
     };
 
@@ -495,6 +500,7 @@ mod tests {
             device_name: ResourceLabel::parse("test-device").expect("valid label"),
             challenge,
             rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
             exp: 9_999_999_999,
         };
 
@@ -520,6 +526,7 @@ mod tests {
             device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
             exp: 9_999_999_999,
         };
 
@@ -537,6 +544,7 @@ mod tests {
             device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
             exp: 9_999_999_999,
         };
 
@@ -784,6 +792,7 @@ mod tests {
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge: Challenge::from(vec![7u8; 32]),
             rp_id: "localhost".to_string(),
+            iat: now.as_second(),
             exp,
         };
         let jwt = reg_state
@@ -980,6 +989,7 @@ mod tests {
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
+            iat: now.as_second(),
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
@@ -1054,6 +1064,7 @@ mod tests {
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
+            iat: now.as_second(),
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
@@ -1123,6 +1134,7 @@ mod tests {
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
+            iat: now.as_second(),
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");

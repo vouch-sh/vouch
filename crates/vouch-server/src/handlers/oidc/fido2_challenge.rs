@@ -14,6 +14,7 @@ use crate::crypto::jwt::JwtType;
 use crate::db;
 use crate::error::OAuthErrorCode;
 use crate::handlers::generate_challenge;
+use crate::services::oidc::fido2_grant::Fido2ChallengeState;
 use axum::{
     Json,
     extract::State,
@@ -21,22 +22,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::Challenge;
 use vouch_common::protocol;
-
-/// State embedded in the challenge JWT.
-#[derive(Debug, Serialize, Deserialize)]
-struct Fido2ChallengeState {
-    challenge: Challenge<Raw>,
-    rp_id: String,
-    /// RFC 8725 §3.11: Issued at time.
-    iat: i64,
-    /// RFC 8725 §3.11: Expiration time (5 minutes).
-    exp: i64,
-}
 
 /// Response from `POST /oauth/fido2/challenge`.
 #[derive(Debug, Serialize)]
