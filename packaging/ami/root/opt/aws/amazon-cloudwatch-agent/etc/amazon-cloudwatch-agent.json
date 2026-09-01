@@ -41,12 +41,12 @@
   },
   "logs": {
     "logs_collected": {
-      "files": {
+      "journald": {
         "collect_list": [
           {
-            "file_path": "/var/log/vouch-server/output.log",
             "log_group_name": "/vouch-server/vouch-server",
             "log_stream_name": "{instance_id}",
+            "priority": "info",
             "retention_in_days": 3
           }
         ]

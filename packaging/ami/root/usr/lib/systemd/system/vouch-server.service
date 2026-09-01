@@ -19,8 +19,6 @@ Environment=AWS_DEFAULTS_MODE=in-region
 ExecStart=/usr/bin/vouch-server
 Restart=always
 RestartSec=30
-StandardOutput=append:/var/log/vouch-server/output.log
-StandardError=append:/var/log/vouch-server/output.log
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

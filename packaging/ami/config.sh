@@ -37,10 +37,13 @@ chmod 0600 /var/lib/vouch-server/.pgpass
 chown vouch:vouch /var/lib/vouch-server/.pgpass
 
 #======================================
-# Create log directories
+# CloudWatch agent journald access
 #======================================
-mkdir -p /var/log/vouch-server
-chown vouch:vouch /var/log/vouch-server
+# Nothing on this image logs to a file: vouch-server writes to the journal, and
+# the CloudWatch agent streams the journal off the instance. The agent runs as
+# cwagent (run_as_user in amazon-cloudwatch-agent.json), and a non-root reader
+# needs systemd-journal group membership to open the journal.
+usermod -a -G systemd-journal cwagent
 
 #======================================
 # Enable services
