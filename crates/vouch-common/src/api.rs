@@ -10,6 +10,9 @@ use crate::fido2_types::{
     AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
     StateToken, UserHandle,
 };
+use crate::protocol::{
+    ERROR_ACCESS_DENIED, ERROR_AUTHORIZATION_PENDING, ERROR_EXPIRED_TOKEN, ERROR_SLOW_DOWN,
+};
 
 // ============================================================================
 // Registration
@@ -181,6 +184,10 @@ impl std::fmt::Debug for DeviceTokenResponse {
 }
 
 /// OAuth 2.0 error response.
+///
+/// The RFC 8628 device-poll codes are built from the [`crate::protocol`]
+/// constants rather than literals: the CLI's poll loop dispatches on the same
+/// constants, so the emitted string and the matched string cannot drift apart.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OAuthError {
     /// Error code.
@@ -195,7 +202,7 @@ impl OAuthError {
     #[must_use]
     pub fn authorization_pending() -> Self {
         Self {
-            error: "authorization_pending".to_string(),
+            error: ERROR_AUTHORIZATION_PENDING.to_string(),
             error_description: Some("The user has not yet completed authorization".to_string()),
         }
     }
@@ -204,7 +211,7 @@ impl OAuthError {
     #[must_use]
     pub fn slow_down() -> Self {
         Self {
-            error: "slow_down".to_string(),
+            error: ERROR_SLOW_DOWN.to_string(),
             error_description: Some("Polling too frequently, please slow down".to_string()),
         }
     }
@@ -213,7 +220,7 @@ impl OAuthError {
     #[must_use]
     pub fn expired_token() -> Self {
         Self {
-            error: "expired_token".to_string(),
+            error: ERROR_EXPIRED_TOKEN.to_string(),
             error_description: Some("The device code has expired".to_string()),
         }
     }
@@ -222,7 +229,7 @@ impl OAuthError {
     #[must_use]
     pub fn access_denied() -> Self {
         Self {
-            error: "access_denied".to_string(),
+            error: ERROR_ACCESS_DENIED.to_string(),
             error_description: Some("The user denied the authorization request".to_string()),
         }
     }
