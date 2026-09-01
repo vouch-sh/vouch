@@ -203,9 +203,11 @@ struct BrowserRegistrationState {
     user_email: String,
     /// Serialized webauthn-rs PasskeyRegistration state for verification.
     webauthn_state: webauthn_rs::prelude::PasskeyRegistration,
-    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
     iat: i64,
-    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
     exp: i64,
 }
 

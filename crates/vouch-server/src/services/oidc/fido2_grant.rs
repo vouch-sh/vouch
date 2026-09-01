@@ -36,13 +36,23 @@ use vouch_common::{
     AuthData, Base64Url, ClientDataJson, CredentialId, Signature, StateToken, UserHandle,
 };
 
-/// State embedded in the challenge JWT (must match the challenge endpoint).
+/// State embedded in the challenge JWT.
+///
+/// Defined here, in the grant that consumes it, and constructed by the
+/// `/oauth/fido2/challenge` handler that issues it. One definition rather
+/// than a pair kept in step by hand: the two sides are a serialization
+/// contract, and a field added on one side but not the other rejects every
+/// login.
 #[derive(Debug, Serialize, Deserialize)]
-struct Fido2ChallengeState {
-    challenge: Challenge<Raw>,
-    rp_id: String,
-    iat: i64,
-    exp: i64,
+pub(crate) struct Fido2ChallengeState {
+    pub(crate) challenge: Challenge<Raw>,
+    pub(crate) rp_id: String,
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
+    pub(crate) iat: i64,
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
+    pub(crate) exp: i64,
 }
 
 /// Parsed FIDO2 assertion payload from the `assertion` form parameter.
