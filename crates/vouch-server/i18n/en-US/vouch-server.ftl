@@ -283,6 +283,7 @@ login-terms = Terms of Service
 # text inside (login.html). Cannot merge without losing the link element.
 login-no-account-prefix = Don't have an account?
 login-enroll-now = Enroll now
+login-lost-key-link = Lost your security key? Manage your keys
 login-cert-test-login = Certification Test Login
 login-cert-test-deny = Certification Test Deny
 

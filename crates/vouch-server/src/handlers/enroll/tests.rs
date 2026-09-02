@@ -501,8 +501,9 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // The exploit relies on landing on `/enroll/keys` (a direct web sign-in
-    // with no CLI waiting is NOT sent to `/login` for a FIDO2 assertion).
+    // A returning user is sent to `/login` to assert; the exploit ignores
+    // the redirect and drives `/enroll/keys` directly with the issued
+    // cookie, which the bootstrap session still permits for key management.
     let location = resp
         .headers()
         .get(header::LOCATION)
@@ -511,8 +512,8 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
         .expect("ascii location")
         .to_string();
     assert_eq!(
-        location, "/enroll/keys",
-        "direct returning-user sign-in must redirect to the keys page, got {location}"
+        location, "/login",
+        "direct returning-user sign-in must redirect to /login to assert, got {location}"
     );
 
     // Extract the session cookie value the handler just issued.
@@ -888,6 +889,19 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
         complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // A fresh enrollee has no key to assert with: they must reach the keys
+    // page to register one, not the /login assertion form.
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location");
+    assert_eq!(
+        location, "/enroll/keys",
+        "fresh enrollee must be sent to register a first key, got {location}"
+    );
 
     // Audit writes are spawned; give the runtime a moment before
     // asserting absence.

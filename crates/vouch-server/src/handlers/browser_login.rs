@@ -355,37 +355,35 @@ pub(crate) async fn login_page(
     }) || device_auth_pending;
 
     if !requires_reauth {
-        if let Some(ref pending_id) = query.pending_auth {
-            // Bounce back to /oauth/authorize only when the gate that endpoint
-            // applies would accept the session. `auth.authenticated` is the
-            // wrong question here: an enrollment bootstrap session (upstream
-            // IdP sign-in, no FIDO2) holds a valid cookie but is not
-            // hardware-verified, so deciding from it bounced the user to an
-            // endpoint that refuses the session — consuming the single-use
-            // pending id on the way (#1168). Asking the same predicate keeps
-            // the two endpoints from disagreeing. NeedsAuth falls through to
-            // the assertion form; so does a store failure, where rendering the
-            // form needlessly costs one touch but redirecting could strand
-            // the flow.
-            let session_token = jar
-                .get(vouch_common::SESSION_COOKIE_NAME)
-                .map(|c| c.value());
-            let authorized = match check_session_for_authorization(&state, session_token).await {
-                Ok(AuthorizationSessionState::Authenticated { .. }) => true,
-                Ok(AuthorizationSessionState::NeedsAuth) => false,
-                Err(e) => {
-                    tracing::error!("Session check failed at /login; rendering the form: {e}");
-                    false
-                }
-            };
-            if authorized {
+        // Leave /login only when the session would satisfy the gate
+        // /oauth/authorize itself applies. `auth.authenticated` is the wrong
+        // question here: an enrollment bootstrap session (upstream IdP
+        // sign-in, no FIDO2) holds a valid cookie but is not
+        // hardware-verified — deciding from it bounced such sessions to an
+        // endpoint that refuses them, consuming the single-use pending id on
+        // the way (#1168). Web sign-in routes returning users here precisely
+        // to assert, so a session the gate refuses gets the form: on
+        // NeedsAuth, and on a store failure too, where rendering the form
+        // needlessly costs one touch but redirecting could strand the flow.
+        let session_token = jar
+            .get(vouch_common::SESSION_COOKIE_NAME)
+            .map(|c| c.value());
+        let authorized = match check_session_for_authorization(&state, session_token).await {
+            Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+            Ok(AuthorizationSessionState::NeedsAuth) => false,
+            Err(e) => {
+                tracing::error!("Session check failed at /login; rendering the form: {e}");
+                false
+            }
+        };
+        if authorized {
+            if let Some(ref pending_id) = query.pending_auth {
                 return axum::response::Redirect::to(&format!(
                     "/oauth/authorize?pending_auth={}",
                     urlencoding::encode(pending_id)
                 ))
                 .into_response();
             }
-        } else if auth.authenticated {
             return axum::response::Redirect::to("/").into_response();
         }
     }
@@ -1135,6 +1133,85 @@ mod tests {
                 .is_some(),
             "rendering the form must not spend the single-use pending id"
         );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_for_bootstrap_session_no_pending() {
+        // Web sign-in sends a returning user here with a bootstrap
+        // (NotVerified) session precisely to assert. Redirecting them to `/`
+        // because the cookie looks authenticated would skip the ceremony the
+        // redirect exists for.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "bootstrap-home@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: crate::test_utils::TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "an unverified session must get the assertion form, got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_redirects_verified_session_home() {
+        // A hardware-verified session has nothing left to prove at /login.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "verified-home@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "a verified session skips the form, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/");
     }
 
     #[tokio::test]
