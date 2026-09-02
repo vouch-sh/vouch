@@ -7,10 +7,10 @@
 //! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
+use crate::assurance::ACR_AAL3;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::{FapiProfile, ResponseMode, TokenEndpointAuthMethod};
 use crate::error::ServiceError;
-use crate::services::auth::ACR_AAL3;
 use crate::services::oidc::OAuthScope;
 use crate::services::oidc::authorization::CodeChallengeMethod;
 use crate::services::oidc::grant_type::OAuthGrantType;

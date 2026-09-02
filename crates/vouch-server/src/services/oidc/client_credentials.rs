@@ -9,6 +9,7 @@
 //! Per RFC 6749 Section 4.4.3, no refresh token is included in the response.
 
 use crate::AppState;
+use crate::assurance::HardwareVerification;
 use crate::db::{OAuthClient, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
@@ -80,7 +81,7 @@ pub(crate) async fn exchange_client_credentials(
             binding,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
+            hardware_verification: HardwareVerification::NotVerified,
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
             hardware_aaguid: None,

@@ -5,6 +5,7 @@ use super::claim::ClaimError;
 use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
 use super::store::DocumentStore;
+use crate::assurance::HardwareVerification;
 use anyhow::{Result, bail};
 use jiff::Timestamp;
 
@@ -22,10 +23,10 @@ pub struct DeviceAuthApproval {
     pub user_email: String,
     /// Authenticator that approved the request.
     pub authenticator_id: String,
-    /// Whether the approving browser session completed a WebAuthn ceremony.
-    /// The device-code grant issues its token with this as the
-    /// `hardware_verified` claim.
-    pub hardware_verified: bool,
+    /// Whether the approving browser session completed a WebAuthn ceremony,
+    /// and when. The device-code grant issues its token with this verbatim,
+    /// so `auth_time` is the ceremony instant — not the later token poll.
+    pub verification: HardwareVerification,
 }
 
 /// Domain state of a device authorization request. The stored document
@@ -62,7 +63,13 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
                         user_id: user_id.clone(),
                         user_email: user_email.clone(),
                         authenticator_id: authenticator_id.clone(),
-                        hardware_verified: data.hardware_verified,
+                        verification: if data.hardware_verified {
+                            HardwareVerification::Verified {
+                                auth_time: data.auth_time,
+                            }
+                        } else {
+                            HardwareVerification::NotVerified
+                        },
                     })
                 }
                 _ => DeviceAuthState::Denied,
@@ -165,6 +172,7 @@ pub async fn create_device_auth_request(
         user_email: None,
         authenticator_id: None,
         hardware_verified: false,
+        auth_time: None,
         expires_at,
         interval_seconds,
         last_poll_at: None,
@@ -217,10 +225,15 @@ pub struct AuthorizeDeviceAuthParams<'a> {
     pub user_email: &'a str,
     /// Authenticator that approved the request.
     pub authenticator_id: &'a str,
-    /// Whether the approving browser session completed a WebAuthn ceremony.
-    /// Recorded on the request so the device-code grant issues its token with
-    /// a `hardware_verified` claim that reflects what actually happened.
-    pub hardware_verified: bool,
+    /// Whether the approving browser session completed a WebAuthn ceremony,
+    /// and when it happened. Recorded on the request so the device-code grant
+    /// issues its token with claims that reflect what actually happened —
+    /// `auth_time` in particular is the ceremony instant, not the later token
+    /// poll (OIDC Core §2: "Time when the End-User authentication occurred").
+    /// An approval observes its ceremony directly, so `Verified` here must
+    /// carry the instant; `Verified { auth_time: None }` is reserved for
+    /// inherited verification (token exchange) and legacy rows.
+    pub verification: HardwareVerification,
 }
 
 /// Authorize a device auth request.
@@ -239,11 +252,18 @@ pub async fn authorize_device_auth(
         user_id,
         user_email,
         authenticator_id,
-        hardware_verified,
+        verification,
     } = params;
 
     if id.is_empty() {
         bail!("authorize_device_auth called with empty id");
+    }
+    if let HardwareVerification::Verified { auth_time: None } = verification {
+        bail!(
+            "authorize_device_auth: an approval observes its ceremony \
+             directly, so a verified approval must carry the ceremony's \
+             auth_time"
+        );
     }
 
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
@@ -270,7 +290,8 @@ pub async fn authorize_device_auth(
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
-    data.hardware_verified = hardware_verified;
+    data.hardware_verified = verification.hardware_verified();
+    data.auth_time = verification.auth_time();
     let won = store.compare_and_update(id, version, &data).await?;
     if !won {
         bail!(

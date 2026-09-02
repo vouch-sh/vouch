@@ -13,6 +13,7 @@
 #[cfg(all(feature = "test-utils", not(debug_assertions)))]
 compile_error!("test-utils feature must not be enabled in release builds");
 
+pub mod assurance;
 pub(crate) mod attestation;
 pub mod config;
 pub mod crypto;

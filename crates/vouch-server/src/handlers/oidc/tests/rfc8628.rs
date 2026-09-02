@@ -2,6 +2,7 @@
 //! RFC 8628 — Device Authorization Grant tests.
 
 use super::helpers::*;
+use crate::assurance::HardwareVerification;
 
 #[tokio::test]
 async fn test_rfc8628_device_authorization_response_format() {
@@ -141,7 +142,9 @@ async fn setup_authorized_device(
             user_id: &user.id,
             user_email: &user.email,
             authenticator_id,
-            hardware_verified: true,
+            verification: HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second()),
+            },
         },
     )
     .await
@@ -161,6 +164,66 @@ async fn poll_device_token(app: &axum::Router, device_code: &str) -> (StatusCode
         &[],
     )
     .await
+}
+
+/// OIDC Core §2 defines `auth_time` as the "Time when the End-User
+/// authentication occurred." The device-code grant issues its token in a
+/// later `/oauth/token` poll, so the claim must be the ceremony instant
+/// recorded at approval — stamping the poll instant instead widens the
+/// key-deletion step-up freshness window by the ceremony-to-poll delay,
+/// which a suspended host can stretch to the device code's lifetime.
+#[tokio::test]
+async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "auth-time-device@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code = "auth_time_dev";
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    let id = crate::db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(device_code),
+        "AUTH-TIME",
+        None,
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create device authorization request");
+
+    // A ceremony that happened well before the poll.
+    let ceremony_time = jiff::Timestamp::now().as_second().saturating_sub(300);
+    crate::db::authorize_device_auth(
+        &state.store,
+        crate::db::AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user.id,
+            user_email: &user.email,
+            authenticator_id: &auth,
+            verification: HardwareVerification::Verified {
+                auth_time: Some(ceremony_time),
+            },
+        },
+    )
+    .await
+    .expect("approve device authorization");
+
+    let (status, body) = poll_device_token(&app, device_code).await;
+    assert_eq!(status, StatusCode::OK, "device grant should issue: {body}");
+    let token = serde_json::from_str::<serde_json::Value>(&body).expect("token response is JSON")
+        ["access_token"]
+        .as_str()
+        .expect("access_token present")
+        .to_string();
+
+    let claims = decode_jwt_payload(&token);
+    assert_eq!(
+        claims["auth_time"], ceremony_time,
+        "auth_time must be the ceremony instant recorded at approval, \
+         not the later poll instant"
+    );
 }
 
 /// RFC 8628 Section 3.5 defers to RFC 6749 for error semantics, and RFC 6749

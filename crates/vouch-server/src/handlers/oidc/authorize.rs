@@ -11,6 +11,7 @@ use super::{
     build_redirect_url_with_params,
 };
 use crate::AppState;
+use crate::assurance::ACR_AAL3;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
 use crate::error::OAuthErrorCode;
@@ -1705,9 +1706,7 @@ async fn issue_code_after_reauth_check(
 ) -> Response {
     // Step 5: Validate requested ACR (RFC 9470).
     if let Some(acr) = validated.acr_values() {
-        let acr_ok = acr
-            .split_whitespace()
-            .any(|v| v == crate::services::auth::ACR_AAL3);
+        let acr_ok = acr.split_whitespace().any(|v| v == ACR_AAL3);
         if !acr_ok {
             return oauth_error_response(
                 state,

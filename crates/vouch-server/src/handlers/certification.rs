@@ -14,6 +14,7 @@
 //! HTTPS with self-signed certs; the safeguards are operational discipline and
 //! the loud startup warnings.
 
+use crate::assurance::HardwareVerification;
 use std::sync::Arc;
 
 use axum::{
@@ -172,7 +173,7 @@ pub(crate) async fn complete_login(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+            hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(Timestamp::now().as_second()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
