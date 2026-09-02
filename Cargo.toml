@@ -148,14 +148,14 @@ base64 = { version = "=0.23.1", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
 clap = { version = "=4.6.6", default-features = false }
 clap_complete = { version = "=4.6.9", default-features = false }
-const-oid = { version = "=0.9.6", default-features = false }
+const-oid = { version = "=0.10.2", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.13", default-features = false }
-der = { version = "=0.7.10", default-features = false }
+der = { version = "=0.8.1", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "c6237c88099b3f492ecc5fcee42df06a19224b97", package = "amzn-dogwood-language", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
 ed25519-dalek = { version = "=3.0.0", default-features = false }
-flate2 = { version = "=1.1.9", default-features = false }
+flate2 = { version = "=1.1.10", default-features = false }
 gethostname = { version = "=1.1.0", default-features = false }
 governor = { version = "=0.10.4", default-features = false }
 ipnet = { version = "=2.12.1", default-features = false }
@@ -191,15 +191,15 @@ rust-ini = { version = "=0.21.3", default-features = false }
 rustls = { version = "=0.23.43", default-features = false }
 sea-query = { version = "=1.0.2", default-features = false }
 sea-query-sqlx = { version = "=0.9.1", default-features = false }
-sha2 = { version = "=0.10.9", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
 secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.229", default-features = false }
 serde_json = { version = "=1.0.151", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
 serde-saphyr = { version = "=1.2.0", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
-signature = { version = "=2.2.0", default-features = false }
-spki = { version = "=0.7.3", default-features = false }
+signature = { version = "=3.0.0", default-features = false }
+spki = { version = "=0.8.0", default-features = false }
 ssh-key = { version = "=0.6.7", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 sys-locale = { version = "=0.3.2", default-features = false }
@@ -231,7 +231,7 @@ windows = { version = "=0.62.2", default-features = false }
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 winresource = { version = "=0.1.31", default-features = false }
 wiremock = { version = "=0.6.5", default-features = false }
-x509-cert = { version = "=0.2.5", default-features = false }
+x509-cert = { version = "=0.3.0", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false }
 
 [profile.release]
