@@ -643,11 +643,11 @@ pub(crate) async fn browser_login_complete(
     let new_counter = verification_result.new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
-    // The instant of the FIDO2 ceremony verified above — stamped as
-    // `auth_time` on both the browser session and the device approval, so
+    // The instant the assertion above verified, stamped by the verifier
+    // itself. It backs both the browser session and the device approval, so
     // the token the device-code grant later mints reports the ceremony
-    // instant, not the CLI's poll instant.
-    let auth_now = Timestamp::now();
+    // instant rather than the CLI's poll instant.
+    let auth_now = verification_result.verified_at;
 
     // Release a CLI waiting on `vouch enroll`: the assertion just verified is
     // the possession proof the upstream IdP sign-in cannot provide, so the
@@ -666,9 +666,7 @@ pub(crate) async fn browser_login_complete(
                     user_id: &user.id,
                     user_email: &user.email,
                     authenticator_id: &authenticator.id,
-                    verification: HardwareVerification::Verified {
-                        auth_time: Some(auth_now.as_second()),
-                    },
+                    verification: db::DeviceApproval::Observed(auth_now),
                 },
             )
             .await

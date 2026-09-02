@@ -453,7 +453,7 @@ pub(crate) async fn device_token(
                         ));
                     }
                 };
-            let db::DeviceAuthApproval {
+            let db::StoredApproval {
                 user_id,
                 user_email,
                 authenticator_id,
@@ -624,7 +624,8 @@ pub(crate) async fn device_token(
 )]
 mod tests {
     use super::*;
-    use crate::assurance::HardwareVerification;
+    use crate::crypto::webauthn_verify::AuthTime;
+    use crate::db::DeviceApproval;
     use crate::test_utils::*;
 
     // ========================================================================
@@ -926,9 +927,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1010,9 +1011,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1266,9 +1267,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1328,9 +1329,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1389,9 +1390,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1533,9 +1534,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1740,9 +1741,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                verification: HardwareVerification::Verified {
-                    auth_time: Some(Timestamp::now().as_second()),
-                },
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1803,11 +1804,9 @@ mod tests {
                 user_email: &user.email,
                 authenticator_id: &auth_id,
                 verification: if hardware_verified {
-                    HardwareVerification::Verified {
-                        auth_time: Some(Timestamp::now().as_second()),
-                    }
+                    DeviceApproval::Observed(AuthTime::for_test(Timestamp::now().as_second()))
                 } else {
-                    HardwareVerification::NotVerified
+                    DeviceApproval::NotVerified
                 },
             },
         )

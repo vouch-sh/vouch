@@ -41,9 +41,9 @@ pub struct DeviceAuthRequestDoc {
     pub hardware_verified: bool,
     /// Unix seconds of the WebAuthn ceremony that approved this request —
     /// the `auth_time` the device-code grant stamps on the issued token.
-    /// `Some` iff `hardware_verified`; absent from documents written by an
-    /// older server during a rolling deploy, which the freshness gate on
-    /// key deletion reads as epoch (step-up required).
+    /// `Some` whenever `hardware_verified` and this version wrote the row;
+    /// `None` on rows predating the field, which the freshness gate on key
+    /// deletion reads as epoch (step-up required).
     #[serde(default)]
     pub auth_time: Option<i64>,
     pub expires_at: Timestamp,

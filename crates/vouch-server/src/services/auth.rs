@@ -19,7 +19,7 @@ use crate::AppState;
 use crate::assurance::{AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
-use crate::crypto::webauthn_verify::{self, OriginPolicy};
+use crate::crypto::webauthn_verify::{self, AuthTime, OriginPolicy};
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
@@ -119,6 +119,9 @@ pub(crate) struct LoginAssertionResult {
     pub new_counter: u32,
     /// Whether user verification was performed.
     pub user_verified: bool,
+    /// When this assertion verified — the `auth_time` any token or device
+    /// approval resting on this ceremony must report.
+    pub verified_at: AuthTime,
 }
 
 /// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
@@ -161,6 +164,7 @@ pub(crate) async fn verify_login_assertion(
         Ok(LoginAssertionResult {
             new_counter: result.counter,
             user_verified: result.user_verified,
+            verified_at: result.verified_at,
         })
     })
     .await
@@ -546,8 +550,12 @@ pub(crate) struct AccessTokenClaims {
     /// RFC 9449 Section 6: DPoP confirmation (sender-constrained token binding).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
-    /// RFC 9068 Section 2.2: Time when the End-User authentication occurred.
-    /// RECOMMENDED per OIDC Core Section 2. Reflects FIDO2 session creation time.
+    /// RFC 9068 Section 2.2.1: "auth_time OPTIONAL - as defined in Section 2
+    /// of [OpenID.Core]", i.e. "Time when the End-User authentication
+    /// occurred" — the instant the FIDO2 ceremony verified, not when the
+    /// token carrying it was issued. OIDC Core Section 2 makes it REQUIRED
+    /// when `max_age` is requested or `auth_time` is an Essential Claim, and
+    /// OPTIONAL otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_time: Option<i64>,
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.

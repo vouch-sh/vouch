@@ -2,7 +2,8 @@
 //! RFC 8628 — Device Authorization Grant tests.
 
 use super::helpers::*;
-use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 
 #[tokio::test]
 async fn test_rfc8628_device_authorization_response_format() {
@@ -142,9 +143,9 @@ async fn setup_authorized_device(
             user_id: &user.id,
             user_email: &user.email,
             authenticator_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -202,9 +203,7 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
             user_id: &user.id,
             user_email: &user.email,
             authenticator_id: &auth,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(ceremony_time),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(ceremony_time)),
         },
     )
     .await
@@ -223,6 +222,62 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
         claims["auth_time"], ceremony_time,
         "auth_time must be the ceremony instant recorded at approval, \
          not the later poll instant"
+    );
+}
+
+/// An approval row written before the ceremony instant was recorded is
+/// hardware-verified with no `auth_time`. The grant must issue it as such —
+/// `hardware_verified` true, `auth_time` absent — rather than substituting
+/// the poll instant, so the key-deletion freshness gate reads epoch via
+/// `auth_time.unwrap_or(0)` and challenges (the rejection half is pinned by
+/// `test_require_fresh_timestamp_epoch_is_rejected` in `services::keys`).
+#[tokio::test]
+async fn test_device_grant_preserves_absent_auth_time_on_legacy_approval() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "legacy-device@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code = "legacy_auth_time_dev";
+    let doc = crate::db::documents::device_auth::DeviceAuthRequestDoc {
+        device_code_hash: sha256_base64url(device_code),
+        user_code: "LGCY-AUTH".to_string(),
+        status: crate::db::DeviceAuthStatus::Authorized,
+        client_id: None,
+        user_id: Some(user.id.clone()),
+        user_email: Some(user.email.clone()),
+        authenticator_id: Some(auth),
+        hardware_verified: true,
+        // The legacy shape: verified, but no ceremony instant recorded.
+        auth_time: None,
+        expires_at: jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(1))
+            .expect("device code expiry"),
+        interval_seconds: 0,
+        last_poll_at: None,
+        consumed_at: None,
+    };
+    state
+        .store
+        .insert(&doc)
+        .await
+        .expect("insert legacy-shaped approval");
+
+    let (status, body) = poll_device_token(&app, device_code).await;
+    assert_eq!(status, StatusCode::OK, "device grant should issue: {body}");
+    let token = serde_json::from_str::<serde_json::Value>(&body).expect("token response is JSON")
+        ["access_token"]
+        .as_str()
+        .expect("access_token present")
+        .to_string();
+
+    let claims = decode_jwt_payload(&token);
+    assert_eq!(
+        claims["hardware_verified"], true,
+        "a legacy approval still proved possession"
+    );
+    assert!(
+        claims.get("auth_time").is_none(),
+        "no ceremony instant was recorded, so none may be invented: {claims}"
     );
 }
 

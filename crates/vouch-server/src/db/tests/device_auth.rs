@@ -7,7 +7,8 @@
 )]
 
 use super::*;
-use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 
 // ========================================================================
 // RFC 8628 - Device Authorization Grant Tests
@@ -121,9 +122,9 @@ async fn test_device_auth_authorization_flow() {
             user_id: &user_id,
             user_email: &user.email,
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -142,50 +143,6 @@ async fn test_device_auth_authorization_flow() {
     assert_eq!(approval.user_id, user_id);
     assert_eq!(approval.user_email, user.email);
     assert_eq!(approval.authenticator_id, auth_id);
-}
-
-/// An approval observes its ceremony directly, so a `Verified` approval
-/// without the ceremony's `auth_time` is a caller bug: recording it would
-/// leave the device-code grant nothing but the poll instant to stamp, the
-/// exact freshness overstatement the field exists to prevent.
-#[tokio::test]
-async fn test_authorize_rejects_verified_approval_without_auth_time() {
-    let (store, _audit) = test_db().await;
-
-    let id = create_device_auth_request(
-        &store,
-        "hashed_device_code_no_time",
-        "NOTM-0001",
-        None,
-        "2099-12-31T23:59:59Z".parse().unwrap(),
-        5,
-    )
-    .await
-    .expect("Failed to create device auth request");
-
-    let err = authorize_device_auth(
-        &store,
-        AuthorizeDeviceAuthParams {
-            id: &id,
-            user_id: "user_no_time",
-            user_email: "no-time@example.com",
-            authenticator_id: "auth_no_time",
-            verification: HardwareVerification::Verified { auth_time: None },
-        },
-    )
-    .await
-    .expect_err("verified approval without auth_time must be rejected");
-    assert!(
-        err.to_string().contains("auth_time"),
-        "unexpected error: {err}"
-    );
-
-    // The request must remain pending — the rejected approval wrote nothing.
-    let request = get_device_auth_by_id(&store, &id)
-        .await
-        .expect("Failed to get request")
-        .expect("Should exist");
-    assert!(matches!(request.state, DeviceAuthState::Pending));
 }
 
 /// Rows written before authenticator deletion voided approvals can carry
@@ -322,9 +279,9 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
             user_id: &user_id,
             user_email: "consume@example.com",
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -386,9 +343,9 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
             user_id: &user_id,
             user_email: "double@example.com",
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -466,9 +423,9 @@ async fn test_try_consume_device_auth_expired_returns_false() {
             user_id: &user_id,
             user_email: "expired@example.com",
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -542,9 +499,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -557,9 +514,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_b",
             user_email: "b@example.com",
             authenticator_id: "auth_b",
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -602,9 +559,9 @@ async fn test_authorize_after_deny_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -639,9 +596,9 @@ async fn test_deny_after_authorize_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await

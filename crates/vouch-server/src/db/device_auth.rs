@@ -6,19 +6,49 @@ use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
 use super::store::DocumentStore;
 use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
 use anyhow::{Result, bail};
 use jiff::Timestamp;
 
 // Re-export DeviceAuthStatus from documents module
 pub use super::documents::device_auth::DeviceAuthStatus;
 
-/// Approval evidence recorded when a pending request is authorized.
+/// What the approving browser observed, as evidence rather than assertion.
+///
+/// [`Observed`] can only be built by someone holding an [`AuthTime`], which
+/// only a completed WebAuthn ceremony yields — so a request that ran no
+/// ceremony, such as the device-code poll, cannot claim one happened
+/// (issue #1166). This is the write side; the read side gets
+/// [`HardwareVerification`], because a rehydrated row carries a bare
+/// integer and no evidence.
+///
+/// [`Observed`]: Self::Observed
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceApproval {
+    /// The browser completed a WebAuthn ceremony at this instant.
+    Observed(AuthTime),
+    /// The approval rests on an upstream IdP sign-in alone.
+    NotVerified,
+}
+
+impl From<DeviceApproval> for HardwareVerification {
+    fn from(approval: DeviceApproval) -> Self {
+        match approval {
+            DeviceApproval::Observed(at) => Self::Verified {
+                auth_time: Some(at.as_second()),
+            },
+            DeviceApproval::NotVerified => Self::NotVerified,
+        }
+    }
+}
+
+/// Approval evidence read back from a stored row.
 ///
 /// Only [`state_from_stored`] constructs one, and only from a row whose
 /// approval fields are all present — the device-code grant cannot reach
 /// token issuance holding a partial approval.
 #[derive(Debug, Clone)]
-pub struct DeviceAuthApproval {
+pub struct StoredApproval {
     pub user_id: String,
     pub user_email: String,
     /// Authenticator that approved the request.
@@ -26,6 +56,8 @@ pub struct DeviceAuthApproval {
     /// Whether the approving browser session completed a WebAuthn ceremony,
     /// and when. The device-code grant issues its token with this verbatim,
     /// so `auth_time` is the ceremony instant — not the later token poll.
+    /// Rows written before the instant was recorded read as
+    /// `Verified { auth_time: None }`, which freshness gates treat as epoch.
     pub verification: HardwareVerification,
 }
 
@@ -36,7 +68,7 @@ pub struct DeviceAuthApproval {
 #[derive(Debug)]
 pub enum DeviceAuthState {
     Pending,
-    Authorized(DeviceAuthApproval),
+    Authorized(StoredApproval),
     Denied,
     /// `user_id` is retained for replay revocation; `None` on rows written
     /// before approval attribution was recorded.
@@ -59,7 +91,7 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
         DeviceAuthStatus::Authorized => {
             match (&data.user_id, &data.user_email, &data.authenticator_id) {
                 (Some(user_id), Some(user_email), Some(authenticator_id)) => {
-                    DeviceAuthState::Authorized(DeviceAuthApproval {
+                    DeviceAuthState::Authorized(StoredApproval {
                         user_id: user_id.clone(),
                         user_email: user_email.clone(),
                         authenticator_id: authenticator_id.clone(),
@@ -225,15 +257,12 @@ pub struct AuthorizeDeviceAuthParams<'a> {
     pub user_email: &'a str,
     /// Authenticator that approved the request.
     pub authenticator_id: &'a str,
-    /// Whether the approving browser session completed a WebAuthn ceremony,
-    /// and when it happened. Recorded on the request so the device-code grant
-    /// issues its token with claims that reflect what actually happened —
-    /// `auth_time` in particular is the ceremony instant, not the later token
-    /// poll (OIDC Core §2: "Time when the End-User authentication occurred").
-    /// An approval observes its ceremony directly, so `Verified` here must
-    /// carry the instant; `Verified { auth_time: None }` is reserved for
-    /// inherited verification (token exchange) and legacy rows.
-    pub verification: HardwareVerification,
+    /// What the approving browser observed. Recorded on the request so the
+    /// device-code grant issues its token with claims that reflect what
+    /// actually happened — `auth_time` in particular is the ceremony
+    /// instant, not the later token poll (OIDC Core §2: "Time when the
+    /// End-User authentication occurred").
+    pub verification: DeviceApproval,
 }
 
 /// Authorize a device auth request.
@@ -257,13 +286,6 @@ pub async fn authorize_device_auth(
 
     if id.is_empty() {
         bail!("authorize_device_auth called with empty id");
-    }
-    if let HardwareVerification::Verified { auth_time: None } = verification {
-        bail!(
-            "authorize_device_auth: an approval observes its ceremony \
-             directly, so a verified approval must carry the ceremony's \
-             auth_time"
-        );
     }
 
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
@@ -290,6 +312,7 @@ pub async fn authorize_device_auth(
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
+    let verification = HardwareVerification::from(verification);
     data.hardware_verified = verification.hardware_verified();
     data.auth_time = verification.auth_time();
     let won = store.compare_and_update(id, version, &data).await?;
@@ -372,7 +395,7 @@ pub struct DeviceCodeClaim {
 
 /// Try to consume an authorized device code (RFC 8628 Section 3.5).
 ///
-/// On success returns the [`DeviceAuthApproval`] read in the same atomic
+/// On success returns the [`StoredApproval`] read in the same atomic
 /// step plus a [`DeviceCodeClaim`] witness — proof that this caller won the
 /// optimistic-concurrency consume. Token issuance takes its user
 /// attribution from this approval, never from an earlier (raceable) read.
@@ -383,7 +406,7 @@ pub struct DeviceCodeClaim {
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
-) -> std::result::Result<(DeviceAuthApproval, DeviceCodeClaim), ClaimError> {
+) -> std::result::Result<(StoredApproval, DeviceCodeClaim), ClaimError> {
     let now = Timestamp::now();
 
     let doc = store

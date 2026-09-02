@@ -8,7 +8,8 @@
 
 use super::occ_modify::create_test_github_installation;
 use super::*;
-use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 
 // ========================================================================
 // Concurrent-replay regression coverage for single-use primitives:
@@ -94,9 +95,9 @@ async fn test_device_auth_consume_concurrent() {
             user_id: &user_id,
             user_email: "race-device@example.com",
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -266,9 +267,9 @@ async fn test_authorize_device_auth_concurrent() {
                     user_id: &uid_a,
                     user_email: "race-authorize@example.com",
                     authenticator_id: &aid_a,
-                    verification: HardwareVerification::Verified {
-                        auth_time: Some(jiff::Timestamp::now().as_second()),
-                    },
+                    verification: DeviceApproval::Observed(AuthTime::for_test(
+                        jiff::Timestamp::now().as_second(),
+                    )),
                 },
             )
             .await
@@ -281,9 +282,9 @@ async fn test_authorize_device_auth_concurrent() {
                     user_id: &uid_b,
                     user_email: "race-authorize@example.com",
                     authenticator_id: &aid_b,
-                    verification: HardwareVerification::Verified {
-                        auth_time: Some(jiff::Timestamp::now().as_second()),
-                    },
+                    verification: DeviceApproval::Observed(AuthTime::for_test(
+                        jiff::Timestamp::now().as_second(),
+                    )),
                 },
             )
             .await
@@ -1047,9 +1048,9 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
             user_id: &user_id,
             user_email: "cascade@example.com",
             authenticator_id: &auth_id,
-            verification: HardwareVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
-            },
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await

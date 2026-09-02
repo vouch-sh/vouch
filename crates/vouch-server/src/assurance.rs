@@ -3,7 +3,8 @@
 //!
 //! Implements:
 //! - RFC 8176 — Authentication Method Reference Values
-//! - RFC 9068 Section 2.2 — JWT Access Token claims (`amr`, `acr`, `auth_time`)
+//! - RFC 9068 Section 2.2.1 — Authentication Information Claims (`amr`,
+//!   `acr`, `auth_time`)
 //!
 //! Lives at the crate root because the vocabulary is consumed on both sides
 //! of the layer boundary: the db layer records a [`HardwareVerification`] on
