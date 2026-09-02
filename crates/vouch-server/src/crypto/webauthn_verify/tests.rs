@@ -1701,6 +1701,93 @@ fn test_attestation_format_identifiers_match_case_sensitively() {
     );
 }
 
+/// The §8.2 CDDL types every x5c element as `bytes`
+/// (`x5c: [ attestnCert: bytes, * (caCert: bytes) ]`), and step 1 of the
+/// verification procedure requires "that attStmt is valid CBOR conforming to
+/// the syntax defined above". A packed x5c carrying a non-byte-string element
+/// is malformed and must be rejected, not repaired by dropping the element —
+/// webauthn-rs rejects the same input on the browser path.
+#[test]
+fn test_packed_rejects_x5c_with_non_byte_string_element() {
+    // The genuine fixture, with junk appended to its otherwise-valid chain.
+    let raw = real_packed_attestation();
+    let mut value: ciborium::Value =
+        ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+    if let ciborium::Value::Map(ref mut entries) = value {
+        for (k, v) in entries.iter_mut() {
+            if k.as_text() == Some("attStmt")
+                && let ciborium::Value::Map(ref mut stmt) = *v
+            {
+                for (sk, sv) in stmt.iter_mut() {
+                    if sk.as_text() == Some("x5c")
+                        && let ciborium::Value::Array(ref mut arr) = *sv
+                    {
+                        arr.push(ciborium::Value::Text("junk".to_string()));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &out,
+            client_data_json: &fixture_client_data(),
+            expected_rp_id: "localhost",
+            expected_challenge: "test-challenge",
+            expected_origin: "http://localhost",
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &RealCoseVerifier::new(),
+    )
+    .expect_err("a packed x5c with a non-byte-string element must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("non-byte-string")),
+        "expected a non-byte-string extraction error, got {err:?}"
+    );
+}
+
+/// §8.2 step 3 keys self attestation to absence: "If x5c is not present, self
+/// attestation is in use." An x5c that is present but empty is neither a
+/// conforming chain nor absence, so it is rejected as malformed rather than
+/// silently downgraded to the self-attestation path.
+#[test]
+fn test_packed_rejects_empty_x5c_array() {
+    let rp_id = "example.com";
+    let challenge = "test-challenge";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+    let mut att_stmt = self_att_stmt(Some(-8));
+    att_stmt.push((
+        ciborium::Value::Text("x5c".to_string()),
+        ciborium::Value::Array(vec![]),
+    ));
+    let attestation = make_attestation_object("packed", att_stmt, &auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let err = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect_err("a present-but-empty x5c must not fall back to self attestation");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("empty")),
+        "expected an empty-x5c extraction error, got {err:?}"
+    );
+}
+
 // =========================================================================
 // Unverified attestation formats do not convey an AAGUID
 // =========================================================================
@@ -1999,10 +2086,10 @@ fn test_fido_u2f_rejects_missing_sig() {
     );
 }
 
-/// WebAuthn L2 §8.3 step 1: "Verify that x5c has exactly one element." A
-/// fido-u2f statement that carries a chain rather than the lone leaf
-/// certificate is not a conforming U2F statement and is rejected here, before
-/// the signature is inspected.
+/// WebAuthn L2 §8.3 step 2: "Check that x5c has exactly one element and let
+/// attCert be that element." A fido-u2f statement that carries a chain rather
+/// than the lone leaf certificate is not a conforming U2F statement and is
+/// rejected here, before the signature is inspected.
 #[test]
 fn test_fido_u2f_rejects_multi_element_x5c() {
     let (auth_data, x5c) = fixture_auth_data_and_x5c();
@@ -2039,6 +2126,85 @@ fn test_fido_u2f_rejects_multi_element_x5c() {
     assert!(
         matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("exactly one")),
         "expected an exactly-one-element error, got {err:?}"
+    );
+}
+
+/// The §8.3 CDDL types x5c as `[ attestnCert: bytes ]`, so every element must
+/// be a byte string. An `x5c` of `[leaf, "junk"]` must be rejected as
+/// malformed rather than filtered down to the lone leaf, which would let it
+/// satisfy step 2's exactly-one-element check on an array that actually
+/// carries two (issue #1167).
+#[test]
+fn test_fido_u2f_rejects_x5c_with_non_byte_string_element() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(x5c),
+                ciborium::Value::Text("junk".to_string()),
+            ]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(fixture_original_packed_sig()),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out)
+        .expect_err("an x5c with a non-byte-string element must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("non-byte-string")),
+        "expected a non-byte-string extraction error, got {err:?}"
+    );
+}
+
+/// An `x5c` member that is not an array at all does not conform to the §8.3
+/// CDDL and is rejected as malformed, not treated as an absent chain.
+#[test]
+fn test_fido_u2f_rejects_non_array_x5c() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Bytes(x5c),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out).expect_err("a non-array x5c must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("not an array")),
+        "expected a not-an-array extraction error, got {err:?}"
     );
 }
 

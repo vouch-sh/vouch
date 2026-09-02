@@ -811,8 +811,12 @@ fn verify_packed_attestation<V: CoseVerifier>(
     auth_data_aaguid: Option<&str>,
     verifier: &V,
 ) -> Result<Option<AttestationProof>, VerifyError> {
-    // Extract x5c certificate chain if present
-    let x5c_certs = extract_x5c_certs(stmt_map);
+    // Extract the x5c certificate chain if present. Extraction is strict: an
+    // x5c member that is not a non-empty array of byte strings is rejected
+    // (WebAuthn Level 2 Section 8.2, verification procedure step 1: "Verify
+    // that attStmt is valid CBOR conforming to the syntax defined above"),
+    // matching webauthn-rs on the browser path.
+    let x5c_certs = extract_x5c_certs(stmt_map)?;
 
     // WebAuthn Level 2 Section 8.2 gives `alg` as a mandatory member of both
     // arms of the packed CDDL, and step 1 of the verification procedure is
@@ -901,16 +905,18 @@ fn verify_fido_u2f_attestation(
     cose_key_bytes: &[u8],
     credential_id: &[u8],
 ) -> Result<(), VerifyError> {
-    let x5c_certs = extract_x5c_certs(stmt_map).ok_or_else(|| {
+    let x5c_certs = extract_x5c_certs(stmt_map)?.ok_or_else(|| {
         VerifyError::AttestationChainInvalid(
             "fido-u2f attestation requires an x5c certificate chain".to_string(),
         )
     })?;
 
-    // WebAuthn Level 2 Section 8.3, verification procedure step 1: "Verify
-    // that x5c has exactly one element, the attestation certificate." A
+    // WebAuthn Level 2 Section 8.3, verification procedure step 2: "Check
+    // that x5c has exactly one element and let attCert be that element." A
     // conforming U2F statement carries only the leaf; a chain, if present, is
-    // not a U2F statement and is rejected here.
+    // not a U2F statement and is rejected here. Extraction is strict (every
+    // element a byte string), so this counts the raw array — a non-cert
+    // element cannot shrink it to one.
     if x5c_certs.len() != 1 {
         return Err(VerifyError::AttestationChainInvalid(format!(
             "fido-u2f x5c must have exactly one element (the leaf attestation \
@@ -1038,30 +1044,46 @@ fn cose_key_alg(cose_key: &[u8]) -> Result<i64, VerifyError> {
     get_cose_int(&map, 3)
 }
 
-/// Extract x5c DER certificate arrays from a CBOR attStmt map.
-fn extract_x5c_certs(stmt_map: &[(ciborium::Value, ciborium::Value)]) -> Option<Vec<Vec<u8>>> {
+/// Extract the x5c DER certificate array from a CBOR attStmt map.
+///
+/// Returns `Ok(None)` when the map has no `x5c` member. A present `x5c` must
+/// be a non-empty CBOR array whose every element is a byte string — the CDDL
+/// of every x5c-bearing format types the elements as `bytes` (WebAuthn Level 2
+/// Section 8.2: `x5c: [ attestnCert: bytes, * (caCert: bytes) ]`; Section 8.3:
+/// `x5c: [ attestnCert: bytes ]`) — so a non-conforming element is an error,
+/// never silently dropped. Filtering here would let downstream conformance
+/// checks (fido-u2f's exactly-one-element rule) count a shorter array than the
+/// statement actually carries.
+fn extract_x5c_certs(
+    stmt_map: &[(ciborium::Value, ciborium::Value)],
+) -> Result<Option<Vec<Vec<u8>>>, VerifyError> {
     for (k, v) in stmt_map {
         if let ciborium::Value::Text(s) = k
             && s == "x5c"
-            && let ciborium::Value::Array(arr) = v
         {
-            let certs: Vec<Vec<u8>> = arr
-                .iter()
-                .filter_map(|item| {
-                    if let ciborium::Value::Bytes(bytes) = item {
-                        Some(bytes.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if certs.is_empty() {
-                return None;
+            let ciborium::Value::Array(arr) = v else {
+                return Err(VerifyError::AttestationChainInvalid(
+                    "attStmt x5c is not an array".to_string(),
+                ));
+            };
+            if arr.is_empty() {
+                return Err(VerifyError::AttestationChainInvalid(
+                    "attStmt x5c array is empty".to_string(),
+                ));
             }
-            return Some(certs);
+            let mut certs = Vec::with_capacity(arr.len());
+            for item in arr {
+                let ciborium::Value::Bytes(bytes) = item else {
+                    return Err(VerifyError::AttestationChainInvalid(
+                        "attStmt x5c contains a non-byte-string element".to_string(),
+                    ));
+                };
+                certs.push(bytes.clone());
+            }
+            return Ok(Some(certs));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Verify the attestation signature using the leaf certificate's public key.

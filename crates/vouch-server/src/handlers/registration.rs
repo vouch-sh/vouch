@@ -78,19 +78,35 @@ pub(crate) fn validate_registration_attestation(
         return Err(ServiceError::api(StatusCode::BAD_REQUEST, code, message));
     }
 
-    // An attestation certificate chain is mandatory.
-    let Some(certs) = crate::attestation::extract_x5c_from_attestation(attestation_object) else {
-        tracing::warn!(
-            "Rejected registration: no attestation certificate chain \
-             (self-attestation)"
-        );
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "attestation_cert_required",
-            "This server requires authenticators that provide an \
-             attestation certificate chain validating against a \
-             trusted root. Self-attestation is not accepted.",
-        ));
+    // An attestation certificate chain is mandatory, and a malformed one is
+    // rejected outright rather than repaired by dropping the offending
+    // elements — filtering would let this layer accept a statement the
+    // verification library on either path rejects.
+    let certs = match crate::attestation::extract_x5c_from_attestation(attestation_object) {
+        Ok(Some(certs)) => certs,
+        Ok(None) => {
+            tracing::warn!(
+                "Rejected registration: no attestation certificate chain \
+                 (self-attestation)"
+            );
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "attestation_cert_required",
+                "This server requires authenticators that provide an \
+                 attestation certificate chain validating against a \
+                 trusted root. Self-attestation is not accepted.",
+            ));
+        }
+        Err(reason) => {
+            tracing::warn!("Rejected registration: malformed x5c: {reason}");
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "attestation_chain_invalid",
+                "Attestation certificate chain is malformed. Only genuine \
+                 hardware authenticators with valid attestation chains are \
+                 accepted.",
+            ));
+        }
     };
 
     // The AAGUID in authData is client-supplied. It is passed here only so the
@@ -370,6 +386,42 @@ mod tests {
         );
         let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
             .expect_err("an x5c chain that does not validate must be rejected");
+        assert!(
+            error_code(&err).contains("attestation_chain_invalid"),
+            "expected attestation_chain_invalid, got {err:?}"
+        );
+    }
+
+    /// WebAuthn L2 §8.2 CDDL types every x5c element as `bytes`
+    /// (`x5c: [ attestnCert: bytes, * (caCert: bytes) ]`). A statement whose
+    /// x5c carries the genuine chain plus a junk text element is malformed and
+    /// must be rejected at the chokepoint — not repaired by dropping the junk
+    /// and validating the survivors, which both verification libraries would
+    /// refuse to do (issue #1167).
+    #[test]
+    fn test_x5c_with_non_byte_string_element_is_rejected() {
+        let raw = real_attestation();
+        let mut value: Value = ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+        if let Value::Map(ref mut entries) = value {
+            for (k, v) in entries.iter_mut() {
+                if k.as_text() == Some("attStmt")
+                    && let Value::Map(ref mut stmt) = *v
+                {
+                    for (sk, sv) in stmt.iter_mut() {
+                        if sk.as_text() == Some("x5c")
+                            && let Value::Array(ref mut arr) = *sv
+                        {
+                            arr.push(Value::Text("junk".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut att = Vec::new();
+        ciborium::into_writer(&value, &mut att).expect("CBOR serialization");
+
+        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+            .expect_err("an x5c with a non-byte-string element must be rejected");
         assert!(
             error_code(&err).contains("attestation_chain_invalid"),
             "expected attestation_chain_invalid, got {err:?}"
