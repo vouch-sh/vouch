@@ -414,7 +414,6 @@ authorize-denied-invalid-request-object-coded = Invalid Request Object ({ $code 
 authorize-denied-request-object-fetch-failed = Failed to fetch Request Object: { $detail }
 authorize-denied-invalid-request = Invalid request: { $detail }
 authorize-denied-session-expired = Authorization session expired. Please try again.
-authorize-denied-authentication-failed = Authentication failed. Please try again.
 authorize-denied-server-error = The authorization server could not complete the request. Please try again, or contact the application owner if this persists.
 authorize-denied-unknown-client = Unknown client application. Please contact the application administrator.
 authorize-denied-client-deactivated = This application has been deactivated.

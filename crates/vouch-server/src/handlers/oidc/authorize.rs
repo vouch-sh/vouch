@@ -1154,35 +1154,36 @@ async fn fetch_and_resolve_request_uri(
 
 /// Handle returning from login with a pending auth ID.
 ///
-/// Phase A: consume pending → resolve client (lookup + active + redirect_uri re-validation).
-/// Phase C: session check + max_age check + code issuance.
+/// Phase A: read pending → resolve client (lookup + active + redirect_uri re-validation).
+/// Phase C: session check → consume pending → max_age check + code issuance.
 async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
-    // Consume the pending auth (single-use). The `_claim` witness is
-    // bound to satisfy `#[must_use]`; downstream code uses `pending`
-    // (the consumed record's data) directly.
-    let (pending, _claim) =
-        match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
-            Ok(pair) => pair,
-            Err(db::claim::ClaimError::AlreadyConsumed) => {
-                tracing::warn!(
-                    pending_id,
-                    "Pending OAuth authorization not found or expired"
-                );
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: Tr::new("authorize-denied-session-expired"),
-                }
-                .into_response();
+    // Read the pending auth without spending it. The single-use claim is
+    // consumed only after the session gate passes: consuming first meant a
+    // session this endpoint refuses — or one lost mid-flow — burned the id,
+    // so the user's retry could only ever see "session expired" (#1168).
+    // Same check-before-spend ordering as the OIDC callback (#1071).
+    let pending = match db::get_pending_oauth_authorization(&state.store, pending_id).await {
+        Ok(Some(pending)) => pending,
+        Ok(None) => {
+            tracing::warn!(
+                pending_id,
+                "Pending OAuth authorization not found or expired"
+            );
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: Tr::new("authorize-denied-session-expired"),
             }
-            Err(e) => {
-                tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: Tr::new("authorize-denied-generic"),
-                }
-                .into_response();
+            .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: Tr::new("authorize-denied-generic"),
             }
-        };
+            .into_response();
+        }
+    };
 
     // Phase A: re-validate client active + redirect_uri (errors → page).
     // This guards against the client being deactivated or redirect_uri removed
@@ -1222,6 +1223,31 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             authenticator,
             auth_time: session_auth_time,
         }) => {
+            // The session is acceptable — spend the single-use claim. The
+            // `_claim` witness is bound to satisfy `#[must_use]`; completion
+            // uses `pending` (the consumed record's data), not the pre-read.
+            let (pending, _claim) =
+                match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
+                    Ok(pair) => pair,
+                    // Lost the claim race to a concurrent submission of the
+                    // same id, or the record expired between read and claim.
+                    Err(db::claim::ClaimError::AlreadyConsumed) => {
+                        tracing::warn!(pending_id, "Pending OAuth authorization already consumed");
+                        return AuthorizeDeniedTemplate {
+                            client_name: resolved.client.name.clone(),
+                            error_message: Tr::new("authorize-denied-session-expired"),
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to consume pending OAuth authorization: {}", e);
+                        return AuthorizeDeniedTemplate {
+                            client_name: resolved.client.name.clone(),
+                            error_message: Tr::new("authorize-denied-generic"),
+                        }
+                        .into_response();
+                    }
+                };
             complete_pending_auth(
                 state,
                 &resolved,
@@ -1234,11 +1260,15 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) => {
-            tracing::warn!("User not authenticated after returning from login");
-            AuthorizeDeniedTemplate {
-                client_name: resolved.client.name.clone(),
-                error_message: Tr::new("authorize-denied-authentication-failed"),
-            }
+            // The pending id is unspent, so the login page can send the user
+            // back here once the assertion completes. `login_page` consults
+            // the same session gate, so an unacceptable session renders the
+            // form there rather than bouncing back (#1168).
+            tracing::info!("Session requires an assertion; returning to /login");
+            axum::response::Redirect::to(&format!(
+                "/login?pending_auth={}",
+                urlencoding::encode(pending_id)
+            ))
             .into_response()
         }
         // A store failure is not a failed authentication. Telling the user

@@ -37,7 +37,9 @@ use crate::services::auth::{
     TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::oidc::authorization::{Prompt, PromptSet};
+use crate::services::oidc::authorization::{
+    AuthorizationSessionState, Prompt, PromptSet, check_session_for_authorization,
+};
 use askama::Template;
 use axum::{
     Json,
@@ -352,15 +354,40 @@ pub(crate) async fn login_page(
         prompt_requests_login || p.max_age.is_some()
     }) || device_auth_pending;
 
-    if auth.authenticated && !requires_reauth {
+    if !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
-            return axum::response::Redirect::to(&format!(
-                "/oauth/authorize?pending_auth={}",
-                urlencoding::encode(pending_id)
-            ))
-            .into_response();
+            // Bounce back to /oauth/authorize only when the gate that endpoint
+            // applies would accept the session. `auth.authenticated` is the
+            // wrong question here: an enrollment bootstrap session (upstream
+            // IdP sign-in, no FIDO2) holds a valid cookie but is not
+            // hardware-verified, so deciding from it bounced the user to an
+            // endpoint that refuses the session — consuming the single-use
+            // pending id on the way (#1168). Asking the same predicate keeps
+            // the two endpoints from disagreeing. NeedsAuth falls through to
+            // the assertion form; so does a store failure, where rendering the
+            // form needlessly costs one touch but redirecting could strand
+            // the flow.
+            let session_token = jar
+                .get(vouch_common::SESSION_COOKIE_NAME)
+                .map(|c| c.value());
+            let authorized = match check_session_for_authorization(&state, session_token).await {
+                Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+                Ok(AuthorizationSessionState::NeedsAuth) => false,
+                Err(e) => {
+                    tracing::error!("Session check failed at /login; rendering the form: {e}");
+                    false
+                }
+            };
+            if authorized {
+                return axum::response::Redirect::to(&format!(
+                    "/oauth/authorize?pending_auth={}",
+                    urlencoding::encode(pending_id)
+                ))
+                .into_response();
+            }
+        } else if auth.authenticated {
+            return axum::response::Redirect::to("/").into_response();
         }
-        return axum::response::Redirect::to("/").into_response();
     }
 
     let (client_name, logo_uri, policy_uri, tos_uri) = match &pending {
@@ -1048,6 +1075,80 @@ mod tests {
              got {} with location {:?}",
             resp.status,
             resp.headers.get("location")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_for_bootstrap_session_without_prompt() {
+        // Issue #1168: an enrollment bootstrap session (upstream IdP sign-in,
+        // no FIDO2) holds a valid cookie but is not hardware-verified, and
+        // /oauth/authorize refuses it. With a default (no prompt, no max_age)
+        // pending auth, /login must render the assertion form rather than
+        // bounce the user to an endpoint that will turn them away — and it
+        // must leave the single-use pending id unspent for the round trip.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "bootstrap-form@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: crate::test_utils::TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: None,
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: None,
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: Default::default(),
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "a session /oauth/authorize would refuse must get the assertion \
+             form, not a redirect; got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+        assert!(
+            crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
+                .await
+                .expect("pending lookup")
+                .is_some(),
+            "rendering the form must not spend the single-use pending id"
         );
     }
 
