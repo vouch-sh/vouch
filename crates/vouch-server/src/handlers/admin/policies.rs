@@ -11,8 +11,8 @@ use crate::services::policy as posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::Json;
-use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -21,7 +21,8 @@ use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
 use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::OrgAdmin;
+use crate::handlers::session::{AuthContext, get_resource_auth_context};
 
 const REDIRECT_BASE: &str = "/admin/policies";
 
@@ -186,9 +187,8 @@ pub(crate) async fn admin_policies_page(
 
 /// POST /admin/policies/preconfigured/{slug}/toggle
 pub(crate) async fn toggle_preconfigured_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
+    admin: OrgAdmin,
     headers: HeaderMap,
     jar: CookieJar,
     ValidPath(slug): ValidPath<String>,
@@ -203,8 +203,10 @@ pub(crate) async fn toggle_preconfigured_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     // Single read of active slugs — fixes TOCTOU from old handler
     let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
@@ -322,9 +324,8 @@ fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
 
 /// POST /admin/policies/custom — Create a new custom policy.
 pub(crate) async fn create_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
+    admin: OrgAdmin,
     headers: HeaderMap,
     jar: CookieJar,
     axum::Form(form): axum::Form<CustomPolicyForm>,
@@ -362,8 +363,10 @@ pub(crate) async fn create_custom_policy(
 
     // Authenticate before parsing: policy text is attacker-influenced
     // input, so only an authenticated org admin may reach the parser.
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
@@ -429,9 +432,8 @@ pub(crate) async fn create_custom_policy(
 
 /// POST /admin/policies/custom/{id} — Update a custom policy.
 pub(crate) async fn update_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
+    admin: OrgAdmin,
     headers: HeaderMap,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
@@ -467,8 +469,10 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
@@ -534,17 +538,17 @@ pub(crate) async fn update_custom_policy(
 
 /// POST /admin/policies/custom/{id}/delete — Delete a custom policy.
 pub(crate) async fn delete_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
+    admin: OrgAdmin,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let deleted = db::delete_custom_policy(&state.store, &id, &org_id)
         .await
@@ -585,17 +589,18 @@ pub(crate) async fn delete_custom_policy(
 
 /// POST /admin/policies/custom/{id}/toggle — Toggle active state.
 pub(crate) async fn toggle_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
+    admin: OrgAdmin,
     headers: HeaderMap,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let policy = db::get_custom_policy(&state.store, &id)
         .await
@@ -768,18 +773,11 @@ fn invalid(text: Option<String>, error: String) -> Json<ValidateResponse> {
 
 /// POST /api/v1/org/policies/validate — validate a policy (JSON).
 pub(crate) async fn validate_policy_api(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
+    _admin: OrgAdmin,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
     // Authenticate before parsing: policy text is attacker-influenced
     // input, so only an authenticated org admin may reach the parser.
-    let _auth =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
     let (policy_text, decision) = match (req.policy_text, req.rule) {
         (Some(_), Some(_)) | (None, None) => {
             return Err(ServiceError::api(

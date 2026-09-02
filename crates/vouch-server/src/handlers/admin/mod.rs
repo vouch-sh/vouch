@@ -34,8 +34,6 @@ use jiff::Timestamp;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use super::session::extract_org_admin;
-
 /// Query parameters for paginated pages.
 #[derive(Debug, Deserialize)]
 pub(crate) struct PaginationParams {
@@ -88,16 +86,16 @@ pub(crate) fn compute_token_expiry(days: i64) -> Result<Timestamp, ServiceError>
     })
 }
 
-/// Helper: extract org admin from cookie, verify target is in same org.
+/// Helper: verify the target user belongs to the extracted admin's org.
 pub(crate) async fn extract_admin_and_target(
     state: &AppState,
-    headers: &axum::http::HeaderMap,
-    jar: &axum_extra::extract::cookie::CookieJar,
-    method: &str,
-    uri: &str,
+    admin: super::extractors::OrgAdmin,
     target_user_id: &str,
 ) -> Result<(db::User, db::User, String), ServiceError> {
-    let (admin, org_id) = extract_org_admin(state, headers, jar, method, uri, None).await?;
+    let super::extractors::OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let target = db::get_user_by_id(&state.store, target_user_id)
         .await?

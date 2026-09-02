@@ -7,15 +7,15 @@ use crate::db::documents::audit::AdminMemberActionData;
 use crate::error::ServiceError;
 use crate::impl_template_response;
 use askama::Template;
-use axum::extract::OriginalUri;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
 use crate::handlers::browser_login::validate_origin;
+use crate::handlers::extractors::OrgAdmin;
 use crate::handlers::session::{AuthContext, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
 
@@ -120,24 +120,14 @@ pub(crate) async fn admin_members_page(
 
 /// POST /admin/members/{id}/promote — Promote a member to admin.
 pub(crate) async fn promote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot promote yourself (no-op but creates misleading audit events)
     if admin.id == *target_id {
@@ -183,24 +173,14 @@ pub(crate) async fn promote_member(
 
 /// POST /admin/members/{id}/demote — Demote an admin to regular member.
 pub(crate) async fn demote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot demote yourself
     if admin.id == *target_id {
@@ -246,24 +226,14 @@ pub(crate) async fn demote_member(
 
 /// POST /admin/members/{id}/deactivate — Deactivate a user.
 pub(crate) async fn deactivate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot deactivate yourself
     if admin.id == *target_id {
@@ -320,24 +290,14 @@ pub(crate) async fn deactivate_member(
 
 /// POST /admin/members/{id}/activate — Reactivate a user.
 pub(crate) async fn activate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     let updated = db::update_user_active_status(&state.store, &target_id, true).await?;
     if !updated {
@@ -370,24 +330,14 @@ pub(crate) async fn activate_member(
 
 /// POST /admin/members/{id}/revoke-credentials — Revoke all credentials for a user.
 pub(crate) async fn revoke_member_credentials(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot revoke your own credentials
     if admin.id == *target_id {
@@ -459,24 +409,14 @@ pub(crate) async fn revoke_member_credentials(
 
 /// POST /admin/members/{id}/remove — Remove a user from the organization.
 pub(crate) async fn remove_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
     validate_origin(&headers, &state.config().base_url)?;
 
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot remove yourself
     if admin.id == *target_id {
@@ -823,6 +763,56 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "Self-demote should be blocked: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_cannot_promote() {
+        // The OrgAdmin extractor refuses an org-admin session minted by
+        // upstream IdP sign-in alone (no FIDO2 ceremony): granting persistent
+        // admin to another account is an org-wide write and takes the same
+        // bar as credential issuance.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let target =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = admin_cookie(&token);
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/promote", target.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an unverified session must not promote members: {body}"
+        );
+        assert!(
+            body.contains("hardware_required"),
+            "the refusal must name the missing proof: {body}"
+        );
+
+        let unchanged = crate::db::get_user_by_id(&state.store, &target.id)
+            .await
+            .expect("target lookup")
+            .expect("target exists");
+        assert!(!unchanged.is_org_admin, "target must remain a member");
     }
 
     #[tokio::test]

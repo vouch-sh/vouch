@@ -11,9 +11,12 @@ use http::request::Parts;
 use serde::Deserialize;
 
 use crate::AppState;
+use crate::db;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
+use crate::handlers::session::extract_org_admin;
 use crate::infra::rate_limit::resolve_client_ip;
+use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
 /// Derefs to `&str` so it can be passed directly to db functions.
@@ -313,6 +316,47 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
 
         Ok(Self(from_tls))
+    }
+}
+
+/// An organization administrator holding a hardware-verified session.
+///
+/// The proof is the type: a handler that mutates org-wide state takes
+/// `OrgAdmin` in its signature and cannot run without the admin-role and
+/// key-ceremony checks in [`extract_org_admin`] — the same reasoning
+/// [`super::session::HardwareVerifiedToken`] applies to credential issuance.
+pub(crate) struct OrgAdmin {
+    /// The administrator's user record (active, org member, admin).
+    pub(crate) user: db::User,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let axum::extract::OriginalUri(uri) =
+            axum::extract::OriginalUri::from_request_parts(parts, state)
+                .await
+                .unwrap_or_else(|infallible| match infallible {});
+        let client_cert = OptionalClientCert::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
+        let jar = CookieJar::from_headers(&parts.headers);
+        let (user, org_id) = extract_org_admin(
+            state,
+            &parts.headers,
+            &jar,
+            parts.method.as_str(),
+            uri.path(),
+            client_cert.0.as_ref(),
+        )
+        .await?;
+        Ok(Self { user, org_id })
     }
 }
 
