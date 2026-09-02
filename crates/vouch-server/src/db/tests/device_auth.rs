@@ -7,6 +7,8 @@
 )]
 
 use super::*;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 
 // ========================================================================
 // RFC 8628 - Device Authorization Grant Tests
@@ -120,7 +122,9 @@ async fn test_device_auth_authorization_flow() {
             user_id: &user_id,
             user_email: &user.email,
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -158,6 +162,7 @@ async fn test_authorized_row_with_cleared_authenticator_reads_denied() {
         user_email: Some("a@example.com".to_string()),
         authenticator_id: None,
         hardware_verified: true,
+        auth_time: None,
         expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
         interval_seconds: 5,
         last_poll_at: None,
@@ -274,7 +279,9 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
             user_id: &user_id,
             user_email: "consume@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -336,7 +343,9 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
             user_id: &user_id,
             user_email: "double@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -414,7 +423,9 @@ async fn test_try_consume_device_auth_expired_returns_false() {
             user_id: &user_id,
             user_email: "expired@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -488,7 +499,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -501,7 +514,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_b",
             user_email: "b@example.com",
             authenticator_id: "auth_b",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -544,7 +559,9 @@ async fn test_authorize_after_deny_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -579,7 +596,9 @@ async fn test_deny_after_authorize_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await

@@ -32,6 +32,7 @@ use super::attestation_chain::AttestationProof;
 use super::{cose, oid};
 use thiserror::Error;
 use vouch_common::protocol;
+use webauthn_rs::prelude::Passkey;
 
 /// Trait for COSE signature verification.
 ///
@@ -194,13 +195,62 @@ pub enum VerifyError {
     },
 }
 
+/// The instant a WebAuthn ceremony verified — the `auth_time` claim's value
+/// (OIDC Core §2: "Time when the End-User authentication occurred").
+///
+/// The inner value is stamped only here, at the moment a ceremony completes,
+/// and there is no public constructor. Holding one is therefore evidence
+/// that a ceremony happened at that instant, which is what stops a later
+/// request — a device-code poll, say — from passing off its own clock
+/// reading as an authentication time (issue #1166).
+#[derive(Debug, Clone, Copy)]
+pub struct AuthTime(i64);
+
+impl AuthTime {
+    /// Stamp the current instant. Private: every public path to an
+    /// `AuthTime` runs through a completed ceremony.
+    fn stamp() -> Self {
+        Self(jiff::Timestamp::now().as_second())
+    }
+
+    /// The instant a `webauthn-rs` registration ceremony completed.
+    ///
+    /// Registration runs through `finish_passkey_registration`, which yields
+    /// a [`Passkey`] only for a verified ceremony — so holding one is the
+    /// same evidence [`VerificationResult`] carries for assertions.
+    #[must_use]
+    pub fn from_passkey_registration(_verified: &Passkey) -> Self {
+        Self::stamp()
+    }
+
+    /// Unix seconds, for the `auth_time` claim and for storage.
+    #[must_use]
+    pub fn as_second(self) -> i64 {
+        self.0
+    }
+
+    /// Build an `AuthTime` for a specific instant in tests, standing in for
+    /// a ceremony that cannot be run without hardware.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn for_test(unix_seconds: i64) -> Self {
+        Self(unix_seconds)
+    }
+}
+
 /// Result of successful assertion verification.
+///
+/// The `verified_at` field has no public constructor, so this struct cannot
+/// be built outside this module — a caller holding one has been through
+/// [`verify_assertion`].
 #[derive(Debug)]
 pub struct VerificationResult {
     /// The new counter value from the authenticator.
     pub counter: u32,
     /// Whether user verification was performed.
     pub user_verified: bool,
+    /// When this assertion verified.
+    pub verified_at: AuthTime,
 }
 
 /// Client data structure from WebAuthn.
@@ -435,6 +485,7 @@ fn verify_assertion_inner<V: CoseVerifier>(
     Ok(VerificationResult {
         counter,
         user_verified,
+        verified_at: AuthTime::stamp(),
     })
 }
 

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.9.1"
+version = "2026.9.2"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.98.0"
@@ -135,7 +135,7 @@ apple-native-keyring-store = { version = "=1.0.2", default-features = false }
 arc-swap = { version = "=1.9.2", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
 aws-config = { version = "=1.11.0", default-features = false }
-aws-lc-rs = { version = "=1.18.0", default-features = false }
+aws-lc-rs = { version = "=1.18.1", default-features = false }
 aws-sdk-dsql = { version = "=1.68.0", default-features = false }
 aws-sdk-kms = { version = "=1.117.0", default-features = false }
 aws-sdk-s3 = { version = "=1.144.0", default-features = false }

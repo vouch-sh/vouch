@@ -453,18 +453,17 @@ pub(crate) async fn device_token(
                         ));
                     }
                 };
-            let db::DeviceAuthApproval {
+            let db::StoredApproval {
                 user_id,
                 user_email,
                 authenticator_id,
-                hardware_verified,
+                verification,
             } = approval;
 
             // Use the registered client_id from the device auth request.
             let client_id = request
                 .client_id
                 .unwrap_or_else(|| state.config().base_url.to_string());
-            let now_secs = now.as_second();
 
             // The device auth request doesn't carry aaguid/org_domain, so look
             // them up once here. These reads happen at session creation and
@@ -529,18 +528,13 @@ pub(crate) async fn device_token(
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
-                    // Mirrors how the browser approved this request, so the
-                    // claims the credential endpoints gate on reflect whether
-                    // the authenticator was actually exercised. An approval
-                    // without a ceremony carries no `auth_time`: the approval
-                    // instant is not a FIDO2 instant.
-                    hardware_verification: if hardware_verified {
-                        crate::services::auth::HardwareVerification::Verified {
-                            auth_time: Some(now_secs),
-                        }
-                    } else {
-                        crate::services::auth::HardwareVerification::NotVerified
-                    },
+                    // Verbatim from the approval, so the claims the credential
+                    // endpoints gate on reflect what the browser actually did
+                    // — `auth_time` in particular is the ceremony instant
+                    // recorded there, not this poll's instant, which can lag
+                    // it by up to the device code's lifetime and would
+                    // overstate freshness to the key-deletion step-up gate.
+                    hardware_verification: verification,
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
                     hardware_aaguid: hardware_aaguid.as_deref(),
@@ -630,6 +624,8 @@ pub(crate) async fn device_token(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::webauthn_verify::AuthTime;
+    use crate::db::DeviceApproval;
     use crate::test_utils::*;
 
     // ========================================================================
@@ -931,7 +927,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1013,7 +1011,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1267,7 +1267,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1327,7 +1329,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1386,7 +1390,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1528,7 +1534,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1733,7 +1741,9 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified: true,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
             },
         )
         .await
@@ -1793,7 +1803,11 @@ mod tests {
                 user_id: &user.id,
                 user_email: &user.email,
                 authenticator_id: &auth_id,
-                hardware_verified,
+                verification: if hardware_verified {
+                    DeviceApproval::Observed(AuthTime::for_test(Timestamp::now().as_second()))
+                } else {
+                    DeviceApproval::NotVerified
+                },
             },
         )
         .await

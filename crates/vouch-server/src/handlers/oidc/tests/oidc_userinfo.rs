@@ -89,9 +89,10 @@ async fn test_userinfo_no_email_when_scope_is_none() {
     // token exchange when the requested scope set has an empty intersection
     // with the available scopes) must not be interpreted by userinfo as
     // "full access" — it must return only `sub`, never the user's email.
+    use crate::assurance::HardwareVerification;
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification, NoClientAuth,
-        SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, NoClientAuth, SenderConstraintProof,
+        TokenBinding, TokenIssuanceProof, create_oauth_access_token,
     };
     use secrecy::ExposeSecret;
 

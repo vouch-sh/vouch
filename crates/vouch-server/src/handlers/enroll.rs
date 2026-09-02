@@ -2,6 +2,8 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
+use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::impl_template_response;
@@ -938,7 +940,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
+            hardware_verification: HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
@@ -1503,6 +1505,16 @@ pub(crate) async fn browser_register_complete(
     )
     .await?;
 
+    // The registration ceremony just completed above is an authentication
+    // event (the session's amr/acr below claim hardware verification), and
+    // `finish_passkey_registration` yields a `Passkey` only for a verified
+    // one. Its instant backs both the browser session and the device
+    // approval, so the token the device-code grant later mints reports the
+    // ceremony instant rather than the CLI's poll instant, and the
+    // `require_fresh_timestamp` gate on key deletion does not read either as
+    // Unix epoch (`unwrap_or(0)`).
+    let auth_now = AuthTime::from_passkey_registration(&passkey);
+
     // Mark device authorization as complete (only for CLI-initiated flows)
     if reg_state.device_auth_id.is_empty() {
         tracing::debug!(
@@ -1518,7 +1530,7 @@ pub(crate) async fn browser_register_complete(
                 user_email: &reg_state.user_email,
                 authenticator_id: &authenticator_id,
                 // The WebAuthn registration ceremony just completed above.
-                hardware_verified: true,
+                verification: db::DeviceApproval::Observed(auth_now),
             },
         )
         .await
@@ -1602,14 +1614,6 @@ pub(crate) async fn browser_register_complete(
         None => None,
     };
 
-    // Capture the FIDO2 authentication timestamp — the user just completed
-    // WebAuthn registration, which is an authentication event (amr/acr below
-    // claim hardware verification). This must be `Some(now)` for consistency
-    // with every other `HardwareVerification::Verified` flow and so the
-    // `require_fresh_timestamp` freshness gate on key deletion does not treat
-    // the freshly-minted session as Unix epoch (`unwrap_or(0)`).
-    let auth_now = Timestamp::now();
-
     let session_result = create_oauth_access_token(
         &state,
         CreateOAuthTokenParams {
@@ -1621,7 +1625,7 @@ pub(crate) async fn browser_register_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+            hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,

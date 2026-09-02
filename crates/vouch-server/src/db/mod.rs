@@ -98,8 +98,8 @@ pub use organizations::create_organization;
 #[cfg(test)]
 pub use device_auth::deny_device_auth;
 pub use device_auth::{
-    AuthorizeDeviceAuthParams, DeviceAuthApproval, DeviceAuthRequest, DeviceAuthState,
-    DeviceAuthStatus, OidcState, authorize_device_auth, create_device_auth_request,
+    AuthorizeDeviceAuthParams, DeviceApproval, DeviceAuthRequest, DeviceAuthState,
+    DeviceAuthStatus, OidcState, StoredApproval, authorize_device_auth, create_device_auth_request,
     create_oidc_state, delete_expired_device_auth_requests, delete_expired_oidc_states,
     get_device_auth_by_code_hash, get_device_auth_by_user_code, try_consume_device_auth,
     try_consume_oidc_state, update_device_auth_poll_time,

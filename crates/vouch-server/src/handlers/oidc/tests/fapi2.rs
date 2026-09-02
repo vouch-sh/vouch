@@ -12,6 +12,8 @@
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
 use super::helpers::*;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 use crate::db::TokenEndpointAuthMethod;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 
@@ -1099,7 +1101,9 @@ async fn setup_authorized_device(
             user_id: &user.id,
             user_email: &user.email,
             authenticator_id: auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await

@@ -1009,9 +1009,10 @@ impl Default for TestSessionSpec<'_> {
 /// token validation pipeline, and resolves the `hardware_aaguid` / `org_domain`
 /// snapshot the way production call sites do.
 pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_>) -> String {
+    use crate::assurance::HardwareVerification;
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification,
-        SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
     use secrecy::ExposeSecret;

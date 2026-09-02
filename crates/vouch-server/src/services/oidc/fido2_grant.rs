@@ -14,6 +14,7 @@
 //!    verifies WebAuthn assertion, and issues an OAuth access token.
 
 use crate::AppState;
+use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -410,7 +411,7 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+            hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(now),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,

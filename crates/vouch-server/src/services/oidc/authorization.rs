@@ -523,6 +523,15 @@ pub enum AuthorizationSessionState {
         session: Box<Session>,
         /// The authenticator used.
         authenticator: Box<Authenticator>,
+        /// When the session's FIDO2 ceremony happened, from the access
+        /// token's `auth_time` claim — the value the issued code reports as
+        /// `auth_time` and the `max_age` decision measures from.
+        ///
+        /// `None` for a session whose verification was inherited rather than
+        /// observed (RFC 8693 token exchange) or issued before the instant
+        /// was recorded. It stays `None` all the way to the claim: row
+        /// creation and code issuance are not authentication.
+        auth_time: Option<i64>,
     },
     /// User needs to authenticate.
     NeedsAuth,
@@ -870,6 +879,7 @@ pub async fn check_session_for_authorization(
                 user: Box::new(validated.user),
                 session: Box::new(validated.session),
                 authenticator: Box::new(authenticator),
+                auth_time: validated.auth_time,
             })
         }
         None => Ok(AuthorizationSessionState::NeedsAuth),

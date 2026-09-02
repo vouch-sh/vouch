@@ -2,6 +2,7 @@
 //! OIDC Core 1.0 Section 4 — Discovery + JWKS tests.
 
 use super::helpers::*;
+use crate::assurance::AuthMethod;
 use std::collections::BTreeSet;
 
 #[tokio::test]
@@ -590,7 +591,7 @@ async fn test_oidc_discovery_claims_match_id_token_struct() {
             jkt: Some("thumbprint".to_string()),
             x5t_s256: None,
         }),
-        amr: Some(vec![crate::services::auth::AuthMethod::HardwareKey]),
+        amr: Some(vec![AuthMethod::HardwareKey]),
         acr: Some("acr".to_string()),
         at_hash: Some("hash".to_string()),
     };

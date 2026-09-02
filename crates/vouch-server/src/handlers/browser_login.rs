@@ -20,6 +20,7 @@
 //! - Session binding to authenticator
 
 use crate::AppState;
+use crate::assurance::HardwareVerification;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
 use crate::db::ClientInfo;
@@ -642,6 +643,12 @@ pub(crate) async fn browser_login_complete(
     let new_counter = verification_result.new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
+    // The instant the assertion above verified, stamped by the verifier
+    // itself. It backs both the browser session and the device approval, so
+    // the token the device-code grant later mints reports the ceremony
+    // instant rather than the CLI's poll instant.
+    let auth_now = verification_result.verified_at;
+
     // Release a CLI waiting on `vouch enroll`: the assertion just verified is
     // the possession proof the upstream IdP sign-in cannot provide, so the
     // device authorization is authorized from here.
@@ -659,7 +666,7 @@ pub(crate) async fn browser_login_complete(
                     user_id: &user.id,
                     user_email: &user.email,
                     authenticator_id: &authenticator.id,
-                    hardware_verified: true,
+                    verification: db::DeviceApproval::Observed(auth_now),
                 },
             )
             .await
@@ -695,7 +702,6 @@ pub(crate) async fn browser_login_complete(
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.to_string();
-    let auth_now = Timestamp::now();
 
     // Snapshot org domain at session creation so the federation claims are a
     // session-time snapshot rather than current-state lookups. Fail closed:
@@ -727,7 +733,7 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            hardware_verification: crate::services::auth::HardwareVerification::Verified {
+            hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,

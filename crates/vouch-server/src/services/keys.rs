@@ -5,6 +5,7 @@
 //! It is used by both the API key handlers (Bearer token auth) and the enrollment
 //! key handlers (cookie-based auth).
 
+use crate::assurance::ACR_AAL3;
 use crate::db::documents::authenticator::AuthenticatorDoc;
 use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
@@ -93,7 +94,7 @@ pub(crate) fn require_recent_hardware_verification(
              exercised the security key"
         );
         return Err(ServiceError::StepUpRequired {
-            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+            acr_values: Some(ACR_AAL3.to_string()),
             max_age: Some(u64::try_from(KEY_DELETE_MAX_AGE_SECS).unwrap_or(60)),
         });
     }
@@ -123,7 +124,7 @@ pub(crate) fn require_fresh_timestamp(
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
-        acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
+        acr_values: Some(ACR_AAL3.to_string()),
         max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
     })
 }

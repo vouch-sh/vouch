@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use vouch_cli::{HttpClient, TestHttpClient};
 use vouch_common::protocol;
+use vouch_server::crypto::webauthn_verify::AuthTime;
 use vouch_server::{AppState, db, test_utils};
 
 /// Unified test harness for integration tests.
@@ -480,7 +481,9 @@ impl TestHarness {
                 user_id,
                 user_email: email,
                 authenticator_id: auth_id,
-                hardware_verified: true,
+                verification: db::DeviceApproval::Observed(AuthTime::for_test(
+                    jiff::Timestamp::now().as_second(),
+                )),
             },
         )
         .await?;
