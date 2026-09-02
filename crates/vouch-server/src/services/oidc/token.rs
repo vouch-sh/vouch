@@ -373,7 +373,7 @@ pub(crate) async fn exchange_authorization_code(
             act: None,
             audience: grants.audience.as_deref(),
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+                auth_time: auth_code.auth_time,
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
@@ -407,7 +407,7 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             scope: &auth_code.scope,
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
+                auth_time: auth_code.auth_time,
             },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
@@ -1237,6 +1237,15 @@ pub struct OidcValidatedSession {
     /// Whether a FIDO2 assertion backs this session, from the access token's
     /// `hardware_verified` claim.
     pub hardware_verified: bool,
+    /// When that assertion happened, from the access token's `auth_time`
+    /// claim (OIDC Core §2).
+    ///
+    /// Independent of [`Self::hardware_verified`]: a token exchanged under
+    /// RFC 8693 inherits the subject's verification but not its instant, and
+    /// tokens issued before the instant was recorded carry none. `None`
+    /// means "cannot say when", and nothing may substitute a nearby
+    /// timestamp for it.
+    pub auth_time: Option<i64>,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1313,9 +1322,9 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let (client_id, hardware_verified) = match &decoded {
+    let (client_id, hardware_verified, auth_time) = match &decoded {
         crate::services::auth::DecodedToken::AccessToken(c) => {
-            (Some(c.client_id.clone()), c.hardware_verified)
+            (Some(c.client_id.clone()), c.hardware_verified, c.auth_time)
         }
     };
 
@@ -1326,6 +1335,7 @@ pub async fn validate_session_token(
         scope: decoded.scope().cloned(),
         client_id,
         hardware_verified,
+        auth_time,
     }))
 }
 

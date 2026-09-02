@@ -13,7 +13,7 @@ use super::{
 use crate::AppState;
 use crate::assurance::ACR_AAL3;
 use crate::db::ResponseMode;
-use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
+use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, User};
 use crate::error::OAuthErrorCode;
 use crate::handlers::extractors::{OAuthForm, OAuthQuery};
 use crate::impl_template_response;
@@ -418,15 +418,16 @@ async fn check_session_and_authorize(
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: ref auth_session,
+            session: _,
             authenticator,
+            auth_time: session_auth_time,
         }) => {
             authorize_authenticated_user(
                 state,
                 validated,
                 &resolved.client,
                 &user,
-                auth_session,
+                session_auth_time,
                 &authenticator,
                 reauth_policy,
                 par_to_consume,
@@ -1217,15 +1218,16 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: ref auth_session,
+            session: _,
             authenticator,
+            auth_time: session_auth_time,
         }) => {
             complete_pending_auth(
                 state,
                 &resolved,
                 &pending,
                 &user,
-                auth_session,
+                session_auth_time,
                 &authenticator,
                 auth_code_lifetime,
             )
@@ -1263,7 +1265,7 @@ async fn complete_pending_auth(
     resolved: &ResolvedClient,
     pending: &db::PendingOAuthAuthorization,
     user: &User,
-    auth_session: &Session,
+    session_auth_time: Option<i64>,
     authenticator: &Authenticator,
     auth_code_lifetime: i64,
 ) -> Response {
@@ -1280,19 +1282,41 @@ async fn complete_pending_auth(
     // Validate max_age: if the pending request specified max_age,
     // verify the session is not older than that threshold (RFC 9470).
     //
-    // A session created after this authorization request began means the
-    // user authenticated *for this request*, which satisfies any max_age
-    // (including 0) by definition — no elapsed-seconds arithmetic can say
-    // otherwise. Checking timestamps directly keeps the outcome independent
-    // of how long the post-login browser navigation took: with max_age=0, a
-    // wall-clock age check alone would fail again whenever that round trip
-    // crosses an integer-second boundary.
+    // A user who authenticated after this authorization request began did so
+    // *for this request*, which satisfies any max_age (including 0) by
+    // definition — no elapsed-seconds arithmetic can say otherwise. Checking
+    // timestamps directly keeps the outcome independent of how long the
+    // post-login browser navigation took: with max_age=0, a wall-clock age
+    // check alone would fail again whenever that round trip crosses an
+    // integer-second boundary.
+    //
+    // Both the comparison and the age measure from the ceremony rather than
+    // from session-row creation, since max_age is an authentication age
+    // (OIDC Core §2). They coincide for a session minted in the same request
+    // as its ceremony; measuring from the row would let a session written
+    // during this request on the strength of an older ceremony skip the
+    // check.
+    //
+    // A session with no recorded ceremony instant — written before the field
+    // existed — cannot answer "how long ago", so a request that asks the
+    // question gets re-authentication rather than a substituted value.
+    if pending.max_age.is_some() && session_auth_time.is_none() {
+        return resolved
+            .error_redirect(
+                state,
+                OAuthErrorCode::LoginRequired,
+                "Session records no authentication time for max_age",
+                pending.state.as_deref(),
+            )
+            .await;
+    }
     if let Some(max_age) = pending.max_age
-        && auth_session.created_at < pending.created_at
+        && let Some(session_auth_time) = session_auth_time
+        && session_auth_time < pending.created_at.as_second()
     {
         let age_secs = jiff::Timestamp::now()
-            .duration_since(auth_session.created_at)
-            .as_secs()
+            .as_second()
+            .saturating_sub(session_auth_time)
             .max(0);
         let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
         let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
@@ -1369,7 +1393,7 @@ async fn complete_pending_auth(
         dpop_jkt: pending.dpop_jkt.as_deref(),
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: pending.authorization_details.as_ref(),
-        auth_time: Some(auth_session.created_at.as_second()),
+        auth_time: session_auth_time,
         par: par_proof,
     };
 
@@ -1596,7 +1620,7 @@ async fn authorize_authenticated_user(
     validated: ValidatedAuthRequest,
     oauth_client: &OAuthClient,
     user: &User,
-    auth_session: &Session,
+    session_auth_time: Option<i64>,
     authenticator: &Authenticator,
     reauth_policy: ReauthPolicy,
     par_to_consume: Option<db::ParRef<'_>>,
@@ -1636,7 +1660,19 @@ async fn authorize_authenticated_user(
                     // A max_age too large for `i64` seconds is ~292 billion
                     // years, far beyond any session, so saturating means "no
                     // age limit" rather than an arbitrary rejection.
-                    let elapsed = jiff::Timestamp::now().duration_since(auth_session.created_at);
+                    //
+                    // The elapsed time runs from the ceremony, since max_age
+                    // bounds an authentication age, not a row's lifetime. A
+                    // session that cannot say when it authenticated — one
+                    // whose verification was inherited through RFC 8693
+                    // exchange — re-authenticates rather than having a
+                    // substitute instant stand in for the answer.
+                    let Some(auth_time) = session_auth_time else {
+                        return true;
+                    };
+                    let elapsed = jiff::Timestamp::now().duration_since(
+                        jiff::Timestamp::from_second(auth_time).unwrap_or_default(),
+                    );
                     let limit =
                         jiff::SignedDuration::from_secs(i64::try_from(max_age).unwrap_or(i64::MAX));
                     elapsed > limit
@@ -1679,7 +1715,7 @@ async fn authorize_authenticated_user(
         validated,
         oauth_client,
         user,
-        auth_session,
+        session_auth_time,
         authenticator,
         par_to_consume,
         response_mode,
@@ -1699,7 +1735,7 @@ async fn issue_code_after_reauth_check(
     validated: ValidatedAuthRequest,
     oauth_client: &OAuthClient,
     user: &User,
-    auth_session: &Session,
+    session_auth_time: Option<i64>,
     authenticator: &Authenticator,
     par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
@@ -1789,7 +1825,7 @@ async fn issue_code_after_reauth_check(
         dpop_jkt: validated.dpop_jkt(),
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: ad_value.as_ref(),
-        auth_time: Some(auth_session.created_at.as_second()),
+        auth_time: session_auth_time,
         par: par_proof,
     };
 
