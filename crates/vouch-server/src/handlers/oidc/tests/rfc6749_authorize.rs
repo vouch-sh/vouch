@@ -1648,25 +1648,6 @@ async fn test_authorize_still_issues_a_code_for_a_verified_session() {
     );
 }
 
-/// Drive the unauthenticated first leg of the deferred flow and return the
-/// pending auth id from the `/login` redirect.
-async fn start_deferred_flow(app: &axum::Router, client_id: &str, state_param: &str) -> String {
-    let response = http_get_full(app, &authorize_url(client_id, state_param), &[]).await;
-    let location = response
-        .headers
-        .get("Location")
-        .expect("first leg must redirect to /login")
-        .to_str()
-        .expect("Valid UTF-8")
-        .to_string();
-    location
-        .split("pending_auth=")
-        .nth(1)
-        .and_then(|rest| rest.split('&').next())
-        .expect("login redirect must carry pending_auth")
-        .to_string()
-}
-
 #[tokio::test]
 async fn test_pending_auth_with_bootstrap_session_returns_to_login_and_preserves_pending() {
     // Issue #1168: a bootstrap (NotVerified) session arriving with a pending
@@ -1692,7 +1673,14 @@ async fn test_pending_auth_with_bootstrap_session_returns_to_login_and_preserves
     .await;
     let cookie = format!("__Host-vouch_session={session_token}");
 
-    let pending_id = start_deferred_flow(&app, &client.client_id, "teststate-pending-bs").await;
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Second leg: return from login with the bootstrap session.
     let response = http_get_full(
@@ -1751,7 +1739,14 @@ async fn test_pending_auth_without_session_returns_to_login_and_preserves_pendin
     let user = create_test_user(&state.store, "pending-nosession@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let pending_id = start_deferred_flow(&app, &client.client_id, "teststate-pending-ns").await;
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_get_full(
         &app,

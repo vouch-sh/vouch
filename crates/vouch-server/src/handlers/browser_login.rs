@@ -1104,29 +1104,14 @@ mod tests {
         )
         .await;
 
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = crate::test_utils::create_test_pending_auth(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            crate::test_utils::TestPendingAuthSpec {
                 client_id: &client.client_id,
-                redirect_uri: "https://example.com/callback",
-                response_type: "code",
-                state: None,
-                scope: Some("openid"),
-                nonce: None,
-                code_challenge: None,
-                code_challenge_method: None,
-                resource: None,
-                acr_values: None,
-                max_age: None,
-                prompt: None,
-                dpop_jkt: None,
-                authorization_details: None,
-                response_mode: Default::default(),
-                par_request_uri: None,
+                ..Default::default()
             },
         )
-        .await
-        .expect("Failed to create pending auth");
+        .await;
 
         let resp = crate::test_utils::http_get_full(
             &app,
