@@ -319,22 +319,25 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     }
 }
 
-/// A signed-in user with a hardware-verified session, for the applications
-/// portal.
+/// A signed-in user whose session is backed by a FIDO2 ceremony.
 ///
-/// Registering an application mints client secrets and sets redirect URIs —
-/// credentials that outlive the session creating them — so this surface takes
-/// the same bar as credential issuance. Taking this type is what runs the
-/// check, and like [`crate::handlers::extractors::AdminPage`] it answers a
-/// person rather than an API client: no session gets the portal's
-/// unauthorized page, while a session that simply has not asserted is sent to
-/// `/login` to touch a key.
-pub(crate) struct ApplicationsSession {
+/// The default for any browser page offering a privileged action — the
+/// applications portal registers OAuth clients, minting secrets and setting
+/// redirect URIs, credentials that outlive the session creating them. Taking
+/// this type is what runs the check, so a new page gets the bar by asking for
+/// the type rather than by remembering a guard.
+///
+/// It answers a person, not an API client: a session that has not asserted is
+/// sent to `/login` to touch a key, and one that is not signed in at all gets
+/// the unauthorized page. [`HardwareVerifiedToken`] is the same requirement
+/// for callers that read a JSON error instead, and [`AdminPage`] adds the
+/// org-admin role on top of this one.
+pub(crate) struct AttestedSession {
     /// Header/template context for the rendered page.
     pub(crate) auth: AuthContext,
 }
 
-impl FromRequestParts<Arc<AppState>> for ApplicationsSession {
+impl FromRequestParts<Arc<AppState>> for AttestedSession {
     type Rejection = axum::response::Response;
 
     async fn from_request_parts(
