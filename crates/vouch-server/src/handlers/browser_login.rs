@@ -304,8 +304,6 @@ pub(crate) async fn login_page(
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
     jar: CookieJar,
 ) -> Response {
-    let auth = get_auth_context(&state, &jar).await;
-
     // Validate pending_auth is a UUID before DB lookup.
     if let Some(ref pending_id) = query.pending_auth
         && uuid::Uuid::try_parse(pending_id).is_err()
@@ -443,6 +441,11 @@ pub(crate) async fn login_page(
         }
         _ => None,
     };
+
+    // Only the rendered form needs the header context, and building it costs
+    // a session and a user lookup that the session gate above already did.
+    // Reaching this point means the form is being shown.
+    let auth = get_auth_context(&state, &jar).await;
 
     LoginTemplate {
         pending_auth: query.pending_auth,
