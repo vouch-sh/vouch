@@ -522,6 +522,53 @@ fn build_test_request(
     Request::from_parts(parts, body)
 }
 
+/// Generate a self-signed P-256 certificate DER for testing.
+pub fn make_test_cert_der(cn: &str) -> Vec<u8> {
+    use der::{Decode as _, Encode, asn1::Utf8StringRef};
+    use p256::ecdsa::SigningKey;
+    use spki::EncodePublicKey as _;
+    use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Validity;
+
+    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+
+    let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+    let cn_value = Utf8StringRef::new(cn).expect("valid CN");
+    let atv = x509_cert::attr::AttributeTypeAndValue {
+        oid: cn_oid,
+        value: der::asn1::Any::from(cn_value),
+    };
+    let mut rdn_set = der::asn1::SetOfVec::new();
+    rdn_set.insert(atv).expect("insert RDN");
+    let subject =
+        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)]);
+
+    let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+    let serial = SerialNumber::new(&[1u8]).expect("serial");
+    let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+    let builder = CertificateBuilder::new(
+        Profile::Leaf {
+            issuer: subject.clone(),
+            enable_key_agreement: false,
+            enable_key_encipherment: false,
+        },
+        serial,
+        validity,
+        subject,
+        spki,
+        &key,
+    )
+    .expect("cert builder");
+
+    let cert = builder
+        .build::<p256::ecdsa::DerSignature>()
+        .expect("build cert");
+    cert.to_der().expect("DER encode")
+}
+
 /// Build a request with an injected mTLS client certificate DER.
 ///
 /// Injects `ConnectInfo<PeerClientCert>` so `OptionalClientCert` extracts it.
@@ -1143,6 +1190,25 @@ async fn forge_auth_time(
     .expect("Failed to persist the forged-auth_time session");
 
     token
+}
+
+/// Create an org with an admin user, a FIDO2-verified session, and return
+/// the admin plus the session's raw access token.
+pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    (admin, token)
 }
 
 /// Create an organization API token for testing, bound to the given org,

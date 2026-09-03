@@ -329,7 +329,7 @@ yet) is emitted as an OCSF Base Event (`class_uid: 0`) with the raw type preserv
 `unmapped.event_type`, never a `500`.
 
 This table and the mapping code are kept in sync by an automated test
-(`ocsf_class` in `handlers/admin/ocsf.rs`) that fails the build if they drift apart.
+(`ocsf_class` in `handlers/api/org/ocsf.rs`) that fails the build if they drift apart.
 
 ## Known gap: events written before the NULL-domain fix
 

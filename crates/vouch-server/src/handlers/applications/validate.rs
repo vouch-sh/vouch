@@ -23,7 +23,7 @@ use super::{validate_post_logout_redirect_uris, validate_redirect_uris};
 
 /// A validation failure: a machine-readable code plus a human message.
 #[derive(Debug)]
-pub(super) enum AppValidationError {
+pub(crate) enum AppValidationError {
     EmptyName,
     InvalidApplicationType,
     InvalidAccessScope,
@@ -57,7 +57,7 @@ pub(super) enum AppValidationError {
 
 impl AppValidationError {
     /// Machine-readable error code (stable API contract).
-    pub(super) fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::EmptyName => "invalid_name",
             Self::InvalidApplicationType => "invalid_type",
@@ -81,7 +81,7 @@ impl AppValidationError {
     }
 
     /// Human-readable error message.
-    pub(super) fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match self {
             Self::EmptyName => "Application name is required".to_string(),
             Self::InvalidApplicationType => {
@@ -177,7 +177,7 @@ impl AppValidationError {
     /// Values interpolated from the submitted request (URI lists, an
     /// algorithm name) are passed through verbatim; only the sentence around
     /// them is translated.
-    pub(super) fn localized(&self) -> Tr<'static> {
+    pub(crate) fn localized(&self) -> Tr<'static> {
         match self {
             Self::EmptyName => Tr::new("apps-invalid-name-required"),
             Self::InvalidApplicationType => Tr::new("apps-invalid-application-type"),
@@ -224,7 +224,7 @@ impl From<AppValidationError> for ServiceError {
 }
 
 /// Raw application fields for create requests.
-pub(super) struct CreateAppInput<'a> {
+pub(crate) struct CreateAppInput<'a> {
     pub name: &'a str,
     pub application_type: &'a str,
     pub redirect_uris: &'a [String],
@@ -239,7 +239,7 @@ pub(super) struct CreateAppInput<'a> {
 
 /// Validated create fields, ready for `CreateOAuthClientParams`.
 #[derive(Debug)]
-pub(super) struct ValidatedCreateApp<'a> {
+pub(crate) struct ValidatedCreateApp<'a> {
     /// Trimmed, non-empty application name.
     pub name: &'a str,
     pub app_type: OAuthClientType,
@@ -255,7 +255,7 @@ pub(super) struct ValidatedCreateApp<'a> {
 /// Pure format validation — safe to call before authentication so malformed
 /// requests incur no DB cost. Handler-specific checks (access scope, org
 /// membership) stay in the handlers.
-pub(super) fn validate_create_application<'a>(
+pub(crate) fn validate_create_application<'a>(
     input: CreateAppInput<'a>,
 ) -> Result<ValidatedCreateApp<'a>, AppValidationError> {
     let name = input.name.trim();
@@ -352,7 +352,7 @@ fn client_keys(
 ///
 /// `None` means the field was not provided (API PATCH semantics); web form
 /// handlers pass `Some` for fields the form always submits.
-pub(super) struct UpdateAppInput<'a> {
+pub(crate) struct UpdateAppInput<'a> {
     pub redirect_uris: Option<&'a [String]>,
     pub resource_uris: Option<&'a [String]>,
     /// `None` = field absent (preserve existing). `Some(&[])` = explicitly clear the list.
@@ -365,7 +365,7 @@ pub(super) struct UpdateAppInput<'a> {
 
 /// Validated update fields (format phase only).
 #[derive(Debug)]
-pub(super) struct ValidatedUpdateApp<'a> {
+pub(crate) struct ValidatedUpdateApp<'a> {
     pub is_fapi: bool,
     /// Whether `fapi_profile` was present in the request at all. A provided
     /// non-FAPI value is an explicit transition away from FAPI; an absent
@@ -388,7 +388,7 @@ pub(super) struct ValidatedUpdateApp<'a> {
 /// values. Pure format validation — safe to call before authentication.
 /// FAPI rules that depend on the existing client record are checked by
 /// [`validate_update_fapi`] after the ownership check.
-pub(super) fn validate_update_format<'a>(
+pub(crate) fn validate_update_format<'a>(
     input: UpdateAppInput<'a>,
 ) -> Result<ValidatedUpdateApp<'a>, AppValidationError> {
     // Redirect URIs are validated in `validate_update_fapi`, which is the stage
@@ -485,7 +485,7 @@ fn effective_token_endpoint_auth_method(
 /// Call after authentication and the ownership check.  This covers rules that
 /// depend on persisted state (e.g. the client's application_type) and
 /// therefore cannot run in the pre-auth format pass.
-pub(super) fn validate_update_fapi(
+pub(crate) fn validate_update_fapi(
     validated: &ValidatedUpdateApp<'_>,
     client: &OAuthClient,
 ) -> Result<(), AppValidationError> {
@@ -596,7 +596,7 @@ pub(super) fn validate_update_fapi(
 ///
 /// Everything else in [`CreateOAuthClientParams`] is identical between the
 /// API and web-form create paths and is wired by [`build_create_params`].
-pub(super) struct CreateAppContext<'a> {
+pub(crate) struct CreateAppContext<'a> {
     pub user_id: &'a str,
     pub description: Option<&'a str>,
     pub redirect_uris: &'a [String],
@@ -615,7 +615,7 @@ pub(super) struct CreateAppContext<'a> {
 /// derived from the validated input or the caller context are fixed for
 /// manual registration (RFC 7591 dynamic registration is a separate
 /// subsystem with its own defaults).
-pub(super) fn build_create_params<'a>(
+pub(crate) fn build_create_params<'a>(
     validated: &'a ValidatedCreateApp<'a>,
     ctx: CreateAppContext<'a>,
 ) -> CreateOAuthClientParams<'a> {
@@ -679,7 +679,7 @@ pub(super) fn build_create_params<'a>(
 
 /// FAPI-related fields for an update, merged against the existing client.
 #[derive(Debug)]
-pub(super) struct FapiUpdateFields<'a> {
+pub(crate) struct FapiUpdateFields<'a> {
     pub fapi_profile: FapiProfile,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub keys: Option<&'a crate::db::ClientKeys>,
@@ -695,7 +695,7 @@ pub(super) struct FapiUpdateFields<'a> {
 /// forcing rule. A provided non-FAPI value clears the profile, JWKS, and
 /// DPoP binding of a client that was not already FAPI; downgrading a FAPI
 /// client is rejected upstream by [`validate_update_fapi`].
-pub(super) fn compute_fapi_update_fields<'a>(
+pub(crate) fn compute_fapi_update_fields<'a>(
     validated: &'a ValidatedUpdateApp<'_>,
     client: &'a OAuthClient,
 ) -> Result<FapiUpdateFields<'a>, AppValidationError> {

@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! API handlers for OAuth Application Registration.
-//!
-//! These handlers return JSON responses for programmatic access to
-//! application management.
+//! JSON handlers for `/api/v1/applications/*` — programmatic OAuth
+//! application management. Every handler takes the `AuthenticatedToken`
+//! extractor and answers with a JSON error envelope; the browser portal for
+//! the same data lives in [`crate::handlers::applications`], which also owns
+//! the request/response types and validation rules both surfaces share.
 
 use crate::AppState;
 use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
 use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
 
-use super::generate_client_secret;
-use super::types::{
+use crate::error::ServiceError;
+use crate::handlers::applications::generate_client_secret;
+use crate::handlers::applications::types::{
     AddSecretRequest, AddSecretResponse, ApplicationResponse, CreateApplicationRequest,
     CreateApplicationResponse, ListApplicationsResponse, ListSecretsResponse, SecretInfo,
     UpdateApplicationRequest,
 };
-use super::validate::{
+use crate::handlers::applications::validate::{
     CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
     compute_fapi_update_fields, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
-use crate::error::ServiceError;
 use crate::handlers::hash_token;
 use crate::handlers::session::AuthenticatedToken;
 use crate::handlers::{ValidPath, ValidUuid};

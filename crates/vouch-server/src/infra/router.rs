@@ -389,24 +389,24 @@ fn build_general_limited_routes(
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     let protected_api_routes = Router::new()
-        // Org admin API (JSON, JWT Bearer auth)
+        // Org admin API (JSON; see handlers::api::org's module doc for auth per handler)
         .route(
             "/api/v1/org/scim-tokens",
-            get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
+            get(handlers::api::org::list_scim_tokens).post(handlers::api::org::create_scim_token),
         )
         .route(
             "/api/v1/org/scim-tokens/{id}",
-            delete(handlers::admin::delete_scim_token),
+            delete(handlers::api::org::delete_scim_token),
         )
         // Org-scoped audit event export (JSON/NDJSON/OCSF)
         .route(
             "/api/v1/org/audit-events",
-            get(handlers::admin::audit_events),
+            get(handlers::api::org::audit_events),
         )
         // Policy validation API (used by the admin policy editor)
         .route(
             "/api/v1/org/policies/validate",
-            post(handlers::admin::validate_policy_api),
+            post(handlers::api::org::validate_policy_api),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(
@@ -606,27 +606,27 @@ fn build_api_management_routes(
         // Applications API (JSON)
         .route(
             "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
+            get(handlers::api::applications::list_applications_api)
+                .post(handlers::api::applications::create_application_api),
         )
         .route(
             "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
+            get(handlers::api::applications::get_application_api)
+                .patch(handlers::api::applications::update_application_api)
+                .delete(handlers::api::applications::delete_application_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets",
-            get(handlers::applications::list_secrets_api)
-                .post(handlers::applications::add_secret_api),
+            get(handlers::api::applications::list_secrets_api)
+                .post(handlers::api::applications::add_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets/{secret_id}",
-            delete(handlers::applications::delete_secret_api),
+            delete(handlers::api::applications::delete_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
+            post(handlers::api::applications::revoke_tokens_api),
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),

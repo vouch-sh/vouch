@@ -2,6 +2,7 @@
 //! HTTP request handlers.
 
 pub(crate) mod admin;
+pub(crate) mod api;
 pub(crate) mod applications;
 pub(crate) mod auth;
 pub(crate) mod browser_login;
