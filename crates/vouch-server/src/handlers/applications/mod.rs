@@ -9,17 +9,14 @@ mod types;
 mod validate;
 mod web;
 
-use crate::AppState;
 use crate::db;
 use aws_lc_rs::rand as aws_rand;
-use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use super::extract_session_from_cookie;
-use super::session::AuthContext;
-
 // Re-export handler functions used by the router.
+pub(crate) use types::ApplicationUnauthorizedTemplate;
+
 pub(crate) use api::{
     add_secret_api, create_application_api, delete_application_api, delete_secret_api,
     get_application_api, list_applications_api, list_secrets_api, revoke_tokens_api,
@@ -53,29 +50,6 @@ pub(crate) fn generate_client_secret() -> String {
     let mut bytes = [0u8; SECRET_LENGTH];
     aws_rand::fill(&mut bytes).expect("RNG failure");
     format!("vouch_{}", URL_SAFE_NO_PAD.encode(bytes))
-}
-
-/// Extract auth context from cookie for web UI.
-///
-/// Returns `Some(AuthContext)` if a valid session exists, `None` otherwise.
-async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<AuthContext> {
-    // Use shared cookie extraction
-    let session = extract_session_from_cookie(state, jar).await.ok()?;
-
-    // Missing or deactivated users are unauthenticated — the active-account
-    // invariant is enforced once, in `load_active_user`.
-    let user = super::session::load_active_user(state, &session.sub)
-        .await
-        .ok()?;
-
-    Some(AuthContext {
-        authenticated: true,
-        user_id: Some(session.sub),
-        user_email: Some(user.email),
-        has_org: user.org_id.is_some(),
-        is_org_admin: user.is_org_admin,
-        hardware_verified: session.hardware_verified,
-    })
 }
 
 /// Parse redirect URIs from form input (newline or comma separated).
@@ -168,16 +142,13 @@ fn validate_redirect_uris(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use axum_extra::extract::cookie::{Cookie, CookieJar};
-
     use crate::test_utils::*;
 
-    /// A deactivated user whose session has not yet been swept must be treated
-    /// as unauthenticated by the web UI, matching `get_resource_auth_context`
-    /// on the API path.
+    /// A deactivated user whose session has not yet been swept must be turned
+    /// away by the web UI, matching `get_resource_auth_context` on the API path.
     #[tokio::test]
     async fn deactivated_user_cookie_is_unauthenticated() {
-        let state = test_app_state().await;
+        let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-web@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session_with(
@@ -190,22 +161,73 @@ mod tests {
             },
         )
         .await;
-        let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, token));
+        let cookie = format!("__Host-vouch_session={token}");
 
-        let auth = super::extract_auth_from_cookie(&state, &jar).await;
-        assert!(
-            auth.is_some(),
-            "active user with a valid cookie must authenticate"
+        let resp = http_get_full(&app, "/applications", &[("Cookie", &cookie)]).await;
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "active user with a valid cookie must reach the portal"
         );
 
         crate::db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
-        let auth = super::extract_auth_from_cookie(&state, &jar).await;
+        let resp = http_get_full(&app, "/applications", &[("Cookie", &cookie)]).await;
         assert!(
-            auth.is_none(),
-            "deactivated user must be unauthenticated even while the session still exists"
+            resp.body.contains("Unauthorized") || resp.status.is_client_error(),
+            "deactivated user must be refused even while the session still exists: {}",
+            resp.status
+        );
+    }
+
+    /// Client secrets outlive the session that mints them, so the portal is
+    /// closed to a session that never ran a key ceremony.
+    #[tokio::test]
+    async fn bootstrap_session_cannot_reach_the_applications_portal() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "bootstrap-apps@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_get_full(&app, "/applications", &[("Cookie", &cookie)]).await;
+        assert!(
+            resp.status.is_redirection(),
+            "an unverified session must be sent to assert, got {}",
+            resp.status
+        );
+        assert_eq!(
+            resp.headers
+                .get("location")
+                .expect("redirect location")
+                .to_str()
+                .expect("ascii location"),
+            "/login"
+        );
+
+        let resp = crate::test_utils::http_post_form_full(
+            &app,
+            "/applications/new",
+            "name=evil&redirect_uris=https://evil.example.com/cb",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert!(
+            resp.status.is_redirection(),
+            "an unverified session must not register an application, got {}",
+            resp.status
         );
     }
 }

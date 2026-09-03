@@ -319,6 +319,67 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     }
 }
 
+/// A signed-in user with a hardware-verified session, for the applications
+/// portal.
+///
+/// Registering an application mints client secrets and sets redirect URIs —
+/// credentials that outlive the session creating them — so this surface takes
+/// the same bar as credential issuance. Taking this type is what runs the
+/// check, and like [`crate::handlers::extractors::AdminPage`] it answers a
+/// person rather than an API client: no session gets the portal's
+/// unauthorized page, while a session that simply has not asserted is sent to
+/// `/login` to touch a key.
+pub(crate) struct ApplicationsSession {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+}
+
+impl FromRequestParts<Arc<AppState>> for ApplicationsSession {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse;
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let unauthorized =
+            || crate::handlers::applications::ApplicationUnauthorizedTemplate.into_response();
+
+        let Ok(session) = crate::handlers::session::extract_session_from_cookie(state, &jar).await
+        else {
+            return Err(unauthorized());
+        };
+
+        // Missing or deactivated users are unauthenticated — the active-account
+        // invariant is enforced once, in `load_active_user`.
+        let Ok(user) = crate::handlers::session::load_active_user(state, &session.sub).await else {
+            return Err(unauthorized());
+        };
+
+        if !session.hardware_verified {
+            tracing::info!(
+                target: "security",
+                user_id = %session.sub,
+                "application registration requires an assertion: session is not hardware-verified"
+            );
+            return Err(axum::response::Redirect::to("/login").into_response());
+        }
+
+        Ok(Self {
+            auth: AuthContext {
+                authenticated: true,
+                user_id: Some(session.sub),
+                user_email: Some(user.email),
+                has_org: user.org_id.is_some(),
+                is_org_admin: user.is_org_admin,
+                hardware_verified: session.hardware_verified,
+            },
+        })
+    }
+}
+
 /// An organization administrator viewing an admin page.
 ///
 /// Every admin page needs the same four facts — a signed-in user, the

@@ -11,23 +11,20 @@ use axum::{
     extract::{Path, State},
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::types::{
     ApplicationCreateTemplate, ApplicationCreatedTemplate, ApplicationDetailTemplate,
-    ApplicationErrorTemplate, ApplicationInfo, ApplicationUnauthorizedTemplate,
-    ApplicationsListTemplate, CreateApplicationForm, SecretAddedTemplate, SecretInfo,
-    UpdateApplicationForm, UsageStat,
+    ApplicationErrorTemplate, ApplicationInfo, ApplicationsListTemplate, CreateApplicationForm,
+    SecretAddedTemplate, SecretInfo, UpdateApplicationForm, UsageStat,
 };
 use super::validate::{
     AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
     compute_fapi_update_fields, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
-use super::{
-    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
-};
+use super::{generate_client_secret, parse_redirect_uris, parse_resource_uris};
+use crate::handlers::extractors::ApplicationsSession;
 use crate::handlers::hash_token;
 use crate::infra::i18n::Tr;
 
@@ -60,11 +57,9 @@ fn validation_error_response(err: &AppValidationError, back_url: String) -> Resp
 /// GET /applications
 pub(crate) async fn list_applications_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
     let applications = match db::get_oauth_clients_for_user(&state.store, user_id).await {
@@ -84,13 +79,8 @@ pub(crate) async fn list_applications_page(
 
 /// Show create application form.
 /// GET /applications/new
-pub(crate) async fn create_application_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+pub(crate) async fn create_application_page(session: ApplicationsSession) -> Response {
+    let ApplicationsSession { auth } = session;
 
     let user_has_org = auth.has_org;
     ApplicationCreateTemplate { auth, user_has_org }.into_response()
@@ -100,12 +90,10 @@ pub(crate) async fn create_application_page(
 /// POST /applications/new
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -263,12 +251,10 @@ pub(crate) async fn create_application_form(
 /// GET /applications/:id
 pub(crate) async fn detail_application_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -347,13 +333,11 @@ pub(crate) async fn detail_application_page(
 /// POST /applications/:id
 pub(crate) async fn update_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Path(app_id): Path<String>,
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -497,12 +481,10 @@ pub(crate) async fn update_application_form(
 /// POST /applications/:id/delete
 pub(crate) async fn delete_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -537,12 +519,10 @@ pub(crate) async fn delete_application_form(
 /// POST /applications/:id/secrets
 pub(crate) async fn add_secret_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -635,12 +615,10 @@ pub(crate) async fn add_secret_form(
 /// POST /applications/:id/secrets/:secret_id/delete
 pub(crate) async fn delete_secret_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: ApplicationsSession,
     Path((app_id, secret_id)): Path<(String, String)>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let ApplicationsSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
