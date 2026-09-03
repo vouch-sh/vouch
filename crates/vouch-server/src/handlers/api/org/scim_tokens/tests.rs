@@ -203,6 +203,126 @@ async fn test_create_scim_token_succeeds() {
     );
 }
 
+// RFC 8705 Section 3: "The protected resource MUST obtain, from its TLS
+// implementation layer, the client certificate used for mutual TLS and MUST
+// verify that the certificate matches the certificate associated with the
+// access token."
+#[tokio::test]
+async fn test_create_scim_token_cert_bound_token_with_matching_cert_succeeds() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+
+    let cert_der = make_test_cert_der("scim-admin");
+    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&cert_der);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json_with_cert(
+        &app,
+        "/api/v1/org/scim-tokens",
+        r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
+        &[("Authorization", &auth_header)],
+        Some(cert_der),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert!(resp["id"].as_str().is_some(), "response must contain id");
+}
+
+// RFC 8705 Section 3: "If they do not match, the resource access attempt MUST
+// be rejected with an error, per [RFC6750], using an HTTP 401 status code and
+// the "invalid_token" error code."
+#[tokio::test]
+async fn test_create_scim_token_cert_bound_token_without_cert_returns_401() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+
+    let cert_der = make_test_cert_der("scim-admin");
+    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&cert_der);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json_with_cert(
+        &app,
+        "/api/v1/org/scim-tokens",
+        r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
+        &[("Authorization", &auth_header)],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert!(
+        body.contains("invalid_token"),
+        "RFC 8705 Section 3 requires the invalid_token error code; body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_create_scim_token_cert_bound_token_with_wrong_cert_returns_401() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+
+    let bound_cert_der = make_test_cert_der("scim-admin");
+    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&bound_cert_der);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    let other_cert_der = make_test_cert_der("imposter");
+    let (status, body) = http_post_json_with_cert(
+        &app,
+        "/api/v1/org/scim-tokens",
+        r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
+        &[("Authorization", &auth_header)],
+        Some(other_cert_der),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert!(
+        body.contains("invalid_token"),
+        "RFC 8705 Section 3 requires the invalid_token error code; body: {body}"
+    );
+}
+
 #[tokio::test]
 async fn test_bootstrap_admin_session_cannot_mint_scim_token() {
     // An org admin session minted by upstream IdP sign-in alone (no FIDO2

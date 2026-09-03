@@ -11,7 +11,7 @@ use crate::handlers::admin::{
     MAX_SCIM_TOKEN_DESCRIPTION_CHARS, compute_token_expiry, generate_scim_token, has_audit_read,
     requested_scope,
 };
-use crate::handlers::extractors::OrgAdmin;
+use crate::handlers::extractors::{OptionalClientCert, OrgAdmin};
 use crate::handlers::session::extract_org_admin;
 use crate::handlers::{ValidPath, ValidUuid};
 use axum::Json;
@@ -84,6 +84,7 @@ pub(crate) async fn create_scim_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, ServiceError> {
     // Validate inputs before auth to fail fast on obviously bad requests
@@ -105,8 +106,15 @@ pub(crate) async fn create_scim_token(
         ));
     }
 
-    let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (user, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(req.expires_in_days)?);

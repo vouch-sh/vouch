@@ -11,10 +11,10 @@
 //! `cnf.x5t#S256`) additionally requires the matching mTLS client
 //! certificate; the certificate is never a credential on its own.
 //! `create_scim_token` calls the same `extract_org_admin` chain directly
-//! instead of through the extractor, so it accepts the identical set of
-//! credentials; the one real difference is that `OrgAdmin` forwards an
-//! mTLS client certificate when present, while `create_scim_token` always
-//! passes `None`. `audit_events` is the outlier: it additionally accepts
+//! instead of through the extractor — it validates its request body before
+//! authenticating — but accepts the identical set of credentials, including
+//! forwarding the mTLS client certificate for certificate-bound tokens.
+//! `audit_events` is the outlier: it additionally accepts
 //! an org API token carrying the `audit:read` scope as its principal, and
 //! it hard-401s any request with no `Authorization` header at all — which
 //! is what keeps the cookie fallback from ever applying to it.
