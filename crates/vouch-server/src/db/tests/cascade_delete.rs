@@ -255,6 +255,7 @@ async fn test_oauth_client_cascade_delete() {
             ip_address: None,
             user_agent: None,
             details: None,
+            org_domain: RecordedOrgDomain::Unresolved,
         },
     )
     .await;

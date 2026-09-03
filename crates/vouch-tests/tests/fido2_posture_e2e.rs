@@ -201,6 +201,23 @@ async fn exchange_fido2_assertion(
     (status, json)
 }
 
+/// Return the `oauth_token_issued` audit event(s) for `user_id`.
+///
+/// `record_oauth_event` is awaited before `/oauth/token` returns its
+/// response, so the row is already visible by the time the caller queries.
+async fn token_issued_events(harness: &TestHarness, user_id: &str) -> Vec<db::AuditEvent> {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_token_issued".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events")
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 /// Windows 11 24H2 with OsRecency active must successfully obtain a token.
@@ -475,16 +492,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
 
-    let rows = harness
-        .state
-        .audit
-        .query_events(&db::AuditEventFilter {
-            event_types: Some(vec!["oauth_token_issued".to_string()]),
-            user_id: Some(user.id.clone()),
-            ..Default::default()
-        })
-        .await
-        .expect("query audit events");
+    let rows = token_issued_events(&harness, &user.id).await;
     assert_eq!(
         rows.len(),
         1,
@@ -494,6 +502,52 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         rows[0].data.contains("fido2-assertion"),
         "the audit payload must carry the grant type: {}",
         rows[0].data
+    );
+}
+
+/// A successful FIDO2 grant for an org member stamps the org's domain into
+/// the `oauth_token_issued` event's `email_domain` — the hot-path formula
+/// (`fido2_grant.rs`) must reproduce what the full lookup would have done.
+#[tokio::test]
+async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("login-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = harness
+        .create_user_in_org("member@login-audit.example.com", &org.id, false)
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let rows = token_issued_events(&harness, &user.id).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the grant must write exactly one oauth_token_issued row"
+    );
+    assert_eq!(
+        rows[0].email_domain.as_deref(),
+        Some("login-audit.example.com"),
+        "org member login must stamp the org's domain onto the audit event"
     );
 }
 

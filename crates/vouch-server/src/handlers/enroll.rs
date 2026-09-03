@@ -1367,7 +1367,7 @@ pub(crate) async fn browser_register_complete(
         .map_err(|e| {
             ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
-    if let Some(account) = account
+    if let Some(ref account) = account
         && !account.active
     {
         return Err(ServiceError::Forbidden("user_deactivated"));
@@ -1591,7 +1591,10 @@ pub(crate) async fn browser_register_complete(
     let enroll_client_id = state.config().base_url.clone();
     let user_id_str = reg_state.user_id.to_string();
 
-    // Snapshot org domain for federation claims tied to this session. Fail
+    // Snapshot org domain for federation claims tied to this session, reusing
+    // the same `account` read that gated activation above rather than a
+    // second `get_user_by_id` — so the snapshot reflects the user's org as of
+    // the start of this ceremony, not as of just before token issuance. Fail
     // closed: the snapshot is captured exactly once, so silently dropping a
     // transient DB error would permanently degrade this session's `hd` claim.
     let snapshot_error = |err: anyhow::Error| {
@@ -1602,16 +1605,10 @@ pub(crate) async fn browser_register_complete(
             Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
-    let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
-        .await
-        .map_err(snapshot_error)?
-    {
-        Some(u) => match u.org_id {
-            Some(org_id) => db::get_organization_domain(&state.store, &org_id)
-                .await
-                .map_err(snapshot_error)?,
-            None => None,
-        },
+    let org_domain = match account.as_ref().and_then(|u| u.org_id.clone()) {
+        Some(org_id) => db::get_organization_domain(&state.store, &org_id)
+            .await
+            .map_err(snapshot_error)?,
         None => None,
     };
 

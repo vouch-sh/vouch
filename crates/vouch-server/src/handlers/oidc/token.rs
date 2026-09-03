@@ -988,6 +988,16 @@ async fn handle_client_credentials_grant(
     .await
     {
         Ok(result) => {
+            // Client-credentials grants have no user subject, so the event's
+            // default resolution would fall straight through to the
+            // client-org branch — the client is already in scope here, so
+            // skip that redundant re-lookup.
+            let audit_org_domain = crate::db::resolve_event_org_domain(
+                &state.store,
+                None,
+                authenticated_client.client.org_id.as_deref(),
+            )
+            .await;
             // Record audit event
             crate::db::record_oauth_event(
                 &state.audit,
@@ -999,6 +1009,7 @@ async fn handle_client_credentials_grant(
                     ip_address: client_info.client_ip,
                     user_agent: client_info.user_agent.as_deref(),
                     details: Some("grant_type=client_credentials"),
+                    org_domain: crate::db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
                 },
             )
             .await;

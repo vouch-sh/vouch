@@ -492,6 +492,7 @@ async fn test_oauth_usage_recording() {
             ip_address: None,
             user_agent: None,
             details: None,
+            org_domain: RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -505,6 +506,7 @@ async fn test_oauth_usage_recording() {
             ip_address: None,
             user_agent: None,
             details: None,
+            org_domain: RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -518,6 +520,7 @@ async fn test_oauth_usage_recording() {
             ip_address: None,
             user_agent: None,
             details: None,
+            org_domain: RecordedOrgDomain::Unresolved,
         },
     )
     .await;
