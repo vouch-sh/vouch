@@ -15,8 +15,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 // Re-export handler functions used by the router.
-pub(crate) use types::ApplicationUnauthorizedTemplate;
-
 pub(crate) use api::{
     add_secret_api, create_application_api, delete_application_api, delete_secret_api,
     get_application_api, list_applications_api, list_secrets_api, revoke_tokens_api,
@@ -176,9 +174,18 @@ mod tests {
 
         let resp = http_get_full(&app, "/applications", &[("Cookie", &cookie)]).await;
         assert!(
-            resp.body.contains("Unauthorized") || resp.status.is_client_error(),
-            "deactivated user must be refused even while the session still exists: {}",
+            resp.status.is_redirection(),
+            "deactivated user must be refused even while the session still exists, got {}",
             resp.status
+        );
+        assert_eq!(
+            resp.headers
+                .get("location")
+                .expect("redirect location")
+                .to_str()
+                .expect("ascii location"),
+            "/enroll/start",
+            "a session that cannot be used is sent to sign in again"
         );
     }
 

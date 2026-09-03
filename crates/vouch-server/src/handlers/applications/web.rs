@@ -730,12 +730,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_detail_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-detail@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
-        let resp = http_get_full(&app, "/applications/not-a-uuid", &[]).await;
+        let resp = http_get_full(&app, "/applications/not-a-uuid", &[("Cookie", &cookie)]).await;
 
-        // Should NOT be 400 (which ValidPath would produce).
-        // Without a session cookie the handler returns the unauthorized template (200).
+        // A person mistyping a URL reads a page, not a JSON error envelope —
+        // the browser routes answer in HTML where the API routes answer 400.
         assert_ne!(resp.status, StatusCode::BAD_REQUEST);
         let ct = resp
             .headers
@@ -750,13 +763,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-delete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
         let (status, body) = http_post_form(
             &app,
             "/applications/not-a-uuid/delete",
             "",
-            &[("Origin", "https://test.example.com")],
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
         )
         .await;
 
@@ -769,13 +795,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_secret_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
         let (status, body) = http_post_form(
             &app,
             "/applications/not-a-uuid/secrets",
             "",
-            &[("Origin", "https://test.example.com")],
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
         )
         .await;
 
@@ -788,13 +827,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_secret_page_invalid_uuids_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-secret-del@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
         let (status, body) = http_post_form(
             &app,
             "/applications/not-a-uuid/secrets/also-bad/delete",
             "",
-            &[("Origin", "https://test.example.com")],
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
         )
         .await;
 

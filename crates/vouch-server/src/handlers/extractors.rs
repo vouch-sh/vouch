@@ -347,18 +347,17 @@ impl FromRequestParts<Arc<AppState>> for AttestedSession {
         use axum::response::IntoResponse;
 
         let jar = CookieJar::from_headers(&parts.headers);
-        let unauthorized =
-            || crate::handlers::applications::ApplicationUnauthorizedTemplate.into_response();
+        let sign_in = || axum::response::Redirect::to("/enroll/start").into_response();
 
         let Ok(session) = crate::handlers::session::extract_session_from_cookie(state, &jar).await
         else {
-            return Err(unauthorized());
+            return Err(sign_in());
         };
 
         // Missing or deactivated users are unauthenticated — the active-account
         // invariant is enforced once, in `load_active_user`.
         let Ok(user) = crate::handlers::session::load_active_user(state, &session.sub).await else {
-            return Err(unauthorized());
+            return Err(sign_in());
         };
 
         if !session.hardware_verified {

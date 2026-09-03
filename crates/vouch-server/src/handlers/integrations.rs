@@ -8,13 +8,12 @@
 //! - EKS (via AWS IAM and EKS Access Entries)
 
 use crate::db;
-use crate::handlers::session::{
-    AuthContext, extract_session_from_cookie, get_resource_auth_context,
-};
+use crate::handlers::extractors::AttestedSession;
+use crate::handlers::session::{AuthContext, extract_session_from_cookie};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::extract::State;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
@@ -46,13 +45,12 @@ impl_template_response!(IntegrationsTemplate);
 pub(crate) async fn integrations_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    session: AttestedSession,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    // Redirect unauthenticated users to enrollment
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
+    // Every action on this page — connecting or managing the GitHub App —
+    // already requires a ceremony, so a session that has not asserted would
+    // read a status screen whose every button turns it away.
+    let AttestedSession { auth } = session;
 
     // Check if GitHub App is configured on the server
     let github_configured = state.github_app.is_some();

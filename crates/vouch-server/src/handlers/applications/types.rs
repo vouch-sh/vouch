@@ -5,12 +5,8 @@
 //! both the web UI and API handlers.
 
 use crate::db::{AccessScope, OAuthClient};
-use crate::{impl_template_helpers, impl_template_response};
+use crate::impl_template_response;
 use askama::Template;
-use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
-};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -162,11 +158,6 @@ pub(crate) struct ApplicationErrorTemplate {
     pub back_url: String,
 }
 
-/// Unauthorized template.
-#[derive(Template)]
-#[template(path = "applications/unauthorized.html")]
-pub(crate) struct ApplicationUnauthorizedTemplate;
-
 impl_template_response!(
     ApplicationsListTemplate,
     ApplicationCreateTemplate,
@@ -175,23 +166,6 @@ impl_template_response!(
     SecretAddedTemplate,
     ApplicationErrorTemplate,
 );
-
-// `ApplicationUnauthorizedTemplate` keeps a custom `IntoResponse` that returns
-// 401 instead of 200. Wire up the shared i18n shims (`tr`, `lang`, …) via
-// `impl_template_helpers!` while keeping the bespoke `IntoResponse` below.
-impl_template_helpers!(ApplicationUnauthorizedTemplate);
-
-impl IntoResponse for ApplicationUnauthorizedTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => (StatusCode::UNAUTHORIZED, Html(html)).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Request/Response Types
