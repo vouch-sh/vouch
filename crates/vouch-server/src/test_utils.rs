@@ -1145,6 +1145,25 @@ async fn forge_auth_time(
     token
 }
 
+/// Create an org with an admin user, a FIDO2-verified session, and return
+/// the admin plus the session's raw access token.
+pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    (admin, token)
+}
+
 /// Create an organization API token for testing, bound to the given org,
 /// with an explicit scope set. Shared primitive behind
 /// [`create_test_scim_token`] (default SCIM scopes) and

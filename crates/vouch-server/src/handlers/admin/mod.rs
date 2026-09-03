@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Organization admin handlers for SCIM token management, member management,
-//! audit log viewing, and device posture policies.
+//! Organization admin browser UI (member management, audit log viewing,
+//! device posture policies, SCIM token management) plus the org-admin
+//! helpers shared with the `/api/v1/org/*` JSON handlers in
+//! [`crate::handlers::api::org`].
 //!
-//! These APIs support both JWT Bearer authentication and cookie-based authentication
-//! from regular FIDO2 sessions. Only organization admins can access these endpoints.
+//! The page handlers (`AdminPage`) read only the session cookie. The
+//! form-post/action handlers accept the session cookie as well as a Bearer
+//! or DPoP access token — see `api::org`'s module doc for exactly which
+//! auth shapes each entry point covers. Only organization admins can reach
+//! any of these endpoints.
 
 mod audit;
-mod audit_api;
 mod domains;
 pub(crate) mod flash;
 mod members;
-mod ocsf;
 mod policies;
 mod scim_tokens;
 mod subdomain;
 
 pub(crate) use audit::*;
-pub(crate) use audit_api::*;
 pub(crate) use domains::*;
 pub(crate) use members::*;
 pub(crate) use policies::*;
@@ -25,6 +27,7 @@ pub(crate) use subdomain::*;
 
 use crate::AppState;
 use crate::db;
+use crate::db::{ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::http::StatusCode;
@@ -86,6 +89,34 @@ pub(crate) fn compute_token_expiry(days: i64) -> Result<Timestamp, ServiceError>
     })
 }
 
+/// Maximum length of a SCIM token description, in Unicode characters. Matches
+/// the `maxlength` the admin form advertises, which the browser counts in
+/// characters rather than UTF-8 bytes.
+pub(crate) const MAX_SCIM_TOKEN_DESCRIPTION_CHARS: usize = 256;
+
+/// The four SCIM provisioning scopes plus, if requested, `audit:read`.
+/// Shared by the API and UI create handlers so the scope set granted to a
+/// new token can't drift between the two entry points.
+pub(crate) fn requested_scope(audit_read: bool) -> ScimScopeSet {
+    let mut scopes = vec![
+        ScimScope::UsersRead,
+        ScimScope::UsersWrite,
+        ScimScope::GroupsRead,
+        ScimScope::GroupsWrite,
+    ];
+    if audit_read {
+        scopes.push(ScimScope::AuditRead);
+    }
+    ScimScopeSet::from_scopes(scopes)
+}
+
+/// Whether a stored scope string grants `audit:read`. Malformed scope
+/// strings (should not occur — always written by [`requested_scope`]) are
+/// treated as not granting it, matching `ScimAuth`'s fail-closed behavior.
+pub(crate) fn has_audit_read(scope: &str) -> bool {
+    ScimScopeSet::parse(scope).is_some_and(|s| s.contains(ScimScope::AuditRead))
+}
+
 /// Helper: verify the target user belongs to the extracted admin's org.
 pub(crate) async fn extract_admin_and_target(
     state: &AppState,
@@ -111,4 +142,81 @@ pub(crate) async fn extract_admin_and_target(
     }
 
     Ok((admin, target, org_id))
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn test_generate_scim_token_has_prefix_and_hash() {
+        let generated = super::generate_scim_token().unwrap();
+        let plaintext = generated.plaintext.expose_secret();
+
+        assert!(
+            plaintext.starts_with("vouch_scim_"),
+            "token must have vouch_scim_ prefix"
+        );
+        // 32 random bytes → 43 base64url chars + 11 char prefix
+        assert!(plaintext.len() > 40, "token must be sufficiently long");
+        // Hash should be 64-char hex (SHA-256)
+        assert_eq!(generated.hash.len(), 64, "hash must be 64 hex chars");
+        // Hash must match the plaintext
+        let expected_hash = hex::encode(aws_lc_rs::digest::digest(
+            &aws_lc_rs::digest::SHA256,
+            plaintext.as_bytes(),
+        ));
+        assert_eq!(generated.hash, expected_hash, "hash must match plaintext");
+    }
+
+    #[test]
+    fn test_generate_scim_token_unique() {
+        let a = super::generate_scim_token().unwrap();
+        let b = super::generate_scim_token().unwrap();
+        assert_ne!(
+            a.plaintext.expose_secret(),
+            b.plaintext.expose_secret(),
+            "tokens must be unique"
+        );
+    }
+
+    #[test]
+    fn test_compute_token_expiry_valid_days() {
+        let expiry = super::compute_token_expiry(30).unwrap();
+        let now = jiff::Timestamp::now();
+        let diff_secs = expiry.duration_since(now).as_secs();
+        let expected_secs = 30 * 24 * 3600;
+        assert!(
+            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
+            "30 days should be ~{expected_secs}s, got {diff_secs}s"
+        );
+    }
+
+    #[test]
+    fn test_compute_token_expiry_one_day() {
+        let expiry = super::compute_token_expiry(1).unwrap();
+        let now = jiff::Timestamp::now();
+        let diff_secs = expiry.duration_since(now).as_secs();
+        let expected_secs = 24 * 3600;
+        assert!(
+            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
+            "1 day should be ~{expected_secs}s, got {diff_secs}s"
+        );
+    }
+
+    #[test]
+    fn test_compute_token_expiry_365_days() {
+        let expiry = super::compute_token_expiry(365).unwrap();
+        let now = jiff::Timestamp::now();
+        let diff_secs = expiry.duration_since(now).as_secs();
+        let expected_secs: i64 = 365 * 24 * 3600;
+        assert!(
+            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
+            "365 days should be ~{expected_secs}s, got {diff_secs}s"
+        );
+    }
 }

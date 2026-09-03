@@ -389,24 +389,24 @@ fn build_general_limited_routes(
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     let protected_api_routes = Router::new()
-        // Org admin API (JSON, JWT Bearer auth)
+        // Org admin API (JSON; see handlers::api::org's module doc for auth per handler)
         .route(
             "/api/v1/org/scim-tokens",
-            get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
+            get(handlers::api::org::list_scim_tokens).post(handlers::api::org::create_scim_token),
         )
         .route(
             "/api/v1/org/scim-tokens/{id}",
-            delete(handlers::admin::delete_scim_token),
+            delete(handlers::api::org::delete_scim_token),
         )
         // Org-scoped audit event export (JSON/NDJSON/OCSF)
         .route(
             "/api/v1/org/audit-events",
-            get(handlers::admin::audit_events),
+            get(handlers::api::org::audit_events),
         )
         // Policy validation API (used by the admin policy editor)
         .route(
             "/api/v1/org/policies/validate",
-            post(handlers::admin::validate_policy_api),
+            post(handlers::api::org::validate_policy_api),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(

@@ -411,7 +411,7 @@ impl AuditStore {
     /// Insert an audit event with an explicit `created_at`.
     ///
     /// Test-only: backdates events past the audit events API's 30-second
-    /// lag window ([`crate::handlers::admin::audit_api`]) without a test
+    /// lag window ([`crate::handlers::api::org::audit`]) without a test
     /// needing to actually wait.
     ///
     /// # Errors
