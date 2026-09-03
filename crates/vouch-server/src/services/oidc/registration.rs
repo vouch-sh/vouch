@@ -88,6 +88,7 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: Array of OAuth 2.0 response type strings.
     pub response_types: Option<Vec<String>>,
     /// RFC 7591 Section 2: Human-readable name of the client.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub client_name: Option<String>,
     /// RFC 7591 Section 2: URL of the client's home page.
     pub client_uri: Option<String>,
@@ -98,6 +99,7 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: URL of the client's privacy policy.
     pub policy_uri: Option<String>,
     /// RFC 7591 Section 2: Space-delimited scope string.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub scope: Option<String>,
     /// RFC 7591 Section 2: Array of contact email addresses.
     pub contacts: Option<Vec<String>>,
@@ -106,22 +108,29 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: URL for the client's JSON Web Key Set.
     pub jwks_uri: Option<String>,
     /// RFC 7591 Section 2: Unique identifier for the client software.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub software_id: Option<String>,
     /// RFC 7591 Section 2: Version of the client software.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub software_version: Option<String>,
     /// FAPI 2.0: Whether access tokens must be DPoP-bound.
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
     pub id_token_signed_response_alg: Option<String>,
-    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: subject DN for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_subject_dn: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN DNS name for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_dns: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN URI for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_uri: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN IP for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_ip: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN email for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705 Section 3: certificate-bound access tokens.
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
@@ -144,6 +153,42 @@ pub struct RegistrationRequest {
     /// When present, only these URIs are accepted as `post_logout_redirect_uri` in
     /// the end-session request. Absent means no redirect-back after logout.
     pub post_logout_redirect_uris: Option<Vec<String>>,
+}
+
+/// Deserialize an optional string, reading an empty value as absent.
+///
+/// RFC 7591 is silent here: its JSON body has no counterpart to RFC 6749 §3.1
+/// and §3.2's "Parameters sent without a value MUST be treated as if they were
+/// omitted from the request", which
+/// [`crate::handlers::extractors::OAuthForm`] applies to the form-encoded
+/// endpoints. So the choice is ours, and it is made the same way: a stored
+/// empty string is a third state next to "absent" and "set" that means nothing
+/// the two do not, so the field is not stored at all.
+///
+/// Carried by the fields where an empty value would otherwise be persisted:
+/// the RFC 8705 §2.1.2 certificate-subject parameters, where an empty string
+/// matches no certificate and would satisfy the exactly-one rule with a value
+/// that still leaves the client unable to authenticate; and `client_name`,
+/// `scope`, `software_id`, and `software_version`, which have no validator to
+/// pass. An emptied `client_name` therefore takes the same
+/// `"Unnamed Client"` fallback an omitted one does, and the other three go to
+/// NULL — `software_id` is indexed, so this also keeps an empty key out of the
+/// index.
+///
+/// The remaining metadata fields keep serde's plain `Option<String>`, because
+/// an empty value there already reaches a validator that rejects it outright
+/// (an empty `logo_uri` is not a valid HTTPS URL, an empty `application_type`
+/// is not "native" or "web", an empty signing algorithm is not a supported
+/// one). Reading those as absent would turn an explicit
+/// `invalid_client_metadata` into a silent default and hide the client's bug.
+///
+/// A whitespace-only value stays present, matching the form-encoded rule that
+/// reads `%20` as a value rather than as nothing.
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|s| !s.is_empty()))
 }
 
 impl RegistrationRequest {
@@ -172,7 +217,12 @@ impl RegistrationRequest {
                 serde_json::Value::String(v.clone()),
             );
         }
-        if let Some(ref v) = self.contacts {
+        // An empty list carries nothing an absent key does not, so it is not
+        // stored. Individual empty members never reach here: an address without
+        // an `@` is refused by `validate_contacts_and_uris`.
+        if let Some(ref v) = self.contacts
+            && !v.is_empty()
+        {
             metadata.insert(
                 "contacts".to_string(),
                 serde_json::Value::Array(
@@ -971,6 +1021,11 @@ fn validate_request_object_signing(
 /// Returns the validated list, or `None` if the field is absent.
 fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>, ServiceError> {
     let Some(uris) = uris else { return Ok(None) };
+    // An empty allowlist is the same state as no allowlist, so it is not
+    // stored — as in `validate_post_logout_redirect_uris_registration`.
+    if uris.is_empty() {
+        return Ok(None);
+    }
     const MAX_REQUEST_URIS: usize = 10;
     if uris.len() > MAX_REQUEST_URIS {
         return Err(ServiceError::oauth(
@@ -1238,25 +1293,78 @@ fn validate_jwks_and_auth_method(
         ));
     }
 
-    // RFC 8705 Section 2.1.1: tls_client_auth requires at least one identity field
-    if auth_method == TokenEndpointAuthMethod::TlsClientAuth {
-        let has_identity = request.tls_client_auth_subject_dn.is_some()
-            || request.tls_client_auth_san_dns.is_some()
-            || request.tls_client_auth_san_email.is_some()
-            || request.tls_client_auth_san_uri.is_some()
-            || request.tls_client_auth_san_ip.is_some();
-        if !has_identity {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "tls_client_auth requires at least one identity field \
-                 (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
-                 tls_client_auth_san_email, tls_client_auth_san_uri, \
-                 or tls_client_auth_san_ip)",
-            ));
+    validate_tls_client_auth_identity(auth_method, request)?;
+
+    Ok(ValidatedJwksAuth { keys, auth_method })
+}
+
+/// Enforce the certificate-subject metadata rule on a `tls_client_auth` client.
+///
+/// RFC 8705 §2.1.2:
+///
+/// > A client using the "tls_client_auth" authentication method MUST use
+/// > exactly one of the below metadata parameters to indicate the certificate
+/// > subject value that the authorization server is to expect when
+/// > authenticating the respective client.
+///
+/// Zero is refused because `verify_tls_client_auth` reads an all-absent client
+/// as `CertificateNotRegistered`, so the client could never authenticate at the
+/// token endpoint. More than one is refused because that same function consults
+/// the parameters in a fixed precedence order and returns on the first one
+/// present, silently ignoring the rest.
+///
+/// Shared by initial registration and the RFC 7592 §2.2 PUT. The PUT is a full
+/// replacement — omitted fields are cleared — so without this check there it
+/// could move a working client into the exact state registration refuses.
+///
+/// Returns `Ok(())` for every other authentication method, which does not use
+/// these parameters.
+fn validate_tls_client_auth_identity(
+    auth_method: TokenEndpointAuthMethod,
+    request: &RegistrationRequest,
+) -> Result<(), ServiceError> {
+    if auth_method != TokenEndpointAuthMethod::TlsClientAuth {
+        return Ok(());
+    }
+
+    // Listed in the precedence order `verify_tls_client_auth` consults them.
+    let mut present: Vec<&str> = Vec::new();
+    for (name, value) in [
+        (
+            "tls_client_auth_subject_dn",
+            &request.tls_client_auth_subject_dn,
+        ),
+        ("tls_client_auth_san_dns", &request.tls_client_auth_san_dns),
+        (
+            "tls_client_auth_san_email",
+            &request.tls_client_auth_san_email,
+        ),
+        ("tls_client_auth_san_uri", &request.tls_client_auth_san_uri),
+        ("tls_client_auth_san_ip", &request.tls_client_auth_san_ip),
+    ] {
+        if value.is_some() {
+            present.push(name);
         }
     }
 
-    Ok(ValidatedJwksAuth { keys, auth_method })
+    match present.len() {
+        1 => Ok(()),
+        0 => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "tls_client_auth requires exactly one identity field \
+             (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
+             tls_client_auth_san_email, tls_client_auth_san_uri, \
+             or tls_client_auth_san_ip)",
+        )),
+        count => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "tls_client_auth requires exactly one identity field, but {count} were \
+                 supplied: {}",
+                present.join(", ")
+            ),
+        )),
+    }
 }
 
 /// Validate HTTPS URI fields and contacts.
@@ -1639,6 +1747,12 @@ pub async fn update_client_configuration(
             "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
         ));
     }
+
+    // The five RFC 8705 §2.1.2 certificate-subject parameters are written as a
+    // full replacement below, so a PUT that omits them clears them. Checked
+    // against the client's registered (immutable) auth method, which is what
+    // decides whether the parameters are required at all.
+    validate_tls_client_auth_identity(client.token_endpoint_auth_method, &mutable_request)?;
 
     // Validate the signed-response algorithms with the same validators initial
     // registration uses. The client's FAPI profile is immutable

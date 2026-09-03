@@ -1639,15 +1639,15 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// RFC 9101: Whether this client requires signed Request Objects.
     pub require_signed_request_object: Option<bool>,
-    /// RFC 8705 §2.1.1: subject DN for `tls_client_auth`.
+    /// RFC 8705 §2.1.2: subject DN for `tls_client_auth`.
     pub tls_client_auth_subject_dn: Option<&'a str>,
-    /// RFC 8705 §2.1.1: SAN DNS name for `tls_client_auth`.
+    /// RFC 8705 §2.1.2: SAN DNS name for `tls_client_auth`.
     pub tls_client_auth_san_dns: Option<&'a str>,
-    /// RFC 8705 §2.1.1: SAN URI for `tls_client_auth`.
+    /// RFC 8705 §2.1.2: SAN URI for `tls_client_auth`.
     pub tls_client_auth_san_uri: Option<&'a str>,
-    /// RFC 8705 §2.1.1: SAN IP for `tls_client_auth`.
+    /// RFC 8705 §2.1.2: SAN IP for `tls_client_auth`.
     pub tls_client_auth_san_ip: Option<&'a str>,
-    /// RFC 8705 §2.1.1: SAN email for `tls_client_auth`.
+    /// RFC 8705 §2.1.2: SAN email for `tls_client_auth`.
     pub tls_client_auth_san_email: Option<&'a str>,
 }
 

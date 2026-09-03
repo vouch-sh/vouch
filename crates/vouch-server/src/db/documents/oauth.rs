@@ -402,19 +402,19 @@ pub struct OAuthClientDoc {
     /// that were created before RS256 support was added.
     #[serde(default)]
     pub id_token_signed_response_alg: JwsAlgorithm,
-    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: subject DN for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_subject_dn: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN DNS name for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_dns: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN URI for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_uri: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN IP for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_ip: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN email for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705 Section 3: certificate-bound access tokens.
