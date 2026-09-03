@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! OAuth Application Registration handlers.
-//!
-//! This module implements the self-service portal for developers to register
-//! OAuth applications that can integrate with Vouch.
+//! OAuth Application Registration — the self-service browser portal for
+//! developers to register OAuth applications that can integrate with Vouch,
+//! plus the request/response types, validation rules, and secret generation
+//! shared with the JSON API surface in [`crate::handlers::api::applications`].
 
-mod api;
-mod types;
-mod validate;
+pub(crate) mod types;
+pub(crate) mod validate;
 mod web;
 
 use crate::db;
@@ -15,11 +14,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 // Re-export handler functions used by the router.
-pub(crate) use api::{
-    add_secret_api, create_application_api, delete_application_api, delete_secret_api,
-    get_application_api, list_applications_api, list_secrets_api, revoke_tokens_api,
-    update_application_api,
-};
 pub(crate) use web::{
     add_secret_form, create_application_form, create_application_page, delete_application_form,
     delete_secret_form, detail_application_page, list_applications_page, update_application_form,

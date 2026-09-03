@@ -45,7 +45,7 @@ Beyond ssh/aws/eks, credential helpers and setup commands cover many more integr
 
 The server has two distinct route groups sharing `AppState`:
 
-- **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, JWT Bearer auth. Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
+- **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, token auth (JWT Bearer/DPoP; the `/api/v1/org/*` and `/api/v1/applications/*` handlers fall back to the session cookie via `extract_token_from_request`). Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
 - **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`, `/admin/*`) — HTML via Askama templates, cookie-based sessions. Static assets embedded via `rust-embed`.
 
 When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 (308 redirects, except `/health`).
@@ -380,7 +380,7 @@ that gains a citation fails until the baseline is pruned. See
 5. **Built-in SSH CA** — Ed25519 signing, no external dependencies
 6. **MDM for distribution** — Don't build what Jamf/Kandji already do
 7. **OIDC config is env-var only** — No admin UI for OIDC configuration
-8. **Org admin via JWT** — SCIM tokens and auth events at `/api/v1/org/*` use JWT Bearer auth from regular FIDO2 sessions
+8. **Org admin via access token** — SCIM tokens and auth events at `/api/v1/org/*` authorize with the access token from regular FIDO2 sessions (Bearer or DPoP, with session-cookie fallback — see `handlers/api/org`'s module doc)
 
 ## Questions to Ask
 

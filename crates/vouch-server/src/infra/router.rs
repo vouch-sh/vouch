@@ -606,27 +606,27 @@ fn build_api_management_routes(
         // Applications API (JSON)
         .route(
             "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
+            get(handlers::api::applications::list_applications_api)
+                .post(handlers::api::applications::create_application_api),
         )
         .route(
             "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
+            get(handlers::api::applications::get_application_api)
+                .patch(handlers::api::applications::update_application_api)
+                .delete(handlers::api::applications::delete_application_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets",
-            get(handlers::applications::list_secrets_api)
-                .post(handlers::applications::add_secret_api),
+            get(handlers::api::applications::list_secrets_api)
+                .post(handlers::api::applications::add_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets/{secret_id}",
-            delete(handlers::applications::delete_secret_api),
+            delete(handlers::api::applications::delete_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
+            post(handlers::api::applications::revoke_tokens_api),
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
