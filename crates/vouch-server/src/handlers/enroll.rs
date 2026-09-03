@@ -1128,6 +1128,7 @@ pub(crate) async fn enroll_keys_page(
                 user_email: Some(email),
                 has_org,
                 is_org_admin,
+                hardware_verified: token.hardware_verified,
             };
 
             // Consume any flash error set by a prior failed form POST (rename),

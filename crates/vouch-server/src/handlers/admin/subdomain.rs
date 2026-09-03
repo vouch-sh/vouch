@@ -16,8 +16,8 @@ use crate::db::documents::audit::{OrgSubdomainClaimData, OrgSubdomainReleaseData
 use crate::db::{SubdomainClaimError, SubdomainLabelError};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
-use crate::handlers::extractors::OrgAdmin;
-use crate::handlers::session::{AuthContext, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use crate::services::oidc::{
@@ -195,26 +195,13 @@ fn claim_error_message(e: &SubdomainClaimError) -> String {
 pub(crate) async fn admin_subdomain_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let Some(user_id) = auth.user_id.clone() else {
-        return Redirect::to("/enroll/start").into_response();
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let org = match db::get_organization(&state.store, &org_id).await {
         Ok(Some(o)) => o,

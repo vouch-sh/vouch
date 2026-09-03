@@ -14,7 +14,7 @@ use crate::AppState;
 use crate::db;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
-use crate::handlers::session::extract_org_admin;
+use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::infra::rate_limit::resolve_client_ip;
 use axum_extra::extract::cookie::CookieJar;
 
@@ -316,6 +316,76 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
 
         Ok(Self(from_tls))
+    }
+}
+
+/// An organization administrator viewing an admin page.
+///
+/// Every admin page needs the same four facts — a signed-in user, the
+/// org-admin role, a session backed by a key ceremony, and the organization
+/// being administered — and each failure has its own destination. Taking
+/// this type is what runs those checks, so a new admin page cannot render
+/// privileged controls by forgetting them.
+///
+/// Where [`OrgAdmin`] answers an API caller with 403, this redirects: a
+/// person reading a page needs somewhere to go, and an unverified session is
+/// sent to `/login` to assert rather than shown buttons that will refuse it.
+pub(crate) struct AdminPage {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+    /// The administrator's user id.
+    pub(crate) user_id: String,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for AdminPage {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::{IntoResponse, Redirect};
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let auth = get_resource_auth_context(state, &jar).await;
+
+        if !auth.authenticated {
+            return Err(Redirect::to("/enroll/start").into_response());
+        }
+        if !auth.is_org_admin {
+            return Err(Redirect::to("/integrations").into_response());
+        }
+        if !auth.hardware_verified {
+            tracing::info!(
+                target: "security",
+                path = %parts.uri.path(),
+                "admin page requires an assertion: session is not hardware-verified"
+            );
+            return Err(Redirect::to("/login").into_response());
+        }
+        let Some(user_id) = auth.user_id.clone() else {
+            return Err(Redirect::to("/enroll/start").into_response());
+        };
+
+        let org_id = match db::get_user_by_id(&state.store, &user_id).await {
+            Ok(Some(user)) => match user.org_id {
+                Some(org_id) => org_id,
+                None => return Err(Redirect::to("/integrations").into_response()),
+            },
+            Ok(None) => return Err(Redirect::to("/enroll/start").into_response()),
+            Err(e) => {
+                tracing::error!(error = %e, "admin page: user lookup failed");
+                return Err(Redirect::to("/integrations").into_response());
+            }
+        };
+
+        Ok(Self {
+            auth,
+            user_id,
+            org_id,
+        })
     }
 }
 

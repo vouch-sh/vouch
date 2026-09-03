@@ -36,6 +36,10 @@ pub(crate) struct AuthContext {
     /// Whether the user is an organization admin.
     /// Used to show/hide org admin features like connecting GitHub.
     pub is_org_admin: bool,
+    /// Whether a FIDO2 ceremony backs this session. An enrollment bootstrap
+    /// session (upstream IdP sign-in, no assertion) is authenticated but not
+    /// verified, and pages that offer privileged actions gate on this.
+    pub hardware_verified: bool,
 }
 
 impl AuthContext {
@@ -48,6 +52,7 @@ impl AuthContext {
             user_email: None,
             has_org: false,
             is_org_admin: false,
+            hardware_verified: false,
         }
     }
 }
@@ -760,6 +765,7 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
         user_email,
         has_org,
         is_org_admin,
+        hardware_verified: decoded.hardware_verification().hardware_verified(),
     }
 }
 

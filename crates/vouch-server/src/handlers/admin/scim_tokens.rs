@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use super::{compute_token_expiry, generate_scim_token};
 use crate::filters;
-use crate::handlers::extractors::OrgAdmin;
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
 
@@ -310,28 +310,13 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 pub(crate) async fn admin_scim_tokens_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let db_tokens = match db::list_scim_tokens(&state.store, Some(&org_id)).await {
         Ok(t) => t,
@@ -369,8 +354,10 @@ pub(crate) async fn admin_scim_tokens_page(
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
 pub(crate) async fn admin_create_scim_token(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    admin: OrgAdmin,
+    headers: HeaderMap,
     jar: CookieJar,
     axum::Form(form): axum::Form<CreateScimTokenForm>,
 ) -> Result<Response, ServiceError> {
@@ -391,10 +378,8 @@ pub(crate) async fn admin_create_scim_token(
         ));
     }
 
-    let OrgAdmin {
-        user: admin,
-        org_id,
-    } = admin;
+    let (admin, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(form.expires_in_days)?);

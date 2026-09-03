@@ -74,6 +74,7 @@ async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<A
         user_email: Some(user.email),
         has_org: user.org_id.is_some(),
         is_org_admin: user.is_org_admin,
+        hardware_verified: session.hardware_verified,
     })
 }
 

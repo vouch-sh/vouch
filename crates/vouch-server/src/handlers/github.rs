@@ -10,7 +10,9 @@
 //! - GET /github/success - Success page after connection
 
 use crate::error::ServiceError;
-use crate::handlers::session::AuthContext;
+use crate::handlers::session::{
+    AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
+};
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
     ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
@@ -352,7 +354,7 @@ pub(crate) async fn github_connect_page(
     }
 
     // Extract session from cookie (browser UI)
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -361,7 +363,7 @@ pub(crate) async fn github_connect_page(
 
     // Refuse a deactivated account: the cookie extraction skips the active
     // check, so this mutating flow carries its own guard.
-    let user = match crate::handlers::session::load_active_user(&state, &session.sub).await {
+    let user = match load_active_user(&state, &session.sub).await {
         Ok(u) => u,
         Err(_) => return error_response(GitHubError::UserNotFound),
     };
@@ -435,6 +437,7 @@ pub(crate) async fn github_connect_page(
         user_email: Some(user.email),
         has_org: user.org_id.is_some(),
         is_org_admin: user.is_org_admin,
+        hardware_verified: session.hardware_verified,
     };
 
     GitHubConnectTemplate {
@@ -492,7 +495,7 @@ async fn validate_callback_session(
     token: &GitHubStateToken,
     flow_label: &'static str,
 ) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
-    let session = match crate::handlers::session::extract_session_from_cookie(state, jar).await {
+    let session = match extract_session_from_cookie(state, jar).await {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
@@ -622,7 +625,7 @@ async fn handle_installation_callback(
 
     // Re-fetch the user from DB by the *session* identity (not the JWT),
     // refusing an account deactivated since the flow began.
-    let user = match crate::handlers::session::load_active_user(state, &session.sub).await {
+    let user = match load_active_user(state, &session.sub).await {
         Ok(u) => u,
         Err(_) => return error_response(GitHubError::UserNotFound),
     };
@@ -685,7 +688,7 @@ pub(crate) async fn github_link_start(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -694,7 +697,7 @@ pub(crate) async fn github_link_start(
 
     // Refuse a deactivated account: the cookie extraction skips the active
     // check, so this mutating flow carries its own guard.
-    let user = match crate::handlers::session::load_active_user(&state, &session.sub).await {
+    let user = match load_active_user(&state, &session.sub).await {
         Ok(u) => u,
         Err(_) => return error_response(GitHubError::UserNotFound),
     };
@@ -749,7 +752,7 @@ pub(crate) async fn github_reconnect(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -758,7 +761,7 @@ pub(crate) async fn github_reconnect(
 
     // Refuse a deactivated account: the cookie extraction skips the active
     // check, so this mutating flow carries its own guard.
-    let user = match crate::handlers::session::load_active_user(&state, &session.sub).await {
+    let user = match load_active_user(&state, &session.sub).await {
         Ok(u) => u,
         Err(_) => return error_response(GitHubError::UserNotFound),
     };
@@ -812,7 +815,7 @@ pub(crate) async fn github_success_page(
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
-    let auth = crate::handlers::session::get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar).await;
 
     GitHubSuccessTemplate {
         org_name: state.config().get_org_display_name().to_string(),

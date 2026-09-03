@@ -14,8 +14,8 @@ use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
-use crate::handlers::extractors::OrgAdmin;
-use crate::handlers::session::{AuthContext, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// Page size for the members list.
@@ -46,31 +46,15 @@ impl_template_response!(AdminMembersTemplate);
 /// GET /admin — Members list page.
 pub(crate) async fn admin_members_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    _jar: CookieJar,
+    admin: AdminPage,
     Query(params): Query<PaginationParams>,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    // Get the admin's org_id
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id,
+        org_id,
+    } = admin;
 
     let (users, has_more): (Vec<db::User>, bool) = match db::get_users_by_org_paginated(
         &state.store,
@@ -744,6 +728,45 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "Self-demote should be blocked: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_is_sent_to_assert_not_shown_the_page() {
+        // The page must not render controls its own POSTs would refuse. An
+        // unverified org admin is sent to /login to touch their key, the same
+        // answer the GitHub admin flows give.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp =
+            crate::test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))])
+                .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "an unverified admin must be redirected, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/login");
     }
 
     #[tokio::test]
