@@ -12,7 +12,7 @@ use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -20,7 +20,6 @@ use std::sync::Arc;
 use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
-use crate::handlers::browser_login::validate_origin;
 use crate::handlers::extractors::OrgAdmin;
 use crate::handlers::session::{AuthContext, get_resource_auth_context};
 
@@ -189,12 +188,9 @@ pub(crate) async fn admin_policies_page(
 pub(crate) async fn toggle_preconfigured_policy(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidPath(slug): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     if !posture::is_valid_preconfigured_slug(&slug) {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
@@ -326,12 +322,9 @@ fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
 pub(crate) async fn create_custom_policy(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
@@ -434,13 +427,10 @@ pub(crate) async fn create_custom_policy(
 pub(crate) async fn update_custom_policy(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
@@ -540,11 +530,8 @@ pub(crate) async fn update_custom_policy(
 pub(crate) async fn delete_custom_policy(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let OrgAdmin {
         user: admin,
         org_id,
@@ -591,12 +578,9 @@ pub(crate) async fn delete_custom_policy(
 pub(crate) async fn toggle_custom_policy(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let OrgAdmin {
         user: admin,
         org_id,

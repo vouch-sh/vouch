@@ -33,6 +33,7 @@ async fn rename_key(harness: &TestHarness, token: &str, key_id: &str, body: &str
         &[
             ("Cookie", &cookie),
             ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Origin", harness.base_url()),
         ],
     )
     .await
@@ -43,7 +44,7 @@ async fn delete_key(harness: &TestHarness, token: &str, key_id: &str) -> HttpRes
     http_delete_full(
         &harness.router,
         &format!("/enroll/keys/{key_id}"),
-        &[("Cookie", &cookie)],
+        &[("Cookie", &cookie), ("Origin", harness.base_url())],
     )
     .await
 }

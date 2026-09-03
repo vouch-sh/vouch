@@ -8,13 +8,12 @@ use crate::error::ServiceError;
 use crate::impl_template_response;
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
-use crate::handlers::browser_login::validate_origin;
 use crate::handlers::extractors::OrgAdmin;
 use crate::handlers::session::{AuthContext, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
@@ -121,12 +120,9 @@ pub(crate) async fn admin_members_page(
 /// POST /admin/members/{id}/promote — Promote a member to admin.
 pub(crate) async fn promote_member(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot promote yourself (no-op but creates misleading audit events)
@@ -174,12 +170,9 @@ pub(crate) async fn promote_member(
 /// POST /admin/members/{id}/demote — Demote an admin to regular member.
 pub(crate) async fn demote_member(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot demote yourself
@@ -227,12 +220,9 @@ pub(crate) async fn demote_member(
 /// POST /admin/members/{id}/deactivate — Deactivate a user.
 pub(crate) async fn deactivate_member(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot deactivate yourself
@@ -291,12 +281,9 @@ pub(crate) async fn deactivate_member(
 /// POST /admin/members/{id}/activate — Reactivate a user.
 pub(crate) async fn activate_member(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     let updated = db::update_user_active_status(&state.store, &target_id, true).await?;
@@ -331,12 +318,9 @@ pub(crate) async fn activate_member(
 /// POST /admin/members/{id}/revoke-credentials — Revoke all credentials for a user.
 pub(crate) async fn revoke_member_credentials(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot revoke your own credentials
@@ -410,12 +394,9 @@ pub(crate) async fn revoke_member_credentials(
 /// POST /admin/members/{id}/remove — Remove a user from the organization.
 pub(crate) async fn remove_member(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidPath(target_id): ValidPath<ValidUuid>,
     admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot remove yourself

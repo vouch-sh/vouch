@@ -8,6 +8,7 @@
 pub mod bootstrap;
 pub mod cleanup;
 pub mod csp;
+pub(crate) mod csrf;
 pub mod dns;
 pub(crate) mod egress;
 pub mod generate_document_key;

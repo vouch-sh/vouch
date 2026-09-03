@@ -11,7 +11,6 @@ use crate::db::documents::audit::{OrgDomainAdminData, OrgDomainRemovalData};
 use crate::error::ServiceError;
 use crate::filters;
 use crate::handlers::admin::flash;
-use crate::handlers::browser_login::validate_origin;
 use crate::handlers::extractors::OrgAdmin;
 use crate::handlers::session::{AuthContext, get_resource_auth_context};
 use crate::impl_template_response;
@@ -19,7 +18,6 @@ use crate::infra::dns;
 use crate::infra::i18n::Tr;
 use askama::Template;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
@@ -192,11 +190,9 @@ pub(crate) async fn admin_domains_page(
 pub(crate) async fn admin_add_domain(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     axum::Form(form): axum::Form<AddDomainForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
     let OrgAdmin {
         user: admin,
         org_id,
@@ -318,11 +314,9 @@ pub(crate) async fn admin_add_domain(
 pub(crate) async fn admin_verify_domain(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
     let OrgAdmin {
         user: admin,
         org_id,
@@ -427,11 +421,9 @@ pub(crate) async fn admin_verify_domain(
 pub(crate) async fn admin_remove_domain(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
     let OrgAdmin {
         user: admin,
         org_id,

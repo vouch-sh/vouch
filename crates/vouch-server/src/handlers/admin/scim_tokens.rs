@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use super::{compute_token_expiry, generate_scim_token};
 use crate::filters;
-use crate::handlers::browser_login::validate_origin;
 use crate::handlers::extractors::OrgAdmin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
@@ -372,12 +371,9 @@ pub(crate) async fn admin_scim_tokens_page(
 pub(crate) async fn admin_create_scim_token(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     axum::Form(form): axum::Form<CreateScimTokenForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth to fail fast on obviously bad requests
     if let Some(ref desc) = form.description
         && desc.chars().count() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS
@@ -490,12 +486,9 @@ pub(crate) async fn admin_create_scim_token(
 pub(crate) async fn admin_revoke_scim_token(
     State(state): State<Arc<AppState>>,
     admin: OrgAdmin,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidPath(token_id): ValidPath<ValidUuid>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let OrgAdmin {
         user: admin,
         org_id,

@@ -774,7 +774,13 @@ mod tests {
     async fn test_delete_page_invalid_uuid_returns_html_not_json() {
         let (app, _state) = test_app().await;
 
-        let (status, body) = http_post_form(&app, "/applications/not-a-uuid/delete", "", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/not-a-uuid/delete",
+            "",
+            &[("Origin", "https://test.example.com")],
+        )
+        .await;
 
         assert_ne!(status, StatusCode::BAD_REQUEST);
         assert!(
@@ -787,8 +793,13 @@ mod tests {
     async fn test_add_secret_page_invalid_uuid_returns_html_not_json() {
         let (app, _state) = test_app().await;
 
-        let (status, body) =
-            http_post_form(&app, "/applications/not-a-uuid/secrets", "", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/not-a-uuid/secrets",
+            "",
+            &[("Origin", "https://test.example.com")],
+        )
+        .await;
 
         assert_ne!(status, StatusCode::BAD_REQUEST);
         assert!(
@@ -805,7 +816,7 @@ mod tests {
             &app,
             "/applications/not-a-uuid/secrets/also-bad/delete",
             "",
-            &[],
+            &[("Origin", "https://test.example.com")],
         )
         .await;
 
@@ -845,7 +856,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
 
@@ -902,7 +916,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
 
@@ -974,7 +991,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
         assert!(

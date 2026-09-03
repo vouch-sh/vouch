@@ -44,7 +44,7 @@ use askama::Template;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -464,12 +464,9 @@ pub(crate) async fn login_page(
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
 pub(crate) async fn browser_login_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<BrowserLoginStartRequest>,
 ) -> Result<Json<BrowserLoginStartResponse>, ServiceError> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login start (discoverable credential flow)");
 
     // Generate challenge
@@ -534,12 +531,9 @@ pub(crate) async fn browser_login_start(
 pub(crate) async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidJson(req): ValidJson<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login complete (discoverable credential flow)");
 
     let checked = LoginCompletion::validate(req, &state).await?;
@@ -830,38 +824,6 @@ pub(crate) async fn browser_login_complete(
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Validate Origin header for CSRF protection (RFC 9700).
-pub(crate) fn validate_origin(
-    headers: &HeaderMap,
-    expected_origin: &str,
-) -> Result<(), ServiceError> {
-    let origin = headers
-        .get("Origin")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::FORBIDDEN,
-                "missing_origin",
-                Tr::new("login-error-missing-origin").to_string(),
-            )
-        })?;
-
-    if origin != expected_origin {
-        tracing::warn!(
-            "Origin mismatch: got '{}', expected '{}'",
-            origin,
-            expected_origin
-        );
-        return Err(ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "invalid_origin",
-            Tr::new("login-error-origin-mismatch").to_string(),
-        ));
-    }
-
-    Ok(())
-}
 
 // ============================================================================
 // Tests
