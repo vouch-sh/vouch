@@ -280,3 +280,240 @@ pub(crate) async fn admin_revoke_scim_token(
 
     Ok(Redirect::to("/admin/scim-tokens").into_response())
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
+
+    const ORIGIN: &str = "https://test.example.com";
+
+    fn location(resp: &HttpResponse) -> &str {
+        resp.headers
+            .get("location")
+            .expect("redirect must carry a location header")
+            .to_str()
+            .expect("ascii location")
+    }
+
+    // ── GET /admin/scim-tokens (AdminPage: redirects, never JSON errors) ──
+
+    #[tokio::test]
+    async fn page_without_session_redirects_to_enroll() {
+        let (app, _state) = test_app().await;
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[]).await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/enroll/start");
+    }
+
+    #[tokio::test]
+    async fn page_for_non_admin_redirects_to_integrations() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/integrations");
+    }
+
+    #[tokio::test]
+    async fn page_for_unverified_admin_redirects_to_login() {
+        // An admin session minted by upstream IdP sign-in alone (no FIDO2
+        // ceremony) is sent to assert before seeing token-management buttons.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/login");
+    }
+
+    #[tokio::test]
+    async fn page_renders_org_tokens_for_admin() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        create_test_scim_token(&state.store, "provisioning token", &org_id).await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("provisioning token"),
+            "page must list the org's tokens"
+        );
+    }
+
+    // ── POST /admin/scim-tokens (form: flash + redirect on bad input) ──
+
+    #[tokio::test]
+    async fn create_form_renders_token_once() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            "description=CI+provisioning&expires_in_days=30",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("vouch_scim_"),
+            "the created token is shown once, on this response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_form_invalid_expiry_redirects_with_flash() {
+        // Input validation runs before auth, so no session is needed to
+        // observe the flash redirect.
+        let (app, _state) = test_app().await;
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            "description=x&expires_in_days=0",
+            &[("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+    }
+
+    #[tokio::test]
+    async fn create_form_long_description_redirects_with_flash() {
+        let (app, _state) = test_app().await;
+        let long = "x".repeat(crate::handlers::admin::MAX_SCIM_TOKEN_DESCRIPTION_CHARS + 1);
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            &format!("description={long}&expires_in_days=30"),
+            &[("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+    }
+
+    // ── POST /admin/scim-tokens/{id}/revoke ──
+
+    #[tokio::test]
+    async fn revoke_deletes_token_and_redirects() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        create_test_scim_token(&state.store, "doomed", &org_id).await;
+        let scim_tokens = crate::db::list_scim_tokens(&state.store, Some(&org_id))
+            .await
+            .expect("list tokens");
+        let token_id = &scim_tokens.first().expect("one seeded token").id;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{token_id}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+        let remaining = crate::db::list_scim_tokens(&state.store, Some(&org_id))
+            .await
+            .expect("list tokens");
+        assert!(remaining.is_empty(), "the token must be gone");
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_token_redirects_with_not_found_flash() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let missing = uuid::Uuid::now_v7();
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{missing}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+    }
+
+    #[tokio::test]
+    async fn revoke_cannot_reach_another_orgs_token() {
+        // delete_scim_token filters by org, so a foreign token behaves
+        // exactly like a missing one and survives the attempt.
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let other_org = create_test_org(&state.store, "rival.example").await;
+        create_test_scim_token(&state.store, "foreign", &other_org.id).await;
+        let foreign = crate::db::list_scim_tokens(&state.store, Some(&other_org.id))
+            .await
+            .expect("list tokens");
+        let foreign_id = &foreign.first().expect("one seeded token").id;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{foreign_id}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        let survivors = crate::db::list_scim_tokens(&state.store, Some(&other_org.id))
+            .await
+            .expect("list tokens");
+        assert_eq!(survivors.len(), 1, "the foreign token must survive");
+    }
+}
