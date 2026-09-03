@@ -101,7 +101,7 @@ pub fn print_startup_banner() {
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
     let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
     let api_routes = build_api_routes(&state, config, Arc::clone(&httpsig_resolver))?;
-    let ui_routes = build_ui_routes(config)?;
+    let ui_routes = build_ui_routes(state.clone(), config)?;
     // Merged here rather than inside either group so that neither CORS layer
     // reaches the authorization endpoint -- see RFC 9700 §2.6 on the builder.
     let authorization_endpoint_routes = build_authorization_endpoint_routes(config)?;
@@ -802,7 +802,10 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// Build all UI routes with UI CORS.
-fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+fn build_ui_routes(
+    state: Arc<AppState>,
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
     Ok(Router::new()
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
@@ -889,16 +892,24 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
             "/applications/{id}/secrets/{secret_id}/delete",
             post(handlers::applications::delete_secret_form),
         )
-        // SAML 2.0 SP endpoints
+        // Admin member management UI (rate-limited)
+        .merge(build_admin_routes(config)?)
+        // Rate-limited browser WebAuthn routes
+        .merge(build_browser_auth_routes(config)?)
+        // Every route above authenticates with the session cookie, so
+        // state-changing methods must prove same-origin (RFC 9700 CSRF
+        // defense). Routes added below this layer are exempt.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::infra::csrf::same_origin,
+        ))
+        // SAML 2.0 SP endpoints — after the same-origin layer: the IdP
+        // delivers the ACS POST binding cross-origin by design.
         .route(
             "/saml/acs",
             post(handlers::saml::acs).layer(DefaultBodyLimit::max(SAML_ACS_BODY_LIMIT)),
         )
         .route("/saml/metadata", get(handlers::saml::metadata))
-        // Admin member management UI (rate-limited)
-        .merge(build_admin_routes(config)?)
-        // Rate-limited browser WebAuthn routes
-        .merge(build_browser_auth_routes(config)?)
         // Static file serving for CSS, JS, and assets
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
@@ -1017,6 +1028,49 @@ mod tests {
             "TimeoutLayer must be applied before metrics_middleware in build_app \
              (innermost vs. outer observer); source order: TimeoutLayer at \
              {timeout_pos}, metrics at {metrics_pos}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_mutations_require_same_origin() {
+        let (app, _state) = crate::test_utils::test_app().await;
+
+        // /logout has no per-handler origin check of its own; the layer is
+        // its only CSRF defense.
+        let (status, body) = crate::test_utils::http_post_form(&app, "/logout", "", &[]).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a state-changing UI request without an Origin must be refused: {body}"
+        );
+        assert!(body.contains("missing_origin"), "got: {body}");
+
+        let (status, body) = crate::test_utils::http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[("Origin", "https://evil.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a cross-site Origin must be refused: {body}"
+        );
+        assert!(body.contains("invalid_origin"), "got: {body}");
+
+        // The server's own origin passes through to the handler.
+        let (status, _body) = crate::test_utils::http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a same-origin request must reach the handler"
         );
     }
 }

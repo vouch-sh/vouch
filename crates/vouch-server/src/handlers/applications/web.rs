@@ -11,23 +11,20 @@ use axum::{
     extract::{Path, State},
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::types::{
     ApplicationCreateTemplate, ApplicationCreatedTemplate, ApplicationDetailTemplate,
-    ApplicationErrorTemplate, ApplicationInfo, ApplicationUnauthorizedTemplate,
-    ApplicationsListTemplate, CreateApplicationForm, SecretAddedTemplate, SecretInfo,
-    UpdateApplicationForm, UsageStat,
+    ApplicationErrorTemplate, ApplicationInfo, ApplicationsListTemplate, CreateApplicationForm,
+    SecretAddedTemplate, SecretInfo, UpdateApplicationForm, UsageStat,
 };
 use super::validate::{
     AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
     compute_fapi_update_fields, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
-use super::{
-    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
-};
+use super::{generate_client_secret, parse_redirect_uris, parse_resource_uris};
+use crate::handlers::extractors::AttestedSession;
 use crate::handlers::hash_token;
 use crate::infra::i18n::Tr;
 
@@ -60,11 +57,9 @@ fn validation_error_response(err: &AppValidationError, back_url: String) -> Resp
 /// GET /applications
 pub(crate) async fn list_applications_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
     let applications = match db::get_oauth_clients_for_user(&state.store, user_id).await {
@@ -84,13 +79,8 @@ pub(crate) async fn list_applications_page(
 
 /// Show create application form.
 /// GET /applications/new
-pub(crate) async fn create_application_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+pub(crate) async fn create_application_page(session: AttestedSession) -> Response {
+    let AttestedSession { auth } = session;
 
     let user_has_org = auth.has_org;
     ApplicationCreateTemplate { auth, user_has_org }.into_response()
@@ -100,12 +90,10 @@ pub(crate) async fn create_application_page(
 /// POST /applications/new
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -263,12 +251,10 @@ pub(crate) async fn create_application_form(
 /// GET /applications/:id
 pub(crate) async fn detail_application_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -347,13 +333,11 @@ pub(crate) async fn detail_application_page(
 /// POST /applications/:id
 pub(crate) async fn update_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Path(app_id): Path<String>,
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -497,12 +481,10 @@ pub(crate) async fn update_application_form(
 /// POST /applications/:id/delete
 pub(crate) async fn delete_application_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -537,12 +519,10 @@ pub(crate) async fn delete_application_form(
 /// POST /applications/:id/secrets
 pub(crate) async fn add_secret_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -635,12 +615,10 @@ pub(crate) async fn add_secret_form(
 /// POST /applications/:id/secrets/:secret_id/delete
 pub(crate) async fn delete_secret_form(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    session: AttestedSession,
     Path((app_id, secret_id)): Path<(String, String)>,
 ) -> Response {
-    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
-    };
+    let AttestedSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -752,12 +730,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_detail_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-detail@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
-        let resp = http_get_full(&app, "/applications/not-a-uuid", &[]).await;
+        let resp = http_get_full(&app, "/applications/not-a-uuid", &[("Cookie", &cookie)]).await;
 
-        // Should NOT be 400 (which ValidPath would produce).
-        // Without a session cookie the handler returns the unauthorized template (200).
+        // A person mistyping a URL reads a page, not a JSON error envelope —
+        // the browser routes answer in HTML where the API routes answer 400.
         assert_ne!(resp.status, StatusCode::BAD_REQUEST);
         let ct = resp
             .headers
@@ -772,9 +763,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-delete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
-        let (status, body) = http_post_form(&app, "/applications/not-a-uuid/delete", "", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/not-a-uuid/delete",
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
 
         assert_ne!(status, StatusCode::BAD_REQUEST);
         assert!(
@@ -785,10 +795,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_secret_page_invalid_uuid_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
-        let (status, body) =
-            http_post_form(&app, "/applications/not-a-uuid/secrets", "", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/not-a-uuid/secrets",
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
 
         assert_ne!(status, StatusCode::BAD_REQUEST);
         assert!(
@@ -799,13 +827,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_secret_page_invalid_uuids_returns_html_not_json() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "uuid-secret-del@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
         let (status, body) = http_post_form(
             &app,
             "/applications/not-a-uuid/secrets/also-bad/delete",
             "",
-            &[],
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
         )
         .await;
 
@@ -845,7 +886,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
 
@@ -902,7 +946,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
 
@@ -974,7 +1021,10 @@ mod tests {
             &app,
             &format!("/applications/{}", client.app_id),
             form_body,
-            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+            &[
+                ("Cookie", &format!("__Host-vouch_session={session_token}")),
+                ("Origin", "https://test.example.com"),
+            ],
         )
         .await;
         assert!(

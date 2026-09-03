@@ -7,16 +7,15 @@ use crate::db::documents::audit::AdminMemberActionData;
 use crate::error::ServiceError;
 use crate::impl_template_response;
 use askama::Template;
-use axum::extract::OriginalUri;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// Page size for the members list.
@@ -47,31 +46,15 @@ impl_template_response!(AdminMembersTemplate);
 /// GET /admin — Members list page.
 pub(crate) async fn admin_members_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    _jar: CookieJar,
+    admin: AdminPage,
     Query(params): Query<PaginationParams>,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    // Get the admin's org_id
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id,
+        org_id,
+    } = admin;
 
     let (users, has_more): (Vec<db::User>, bool) = match db::get_users_by_org_paginated(
         &state.store,
@@ -120,24 +103,11 @@ pub(crate) async fn admin_members_page(
 
 /// POST /admin/members/{id}/promote — Promote a member to admin.
 pub(crate) async fn promote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot promote yourself (no-op but creates misleading audit events)
     if admin.id == *target_id {
@@ -183,24 +153,11 @@ pub(crate) async fn promote_member(
 
 /// POST /admin/members/{id}/demote — Demote an admin to regular member.
 pub(crate) async fn demote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot demote yourself
     if admin.id == *target_id {
@@ -246,24 +203,11 @@ pub(crate) async fn demote_member(
 
 /// POST /admin/members/{id}/deactivate — Deactivate a user.
 pub(crate) async fn deactivate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot deactivate yourself
     if admin.id == *target_id {
@@ -320,24 +264,11 @@ pub(crate) async fn deactivate_member(
 
 /// POST /admin/members/{id}/activate — Reactivate a user.
 pub(crate) async fn activate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     let updated = db::update_user_active_status(&state.store, &target_id, true).await?;
     if !updated {
@@ -370,24 +301,11 @@ pub(crate) async fn activate_member(
 
 /// POST /admin/members/{id}/revoke-credentials — Revoke all credentials for a user.
 pub(crate) async fn revoke_member_credentials(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot revoke your own credentials
     if admin.id == *target_id {
@@ -459,24 +377,11 @@ pub(crate) async fn revoke_member_credentials(
 
 /// POST /admin/members/{id}/remove — Remove a user from the organization.
 pub(crate) async fn remove_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot remove yourself
     if admin.id == *target_id {
@@ -823,6 +728,95 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "Self-demote should be blocked: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_is_sent_to_assert_not_shown_the_page() {
+        // The page must not render controls its own POSTs would refuse. An
+        // unverified org admin is sent to /login to touch their key, the same
+        // answer the GitHub admin flows give.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp =
+            crate::test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))])
+                .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "an unverified admin must be redirected, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/login");
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_cannot_promote() {
+        // The OrgAdmin extractor refuses an org-admin session minted by
+        // upstream IdP sign-in alone (no FIDO2 ceremony): granting persistent
+        // admin to another account is an org-wide write and takes the same
+        // bar as credential issuance.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let target =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = admin_cookie(&token);
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/promote", target.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an unverified session must not promote members: {body}"
+        );
+        assert!(
+            body.contains("hardware_required"),
+            "the refusal must name the missing proof: {body}"
+        );
+
+        let unchanged = crate::db::get_user_by_id(&state.store, &target.id)
+            .await
+            .expect("target lookup")
+            .expect("target exists");
+        assert!(!unchanged.is_org_admin, "target must remain a member");
     }
 
     #[tokio::test]

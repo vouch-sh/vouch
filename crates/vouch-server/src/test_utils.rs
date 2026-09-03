@@ -1488,6 +1488,50 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
     create_test_client(store, user_id, TestClientSpec::default()).await
 }
 
+/// Spec for a pending OAuth authorization — the record the deferred authorize
+/// flow parks between the first `/oauth/authorize` leg and `/login`. The
+/// default is the ordinary case: `openid` scope, query response mode, no
+/// forced re-auth.
+#[derive(Default)]
+pub struct TestPendingAuthSpec<'a> {
+    /// Client the authorization belongs to. Required — the default is empty.
+    pub client_id: &'a str,
+    /// Space-delimited OIDC prompt set stored on the request. Default: `None`.
+    pub prompt: Option<&'a str>,
+    /// RFC 9470 maximum authentication age. Default: `None`.
+    pub max_age: Option<i64>,
+}
+
+/// Store a pending OAuth authorization and return its id.
+pub async fn create_test_pending_auth(
+    store: &DocumentStore,
+    spec: TestPendingAuthSpec<'_>,
+) -> String {
+    crate::db::create_pending_oauth_authorization(
+        store,
+        crate::db::CreatePendingOAuthParams {
+            client_id: spec.client_id,
+            redirect_uri: "https://example.com/callback",
+            response_type: "code",
+            state: None,
+            scope: Some("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: spec.max_age,
+            prompt: spec.prompt,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: Default::default(),
+            par_request_uri: None,
+        },
+    )
+    .await
+    .expect("create pending oauth authorization")
+}
+
 /// Create a public OAuth client (no client secret, `token_endpoint_auth_method=none`).
 pub async fn create_test_public_oauth_client(
     store: &DocumentStore,

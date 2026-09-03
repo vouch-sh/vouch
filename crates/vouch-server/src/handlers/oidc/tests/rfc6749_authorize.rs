@@ -1647,3 +1647,133 @@ async fn test_authorize_still_issues_a_code_for_a_verified_session() {
         "a hardware-verified session must still receive a code, got: {location}"
     );
 }
+
+#[tokio::test]
+async fn test_pending_auth_with_bootstrap_session_returns_to_login_and_preserves_pending() {
+    // Issue #1168: a bootstrap (NotVerified) session arriving with a pending
+    // auth id used to have the id consumed before the session gate ran, so
+    // the user saw a dead-end denial and every retry saw "session expired".
+    // The unacceptable session must instead go back to /login with the
+    // single-use id unspent, and /login — consulting the same gate — must
+    // render the assertion form rather than bounce back.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pending-bootstrap@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::NotVerified,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Second leg: return from login with the bootstrap session.
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        response.status.is_redirection(),
+        "an unverified session must be sent back to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth=") && location.contains(&pending_id),
+        "must return to /login carrying the same pending id, got: {location}"
+    );
+    assert!(
+        crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
+            .await
+            .expect("pending lookup")
+            .is_some(),
+        "the refused session must not spend the single-use pending id"
+    );
+
+    // Third leg: /login consults the same gate and renders the form —
+    // the flow converges instead of looping or dead-ending.
+    let login = http_get_full(
+        &app,
+        &format!("/login?pending_auth={pending_id}"),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        login.status,
+        StatusCode::OK,
+        "/login must render the assertion form for the unverified session, \
+         got {} with location {:?}",
+        login.status,
+        login.headers.get("Location")
+    );
+}
+
+#[tokio::test]
+async fn test_pending_auth_without_session_returns_to_login_and_preserves_pending() {
+    // A pending auth id presented with no session at all (expired cookie,
+    // cleared cookies mid-flow) is recoverable: send the user to /login with
+    // the id unspent instead of consuming it and dead-ending.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pending-nosession@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[],
+    )
+    .await;
+    assert!(
+        response.status.is_redirection(),
+        "a sessionless return must be sent back to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth=") && location.contains(&pending_id),
+        "must return to /login carrying the same pending id, got: {location}"
+    );
+    assert!(
+        crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
+            .await
+            .expect("pending lookup")
+            .is_some(),
+        "the sessionless return must not spend the single-use pending id"
+    );
+}

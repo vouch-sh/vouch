@@ -88,7 +88,13 @@ async fn test_enrollment_complete_missing_state() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     // `ValidJson` reports every body rejection in the JSON envelope the
     // browser reads, so a missing field is a 400 like any other bad body.
@@ -113,7 +119,13 @@ async fn test_enrollment_complete_invalid_state_token() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -138,7 +150,13 @@ async fn test_enrollment_complete_missing_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -170,7 +188,13 @@ async fn test_enrollment_complete_oversized_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -224,7 +248,13 @@ async fn test_browser_register_complete_rejects_replayed_state() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -252,7 +282,13 @@ async fn test_enrollment_complete_invalid_base64_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -283,7 +319,13 @@ async fn test_enrollment_complete_rejects_wrong_json_type() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -501,8 +543,9 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // The exploit relies on landing on `/enroll/keys` (a direct web sign-in
-    // with no CLI waiting is NOT sent to `/login` for a FIDO2 assertion).
+    // A returning user is sent to `/login` to assert; the exploit ignores
+    // the redirect and drives `/enroll/keys` directly with the issued
+    // cookie, which the bootstrap session still permits for key management.
     let location = resp
         .headers()
         .get(header::LOCATION)
@@ -511,8 +554,8 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
         .expect("ascii location")
         .to_string();
     assert_eq!(
-        location, "/enroll/keys",
-        "direct returning-user sign-in must redirect to the keys page, got {location}"
+        location, "/login",
+        "direct returning-user sign-in must redirect to /login to assert, got {location}"
     );
 
     // Extract the session cookie value the handler just issued.
@@ -551,7 +594,10 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
     let resp = http_delete_full(
         &app,
         &format!("/enroll/keys/{doomed}"),
-        &[("Cookie", &cookie_header)],
+        &[
+            ("Cookie", &cookie_header),
+            ("Origin", "https://test.example.com"),
+        ],
     )
     .await;
 
@@ -889,6 +935,19 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
+    // A fresh enrollee has no key to assert with: they must reach the keys
+    // page to register one, not the /login assertion form.
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location");
+    assert_eq!(
+        location, "/enroll/keys",
+        "fresh enrollee must be sent to register a first key, got {location}"
+    );
+
     // Audit writes are spawned; give the runtime a moment before
     // asserting absence.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -952,8 +1011,13 @@ async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
     let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) =
-        crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let (status, body) = crate::test_utils::http_post_form(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -991,7 +1055,7 @@ async fn device_redirects_when_provider_selected() {
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=entra",
-        &[],
+        &[("Origin", "https://test.example.com")],
     )
     .await;
 
@@ -1022,7 +1086,7 @@ async fn device_rejects_unknown_provider_slug() {
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=evil",
-        &[],
+        &[("Origin", "https://test.example.com")],
     )
     .await;
 
@@ -1050,8 +1114,13 @@ async fn device_single_idp_auto_selects_without_chooser() {
     let (app, state) = crate::test_utils::test_app_with_idps(idps).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let resp =
-        crate::test_utils::http_post_form_full(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let resp = crate::test_utils::http_post_form_full(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         resp.status,
@@ -1080,8 +1149,13 @@ async fn device_zero_idps_renders_not_configured_error() {
     let (app, state) = test_app().await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) =
-        crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let (status, body) = crate::test_utils::http_post_form(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -1377,7 +1451,10 @@ async fn test_browser_register_complete_rejects_self_attestation() {
         "POST",
         "/enroll/webauthn/complete",
         Some(body),
-        &[("Content-Type", "application/json")],
+        &[
+            ("Content-Type", "application/json"),
+            ("Origin", "https://test.example.com"),
+        ],
     )
     .await;
 
@@ -1421,8 +1498,13 @@ async fn test_browser_register_start_refuses_deactivated_user() {
         .expect("deactivate user");
 
     let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
-    let (status, body) =
-        http_post_json(&app, "/enroll/webauthn/start", "{}", &[("Cookie", &cookie)]).await;
+    let (status, body) = http_post_json(
+        &app,
+        "/enroll/webauthn/start",
+        "{}",
+        &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
@@ -1467,7 +1549,13 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     })
     .to_string();
 
-    let (status, resp) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
@@ -1536,7 +1624,13 @@ async fn test_enrollment_complete_empty_credential_id_leaves_state_unconsumed() 
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
@@ -1560,7 +1654,13 @@ async fn test_enrollment_complete_malformed_client_data_leaves_state_unconsumed(
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
@@ -1586,7 +1686,13 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(

@@ -16,7 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::filters;
-use crate::handlers::session::{AuthContext, get_resource_auth_context};
+use crate::handlers::extractors::AdminPage;
+use crate::handlers::session::AuthContext;
 
 /// Page size for the audit log.
 const AUDIT_PAGE_SIZE: u64 = 50;
@@ -104,37 +105,23 @@ impl_template_response!(AdminAuditTemplate);
 /// GET /admin/audit — Audit log page.
 pub(crate) async fn admin_audit_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    _jar: CookieJar,
+    admin: AdminPage,
     Query(params): Query<AuditParams>,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     // Get the org's domains (primary + verified additional) to scope
     // audit events to this org.
-    let org = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(ref org_id) => db::get_organization(&state.store, org_id)
-                .await
-                .ok()
-                .flatten(),
-            None => None,
-        },
-        _ => None,
-    };
-
-    let Some(org) = org else {
+    let Some(org) = db::get_organization(&state.store, &org_id)
+        .await
+        .ok()
+        .flatten()
+    else {
         return Redirect::to("/integrations").into_response();
     };
 

@@ -11,14 +11,13 @@ use crate::db::documents::audit::{OrgDomainAdminData, OrgDomainRemovalData};
 use crate::error::ServiceError;
 use crate::filters;
 use crate::handlers::admin::flash;
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::impl_template_response;
 use crate::infra::dns;
 use crate::infra::i18n::Tr;
 use askama::Template;
-use axum::extract::{OriginalUri, Path, State};
-use axum::http::{HeaderMap, Method};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
@@ -138,26 +137,13 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
 pub(crate) async fn admin_domains_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let Some(user_id) = auth.user_id.clone() else {
-        return Redirect::to("/enroll/start").into_response();
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let org = match db::get_organization(&state.store, &org_id).await {
         Ok(Some(o)) => o,
@@ -189,16 +175,15 @@ pub(crate) async fn admin_domains_page(
 
 /// POST /admin/domains — add a pending additional domain.
 pub(crate) async fn admin_add_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     axum::Form(form): axum::Form<AddDomainForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let result =
         db::add_additional_domain(&state.store, &org_id, &form.domain, &admin.id, &admin.email)
@@ -314,16 +299,15 @@ pub(crate) async fn admin_add_domain(
 
 /// POST /admin/domains/{domain}/verify — fetch DNS TXT and mark verified.
 pub(crate) async fn admin_verify_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,
@@ -422,16 +406,15 @@ pub(crate) async fn admin_verify_domain(
 
 /// POST /admin/domains/{domain}/remove — remove an additional domain.
 pub(crate) async fn admin_remove_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,

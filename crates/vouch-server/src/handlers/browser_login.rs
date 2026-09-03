@@ -37,12 +37,14 @@ use crate::services::auth::{
     TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::oidc::authorization::{Prompt, PromptSet};
+use crate::services::oidc::authorization::{
+    AuthorizationSessionState, Prompt, PromptSet, check_session_for_authorization,
+};
 use askama::Template;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -302,8 +304,6 @@ pub(crate) async fn login_page(
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
     jar: CookieJar,
 ) -> Response {
-    let auth = get_auth_context(&state, &jar).await;
-
     // Validate pending_auth is a UUID before DB lookup.
     if let Some(ref pending_id) = query.pending_auth
         && uuid::Uuid::try_parse(pending_id).is_err()
@@ -352,15 +352,38 @@ pub(crate) async fn login_page(
         prompt_requests_login || p.max_age.is_some()
     }) || device_auth_pending;
 
-    if auth.authenticated && !requires_reauth {
-        if let Some(ref pending_id) = query.pending_auth {
-            return axum::response::Redirect::to(&format!(
-                "/oauth/authorize?pending_auth={}",
-                urlencoding::encode(pending_id)
-            ))
-            .into_response();
+    if !requires_reauth {
+        // Leave /login only when the session would satisfy the gate
+        // /oauth/authorize itself applies. `auth.authenticated` is the wrong
+        // question here: an enrollment bootstrap session (upstream IdP
+        // sign-in, no FIDO2) holds a valid cookie but is not
+        // hardware-verified — deciding from it bounced such sessions to an
+        // endpoint that refuses them, consuming the single-use pending id on
+        // the way (#1168). Web sign-in routes returning users here precisely
+        // to assert, so a session the gate refuses gets the form: on
+        // NeedsAuth, and on a store failure too, where rendering the form
+        // needlessly costs one touch but redirecting could strand the flow.
+        let session_token = jar
+            .get(vouch_common::SESSION_COOKIE_NAME)
+            .map(|c| c.value());
+        let authorized = match check_session_for_authorization(&state, session_token).await {
+            Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+            Ok(AuthorizationSessionState::NeedsAuth) => false,
+            Err(e) => {
+                tracing::error!("Session check failed at /login; rendering the form: {e}");
+                false
+            }
+        };
+        if authorized {
+            if let Some(ref pending_id) = query.pending_auth {
+                return axum::response::Redirect::to(&format!(
+                    "/oauth/authorize?pending_auth={}",
+                    urlencoding::encode(pending_id)
+                ))
+                .into_response();
+            }
+            return axum::response::Redirect::to("/").into_response();
         }
-        return axum::response::Redirect::to("/").into_response();
     }
 
     let (client_name, logo_uri, policy_uri, tos_uri) = match &pending {
@@ -419,6 +442,11 @@ pub(crate) async fn login_page(
         _ => None,
     };
 
+    // Only the rendered form needs the header context, and building it costs
+    // a session and a user lookup that the session gate above already did.
+    // Reaching this point means the form is being shown.
+    let auth = get_auth_context(&state, &jar).await;
+
     LoginTemplate {
         pending_auth: query.pending_auth,
         client_name,
@@ -439,12 +467,9 @@ pub(crate) async fn login_page(
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
 pub(crate) async fn browser_login_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<BrowserLoginStartRequest>,
 ) -> Result<Json<BrowserLoginStartResponse>, ServiceError> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login start (discoverable credential flow)");
 
     // Generate challenge
@@ -509,12 +534,9 @@ pub(crate) async fn browser_login_start(
 pub(crate) async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidJson(req): ValidJson<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login complete (discoverable credential flow)");
 
     let checked = LoginCompletion::validate(req, &state).await?;
@@ -806,38 +828,6 @@ pub(crate) async fn browser_login_complete(
 // Helper Functions
 // ============================================================================
 
-/// Validate Origin header for CSRF protection (RFC 9700).
-pub(crate) fn validate_origin(
-    headers: &HeaderMap,
-    expected_origin: &str,
-) -> Result<(), ServiceError> {
-    let origin = headers
-        .get("Origin")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::FORBIDDEN,
-                "missing_origin",
-                Tr::new("login-error-missing-origin").to_string(),
-            )
-        })?;
-
-    if origin != expected_origin {
-        tracing::warn!(
-            "Origin mismatch: got '{}', expected '{}'",
-            origin,
-            expected_origin
-        );
-        return Err(ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "invalid_origin",
-            Tr::new("login-error-origin-mismatch").to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1049,6 +1039,144 @@ mod tests {
             resp.status,
             resp.headers.get("location")
         );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_for_bootstrap_session_without_prompt() {
+        // Issue #1168: an enrollment bootstrap session (upstream IdP sign-in,
+        // no FIDO2) holds a valid cookie but is not hardware-verified, and
+        // /oauth/authorize refuses it. With a default (no prompt, no max_age)
+        // pending auth, /login must render the assertion form rather than
+        // bounce the user to an endpoint that will turn them away — and it
+        // must leave the single-use pending id unspent for the round trip.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "bootstrap-form@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: crate::test_utils::TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let pending_id = crate::test_utils::create_test_pending_auth(
+            &state.store,
+            crate::test_utils::TestPendingAuthSpec {
+                client_id: &client.client_id,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "a session /oauth/authorize would refuse must get the assertion \
+             form, not a redirect; got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+        assert!(
+            crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
+                .await
+                .expect("pending lookup")
+                .is_some(),
+            "rendering the form must not spend the single-use pending id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_for_bootstrap_session_no_pending() {
+        // Web sign-in sends a returning user here with a bootstrap
+        // (NotVerified) session precisely to assert. Redirecting them to `/`
+        // because the cookie looks authenticated would skip the ceremony the
+        // redirect exists for.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "bootstrap-home@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: crate::test_utils::TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "an unverified session must get the assertion form, got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_redirects_verified_session_home() {
+        // A hardware-verified session has nothing left to prove at /login.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "verified-home@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = crate::test_utils::create_test_session_with(
+            &state,
+            crate::test_utils::TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "a verified session skips the form, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/");
     }
 
     #[tokio::test]

@@ -11,9 +11,12 @@ use http::request::Parts;
 use serde::Deserialize;
 
 use crate::AppState;
+use crate::db;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
+use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::infra::rate_limit::resolve_client_ip;
+use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
 /// Derefs to `&str` so it can be passed directly to db functions.
@@ -313,6 +316,180 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
 
         Ok(Self(from_tls))
+    }
+}
+
+/// A signed-in user whose session is backed by a FIDO2 ceremony.
+///
+/// The default for any browser page offering a privileged action — the
+/// applications portal registers OAuth clients, minting secrets and setting
+/// redirect URIs, credentials that outlive the session creating them. Taking
+/// this type is what runs the check, so a new page gets the bar by asking for
+/// the type rather than by remembering a guard.
+///
+/// It answers a person, not an API client: a session that has not asserted is
+/// sent to `/login` to touch a key, and one that is not signed in at all gets
+/// the unauthorized page. [`HardwareVerifiedToken`] is the same requirement
+/// for callers that read a JSON error instead, and [`AdminPage`] adds the
+/// org-admin role on top of this one.
+pub(crate) struct AttestedSession {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+}
+
+impl FromRequestParts<Arc<AppState>> for AttestedSession {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse;
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let sign_in = || axum::response::Redirect::to("/enroll/start").into_response();
+
+        let Ok(session) = crate::handlers::session::extract_session_from_cookie(state, &jar).await
+        else {
+            return Err(sign_in());
+        };
+
+        // Missing or deactivated users are unauthenticated — the active-account
+        // invariant is enforced once, in `load_active_user`.
+        let Ok(user) = crate::handlers::session::load_active_user(state, &session.sub).await else {
+            return Err(sign_in());
+        };
+
+        if !session.hardware_verified {
+            tracing::info!(
+                target: "security",
+                user_id = %session.sub,
+                "application registration requires an assertion: session is not hardware-verified"
+            );
+            return Err(axum::response::Redirect::to("/login").into_response());
+        }
+
+        Ok(Self {
+            auth: AuthContext {
+                authenticated: true,
+                user_id: Some(session.sub),
+                user_email: Some(user.email),
+                has_org: user.org_id.is_some(),
+                is_org_admin: user.is_org_admin,
+                hardware_verified: session.hardware_verified,
+            },
+        })
+    }
+}
+
+/// An organization administrator viewing an admin page.
+///
+/// Every admin page needs the same four facts — a signed-in user, the
+/// org-admin role, a session backed by a key ceremony, and the organization
+/// being administered — and each failure has its own destination. Taking
+/// this type is what runs those checks, so a new admin page cannot render
+/// privileged controls by forgetting them.
+///
+/// Where [`OrgAdmin`] answers an API caller with 403, this redirects: a
+/// person reading a page needs somewhere to go, and an unverified session is
+/// sent to `/login` to assert rather than shown buttons that will refuse it.
+pub(crate) struct AdminPage {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+    /// The administrator's user id.
+    pub(crate) user_id: String,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for AdminPage {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::{IntoResponse, Redirect};
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let auth = get_resource_auth_context(state, &jar).await;
+
+        if !auth.authenticated {
+            return Err(Redirect::to("/enroll/start").into_response());
+        }
+        if !auth.is_org_admin {
+            return Err(Redirect::to("/integrations").into_response());
+        }
+        if !auth.hardware_verified {
+            tracing::info!(
+                target: "security",
+                path = %parts.uri.path(),
+                "admin page requires an assertion: session is not hardware-verified"
+            );
+            return Err(Redirect::to("/login").into_response());
+        }
+        let Some(user_id) = auth.user_id.clone() else {
+            return Err(Redirect::to("/enroll/start").into_response());
+        };
+
+        let org_id = match db::get_user_by_id(&state.store, &user_id).await {
+            Ok(Some(user)) => match user.org_id {
+                Some(org_id) => org_id,
+                None => return Err(Redirect::to("/integrations").into_response()),
+            },
+            Ok(None) => return Err(Redirect::to("/enroll/start").into_response()),
+            Err(e) => {
+                tracing::error!(error = %e, "admin page: user lookup failed");
+                return Err(Redirect::to("/integrations").into_response());
+            }
+        };
+
+        Ok(Self {
+            auth,
+            user_id,
+            org_id,
+        })
+    }
+}
+
+/// An organization administrator holding a hardware-verified session.
+///
+/// The proof is the type: a handler that mutates org-wide state takes
+/// `OrgAdmin` in its signature and cannot run without the admin-role and
+/// key-ceremony checks in [`extract_org_admin`] — the same reasoning
+/// [`super::session::HardwareVerifiedToken`] applies to credential issuance.
+pub(crate) struct OrgAdmin {
+    /// The administrator's user record (active, org member, admin).
+    pub(crate) user: db::User,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let axum::extract::OriginalUri(uri) =
+            axum::extract::OriginalUri::from_request_parts(parts, state)
+                .await
+                .unwrap_or_else(|infallible| match infallible {});
+        let client_cert = OptionalClientCert::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
+        let jar = CookieJar::from_headers(&parts.headers);
+        let (user, org_id) = extract_org_admin(
+            state,
+            &parts.headers,
+            &jar,
+            parts.method.as_str(),
+            uri.path(),
+            client_cert.0.as_ref(),
+        )
+        .await?;
+        Ok(Self { user, org_id })
     }
 }
 

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::{AuthContext, extract_org_admin};
 
 const REDIRECT_BASE: &str = "/admin/policies";
 
@@ -89,28 +89,13 @@ impl_template_response!(AdminPoliciesTemplate);
 pub(crate) async fn admin_policies_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let active_slugs = match db::get_active_preconfigured_slugs(&state.store, &org_id).await {
         Ok(slugs) => slugs,
@@ -193,8 +178,6 @@ pub(crate) async fn toggle_preconfigured_policy(
     jar: CookieJar,
     ValidPath(slug): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     if !posture::is_valid_preconfigured_slug(&slug) {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
@@ -329,8 +312,6 @@ pub(crate) async fn create_custom_policy(
     jar: CookieJar,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
@@ -437,8 +418,6 @@ pub(crate) async fn update_custom_policy(
     ValidPath(id): ValidPath<String>,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
@@ -534,17 +513,14 @@ pub(crate) async fn update_custom_policy(
 
 /// POST /admin/policies/custom/{id}/delete — Delete a custom policy.
 pub(crate) async fn delete_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
+    admin: OrgAdmin,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let deleted = db::delete_custom_policy(&state.store, &id, &org_id)
         .await
@@ -585,17 +561,15 @@ pub(crate) async fn delete_custom_policy(
 
 /// POST /admin/policies/custom/{id}/toggle — Toggle active state.
 pub(crate) async fn toggle_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let policy = db::get_custom_policy(&state.store, &id)
         .await
@@ -768,18 +742,11 @@ fn invalid(text: Option<String>, error: String) -> Json<ValidateResponse> {
 
 /// POST /api/v1/org/policies/validate — validate a policy (JSON).
 pub(crate) async fn validate_policy_api(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
+    _admin: OrgAdmin,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
     // Authenticate before parsing: policy text is attacker-influenced
     // input, so only an authenticated org admin may reach the parser.
-    let _auth =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
     let (policy_text, decision) = match (req.policy_text, req.rule) {
         (Some(_), Some(_)) | (None, None) => {
             return Err(ServiceError::api(

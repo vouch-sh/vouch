@@ -16,8 +16,8 @@ use crate::db::documents::audit::{OrgSubdomainClaimData, OrgSubdomainReleaseData
 use crate::db::{SubdomainClaimError, SubdomainLabelError};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use crate::services::oidc::{
@@ -25,8 +25,7 @@ use crate::services::oidc::{
     emergency_rotate_org_keys, org_key_panel, revoke_org_previous_keys, rotate_org_keys,
 };
 use askama::Template;
-use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, Method};
+use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -196,26 +195,13 @@ fn claim_error_message(e: &SubdomainClaimError) -> String {
 pub(crate) async fn admin_subdomain_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let Some(user_id) = auth.user_id.clone() else {
-        return Redirect::to("/enroll/start").into_response();
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let org = match db::get_organization(&state.store, &org_id).await {
         Ok(Some(o)) => o,
@@ -295,16 +281,15 @@ pub(crate) async fn admin_subdomain_page(
 
 /// POST /admin/subdomain — claim an issuer subdomain for the org.
 pub(crate) async fn admin_claim_subdomain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     axum::Form(form): axum::Form<ClaimSubdomainForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     // Per-org signing keys are never persisted in plaintext, and the startup
     // guard refuses to boot an unencrypted server with claims — reject here
@@ -376,15 +361,14 @@ pub(crate) async fn admin_claim_subdomain(
 
 /// POST /admin/subdomain/release — release the org's issuer subdomain.
 pub(crate) async fn admin_release_subdomain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let released = match db::release_subdomain(&state.store, &org_id).await {
         Ok(Some(label)) => {
@@ -441,31 +425,18 @@ pub(crate) async fn admin_release_subdomain(
     ))
 }
 
-/// Request context shared by the key-management POST handlers.
-struct ActionParts<'a> {
-    method: &'a Method,
-    uri: &'a OriginalUri,
-    headers: &'a HeaderMap,
-}
-
-/// Shared guard for the key-management POST handlers: valid origin, an
-/// org-admin session with an org, and a claimed subdomain. On a guard failure
+/// Shared guard for the key-management POST handlers: valid origin and a
+/// claimed subdomain, for an already-extracted org admin. On a guard failure
 /// the caller returns the ready-made redirect.
 async fn subdomain_action_guard(
     state: &Arc<AppState>,
-    parts: &ActionParts<'_>,
     jar: &CookieJar,
+    admin: OrgAdmin,
 ) -> Result<Result<(db::User, String), Response>, ServiceError> {
-    validate_origin(parts.headers, &state.config().base_url)?;
-    let (admin, org_id) = extract_org_admin(
-        state,
-        parts.headers,
-        jar,
-        parts.method.as_str(),
-        parts.uri.path(),
-        None,
-    )
-    .await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     if org_id.is_empty() {
         // No org association is an auth/session problem, not a subdomain one.
@@ -499,18 +470,11 @@ async fn subdomain_action_guard(
 /// fresh Next keys. Rejected while the Next keys' publish window is still
 /// warming relying-party caches, and while Previous keys remain unrevoked.
 pub(crate) async fn admin_rotate_keys(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     jar: CookieJar,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    let parts = ActionParts {
-        method: &method,
-        uri: &uri,
-        headers: &headers,
-    };
-    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+    let (admin, org_id) = match subdomain_action_guard(&state, &jar, admin).await? {
         Ok(v) => v,
         Err(response) => return Ok(response),
     };
@@ -552,18 +516,11 @@ pub(crate) async fn admin_rotate_keys(
 /// Allowed once the token-drain window since the demoting rotate has elapsed,
 /// so no outstanding token loses its verification key.
 pub(crate) async fn admin_revoke_keys(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     jar: CookieJar,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    let parts = ActionParts {
-        method: &method,
-        uri: &uri,
-        headers: &headers,
-    };
-    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+    let (admin, org_id) = match subdomain_action_guard(&state, &jar, admin).await? {
         Ok(v) => v,
         Err(response) => return Ok(response),
     };
@@ -606,18 +563,11 @@ pub(crate) async fn admin_revoke_keys(
 /// verifying — deliberate, since keeping a compromised key verifiable would
 /// keep attacker-forged tokens verifiable too.
 pub(crate) async fn admin_emergency_rotate_keys(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     jar: CookieJar,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    let parts = ActionParts {
-        method: &method,
-        uri: &uri,
-        headers: &headers,
-    };
-    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+    let (admin, org_id) = match subdomain_action_guard(&state, &jar, admin).await? {
         Ok(v) => v,
         Err(response) => return Ok(response),
     };

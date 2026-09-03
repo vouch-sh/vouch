@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use super::{compute_token_expiry, generate_scim_token};
 use crate::filters;
-use crate::handlers::browser_login::validate_origin;
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
 
@@ -192,14 +192,13 @@ pub(crate) async fn create_scim_token(
 /// List SCIM tokens for the organization.
 /// GET /api/v1/org/scim-tokens
 pub(crate) async fn list_scim_tokens(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
+    admin: OrgAdmin,
 ) -> Result<Json<ListScimTokensResponse>, ServiceError> {
-    let (_user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: _user,
+        org_id,
+    } = admin;
 
     let tokens = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
@@ -221,15 +220,11 @@ pub(crate) async fn list_scim_tokens(
 /// Delete a SCIM token.
 /// DELETE /api/v1/org/scim-tokens/:id
 pub(crate) async fn delete_scim_token(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(token_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<StatusCode, ServiceError> {
-    let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin { user, org_id } = admin;
 
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
@@ -315,28 +310,13 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 pub(crate) async fn admin_scim_tokens_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let db_tokens = match db::list_scim_tokens(&state.store, Some(&org_id)).await {
         Ok(t) => t,
@@ -381,8 +361,6 @@ pub(crate) async fn admin_create_scim_token(
     jar: CookieJar,
     axum::Form(form): axum::Form<CreateScimTokenForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth to fail fast on obviously bad requests
     if let Some(ref desc) = form.description
         && desc.chars().count() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS
@@ -491,17 +469,15 @@ pub(crate) async fn admin_create_scim_token(
 
 /// POST /admin/scim-tokens/{id}/revoke — Revoke a SCIM token (UI form).
 pub(crate) async fn admin_revoke_scim_token(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     ValidPath(token_id): ValidPath<ValidUuid>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
@@ -816,6 +792,47 @@ mod tests {
         assert!(
             resp["expires_at"].as_str().is_some(),
             "expires_at must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_cannot_mint_scim_token() {
+        // An org admin session minted by upstream IdP sign-in alone (no FIDO2
+        // ceremony) must not mint a SCIM token — a long-lived credential that
+        // would outlive any later step-up. Same bar as credential issuance.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let auth_header = format!("Bearer {token}");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an unverified session must not mint SCIM tokens: {body}"
+        );
+        assert!(
+            body.contains("hardware_required"),
+            "the refusal must name the missing proof: {body}"
         );
     }
 

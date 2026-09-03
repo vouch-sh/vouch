@@ -2605,6 +2605,7 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
         &[
             ("Cookie", &format!("__Host-vouch_session={session_token}")),
             ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Origin", "https://test.example.com"),
         ],
     )
     .await;

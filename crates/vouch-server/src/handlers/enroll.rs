@@ -971,12 +971,13 @@ pub(crate) async fn complete_enrollment_after_identity(
     let token = session_result.token;
     let token_hash = hash_token(token.expose_secret());
 
-    // Handle CLI-initiated device auth flow. Direct browser sign-ins carry
-    // no device_auth_id in the OIDC state (see direct_enroll_start).
-    //
-    // Either way the CLI is released by a key ceremony, never by the IdP
-    // sign-in alone, which authenticates the person rather than the hardware.
-    let mut require_assertion = false;
+    // The IdP sign-in authenticates the person, never the hardware, so any
+    // returning user — anyone with a key on record — is sent to /login to
+    // assert before their session is good for more than key management. A
+    // fresh enrollee has no key to assert with and goes to /enroll/keys to
+    // register one, which is itself a ceremony: browser_register_complete
+    // replaces this bootstrap session with a hardware-verified one.
+    let require_assertion = authenticator_id.is_some();
 
     if let Some(device_auth_id) = stored_state.device_auth_id.as_deref() {
         // Refuse before the key ceremony if the request the CLI is waiting on
@@ -1022,7 +1023,6 @@ pub(crate) async fn complete_enrollment_after_identity(
             }
             .into_response();
         }
-        require_assertion = authenticator_id.is_some();
     } else if authenticator_id.is_some() {
         // Returning user signing in directly via the website (upstream IdP,
         // no CLI). No FIDO2 assertion happened, so authenticator_id stays
@@ -1042,9 +1042,9 @@ pub(crate) async fn complete_enrollment_after_identity(
     // marked the row `consumed_at = Some(now)` (replay-blocking) and
     // `delete_expired_oidc_states` will reclaim the row at expiry.
 
-    // A returning user with a CLI waiting goes to the login page to assert
-    // with their key; everyone else lands on the keys page, where a
-    // first-time enrollee registers one.
+    // A returning user goes to the login page to assert with their key
+    // (whether or not a CLI is waiting); a first-time enrollee lands on the
+    // keys page to register one.
     let destination = if require_assertion {
         "/login"
     } else {
@@ -1128,6 +1128,7 @@ pub(crate) async fn enroll_keys_page(
                 user_email: Some(email),
                 has_org,
                 is_org_admin,
+                hardware_verified: token.hardware_verified,
             };
 
             // Consume any flash error set by a prior failed form POST (rename),

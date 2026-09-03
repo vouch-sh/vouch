@@ -9,9 +9,10 @@
 //! - POST /github/reconnect - Reconnect an existing GitHub installation
 //! - GET /github/success - Success page after connection
 
-use crate::db;
 use crate::error::ServiceError;
-use crate::handlers::session::AuthContext;
+use crate::handlers::session::{
+    AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
+};
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
     ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
@@ -353,17 +354,18 @@ pub(crate) async fn github_connect_page(
     }
 
     // Extract session from cookie (browser UI)
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization and is admin
@@ -371,6 +373,18 @@ pub(crate) async fn github_connect_page(
         Ok(org_id) => org_id,
         Err(e) => return error_response(e),
     };
+
+    // Connecting the GitHub App mutates org-wide state; require a session
+    // backed by a key ceremony, the same bar as every other org-admin write.
+    // A bootstrap (IdP-only) session asserts at /login first.
+    if !session.hardware_verified {
+        tracing::warn!(
+            target: "security",
+            user_id = %user.id,
+            "Refusing GitHub admin action: session is not hardware-verified"
+        );
+        return Redirect::to("/login").into_response();
+    }
 
     // Get existing connected accounts
     let connected_accounts = service
@@ -423,6 +437,7 @@ pub(crate) async fn github_connect_page(
         user_email: Some(user.email),
         has_org: user.org_id.is_some(),
         is_org_admin: user.is_org_admin,
+        hardware_verified: session.hardware_verified,
     };
 
     GitHubConnectTemplate {
@@ -480,7 +495,7 @@ async fn validate_callback_session(
     token: &GitHubStateToken,
     flow_label: &'static str,
 ) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
-    let session = match crate::handlers::session::extract_session_from_cookie(state, jar).await {
+    let session = match extract_session_from_cookie(state, jar).await {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
@@ -608,10 +623,11 @@ async fn handle_installation_callback(
         Err(resp) => return resp,
     };
 
-    // Re-fetch the user from DB by the *session* identity (not the JWT).
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Re-fetch the user from DB by the *session* identity (not the JWT),
+    // refusing an account deactivated since the flow began.
+    let user = match load_active_user(state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify the user is still a member of the org bound to the state token.
@@ -672,17 +688,18 @@ pub(crate) async fn github_link_start(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization
@@ -735,17 +752,18 @@ pub(crate) async fn github_reconnect(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization and is admin
@@ -753,6 +771,18 @@ pub(crate) async fn github_reconnect(
         Ok(org_id) => org_id.to_string(),
         Err(e) => return error_response(e),
     };
+
+    // Connecting the GitHub App mutates org-wide state; require a session
+    // backed by a key ceremony, the same bar as every other org-admin write.
+    // A bootstrap (IdP-only) session asserts at /login first.
+    if !session.hardware_verified {
+        tracing::warn!(
+            target: "security",
+            user_id = %user.id,
+            "Refusing GitHub admin action: session is not hardware-verified"
+        );
+        return Redirect::to("/login").into_response();
+    }
 
     // Reconnect the installation
     match service
@@ -785,7 +815,7 @@ pub(crate) async fn github_success_page(
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
-    let auth = crate::handlers::session::get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar).await;
 
     GitHubSuccessTemplate {
         org_name: state.config().get_org_display_name().to_string(),
