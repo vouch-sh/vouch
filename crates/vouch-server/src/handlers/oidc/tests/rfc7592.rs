@@ -1019,7 +1019,7 @@ async fn test_rfc7592_put_rejects_rs256_id_token_alg_for_fapi_client() {
 
 #[tokio::test]
 async fn test_rfc7592_put_updates_mtls_client_auth_fields() {
-    // RFC 8705 Section 2.1.1 certificate-matching metadata. Each has a
+    // RFC 8705 Section 2.1.2 certificate-matching metadata. Each has a
     // dedicated column, so RFC 7592 §2.2 replacement applies to all five.
     let (app, state) = test_app().await;
     let (client_id, token) = register_fully_specified_client(&app).await;
@@ -1066,7 +1066,7 @@ async fn test_rfc7592_put_updates_mtls_client_auth_fields() {
 
 #[tokio::test]
 async fn test_rfc7592_put_omitting_mtls_client_auth_fields_clears_them() {
-    // RFC 7592 §2.2 full replacement, applied to the RFC 8705 Section 2.1.1 fields.
+    // RFC 7592 §2.2 full replacement, applied to the RFC 8705 Section 2.1.2 fields.
     let (app, state) = test_app().await;
     let (client_id, token) = register_fully_specified_client(&app).await;
 
@@ -1086,6 +1086,198 @@ async fn test_rfc7592_put_omitting_mtls_client_auth_fields_clears_them() {
     assert_eq!(stored.tls_client_auth_san_uri, None);
     assert_eq!(stored.tls_client_auth_san_ip, None);
     assert_eq!(stored.tls_client_auth_san_email, None);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_empty_optional_strings_are_not_stored() {
+    // The empty-is-absent rule is in the shared `RegistrationRequest`, so it
+    // applies to the PUT body too: emptying these is the same request as
+    // omitting them, which RFC 7592 §2.2 replacement treats as a delete.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "",
+        "software_id": "",
+        "software_version": "",
+        "scope": "",
+        "contacts": [],
+        "request_uris": []
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    // The name column is non-nullable, so it takes the registration default.
+    assert_eq!(stored.name, "Unnamed Client");
+    assert_eq!(stored.software_id, None);
+    assert_eq!(stored.software_version, None);
+    assert_eq!(stored.request_uris, None);
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("scope").is_none() && metadata.get("contacts").is_none(),
+        "empty scope/contacts must not be stored: {metadata}"
+    );
+}
+
+/// Register a `tls_client_auth` client carrying exactly one RFC 8705 §2.1.2
+/// certificate-subject parameter, returning its `client_id` and registration
+/// access token.
+///
+/// The five parameters are only load-bearing for this authentication method,
+/// so the full-replacement tests above — which register `client_secret_basic`
+/// — cannot exercise the rule that governs them.
+async fn register_mtls_client(app: &axum::Router) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS Client",
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=original.example.com"
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_to_clear_mtls_identity_of_tls_client_auth_client() {
+    // RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication
+    // method MUST use exactly one of the below metadata parameters to indicate
+    // the certificate subject value that the authorization server is to expect
+    // when authenticating the respective client."
+    //
+    // RFC 7592 §2.2 replacement would otherwise clear all five, leaving a
+    // client `verify_tls_client_auth` reads as CertificateNotRegistered.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "clearing every identity field of a tls_client_auth client must be refused: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+
+    // A refused update must not have written anything.
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=original.example.com"),
+        "the registered identity field must survive a refused PUT"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_replaces_the_single_mtls_identity_of_tls_client_auth_client() {
+    // RFC 7592 §2.2 replacement still applies within the one-field rule: a PUT
+    // naming a different parameter moves the client onto it and clears the old.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_san_dns": "rotated.example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_san_dns.as_deref(),
+        Some("rotated.example.com")
+    );
+    assert_eq!(stored.tls_client_auth_subject_dn, None);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_empty_mtls_identity_for_tls_client_auth_client() {
+    // An empty string is not a certificate subject anything can match, so it
+    // deserializes as absent and cannot satisfy RFC 8705 §2.1.2's one-field
+    // rule. Otherwise a PUT could blank the client's identity while passing.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": ""
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty identity field must not satisfy the one-field rule: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=original.example.com"),
+        "the registered identity field must survive a refused PUT"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_multiple_mtls_identities_for_tls_client_auth_client() {
+    // RFC 8705 §2.1.2 requires exactly one. `verify_tls_client_auth` consults
+    // the parameters in a fixed precedence order and returns on the first one
+    // present, so a second would be silently ignored.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=rotated.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two identity fields must be refused: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
 }
 
 #[tokio::test]

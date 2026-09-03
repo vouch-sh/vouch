@@ -1373,6 +1373,345 @@ async fn test_rfc7591_accepts_tls_client_auth_registration_without_jwks() {
     );
 }
 
+#[tokio::test]
+async fn test_rfc7591_empty_optional_strings_are_not_stored() {
+    // An empty string is a third state next to "absent" and "set" that means
+    // nothing the two do not, so it is not persisted. These four fields have no
+    // validator to reject one, unlike logo_uri or application_type.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "empty-optional-strings").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "",
+        "scope": "",
+        "software_id": "",
+        "software_version": ""
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {resp}");
+
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id");
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    // The name column is non-nullable, so an emptied client_name takes the same
+    // fallback an omitted one does.
+    assert_eq!(stored.name, "Unnamed Client");
+    assert_eq!(stored.software_id, None, "software_id is indexed");
+    assert_eq!(stored.software_version, None);
+
+    // `scope` lives in the cosmetic-metadata blob, where absent means no key.
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("scope").is_none(),
+        "an empty scope must not be stored: {metadata}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_empty_arrays_are_not_stored() {
+    // Same reasoning as the empty strings: an empty list is not a different
+    // state from an absent one. `post_logout_redirect_uris` already did this.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "empty-arrays").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "contacts": [],
+        "request_uris": [],
+        "post_logout_redirect_uris": []
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {resp}");
+
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id");
+
+    let stored = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    assert_eq!(stored.request_uris, None);
+    assert_eq!(stored.post_logout_redirect_uris, None);
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("contacts").is_none(),
+        "an empty contacts list must not be stored: {metadata}"
+    );
+}
+
+/// An empty-string member of an array is refused outright rather than dropped,
+/// because each of these fields has a validator that an empty value fails.
+#[tokio::test]
+async fn test_rfc7591_rejects_empty_array_members() {
+    for (field, value) in [
+        ("contacts", serde_json::json!(["", "", ""])),
+        ("contacts", serde_json::json!(["", "ok@example.com"])),
+        ("request_uris", serde_json::json!([""])),
+        ("grant_types", serde_json::json!([""])),
+    ] {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("empty-member-{field}")).await;
+        let mut body = serde_json::json!({"redirect_uris": ["https://example.com/callback"]});
+        body[field] = value.clone();
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field}={value} must be refused, got: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata");
+    }
+}
+
+/// The five RFC 8705 §2.1.2 certificate-subject parameters, each of which must
+/// carry the empty-is-absent rule.
+const IDENTITY_FIELDS: [&str; 5] = [
+    "tls_client_auth_subject_dn",
+    "tls_client_auth_san_dns",
+    "tls_client_auth_san_email",
+    "tls_client_auth_san_uri",
+    "tls_client_auth_san_ip",
+];
+
+/// A legal value for each parameter, so a single-field registration is accepted.
+const IDENTITY_VALUES: [&str; 5] = [
+    "CN=test-client",
+    "client.example.com",
+    "client@example.com",
+    "https://client.example.com/",
+    "198.51.100.7",
+];
+
+/// Every one of the five parameters carries the empty-is-absent rule, not just
+/// the first. A missing `deserialize_with` on any of them would leave that
+/// field satisfying the one-field rule with an unmatchable empty subject.
+#[tokio::test]
+async fn test_rfc7591_empty_is_absent_for_every_identity_field() {
+    for field in IDENTITY_FIELDS {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("empty-{field}")).await;
+        let mut body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "tls_client_auth"
+        });
+        body[field] = serde_json::json!("");
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an empty {field} must not count as present, got: {resp}"
+        );
+    }
+}
+
+/// The converse: each parameter on its own is a complete registration, so the
+/// empty-is-absent rule has not started swallowing legitimate values.
+#[tokio::test]
+async fn test_rfc7591_each_identity_field_suffices_alone() {
+    for (field, value) in IDENTITY_FIELDS.iter().zip(IDENTITY_VALUES) {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("single-{field}")).await;
+        let mut body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "tls_client_auth"
+        });
+        body[*field] = serde_json::json!(value);
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{field}={value} alone must be accepted, got: {resp}"
+        );
+    }
+}
+
+/// A `tls_client_auth` registration naming no certificate subject at all is
+/// refused end-to-end, not just by the validator in isolation.
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_no_identity_field() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-no-identity").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth"
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "tls_client_auth without a certificate subject must be refused: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+/// The fields that deliberately do NOT read an empty value as absent, because
+/// each already has a validator that an empty value fails. Turning these into
+/// silent defaults would hide a client bug that is currently reported as
+/// `invalid_client_metadata`.
+#[tokio::test]
+async fn test_rfc7591_validated_fields_still_reject_empty_string() {
+    for field in [
+        "application_type",
+        "token_endpoint_auth_method",
+        "client_uri",
+        "logo_uri",
+        "tos_uri",
+        "policy_uri",
+        "jwks_uri",
+        "id_token_signed_response_alg",
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+        "request_object_signing_alg",
+        "userinfo_signed_response_alg",
+    ] {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("reject-empty-{field}")).await;
+        let mut body = serde_json::json!({"redirect_uris": ["https://example.com/callback"]});
+        body[field] = serde_json::json!("");
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an empty {field} must be reported, not defaulted, got: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata", "field: {field}");
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_two_identity_fields() {
+    // RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication
+    // method MUST use exactly one of the below metadata parameters to indicate
+    // the certificate subject value that the authorization server is to expect
+    // when authenticating the respective client."
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-two-identities").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=test-client",
+        "tls_client_auth_san_dns": "client.example.com"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two certificate-subject parameters must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_empty_identity_field() {
+    // RFC 7591 says nothing about empty JSON string values, so this follows the
+    // RFC 6749 §3.1/§3.2 rule the form-encoded endpoints apply: an empty value
+    // reads as omitted. An empty subject would match no certificate, leaving a
+    // client that RFC 8705 §2.1.2's one-field rule exists to prevent.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-empty-identity").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": ""
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty certificate-subject parameter must not count as present: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 // ========================================================================
 // JWKS write-path shape validation — a type-invalid member (e.g. a boolean
 // "alg") must be rejected at registration through the same typed

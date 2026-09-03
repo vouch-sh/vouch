@@ -4,7 +4,7 @@
 //! Provides:
 //! - Certificate DER parsing and field extraction
 //! - `x5t#S256` thumbprint computation (RFC 8705 Section 3.1)
-//! - `tls_client_auth` subject/SAN matching (RFC 8705 Section 2.1.1)
+//! - `tls_client_auth` subject/SAN matching (RFC 8705 Section 2.1.2)
 //! - `self_signed_tls_client_auth` JWKS x5c matching (RFC 8705 Section 2.2.2)
 
 use base64::Engine;
@@ -151,7 +151,7 @@ fn format_ip_bytes(bytes: &[u8]) -> String {
 }
 
 /// Verify `tls_client_auth` — match certificate against registered
-/// subject DN or SAN fields (RFC 8705 Section 2.1.1).
+/// subject DN or SAN fields (RFC 8705 Section 2.1.2).
 ///
 /// Exactly one of the `tls_client_auth_*` fields must match.
 pub(crate) fn verify_tls_client_auth(
@@ -327,7 +327,7 @@ mod tests {
     }
 
     // =========================================================================
-    // verify_tls_client_auth — all-None case (RFC 8705 Section 2.1.1)
+    // verify_tls_client_auth — all-None case (RFC 8705 Section 2.1.2)
     // =========================================================================
 
     /// When all expected identity fields are None, the certificate cannot be

@@ -1242,7 +1242,7 @@ fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
 }
 
 // =========================================================================
-// validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.1)
+// validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.2)
 // =========================================================================
 
 /// tls_client_auth with a subject_dn identity field is accepted.
@@ -1273,6 +1273,89 @@ fn test_validate_tls_client_auth_requires_identity_field() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+/// An empty certificate-subject parameter deserializes as absent, so it cannot
+/// satisfy the one-field rule.
+///
+/// RFC 7591 is silent on empty JSON string values; this mirrors the RFC 6749
+/// §3.1/§3.2 rule the form-encoded endpoints already apply.
+#[test]
+fn test_empty_identity_field_deserializes_as_absent() {
+    let json = serde_json::json!({
+        "tls_client_auth_subject_dn": "",
+        "tls_client_auth_san_dns": "client.example.com"
+    });
+    let req: RegistrationRequest =
+        serde_json::from_value(json).expect("an empty identity field must deserialize");
+
+    assert_eq!(req.tls_client_auth_subject_dn, None);
+    assert_eq!(
+        req.tls_client_auth_san_dns.as_deref(),
+        Some("client.example.com")
+    );
+}
+
+/// A whitespace-only value is a value, matching the form-encoded rule that
+/// reads `%20` as present rather than as nothing.
+#[test]
+fn test_whitespace_identity_field_deserializes_as_present() {
+    let json = serde_json::json!({"tls_client_auth_subject_dn": " "});
+    let req: RegistrationRequest =
+        serde_json::from_value(json).expect("a whitespace identity field must deserialize");
+
+    assert_eq!(req.tls_client_auth_subject_dn.as_deref(), Some(" "));
+}
+
+/// tls_client_auth whose only identity field is empty must be rejected: an
+/// empty subject matches no certificate, so accepting it would leave the client
+/// unable to authenticate.
+///
+/// Deserialized rather than built from a struct literal, because the
+/// empty-is-absent rule lives in the deserializer — the same place the
+/// form-encoded endpoints apply it — not in the validator.
+// RFC 8705 §2.1.2 requires exactly one certificate-subject parameter.
+#[test]
+fn test_validate_tls_client_auth_rejects_empty_identity_field() {
+    let json = serde_json::json!({"tls_client_auth_subject_dn": ""});
+    let mut req: RegistrationRequest = serde_json::from_value(json).expect("deserializes");
+
+    let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
+
+/// tls_client_auth with two identity fields must be rejected with invalid_client_metadata.
+// RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication method
+// MUST use exactly one of the below metadata parameters to indicate the
+// certificate subject value that the authorization server is to expect when
+// authenticating the respective client."
+#[test]
+fn test_validate_tls_client_auth_rejects_multiple_identity_fields() {
+    let mut req = RegistrationRequest {
+        tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+        tls_client_auth_san_dns: Some("client.example.com".to_string()),
+        ..Default::default()
+    };
+    let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
+
+/// The identity-field rule binds tls_client_auth only; another method may carry
+/// the parameters without them meaning anything.
+// RFC 8705 §2.1.2 scopes the parameters to "a client using the
+// "tls_client_auth" authentication method".
+#[test]
+fn test_validate_identity_fields_unconstrained_for_other_auth_methods() {
+    let mut req = RegistrationRequest {
+        tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+        tls_client_auth_san_dns: Some("client.example.com".to_string()),
+        ..Default::default()
+    };
+    let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
+    assert!(
+        result.is_ok(),
+        "the one-field rule must not reach a non-mTLS client, got: {result:?}"
+    );
+}
+
 /// tls_client_auth with san_dns identity field is accepted.
 // RFC 8705 §2.1.2: tls_client_auth_san_dns identifies the certificate subject.
 #[test]
@@ -1288,7 +1371,7 @@ fn test_validate_tls_client_auth_with_san_dns_accepted() {
     );
 }
 
-/// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_email identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_email() {
@@ -1304,7 +1387,7 @@ fn test_validate_tls_client_auth_with_san_email() {
     );
 }
 
-/// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_uri identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_uri() {
@@ -1320,7 +1403,7 @@ fn test_validate_tls_client_auth_with_san_uri() {
     );
 }
 
-/// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_ip identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_ip() {
