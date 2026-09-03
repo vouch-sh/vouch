@@ -574,11 +574,25 @@ pub(crate) async fn device_token(
             // Usage stats correlate on the client's doc id, so resolve it for
             // registered clients; the built-in CLI flow (base_url fallback)
             // keeps the raw identifier.
-            let audit_client_id =
-                match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
-                    Ok(Some(c)) => c.id,
-                    _ => client_id.clone(),
-                };
+            let audit_client = db::get_oauth_client_by_client_id(&state.store, &client_id)
+                .await
+                .ok()
+                .flatten();
+            let audit_client_id = audit_client
+                .as_ref()
+                .map_or_else(|| client_id.clone(), |c| c.id.clone());
+            // The user-org half of `resolve_event_org_domain`'s "prefer
+            // user, fall back to client" rule was already resolved above for
+            // the session claims, so it's reused here rather than
+            // re-derived; the client-org fallback still runs its own lookup
+            // when the user has no org, using the client already in scope
+            // instead of re-fetching it by id.
+            let audit_org_domain = db::resolve_event_org_domain(
+                &state.store,
+                org_domain.as_deref(),
+                audit_client.as_ref().and_then(|c| c.org_id.as_deref()),
+            )
+            .await;
             db::record_oauth_event(
                 &state.audit,
                 &state.store,
@@ -589,6 +603,7 @@ pub(crate) async fn device_token(
                     ip_address: client_info.client_ip,
                     user_agent: client_info.user_agent.as_deref(),
                     details: Some("grant_type=device_code"),
+                    org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
                 },
             )
             .await;

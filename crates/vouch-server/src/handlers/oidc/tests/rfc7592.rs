@@ -1713,6 +1713,58 @@ async fn test_rfc7592_delete_client_already_deleted() {
     );
 }
 
+/// Deleting an org-owned client whose owning user has no org of their own
+/// must still attribute the `ClientDeleted` audit event to the client's org.
+///
+/// Regression test: the client doc is deleted before the audit event is
+/// recorded, so a naive client-org lookup by `client_id` would always miss
+/// (the row is already gone). `delete_client_configuration` resolves the
+/// fallback from the already-in-scope `client.org_id` instead.
+#[tokio::test]
+async fn test_rfc7592_delete_client_attributes_org_domain_when_owner_has_no_org() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "org-owned-deleted.example").await;
+    let owner = create_test_user(&state.store, "solo-owner@personal.example").await;
+
+    let plaintext_token = "test-rfc7592-delete-org-attribution-token";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            org_id: Some(org.id.clone()),
+            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/oauth/register/{}", client.client_id),
+        &[("Authorization", &format!("Bearer {plaintext_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(owner.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("org-owned-deleted.example"),
+        "the client's own org must be attributed even though the owning user has no org \
+         and the client doc is already deleted by the time the event is recorded"
+    );
+}
+
 // =========================================================================
 // PUT /oauth/register/:client_id — userinfo_signed_response_alg + request_uris
 // =========================================================================

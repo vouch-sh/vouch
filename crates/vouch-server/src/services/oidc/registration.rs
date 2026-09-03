@@ -606,6 +606,7 @@ pub async fn register_client(
             ip_address: None,
             user_agent: None,
             details: Some("RFC 7591 dynamic registration"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -1606,6 +1607,28 @@ pub async fn delete_client_configuration(
             ServiceError::Internal("Failed to delete client".to_string())
         })?;
 
+    // The client doc is already deleted above, so `Unresolved`'s client-org
+    // fallback (a lookup by `client.id`) would always miss. `client.org_id`
+    // is still in scope from before the delete, so resolve the fallback
+    // ourselves instead of losing the org attribution on every org-owned
+    // client whose owning user has no org of their own.
+    let user_org_domain = if let Some(user_id) = client.user_id.as_deref()
+        && let Ok(Some(user)) = db::get_user_by_id(&state.store, user_id).await
+        && let Some(org_id) = user.org_id
+    {
+        db::get_organization_domain(&state.store, &org_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        user_org_domain.as_deref(),
+        client.org_id.as_deref(),
+    )
+    .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
@@ -1616,6 +1639,7 @@ pub async fn delete_client_configuration(
             ip_address: None,
             user_agent: None,
             details: Some("RFC 7592 client configuration DELETE"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
     )
     .await;
@@ -1869,6 +1893,7 @@ pub async fn update_client_configuration(
             ip_address: None,
             user_agent: None,
             details: Some("RFC 7592 client configuration PUT"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;

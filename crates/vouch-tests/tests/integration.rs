@@ -578,6 +578,76 @@ mod device_flow {
         assert_eq!(resp["token_type"], "Bearer");
     }
 
+    /// A device-poll success for an org member stamps the org's domain into
+    /// the `oauth_token_issued` event's `email_domain` — the hot-path
+    /// formula in `handlers/device.rs` must reproduce what the full lookup
+    /// would have done.
+    #[tokio::test]
+    async fn test_device_token_poll_success_records_org_email_domain() {
+        let harness = TestHarness::new().await;
+
+        let org = harness
+            .create_org("device-poll-org.example.com")
+            .await
+            .expect("Failed to create org");
+        let user = harness
+            .create_user_in_org(
+                "device-poll-member@device-poll-org.example.com",
+                &org.id,
+                false,
+            )
+            .await
+            .expect("Failed to create user");
+        let auth_id = harness
+            .create_authenticator(&user.id)
+            .await
+            .expect("Failed to create auth");
+
+        let response = harness
+            .post_form("/oauth/device", "scope=openid")
+            .await
+            .expect("Failed to post device code");
+        let resp: serde_json::Value = response.json().expect("Failed to parse response");
+        let device_code = resp["device_code"].as_str().expect("device_code");
+        let user_code = resp["user_code"].as_str().expect("user_code");
+
+        harness
+            .authorize_device_code(user_code, &user.id, &user.email, &auth_id)
+            .await
+            .expect("Failed to authorize device code");
+
+        let poll_body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+            device_code
+        );
+        let response = harness
+            .post_form("/oauth/token", &poll_body)
+            .await
+            .expect("Failed to poll token");
+        assert_eq!(response.status, 200);
+
+        let rows = harness
+            .state
+            .audit
+            .query_events(&vouch_server::db::AuditEventFilter {
+                event_types: Some(vec!["oauth_token_issued".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the poll success must write exactly one oauth_token_issued row"
+        );
+        assert_eq!(
+            rows[0].email_domain.as_deref(),
+            Some("device-poll-org.example.com"),
+            "org member device-poll success must stamp the org's domain onto the audit event"
+        );
+    }
+
     /// Test that verification interval is respected.
     #[tokio::test]
     async fn test_device_code_interval_field() {

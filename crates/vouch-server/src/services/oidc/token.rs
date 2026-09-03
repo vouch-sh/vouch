@@ -417,6 +417,18 @@ pub(crate) async fn exchange_authorization_code(
 
     // Record usage event for registered clients
     if let Some(auth_client) = authenticated_client {
+        // The user-org half of `resolve_event_org_domain`'s "prefer user,
+        // fall back to client" rule was already resolved above for the
+        // session claims, so it's reused here rather than re-derived; the
+        // client-org fallback still runs its own lookup when the user has no
+        // org, using the client already in scope instead of re-fetching it
+        // by id.
+        let audit_org_domain = db::resolve_event_org_domain(
+            &state.store,
+            org_domain.as_deref(),
+            auth_client.client.org_id.as_deref(),
+        )
+        .await;
         db::record_oauth_event(
             &state.audit,
             &state.store,
@@ -431,6 +443,7 @@ pub(crate) async fn exchange_authorization_code(
                     .dpop_proof()
                     .map(|p| format!("dpop_jkt={}", p.jkt))
                     .as_deref(),
+                org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
             },
         )
         .await;

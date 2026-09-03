@@ -1396,6 +1396,12 @@ pub struct TestClientSpec {
     pub require_signed_request_object: Option<bool>,
     /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
     pub post_logout_redirect_uris: Vec<String>,
+    /// RFC 7592 registration access token hash. Default: `None` (no RFC 7592
+    /// management access — `lookup_and_verify_registration_token` treats a
+    /// client with no stored hash as `invalid_token`). Set this to exercise
+    /// the RFC 7592 GET/PUT/DELETE endpoints against a client built through
+    /// this factory rather than through `/oauth/register`.
+    pub registration_access_token_hash: Option<String>,
 }
 
 impl Default for TestClientSpec {
@@ -1424,6 +1430,7 @@ impl Default for TestClientSpec {
             request_object_signing_alg: Option::None,
             require_signed_request_object: Option::None,
             post_logout_redirect_uris: vec![],
+            registration_access_token_hash: Option::None,
         }
     }
 }
@@ -1497,7 +1504,7 @@ pub async fn create_test_client(
             software_id: Option::None,
             software_version: Option::None,
             registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: Option::None,
+            registration_access_token_hash: spec.registration_access_token_hash.as_deref(),
             registration_metadata: Option::None,
             id_token_signed_response_alg: spec.id_token_signed_response_alg,
             tls_client_auth_subject_dn: spec.tls_client_auth_subject_dn.as_deref(),

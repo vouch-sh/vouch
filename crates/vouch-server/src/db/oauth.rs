@@ -1432,6 +1432,22 @@ impl OAuthEventType {
     }
 }
 
+/// An OAuth event's org domain, as known to the caller.
+///
+/// Forces every call site of [`record_oauth_event`] to state whether it
+/// already resolved the domain (per the same "prefer user, fall back to
+/// client" rule as [`resolve_oauth_event_org_domain`]) so the common grant
+/// paths — which already hold both the user and the client in scope — skip
+/// re-deriving it from the database.
+#[derive(Debug, Clone, Copy)]
+pub enum RecordedOrgDomain<'a> {
+    /// No precomputed info — do the full lookup (today's behavior).
+    Unresolved,
+    /// Caller already resolved this per the same "prefer user, fall back
+    /// to client" rule (see [`resolve_oauth_event_org_domain`]'s doc comment).
+    Known(Option<&'a str>),
+}
+
 /// Parameters for [`record_oauth_event`].
 pub struct RecordOAuthEventParams<'a> {
     pub oauth_client_id: &'a str,
@@ -1440,6 +1456,27 @@ pub struct RecordOAuthEventParams<'a> {
     pub ip_address: Option<std::net::IpAddr>,
     pub user_agent: Option<&'a str>,
     pub details: Option<&'a str>,
+    pub org_domain: RecordedOrgDomain<'a>,
+}
+
+/// Shared "prefer the acting user's org, else the client's own org" rule for
+/// an OAuth event's `email_domain`. Both inputs are already-resolved values —
+/// this makes no user or client lookups of its own, only the one conditional
+/// domain lookup when falling back to the client — so callers control
+/// whether the user/client rows get fetched at all.
+pub async fn resolve_event_org_domain(
+    store: &DocumentStore,
+    user_org_domain: Option<&str>,
+    client_org_id: Option<&str>,
+) -> Option<String> {
+    if let Some(domain) = user_org_domain {
+        return Some(domain.to_string());
+    }
+    let org_id = client_org_id?;
+    super::get_organization_domain(store, org_id)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Resolve the org domain to stamp on an OAuth event's `email_domain`.
@@ -1460,13 +1497,12 @@ async fn resolve_oauth_event_org_domain(
     {
         return Some(domain);
     }
-    if let Ok(Some(client)) = get_oauth_client_by_id(store, params.oauth_client_id).await
-        && let Some(org_id) = client.org_id
-        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
-    {
-        return Some(domain);
-    }
-    None
+    let client_org_id = get_oauth_client_by_id(store, params.oauth_client_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.org_id);
+    resolve_event_org_domain(store, None, client_org_id.as_deref()).await
 }
 
 /// Record an OAuth usage event via the audit store.
@@ -1489,7 +1525,10 @@ pub async fn record_oauth_event(
         asn,
         org_name,
     };
-    let org_domain = resolve_oauth_event_org_domain(store, params).await;
+    let org_domain = match params.org_domain {
+        RecordedOrgDomain::Known(domain) => domain.map(String::from),
+        RecordedOrgDomain::Unresolved => resolve_oauth_event_org_domain(store, params).await,
+    };
     let result = audit
         .insert_event_with_domain(
             params.event_type.kind(),
@@ -2611,6 +2650,7 @@ mod tests {
                     ip_address: None,
                     user_agent: None,
                     details: Some("coverage test"),
+                    org_domain: RecordedOrgDomain::Unresolved,
                 },
             )
             .await;
@@ -2646,5 +2686,220 @@ mod tests {
                 event_type.kind().as_str()
             );
         }
+    }
+
+    // ========================================================================
+    // RecordedOrgDomain Parity
+    // ========================================================================
+    //
+    // A caller passing `RecordedOrgDomain::Known` must produce the exact same
+    // `email_domain` that `Unresolved` (the original full-lookup path) would
+    // have produced — the whole point of the hint is to skip redundant reads,
+    // not to change what gets audited.
+
+    // Records one event and returns the `email_domain` it was stamped with.
+    // Events are ordered newest-first (see `AuditEventFilter::before_id`
+    // doc comment); every caller below uses a distinct `user_id` per call, so
+    // the first row matching `user_id` is unambiguously the one just inserted.
+    async fn stamped_email_domain(
+        audit: &AuditStore,
+        store: &DocumentStore,
+        oauth_client_id: &str,
+        user_id: &str,
+        org_domain: RecordedOrgDomain<'_>,
+    ) -> Option<String> {
+        record_oauth_event(
+            audit,
+            store,
+            &RecordOAuthEventParams {
+                oauth_client_id,
+                event_type: OAuthEventType::TokenIssued,
+                user_id: Some(user_id),
+                ip_address: None,
+                user_agent: None,
+                details: None,
+                org_domain,
+            },
+        )
+        .await;
+        let events = audit
+            .query_events(&AuditEventFilter {
+                user_id: Some(user_id.to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query oauth audit events");
+        events
+            .first()
+            .expect("event was just inserted for this user_id")
+            .email_domain
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_user_with_org() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = crate::test_utils::create_test_org(&store, "user-org.example").await;
+        let user_a = crate::test_utils::create_test_user_in_org(
+            &store,
+            "member-a@user-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let user_b = crate::test_utils::create_test_user_in_org(
+            &store,
+            "member-b@user-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some("user-org.example")),
+        )
+        .await;
+
+        assert_eq!(unresolved.as_deref(), Some("user-org.example"));
+        assert_eq!(known, unresolved);
+    }
+
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_personal_user_no_org_client() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let user_a = crate::test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = crate::test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(None),
+        )
+        .await;
+
+        assert_eq!(unresolved, None);
+        assert_eq!(known, unresolved);
+    }
+
+    // Parity edge case: a personal user (no org) authenticating against an
+    // org-owned client. `resolve_oauth_event_org_domain` falls through the
+    // user check (no org) to the client's own `org_id`. A caller passing
+    // `Known` must replicate that fallback itself rather than pass `None`.
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_personal_user_on_org_owned_client() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = crate::test_utils::create_test_org(&store, "org-owned.example").await;
+        let user_a = crate::test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = crate::test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let client = crate::test_utils::create_test_client(
+            &store,
+            &user_a.id,
+            crate::test_utils::TestClientSpec {
+                org_id: Some(org.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.app_id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+
+        // Hot-path formula: the user has no org, so fall back to the
+        // client's own org_id (already in scope for every real call site).
+        let client_org_domain = crate::db::get_organization_domain(&store, &org.id)
+            .await
+            .expect("lookup org domain")
+            .expect("org has a domain");
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.app_id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some(&client_org_domain)),
+        )
+        .await;
+
+        assert_eq!(unresolved.as_deref(), Some("org-owned.example"));
+        assert_eq!(known, unresolved);
+    }
+
+    // Distinguishes the two `RecordedOrgDomain` arms: the parity tests above
+    // pass a `Known` value equal to what `Unresolved` would resolve, which
+    // would also pass if `Known` were silently ignored. This asserts `Known`
+    // is honored verbatim even when it disagrees with the full resolution —
+    // the only assertion that actually pins the hint is being used.
+    #[tokio::test]
+    async fn test_known_domain_is_honored_even_when_it_differs_from_full_resolution() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = crate::test_utils::create_test_org(&store, "real-org.example").await;
+        let user_a = crate::test_utils::create_test_user_in_org(
+            &store,
+            "member-a@real-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let user_b = crate::test_utils::create_test_user_in_org(
+            &store,
+            "member-b@real-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        assert_eq!(unresolved.as_deref(), Some("real-org.example"));
+
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some("sentinel.example")),
+        )
+        .await;
+        assert_eq!(known.as_deref(), Some("sentinel.example"));
     }
 }

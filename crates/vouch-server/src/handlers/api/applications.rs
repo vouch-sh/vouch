@@ -497,6 +497,7 @@ pub(crate) async fn add_secret_api(
             ip_address: None,
             user_agent: None,
             details: Some("Secret added"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -668,6 +669,7 @@ pub(crate) async fn delete_secret_api(
             ip_address: None,
             user_agent: None,
             details: Some("Secret revoked"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -761,6 +763,7 @@ pub(crate) async fn revoke_tokens_api(
             ip_address: None,
             user_agent: None,
             details: Some("All tokens revoked"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
