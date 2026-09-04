@@ -348,7 +348,7 @@ impl AuditStore {
     /// Crate-internal raw-JSON insert path behind [`Self::insert_event`].
     ///
     /// `pub(super)` because only two write sites assemble their payload as
-    /// a `serde_json::Value`: `insert_auth_event`'s geo-field merge in
+    /// a `serde_json::Value`: `record_auth_event`'s geo-field merge in
     /// `db/config.rs` and the flattened envelope in
     /// [`Self::log_credential_event`]. Everything outside `db` must go
     /// through a typed [`AuditData`] payload.

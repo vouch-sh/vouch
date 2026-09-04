@@ -323,7 +323,7 @@ pub async fn revoke_token(
     };
 
     if revoked {
-        // Fire-and-forget logout audit event
+        // Best-effort logout audit event
         if let Some(ref user_id) = sub {
             let params = db::AuthEventParams {
                 user_id: user_id.clone(),
@@ -332,7 +332,7 @@ pub async fn revoke_token(
                 client: client_info,
                 ..Default::default()
             };
-            db::spawn_audit_event(&state.audit, params, email.clone());
+            db::record_auth_event(&state.audit, params, email.clone()).await;
         }
 
         return RevocationResult {

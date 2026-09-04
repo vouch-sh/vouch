@@ -133,7 +133,7 @@ pub(crate) async fn delete_key(
         client: client_info,
         ..Default::default()
     };
-    db::spawn_audit_event(&state.audit, event, token.email.clone());
+    db::record_auth_event(&state.audit, event, token.email.clone()).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

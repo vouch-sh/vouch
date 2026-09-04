@@ -110,7 +110,7 @@ pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim, get_device_auth_by
 pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, Retention};
 
 // Re-export config and auth event types and functions
-pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};
+pub use config::{AuthEventParams, AuthEventType, ClientInfo, record_auth_event};
 
 // Re-export SCIM types and functions
 pub use scim::{

@@ -427,31 +427,23 @@ async fn seed_and_consume_oidc_state(
         .expect("consume oidc state")
 }
 
-/// Poll the audit store for events of `event_type` for the user. Audit
-/// writes are spawned on a detached task, so the first read can race
-/// the write; retry briefly before returning whatever was found.
-async fn wait_for_audit_events(
+/// Query the audit store for events of `event_type` for the user. Audit
+/// writes are awaited before the handler responds, so the rows are
+/// visible immediately.
+async fn audit_events_for(
     state: &AppState,
     event_type: &str,
     user_id: &str,
 ) -> Vec<crate::db::AuditEvent> {
-    let mut events = Vec::new();
-    for _ in 0..40 {
-        events = state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec![event_type.to_string()]),
-                user_id: Some(user_id.to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("query audit events");
-        if !events.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    events
+    state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec![event_type.to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events")
 }
 
 #[tokio::test]
@@ -480,7 +472,7 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
         complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let events = wait_for_audit_events(&state, "login_success", &user.id).await;
+    let events = audit_events_for(&state, "login_success", &user.id).await;
     assert_eq!(events.len(), 1, "one direct sign-in -> one login_success");
     let event = events.first().expect("login_success event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -770,7 +762,7 @@ async fn test_identity_conflict_renders_error_and_audits() {
         "a refused login must not set a session cookie"
     );
 
-    let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+    let events = audit_events_for(&state, "identity_bind_refused", &victim.id).await;
     assert_eq!(events.len(), 1, "one refusal -> one audit event");
     let event = events.first().expect("identity_bind_refused event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -827,7 +819,7 @@ async fn test_non_durable_login_refused_once_issuer_is_bound() {
         "a refused login must not set a session cookie"
     );
 
-    let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+    let events = audit_events_for(&state, "identity_bind_refused", &victim.id).await;
     assert_eq!(events.len(), 1, "one refusal -> one audit event");
     let event = events.first().expect("identity_bind_refused event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -859,7 +851,7 @@ async fn test_lazy_bind_emits_identity_bound_event() {
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let events = wait_for_audit_events(&state, "identity_bound", &user.id).await;
+    let events = audit_events_for(&state, "identity_bound", &user.id).await;
     assert_eq!(events.len(), 1, "first IdP login -> one identity_bound");
     let event = events.first().expect("identity_bound event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -948,9 +940,8 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
         "fresh enrollee must be sent to register a first key, got {location}"
     );
 
-    // Audit writes are spawned; give the runtime a moment before
-    // asserting absence.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Audit writes are awaited before the handler responds, so absence
+    // here is conclusive.
     let events = state
         .audit
         .query_events(&crate::db::AuditEventFilter::default())

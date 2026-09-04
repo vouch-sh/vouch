@@ -7,7 +7,6 @@
 use std::net::IpAddr;
 
 use super::audit::{AuditEventKind, AuditStore};
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -103,56 +102,45 @@ pub struct ClientInfo {
     pub client_version: Option<String>,
 }
 
-/// Insert a new authentication event via the audit store.
+/// Record an authentication event via the audit store.
 ///
-/// Production code records events through [`spawn_audit_event`]; this is
-/// exposed to in-crate tests that need to await the write and inspect the
-/// returned event ID.
-pub(super) async fn insert_auth_event(
-    audit: &AuditStore,
-    params: &AuthEventParams,
-    email: Option<&str>,
-) -> Result<String> {
-    let mut value = serde_json::to_value(params)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize auth event: {e}"))?;
-    if let (Some(obj), Some(geo)) = (
-        value.as_object_mut(),
-        params.client.client_ip.and_then(crate::geo::lookup),
-    ) {
-        obj.insert(
-            "country_code".to_string(),
-            serde_json::Value::String(geo.country_code),
-        );
-        if let Some(asn) = geo.asn {
-            obj.insert("asn".to_string(), serde_json::json!(asn));
+/// Awaited so the row is committed before the response is sent, and
+/// best-effort: an audit write must never fail the operation it records,
+/// so failures are logged with the wire `event_type` string and swallowed.
+pub async fn record_auth_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
+    let kind = params.event_type.kind();
+    let result = match serde_json::to_value(&params) {
+        Ok(mut value) => {
+            if let (Some(obj), Some(geo)) = (
+                value.as_object_mut(),
+                params.client.client_ip.and_then(crate::geo::lookup),
+            ) {
+                obj.insert(
+                    "country_code".to_string(),
+                    serde_json::Value::String(geo.country_code),
+                );
+                if let Some(asn) = geo.asn {
+                    obj.insert("asn".to_string(), serde_json::json!(asn));
+                }
+                if let Some(org) = geo.org_name {
+                    obj.insert("org_name".to_string(), serde_json::Value::String(org));
+                }
+            }
+            audit
+                .insert_event_json(
+                    kind,
+                    Some(&params.user_id),
+                    email.as_deref(),
+                    &value.to_string(),
+                )
+                .await
+                .map(|_| ())
         }
-        if let Some(org) = geo.org_name {
-            obj.insert("org_name".to_string(), serde_json::Value::String(org));
-        }
+        Err(e) => Err(anyhow::anyhow!("Failed to serialize auth event: {e}")),
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, event_type = kind.as_str(), "failed to record audit event");
     }
-    let data_json = value.to_string();
-    audit
-        .insert_event_json(
-            params.event_type.kind(),
-            Some(&params.user_id),
-            email,
-            &data_json,
-        )
-        .await
-}
-
-/// Record an authentication event without blocking the caller.
-///
-/// Spawns a detached task so credential flows never wait on (or fail with)
-/// the audit write; failures are logged with the event type so dropped
-/// records are visible in one consistent format.
-pub fn spawn_audit_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
-    let audit = audit.clone();
-    tokio::spawn(async move {
-        if let Err(e) = insert_auth_event(&audit, &params, email.as_deref()).await {
-            tracing::warn!(error = %e, event_type = ?params.event_type, "failed to record audit event");
-        }
-    });
 }
 
 #[cfg(test)]
@@ -260,7 +248,7 @@ mod tests {
                     .then(|| "invalid assertion".to_string()),
                 ..AuthEventParams::default()
             };
-            insert_auth_event(&state.audit, &params, Some("test@example.com")).await?;
+            record_auth_event(&state.audit, params, Some("test@example.com".to_string())).await;
         }
 
         let before = jiff::Timestamp::now()

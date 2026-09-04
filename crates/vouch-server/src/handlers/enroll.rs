@@ -797,7 +797,7 @@ pub(crate) async fn complete_enrollment_after_identity(
                 client: client_info,
                 ..Default::default()
             };
-            db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+            db::record_auth_event(&state.audit, event, Some(identity.email.clone())).await;
             return ErrorTemplate {
                 title: Tr::new("enroll-error-identity-conflict-title").to_string(),
                 message: Tr::new("enroll-error-identity-conflict").to_string(),
@@ -823,7 +823,7 @@ pub(crate) async fn complete_enrollment_after_identity(
                 client: client_info,
                 ..Default::default()
             };
-            db::spawn_audit_event(&state.audit, event, Some(email));
+            db::record_auth_event(&state.audit, event, Some(email)).await;
             return ErrorTemplate {
                 title: Tr::new("enroll-error-account-deactivated-title").to_string(),
                 message: Tr::new("enroll-error-account-deactivated").to_string(),
@@ -867,7 +867,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             client: client_info.clone(),
             ..Default::default()
         };
-        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
 
     // Create session for this user (using session cookie instead of enrollment cookie)
@@ -1041,7 +1041,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             client: client_info,
             ..Default::default()
         };
-        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
 
     // No explicit state delete here — `try_consume_oidc_state` already
@@ -1556,10 +1556,10 @@ pub(crate) async fn browser_register_complete(
             client: client_info.clone(),
             ..Default::default()
         };
-        db::spawn_audit_event(&state.audit, event, Some(reg_state.user_email.clone()));
+        db::record_auth_event(&state.audit, event, Some(reg_state.user_email.clone())).await;
     }
 
-    // Log enrollment event (fire-and-forget)
+    // Log enrollment event
     let auth_event_params = AuthEventParams {
         user_id: reg_state.user_id.to_string(),
         event_type: AuthEventType::Enrollment,
@@ -1568,11 +1568,12 @@ pub(crate) async fn browser_register_complete(
         client: client_info,
         ..AuthEventParams::default()
     };
-    db::spawn_audit_event(
+    db::record_auth_event(
         &state.audit,
         auth_event_params,
         Some(reg_state.user_email.clone()),
-    );
+    )
+    .await;
 
     crate::infra::metrics::record_auth_event("enrollment");
 

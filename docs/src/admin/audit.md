@@ -203,10 +203,11 @@ org-scoped.
 ### Cursor semantics and delivery guarantee
 
 `next_cursor` is present whenever there may be more matching events; pass it back as `after`
-(or `before`, if you're walking backward) to continue. IDs are UUID v7 (time-ordered), but
-authentication events are written from detached background tasks, so **commit order can trail
-ID order by a few seconds under load** — a naive high-water-mark poller that just tracks "the
-highest ID seen" can miss events that commit late.
+(or `before`, if you're walking backward) to continue. IDs are UUID v7 (time-ordered) and
+every event is written before the request that caused it receives its response, but
+concurrent requests can still commit in a different order than they minted IDs — a naive
+high-water-mark poller that just tracks "the highest ID seen" can miss an event that commits
+a moment after a higher ID from an overlapping request.
 
 The API's delivery guarantee instead of ID ordering: **an event is never returned with
 `created_at` newer than `now - 30s`**, regardless of the `until` you pass. A poller that
@@ -215,13 +216,12 @@ requests `after=<last cursor>` no more often than every 30 seconds, and persists
 window. Because pages can be byte-capped (see NDJSON below), always follow `next_cursor` until a
 page comes back without one rather than assuming one poll drains everything new.
 
-This guarantee assumes an audit write actually commits within the window. `created_at` is
-stamped when the event is minted, not when it commits, so a detached write task delayed past
-30 seconds (executor saturation, a DSQL OCC retry storm) — or one that fails outright — is not
-currently surfaced by any metric; the event would land later than the poller expects, or not at
-all. Size your polling interval with margin above 30 seconds if your environment is prone to
-write-path contention, and treat this as a best-effort guarantee under normal operating
-conditions rather than a hard real-time bound.
+An event's ID and `created_at` are stamped together immediately before its insert, and the
+insert completes before the response is sent, so a committed event's timestamp trails its
+commit only by the write itself. Audit writes are best-effort, however: a write that fails
+outright is logged server-side and not retried, so the event is absent rather than late —
+treat the guarantee as best-effort under write-path failure rather than a hard real-time
+bound.
 
 ### NDJSON
 
