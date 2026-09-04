@@ -632,6 +632,84 @@ async fn test_rfc8693_requested_token_type_jwt_rejected() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_resource_must_be_absolute_uri_without_fragment() {
+    // RFC 8693 §2.1: "The value of the 'resource' parameter MUST be an
+    // absolute URI, as specified by Section 4.3 of [RFC3986], that MAY
+    // include a query component and MUST NOT include a fragment component."
+    // RFC 8693 §2.2.2: "If the authorization server is unwilling or unable to
+    // issue a token for any target service indicated by the 'resource' or
+    // 'audience' parameters, the 'invalid_target' error code SHOULD be used
+    // in the error response."
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-resource-uri@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    let auth_header = client.basic_auth_header();
+
+    for invalid_resource in [
+        // Relative reference: not an absolute URI.
+        "not-a-valid-uri",
+        // Fragment component.
+        "https://api.example.com/v1#frag",
+    ] {
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                 &subject_token={access_token}\
+                 &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+                 &resource={}",
+                urlencoding::encode(invalid_resource)
+            ),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "resource={invalid_resource} must be rejected: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_target",
+            "resource={invalid_resource} must report invalid_target: {body}"
+        );
+    }
+
+    // A query component is explicitly allowed ("MAY include a query
+    // component"), so this exchange must succeed.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &resource={}",
+            urlencoding::encode("https://api.example.com/v1?tenant=acme")
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "resource with a query component must be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_actor_token_delegation_chain() {
     // RFC 8693 Section 2.1: Token exchange with actor token produces nested `act` claims.
     let (app, state) = test_app().await;

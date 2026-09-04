@@ -1167,6 +1167,23 @@ async fn handle_token_exchange_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
+    // RFC 8693 §2.1: "The value of the 'resource' parameter MUST be an
+    // absolute URI, as specified by Section 4.3 of [RFC3986], that MAY
+    // include a query component and MUST NOT include a fragment component."
+    // Validate only — the raw string stays the audience value below, because
+    // `ResourceUri::parse` normalizes (host-only URIs gain a trailing `/`)
+    // and the issued `aud` must equal what the client sent.
+    if let Some(res) = params.resource.as_deref()
+        && crate::services::oidc::ResourceUri::parse(res).is_err()
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "Invalid resource parameter: must be an absolute URI without a fragment",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
+
     // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
     // If both are present, they must match.
     let effective_audience = match (params.audience.as_deref(), params.resource.as_deref()) {
