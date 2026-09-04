@@ -157,7 +157,7 @@ pub(crate) async fn logout(
                     state.session_cache.invalidate(&token_hash);
                     tracing::info!("Session deleted during logout");
 
-                    // Fire-and-forget logout audit event
+                    // Best-effort logout audit event
                     if let Some(session) = session_info {
                         let params = db::AuthEventParams {
                             user_id: session.user_id.clone(),
@@ -166,7 +166,7 @@ pub(crate) async fn logout(
                             client: client_info,
                             ..Default::default()
                         };
-                        db::spawn_audit_event(&state.audit, params, Some(session.user_email));
+                        db::record_auth_event(&state.audit, params, Some(session.user_email)).await;
                     }
                 }
             }

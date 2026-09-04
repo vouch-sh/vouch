@@ -263,18 +263,15 @@ pub(crate) async fn register_complete(
                 success: false,
                 error_code: "state_already_used",
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::KeyRegistrationReplay,
                     Some(&checked.reg_state.user_id.to_string()),
                     Some(&checked.reg_state.user_name),
                     &audit_data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
-            }
+                .await;
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
@@ -375,7 +372,7 @@ pub(crate) async fn register_complete(
         client: client_info,
         ..Default::default()
     };
-    db::spawn_audit_event(&state.audit, event, Some(reg_state.user_name.clone()));
+    db::record_auth_event(&state.audit, event, Some(reg_state.user_name.clone())).await;
 
     Ok(Json(RegisterCompleteResponse {
         device_id: Uuid::parse_str(&device_id).map_err(|e| {
@@ -467,7 +464,7 @@ pub(crate) async fn delete_key(
         client: client_info,
         ..Default::default()
     };
-    db::spawn_audit_event(&state.audit, event, token.email.clone());
+    db::record_auth_event(&state.audit, event, token.email.clone()).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

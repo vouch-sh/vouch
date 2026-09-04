@@ -325,18 +325,15 @@ pub(crate) async fn admin_claim_subdomain(
         issuer: issuer.as_deref(),
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::OrgSubdomainClaimed,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write org_subdomain_claimed audit event");
-    }
+        .await;
 
     tracing::info!(
         admin_email = %admin.email,
@@ -397,18 +394,15 @@ pub(crate) async fn admin_release_subdomain(
         label: &released,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::OrgSubdomainReleased,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write org_subdomain_released audit event");
-    }
+        .await;
 
     tracing::info!(
         admin_email = %admin.email,

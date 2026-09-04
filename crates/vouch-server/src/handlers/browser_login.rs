@@ -523,6 +523,29 @@ pub(crate) async fn browser_login_start(
     }))
 }
 
+/// Record a failed browser-login attempt. The email feeds the audit row's
+/// `email_domain`/`email_hmac` columns (never stored raw); without it the
+/// event is invisible to org-scoped audit queries, which filter on domain.
+async fn log_login_failure(
+    audit: &db::audit::AuditStore,
+    client: ClientInfo,
+    user_id: &str,
+    email: Option<&str>,
+    authenticator_id: Option<&str>,
+    reason: &str,
+) {
+    let params = AuthEventParams {
+        user_id: user_id.to_string(),
+        event_type: AuthEventType::LoginFailed,
+        authenticator_id: authenticator_id.map(String::from),
+        success: false,
+        failure_reason: Some(reason.to_string()),
+        client,
+        ..AuthEventParams::default()
+    };
+    db::record_auth_event(audit, params, email.map(String::from)).await;
+}
+
 /// POST /login/webauthn/complete
 ///
 /// Verify WebAuthn assertion and create session.
@@ -576,26 +599,9 @@ pub(crate) async fn browser_login_complete(
         expires_at: _,
     } = checked;
 
-    // Helper to log failed login attempts. The email feeds the audit row's
-    // `email_domain`/`email_hmac` columns (never stored raw); without it the
-    // event is invisible to org-scoped audit queries, which filter on domain.
-    let log_failure =
-        |user_id: &str, email: Option<&str>, authenticator_id: Option<&str>, reason: &str| {
-            let params = AuthEventParams {
-                user_id: user_id.to_string(),
-                event_type: AuthEventType::LoginFailed,
-                authenticator_id: authenticator_id.map(String::from),
-                success: false,
-                failure_reason: Some(reason.to_string()),
-                client: client_info.clone(),
-                ..AuthEventParams::default()
-            };
-            db::spawn_audit_event(&state.audit, params, email.map(String::from));
-        };
-
     // Look up authenticator and verify ownership (single JOIN query)
     use crate::services::auth::{AuthenticatorLookupParams, lookup_and_verify_authenticator};
-    let lookup_result = lookup_and_verify_authenticator(
+    let lookup_result = match lookup_and_verify_authenticator(
         &state,
         AuthenticatorLookupParams {
             credential_id: req.credential_id.as_bytes(),
@@ -603,23 +609,34 @@ pub(crate) async fn browser_login_complete(
         },
     )
     .await
-    .map_err(|e| {
-        let reason = match &e {
-            crate::error::ServiceError::NotFound(entity) => {
-                format!("{entity}_not_found")
-            }
-            crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
-            _ => "lookup_error".to_string(),
-        };
-        // Credential lookup failed — no user row was loaded, so no email.
-        log_failure(&user_id.to_string(), None, None, &reason);
-        // Return generic error to prevent credential enumeration
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "auth_failed",
-            Tr::new("login-error-auth-failed").to_string(),
-        )
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            let reason = match &e {
+                crate::error::ServiceError::NotFound(entity) => {
+                    format!("{entity}_not_found")
+                }
+                crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
+                _ => "lookup_error".to_string(),
+            };
+            // Credential lookup failed — no user row was loaded, so no email.
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                &user_id.to_string(),
+                None,
+                None,
+                &reason,
+            )
+            .await;
+            // Return generic error to prevent credential enumeration
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "auth_failed",
+                Tr::new("login-error-auth-failed").to_string(),
+            ));
+        }
+    };
 
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
@@ -629,7 +646,7 @@ pub(crate) async fn browser_login_complete(
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
 
     use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
-    let verification_result = verify_login_assertion(LoginAssertionParams {
+    let verification_result = match verify_login_assertion(LoginAssertionParams {
         authenticator_data: req.authenticator_data.into_bytes(),
         client_data_json: req.client_data_json.into_bytes(),
         signature: req.signature.into_bytes(),
@@ -644,19 +661,25 @@ pub(crate) async fn browser_login_complete(
         origin_policy: state.config().as_ref().into(),
     })
     .await
-    .map_err(|e| {
-        log_failure(
-            &user.id,
-            Some(&user.email),
-            Some(&authenticator.id),
-            &e.to_string(),
-        );
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "auth_failed",
-            Tr::new("login-error-auth-failed").to_string(),
-        )
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                &user.id,
+                Some(&user.email),
+                Some(&authenticator.id),
+                &e.to_string(),
+            )
+            .await;
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "auth_failed",
+                Tr::new("login-error-auth-failed").to_string(),
+            ));
+        }
+    };
 
     tracing::info!(
         "Browser WebAuthn assertion verified for user {}: counter={}, uv={}",
@@ -706,7 +729,7 @@ pub(crate) async fn browser_login_complete(
                 )
             })?;
 
-            db::spawn_audit_event(
+            db::record_auth_event(
                 &state.audit,
                 AuthEventParams {
                     user_id: user.id.clone(),
@@ -717,7 +740,8 @@ pub(crate) async fn browser_login_complete(
                     ..AuthEventParams::default()
                 },
                 Some(user.email.clone()),
-            );
+            )
+            .await;
         } else {
             tracing::warn!(
                 target: "security",
@@ -787,7 +811,7 @@ pub(crate) async fn browser_login_complete(
     })?;
     let token = session_result.token;
 
-    // Log successful login event (fire-and-forget, consistent with failure path)
+    // Log successful login event (consistent with failure path)
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -796,7 +820,7 @@ pub(crate) async fn browser_login_complete(
         client: client_info,
         ..AuthEventParams::default()
     };
-    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
+    db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
     crate::infra::metrics::record_auth_event("browser_login_success");
 
@@ -1656,25 +1680,19 @@ mod tests {
             "invalid signature must fail authentication: {resp_body}"
         );
 
-        // The audit event is spawned fire-and-forget; poll briefly.
+        // The audit event is awaited before the response, so it is
+        // visible immediately.
         let filter = crate::db::AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
             email_domains: Some(vec!["example.com".to_string()]),
             user_id: Some(user.id.clone()),
             ..crate::db::AuditEventFilter::default()
         };
-        let mut events = Vec::new();
-        for _ in 0..100 {
-            events = state
-                .audit
-                .query_events(&filter)
-                .await
-                .expect("query audit events");
-            if !events.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
         assert_eq!(
             events.len(),
             1,

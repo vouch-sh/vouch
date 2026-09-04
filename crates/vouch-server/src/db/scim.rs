@@ -364,14 +364,14 @@ pub async fn delete_expired_scim_tokens(store: &DocumentStore) -> Result<u64> {
 // SCIM Audit → AuditStore
 // ============================================================================
 
-/// Insert SCIM audit log entry via AuditStore.
+/// Record a SCIM audit log entry via AuditStore; best-effort.
 ///
 /// `org_domain` is the acting organization's primary email domain
 /// ([`ScimAuth::org_domain`]). SCIM operations have no user/email of their
 /// own, so without it the event is written with a NULL `email_domain` and
 /// is invisible to org-scoped audit reads (`/admin/audit`,
 /// `GET /api/v1/org/audit-events`).
-pub async fn insert_scim_audit(
+pub async fn record_scim_audit(
     audit: &AuditStore,
     operation: &str,
     resource_type: &str,
@@ -379,7 +379,7 @@ pub async fn insert_scim_audit(
     actor_token_id: Option<&str>,
     details: Option<&str>,
     org_domain: Option<&str>,
-) -> Result<String> {
+) {
     let data = ScimAuditData {
         operation: operation.to_string(),
         resource_type: resource_type.to_string(),
@@ -388,8 +388,8 @@ pub async fn insert_scim_audit(
         details: details.map(String::from),
     };
     audit
-        .insert_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data)
-        .await
+        .record_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data)
+        .await;
 }
 
 // ============================================================================

@@ -7,7 +7,6 @@
 use std::net::IpAddr;
 
 use super::audit::{AuditEventKind, AuditStore};
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -103,56 +102,24 @@ pub struct ClientInfo {
     pub client_version: Option<String>,
 }
 
-/// Insert a new authentication event via the audit store.
+/// Record an authentication event via the audit store.
 ///
-/// Production code records events through [`spawn_audit_event`]; this is
-/// exposed to in-crate tests that need to await the write and inspect the
-/// returned event ID.
-pub(super) async fn insert_auth_event(
-    audit: &AuditStore,
-    params: &AuthEventParams,
-    email: Option<&str>,
-) -> Result<String> {
-    let mut value = serde_json::to_value(params)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize auth event: {e}"))?;
-    if let (Some(obj), Some(geo)) = (
-        value.as_object_mut(),
-        params.client.client_ip.and_then(crate::geo::lookup),
-    ) {
-        obj.insert(
-            "country_code".to_string(),
-            serde_json::Value::String(geo.country_code),
-        );
-        if let Some(asn) = geo.asn {
-            obj.insert("asn".to_string(), serde_json::json!(asn));
-        }
-        if let Some(org) = geo.org_name {
-            obj.insert("org_name".to_string(), serde_json::Value::String(org));
-        }
-    }
-    let data_json = value.to_string();
+/// Awaited so the row is committed before the response is sent, and
+/// best-effort like every [`AuditStore`] write: failures are logged with
+/// the wire `event_type` and swallowed.
+pub async fn record_auth_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
+    let data = crate::db::documents::audit::AuthEventData {
+        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip),
+        params: &params,
+    };
     audit
-        .insert_event_json(
+        .record_event(
             params.event_type.kind(),
             Some(&params.user_id),
-            email,
-            &data_json,
+            email.as_deref(),
+            &data,
         )
-        .await
-}
-
-/// Record an authentication event without blocking the caller.
-///
-/// Spawns a detached task so credential flows never wait on (or fail with)
-/// the audit write; failures are logged with the event type so dropped
-/// records are visible in one consistent format.
-pub fn spawn_audit_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
-    let audit = audit.clone();
-    tokio::spawn(async move {
-        if let Err(e) = insert_auth_event(&audit, &params, email.as_deref()).await {
-            tracing::warn!(error = %e, event_type = ?params.event_type, "failed to record audit event");
-        }
-    });
+        .await;
 }
 
 #[cfg(test)]
@@ -260,7 +227,7 @@ mod tests {
                     .then(|| "invalid assertion".to_string()),
                 ..AuthEventParams::default()
             };
-            insert_auth_event(&state.audit, &params, Some("test@example.com")).await?;
+            record_auth_event(&state.audit, params, Some("test@example.com".to_string())).await;
         }
 
         let before = jiff::Timestamp::now()

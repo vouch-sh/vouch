@@ -1521,35 +1521,25 @@ pub async fn record_oauth_event(
     store: &DocumentStore,
     params: &RecordOAuthEventParams<'_>,
 ) {
-    let (country_code, asn, org_name) = crate::geo::audit_fields(params.ip_address);
     let data = OAuthUsageData {
         oauth_client_id: params.oauth_client_id.to_string(),
         details: params.details.map(String::from),
         client_ip: params.ip_address.map(|ip| ip.to_string()),
         user_agent: params.user_agent.map(String::from),
-        country_code,
-        asn,
-        org_name,
+        geo: crate::db::documents::audit::GeoFields::from_ip(params.ip_address),
     };
     let org_domain = match params.org_domain {
         RecordedOrgDomain::Known(domain) => domain.map(String::from),
         RecordedOrgDomain::Unresolved => resolve_oauth_event_org_domain(store, params).await,
     };
-    let result = audit
-        .insert_event_with_domain(
+    audit
+        .record_event_with_domain(
             params.event_type.kind(),
             params.user_id,
             org_domain.as_deref(),
             &data,
         )
         .await;
-    if let Err(e) = result {
-        tracing::warn!(
-            error = %e,
-            event_type = params.event_type.kind().as_str(),
-            "failed to record OAuth event"
-        );
-    }
 }
 
 /// OAuth usage statistics.

@@ -1392,9 +1392,7 @@ fn test_ingestion_reads_the_keys_writers_serialize() {
         details: None,
         client_ip: Some("10.1.2.3".to_string()),
         user_agent: None,
-        country_code: None,
-        asn: None,
-        org_name: None,
+        geo: crate::db::documents::audit::GeoFields::default(),
     })
     .unwrap();
     let row = crate::db::audit::AuditEvent {

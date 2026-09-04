@@ -8,7 +8,6 @@
 //! end-to-end through the policy gate in `fido2_grant.rs`.
 
 #![expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
@@ -503,6 +502,30 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         "the audit payload must carry the grant type: {}",
         rows[0].data
     );
+
+    // Both audit writes are awaited in flow order, so the UUIDv7 ids must
+    // show the login before the token it authorized.
+    let login_rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(
+        login_rows.len(),
+        1,
+        "the grant must record one login_success"
+    );
+    assert!(
+        login_rows[0].id < rows[0].id,
+        "login_success ({}) must precede oauth_token_issued ({})",
+        login_rows[0].id,
+        rows[0].id
+    );
 }
 
 /// A successful FIDO2 grant for an org member stamps the org's domain into
@@ -653,7 +676,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     .await;
     assert_eq!(status, 400, "grant must be denied: {json}");
 
-    // The audit write is spawned; poll briefly for it to land.
+    // The audit write is awaited before the grant responds.
     let query = |kind: &'static str| {
         let audit = harness.state.audit.clone();
         let user_id = user.id.clone();
@@ -668,14 +691,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
                 .expect("query audit events")
         }
     };
-    let mut failed_rows = Vec::new();
-    for _ in 0..40 {
-        failed_rows = query("login_failed").await;
-        if !failed_rows.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let failed_rows = query("login_failed").await;
     assert_eq!(
         failed_rows.len(),
         1,
@@ -693,25 +709,22 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     );
 }
 
-/// it should be visible immediately, but we poll briefly for safety.
-async fn poll_policy_denied_audit(harness: &TestHarness, user_id: &str) -> db::AuditEvent {
-    for _ in 0..40 {
-        let rows = harness
-            .state
-            .audit
-            .query_events(&db::AuditEventFilter {
-                event_types: Some(vec!["policy_denied".to_string()]),
-                user_id: Some(user_id.to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("query audit events");
-        if !rows.is_empty() {
-            return rows.into_iter().next().unwrap();
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("no policy_denied audit event found for user {user_id}");
+/// Fetch the `policy_denied` audit event for the user; the write is
+/// awaited by the policy gate, so it is visible immediately.
+async fn policy_denied_audit(harness: &TestHarness, user_id: &str) -> db::AuditEvent {
+    let rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["policy_denied".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    rows.into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no policy_denied audit event found for user {user_id}"))
 }
 
 /// A custom posture policy deny through the full HTTP router must record the
@@ -796,7 +809,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     );
 
     // Step 4: Verify the audit record carries the actual policy name.
-    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_row = policy_denied_audit(&harness, &user.id).await;
     let audit_data: serde_json::Value =
         serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
     assert_eq!(
@@ -889,7 +902,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     );
 
     // Verify the audit record carries the slug.
-    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_row = policy_denied_audit(&harness, &user.id).await;
     let audit_data: serde_json::Value =
         serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
     assert_eq!(

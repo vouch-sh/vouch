@@ -270,7 +270,7 @@ pub(crate) async fn exchange_fido2_assertion(
     // Cloned for the failure audit event below, since the success path moves
     // `params.client_info` when it records the LoginSuccess event.
     let failure_client_info = params.client_info.clone();
-    let assertion_result = verify_login_assertion(LoginAssertionParams {
+    let assertion_result = match verify_login_assertion(LoginAssertionParams {
         authenticator_data: payload.authenticator_data.into_bytes(),
         client_data_json: payload.client_data_json.into_bytes(),
         signature: payload.signature.into_bytes(),
@@ -285,26 +285,32 @@ pub(crate) async fn exchange_fido2_assertion(
         origin_policy: state.config().as_ref().into(),
     })
     .await
-    .map_err(|e| {
-        tracing::warn!(
-            "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
-            user_id
-        );
-        // A failed assertion — including clone detection (counter regression)
-        // — is a high-signal security event. Record it in the audit trail with
-        // the credential and user IDs and the failure reason.
-        let failure_event = AuthEventParams {
-            user_id: user.id.clone(),
-            event_type: AuthEventType::LoginFailed,
-            authenticator_id: Some(authenticator.id.clone()),
-            success: false,
-            failure_reason: Some(e.to_string()),
-            client: failure_client_info,
-            ..AuthEventParams::default()
-        };
-        db::spawn_audit_event(&state.audit, failure_event, Some(user.email.clone()));
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(
+                "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
+                user_id
+            );
+            // A failed assertion — including clone detection (counter regression)
+            // — is a high-signal security event. Record it in the audit trail with
+            // the credential and user IDs and the failure reason.
+            let failure_event = AuthEventParams {
+                user_id: user.id.clone(),
+                event_type: AuthEventType::LoginFailed,
+                authenticator_id: Some(authenticator.id.clone()),
+                success: false,
+                failure_reason: Some(e.to_string()),
+                client: failure_client_info,
+                ..AuthEventParams::default()
+            };
+            db::record_auth_event(&state.audit, failure_event, Some(user.email.clone())).await;
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authentication failed",
+            ));
+        }
+    };
 
     tracing::info!(
         "FIDO2 assertion grant: verified for user {}, counter={}, uv={}",
@@ -362,11 +368,11 @@ pub(crate) async fn exchange_fido2_assertion(
             client: params.client_info,
             ..AuthEventParams::default()
         };
-        db::spawn_audit_event(&state.audit, failed_event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, failed_event, Some(user.email.clone())).await;
         return Err(denied);
     }
 
-    // Log the successful auth event (fire-and-forget)
+    // Log the successful auth event
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -375,7 +381,7 @@ pub(crate) async fn exchange_fido2_assertion(
         client: params.client_info,
         ..AuthEventParams::default()
     };
-    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
+    db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
     // Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);

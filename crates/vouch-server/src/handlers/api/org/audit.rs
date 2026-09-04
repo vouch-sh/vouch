@@ -34,11 +34,11 @@ const DEFAULT_PAGE_SIZE: u64 = 500;
 const MAX_PAGE_SIZE: u64 = 1000;
 
 /// Events with `created_at` newer than `now - LAG_WINDOW_SECONDS` are never
-/// returned. Auth events are written from detached tasks (see
-/// `db/config.rs`), so commit order can trail id order by a few seconds
-/// under load; a naive high-water-mark poller would otherwise miss events
+/// returned. Every audit write is awaited before its request responds, but
+/// concurrent requests can still commit in a different order than they
+/// minted ids; a naive high-water-mark poller would otherwise miss events
 /// that commit late. This window — documented as the delivery guarantee in
-/// `docs/src/admin/audit.md` — is comfortably larger than that lag.
+/// `docs/src/admin/audit.md` — is comfortably larger than that skew.
 const LAG_WINDOW_SECONDS: i64 = 30;
 
 /// Byte budget for a single NDJSON response body. Keeps responses well

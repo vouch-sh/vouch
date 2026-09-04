@@ -21,10 +21,10 @@ async fn test_auth_event_logging() {
         .await
         .expect("Failed to create user");
 
-    // Log successful login (insert_auth_event now uses AuditStore)
-    let event_id = config::insert_auth_event(
+    // Log successful login (record_auth_event writes via AuditStore)
+    config::record_auth_event(
         &audit,
-        &AuthEventParams {
+        AuthEventParams {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginSuccess,
             authenticator_id: Some("auth-123".to_string()),
@@ -36,17 +36,14 @@ async fn test_auth_event_logging() {
             success: true,
             ..Default::default()
         },
-        Some("events@example.com"),
+        Some("events@example.com".to_string()),
     )
-    .await
-    .expect("Failed to insert auth event");
-
-    assert!(!event_id.is_empty());
+    .await;
 
     // Log failed login
-    config::insert_auth_event(
+    config::record_auth_event(
         &audit,
-        &AuthEventParams {
+        AuthEventParams {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginFailed,
             client: ClientInfo {
@@ -57,10 +54,23 @@ async fn test_auth_event_logging() {
             failure_reason: Some("Invalid credential".to_string()),
             ..Default::default()
         },
-        Some("events@example.com"),
+        Some("events@example.com".to_string()),
     )
-    .await
-    .expect("Failed to insert auth event");
+    .await;
+
+    // The write is best-effort (failures are swallowed), so assert both
+    // rows landed by querying them back.
+    for expected in ["login_success", "login_failed"] {
+        let events = audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![expected.to_string()]),
+                user_id: Some(user_id.clone()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query events");
+        assert_eq!(events.len(), 1, "expected one {expected} event");
+    }
 }
 
 #[tokio::test]
@@ -78,19 +88,18 @@ async fn test_key_and_device_auth_events_round_trip_and_expire() {
         AuthEventType::DeviceAuthApproved,
     ];
     for event_type in variants {
-        config::insert_auth_event(
+        config::record_auth_event(
             &audit,
-            &AuthEventParams {
+            AuthEventParams {
                 user_id: user_id.clone(),
                 event_type,
                 authenticator_id: Some("auth-123".to_string()),
                 success: true,
                 ..Default::default()
             },
-            Some("key-events@example.com"),
+            Some("key-events@example.com".to_string()),
         )
-        .await
-        .expect("Failed to insert auth event");
+        .await;
     }
 
     // Each variant is queryable under its expected event_type string.
