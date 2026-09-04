@@ -385,7 +385,7 @@ pub(crate) async fn exchange_token(
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)
-    let actor_claim = if let Some(actor) = params.actor {
+    let (actor_claim, actor_user_id) = if let Some(actor) = params.actor {
         let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
@@ -430,6 +430,7 @@ pub(crate) async fn exchange_token(
                 "User account is deactivated",
             ));
         }
+        let actor_user_id = actor_user.id.clone();
         let actor_email = actor_decoded
             .email()
             .map(str::to_string)
@@ -453,9 +454,9 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        Some(actor)
+        (Some(actor), Some(actor_user_id))
     } else {
-        None
+        (None, None)
     };
 
     // Calculate granted scope (intersection of requested and available).
@@ -620,7 +621,7 @@ pub(crate) async fn exchange_token(
         &db::InsertTokenExchangeParams {
             subject_user_id: &subject_session.user_id,
             subject_token_hash: &subject_token_hash,
-            actor_user_id: None,
+            actor_user_id: actor_user_id.as_deref(),
             issued_token_hash: &issued_token_hash,
             requested_audience: params.audience,
             granted_scope: scope_string.as_deref(),
@@ -766,6 +767,8 @@ async fn issue_id_token(
         &db::InsertTokenExchangeParams {
             subject_user_id: ctx.user_id,
             subject_token_hash: ctx.subject_token_hash,
+            // Always None: actor_token with requested_token_type=id_token is
+            // rejected before this path is reached.
             actor_user_id: None,
             issued_token_hash: &issued_token_hash,
             requested_audience: ctx.audience,

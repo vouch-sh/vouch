@@ -774,6 +774,61 @@ async fn test_rfc8693_actor_token_delegation_chain() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_delegated_exchange_records_actor_user_id() {
+    // A delegated exchange (actor_token present) must record the actor's
+    // user id on the token_exchange audit row, so delegation is attributable
+    // to the acting party, not just visible in the issued JWT's `act` claim.
+    // The insert is best-effort in production (failures only log a warning);
+    // against the test store it always lands.
+    let (app, state) = test_app().await;
+
+    let grantor = create_test_user(&state.store, "audit-actor-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+
+    let grantee = create_test_user(&state.store, "audit-actor-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "delegated exchange should succeed: {body}"
+    );
+
+    let row = state
+        .store
+        .find_one::<crate::db::documents::oauth::TokenExchangeDoc>("actor_user_id", &grantee.id)
+        .await
+        .expect("query token_exchange by actor_user_id")
+        .expect("delegated exchange row must record actor_user_id");
+    assert_eq!(
+        row.data.subject_user_id, grantor.id,
+        "audit row must pair the actor with the delegating subject"
+    );
+    assert_eq!(row.data.actor_user_id.as_deref(), Some(grantee.id.as_str()));
+}
+
+#[tokio::test]
 async fn test_rfc8693_token_lifetime_capped_by_subject() {
     // RFC 8693 Section 2.2: Exchanged token lifetime should not exceed
     // the remaining lifetime of the subject token.
