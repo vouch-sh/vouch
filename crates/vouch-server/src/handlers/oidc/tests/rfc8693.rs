@@ -77,7 +77,11 @@ async fn test_token_exchange_valid_token_types() {
 
 #[tokio::test]
 async fn test_token_exchange_invalid_subject_token() {
-    // RFC 8693: Invalid subject token returns invalid_grant
+    // RFC 8693 §2.2.2: "If the request itself is not valid or if either the
+    // 'subject_token' or 'actor_token' are invalid for any reason, or are
+    // unacceptable based on policy, the authorization server MUST construct
+    // an error response, as specified in Section 5.2 of [RFC6749]. The value
+    // of the 'error' parameter MUST be the 'invalid_request' error code."
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "exchange-invalid@example.com").await;
@@ -94,7 +98,7 @@ async fn test_token_exchange_invalid_subject_token() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    assert_eq!(error["error"], "invalid_request");
 }
 
 #[tokio::test]
@@ -265,7 +269,7 @@ async fn test_rfc8693_missing_subject_token() {
     // RFC 6749 §5.2: invalid_request covers a request "missing a required
     // parameter". Pairing subject_token with subject_token_type is what makes
     // this reachable — an absent token used to reach the decoder as an empty
-    // string and come back as invalid_grant.
+    // string and be reported as an invalid token instead.
     assert_eq!(
         error["error"], "invalid_request",
         "Missing subject_token should be rejected as invalid_request, got: {}",
@@ -914,7 +918,9 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 }
 
 // ========================================================================
@@ -1528,7 +1534,9 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 }
 
 #[tokio::test]
@@ -1643,7 +1651,7 @@ async fn test_rfc8693_id_token_rejects_actor_token() {
 //
 // When a token exchange carries an actor_token, the actor user's active
 // flag must be checked symmetrically with the subject user check. A
-// deactivated actor must produce invalid_grant, not a 200 with an act claim.
+// deactivated actor must produce an error, not a 200 with an act claim.
 // ========================================================================
 
 #[tokio::test]
@@ -1691,9 +1699,11 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         "Deactivated actor must be rejected: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8693 §2.2.2: an actor token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
     assert_eq!(
-        error["error"], "invalid_grant",
-        "Must return invalid_grant for deactivated actor: {body}"
+        error["error"], "invalid_request",
+        "Must return invalid_request for deactivated actor: {body}"
     );
     assert!(
         error["error_description"]
@@ -1813,7 +1823,7 @@ async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
 // token lookup (issue #540 pattern).
 //
 // The actor session lookup must distinguish:
-//   * Ok(None) — session missing/revoked → `invalid_grant`
+//   * Ok(None) — session missing/revoked → `invalid_request` (RFC 8693 §2.2.2)
 //   * Err(_)   — store failure          → `ServiceError::Internal` (500)
 //
 // The `Ok(None)` arm is exercised here by issuing a real actor token and
@@ -1828,11 +1838,12 @@ async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
 // ========================================================================
 
 /// A validly-decoded actor token whose backing session has been removed
-/// must produce `invalid_grant` ("Actor token session not found or
-/// revoked"), not a 500. Exercises the `Ok(None)` arm of the actor session
-/// lookup — the same call site whose `Err` handling the fix tightens.
+/// must produce `invalid_request` ("Actor token session not found or
+/// revoked") per RFC 8693 §2.2.2, not a 500. Exercises the `Ok(None)` arm
+/// of the actor session lookup — the same call site whose `Err` handling
+/// the fix tightens.
 #[tokio::test]
-async fn test_rfc8693_actor_session_not_found_returns_invalid_grant() {
+async fn test_rfc8693_actor_session_not_found_returns_invalid_request() {
     let (app, state) = test_app().await;
 
     // Subject (grantor) with a stored, valid access token.
@@ -1873,12 +1884,12 @@ async fn test_rfc8693_actor_session_not_found_returns_invalid_grant() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "missing actor session must return invalid_grant, got: {body}"
+        "missing actor session must return invalid_request, got: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(
-        error["error"], "invalid_grant",
-        "missing actor session must report invalid_grant: {body}"
+        error["error"], "invalid_request",
+        "missing actor session must report invalid_request: {body}"
     );
     assert!(
         error["error_description"]
@@ -1898,10 +1909,10 @@ async fn test_rfc8693_actor_session_not_found_returns_invalid_grant() {
 /// token hash fail with a store error while every other lookup uses the live,
 /// open pool.
 ///
-/// Against the pre-fix `!matches!(.., Ok(Some(_)))` code this returns
-/// `invalid_grant` (the bug); against the fixed `.map_err(Internal)?.ok_or_else(InvalidGrant)?`
-/// code it returns 500. This is the only test that discriminates the fix from
-/// the bug.
+/// Against the pre-fix `!matches!(.., Ok(Some(_)))` code this returns the
+/// OAuth error for a missing session (the bug); against the fixed
+/// `.map_err(Internal)?.ok_or_else(..)?` code it returns 500. This is the
+/// only test that discriminates the fix from the bug.
 #[tokio::test]
 async fn test_rfc8693_actor_session_store_error_returns_internal() {
     let (app, state) = test_app().await;
@@ -1941,10 +1952,14 @@ async fn test_rfc8693_actor_session_store_error_returns_internal() {
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
-        "store failure during actor session lookup must return 500, not \
-         invalid_grant; got: {body}"
+        "store failure during actor session lookup must return 500, not an \
+         OAuth token error; got: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_request",
+        "DB error must not be reported as invalid_request: {body}"
+    );
     assert_ne!(
         error["error"], "invalid_grant",
         "DB error must not be reported as invalid_grant: {body}"

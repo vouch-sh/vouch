@@ -2052,9 +2052,6 @@ rfc8628#5.4#978bf787	SHOULD	To mitigate such an attack, it is RECOMMENDED to inf
 rfc8628#5.4#def2895d	SHOULD	The authorization server SHOULD display information about the device so that the user could notice if a software client was attempting to impersonate a hardware
 rfc8628#5.5#fc8dab50	SHOULD	Devices SHOULD take into account the operating environment when considering how to communicate the code to the user to reduce the chances it will be observed by
 rfc8628#5.7#08d60057	SHOULD	To mitigate an attack in which a malicious user can bootstrap their credentials on a device not in their control, it is RECOMMENDED that any chosen communicatio
-rfc8693#2.2.2#90069c53	MUST	If the request itself is not valid or if either the "subject_token" or "actor_token" are invalid for any reason, or are unacceptable based on policy, the author
-rfc8693#2.2.2#97677945	SHOULD	If the authorization server is unwilling or unable to issue a token for any target service indicated by the "resource" or "audience" parameters, the "invalid_ta
-rfc8693#2.2.2#9c878927	MUST	The value of the "error" parameter MUST be the "invalid_request" error code.
 rfc8693#4#5e0c0c44	MUST	For the purpose of applying access control policy, the consumer of a token MUST only consider the token's top-level claims and the party identified as the curre
 rfc8693#6#95614386	MUST	Tokens employed in the context of the functionality described herein may contain privacy-sensitive information and, to prevent disclosure of such information to
 rfc8693#6#e59b1faa	MUST	In cases where it is desirable to prevent disclosure of certain information to the client, the token MUST be encrypted to its intended recipient.

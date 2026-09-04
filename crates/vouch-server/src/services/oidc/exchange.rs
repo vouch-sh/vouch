@@ -308,8 +308,14 @@ pub(crate) async fn exchange_token(
     let subject_token = params.subject.token.expose_secret();
     let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url)
         .ok_or_else(|| {
+            // RFC 8693 §2.2.2: "If the request itself is not valid or if
+            // either the 'subject_token' or 'actor_token' are invalid for any
+            // reason, or are unacceptable based on policy, the authorization
+            // server MUST construct an error response, as specified in
+            // Section 5.2 of [RFC6749]. The value of the 'error' parameter
+            // MUST be the 'invalid_request' error code."
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Invalid or expired subject token",
             )
         })?;
@@ -323,7 +329,7 @@ pub(crate) async fn exchange_token(
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Subject token session not found",
             )
         })?;
@@ -335,12 +341,15 @@ pub(crate) async fn exchange_token(
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
-            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Subject token user not found")
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Subject token user not found",
+            )
         })?;
 
     if !subject_user.active {
         return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
+            OAuthErrorCode::InvalidRequest,
             "User account is deactivated",
         ));
     }
@@ -370,7 +379,7 @@ pub(crate) async fn exchange_token(
         // Decode actor token (supports both HS256 and ES256)
         let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
             })?;
 
         // Block self-delegation: actor and subject must be different users
@@ -390,7 +399,7 @@ pub(crate) async fn exchange_token(
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
                 ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
+                    OAuthErrorCode::InvalidRequest,
                     "Actor token session not found or revoked",
                 )
             })?;
@@ -401,11 +410,11 @@ pub(crate) async fn exchange_token(
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Actor token user not found")
             })?;
         if !actor_user.active {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "User account is deactivated",
             ));
         }
