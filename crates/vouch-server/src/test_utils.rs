@@ -926,12 +926,16 @@ async fn resolve_session_snapshot(
             .and_then(|a| a.aaguid),
         None => None,
     };
+    // Read-only, no `get_user_org_domain`: its lazy-backfill write would
+    // fire first for any test that installs a `modify` hook to intercept a
+    // specific document.
     let org_domain = match crate::db::get_user_by_id(&state.store, user_id).await {
-        Ok(Some(u)) => match u.org_id {
-            Some(org_id) => crate::db::get_organization_domain(&state.store, &org_id)
+        Ok(Some(u)) => match (u.org_domain, u.org_id) {
+            (Some(domain), _) => Some(domain),
+            (None, Some(org_id)) => crate::db::get_organization_domain(&state.store, &org_id)
                 .await
                 .unwrap_or(None),
-            None => None,
+            (None, None) => None,
         },
         _ => None,
     };

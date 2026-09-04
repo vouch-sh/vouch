@@ -895,12 +895,18 @@ pub(crate) async fn complete_enrollment_after_identity(
     let authenticator_id = existing_authenticator.map(|a| a.id.clone());
     let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
 
-    // Snapshot org domain so the enrollment session carries the federation
-    // claims that match the user's state at this moment. Fail closed: the
-    // snapshot is captured exactly once, so silently dropping a transient
-    // DB error would permanently degrade this session's `hd` claim.
+    // Org domain, read once at session creation for the federation claims.
+    // Fail closed: silently dropping a transient DB error here would
+    // permanently degrade the session's `hd` claim.
     let org_domain = match user.org_id.as_deref() {
-        Some(org_id) => match db::get_organization_domain(&state.store, org_id).await {
+        Some(org_id) => match db::get_user_org_domain(
+            &state.store,
+            &user.id,
+            org_id,
+            user.org_domain.as_deref(),
+        )
+        .await
+        {
             Ok(domain) => domain,
             Err(e) => {
                 tracing::error!("Failed to snapshot org domain: {}", e);
@@ -1605,10 +1611,15 @@ pub(crate) async fn browser_register_complete(
             Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
-    let org_domain = match account.as_ref().and_then(|u| u.org_id.clone()) {
-        Some(org_id) => db::get_organization_domain(&state.store, &org_id)
-            .await
-            .map_err(snapshot_error)?,
+    let org_domain = match account.as_ref() {
+        Some(u) => match u.org_id.as_deref() {
+            Some(org_id) => {
+                db::get_user_org_domain(&state.store, &u.id, org_id, u.org_domain.as_deref())
+                    .await
+                    .map_err(snapshot_error)?
+            }
+            None => None,
+        },
         None => None,
     };
 

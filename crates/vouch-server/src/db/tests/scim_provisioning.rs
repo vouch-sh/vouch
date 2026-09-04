@@ -685,6 +685,7 @@ async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
         email: crate::email::Email::new(email),
         name: Some("Seeded".to_string()),
         org_id: Some(TEST_ORG_ID.to_string()),
+        org_domain: None,
         is_org_admin: false,
         active: true,
         external_id: None,

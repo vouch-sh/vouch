@@ -725,23 +725,23 @@ pub(crate) async fn browser_login_complete(
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.to_string();
 
-    // Snapshot org domain at session creation so the federation claims are a
-    // session-time snapshot rather than current-state lookups. Fail closed:
-    // the snapshot is captured exactly once, so silently dropping a transient
-    // DB error here would permanently degrade the session's `hd` claim.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to snapshot org domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    Tr::new("login-error-session-create-failed").to_string(),
-                )
-            })?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    // Fail closed: silently dropping a transient DB error here would
+    // permanently degrade the session's `hd` claim.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to snapshot org domain: {e}");
+                    ServiceError::api(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "db_error",
+                        Tr::new("login-error-session-create-failed").to_string(),
+                    )
+                })?
+        }
+        None => None,
     };
 
     let session_result = create_oauth_access_token(

@@ -1492,10 +1492,16 @@ async fn resolve_oauth_event_org_domain(
 ) -> Option<String> {
     if let Some(user_id) = params.user_id
         && let Ok(Some(user)) = super::get_user_by_id(store, user_id).await
-        && let Some(org_id) = user.org_id
-        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
+        && let Some(org_id) = user.org_id.as_deref()
     {
-        return Some(domain);
+        // The doc's copy when present, else a plain lookup. No write-back
+        // here: audit recording must not add a write.
+        if let Some(domain) = user.org_domain.clone() {
+            return Some(domain);
+        }
+        if let Ok(Some(domain)) = super::get_organization_domain(store, org_id).await {
+            return Some(domain);
+        }
     }
     let client_org_id = get_oauth_client_by_id(store, params.oauth_client_id)
         .await

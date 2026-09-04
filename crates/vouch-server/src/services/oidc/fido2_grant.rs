@@ -382,14 +382,14 @@ pub(crate) async fn exchange_fido2_assertion(
 
     let now = jiff::Timestamp::now().as_second();
 
-    // Snapshot org domain at session creation so federation claims reflect
-    // the user's state at this moment, not whenever the token is issued.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
+        }
+        None => None,
     };
 
     // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can

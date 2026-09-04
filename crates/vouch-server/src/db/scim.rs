@@ -6,7 +6,7 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::ScimAuditData;
 use super::documents::organization::OrganizationDoc;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
-use super::documents::user::UserDoc;
+use super::documents::user::{UserDoc, UserOrg};
 use super::store::DocumentStore;
 use crate::error::ServiceError;
 use anyhow::Result;
@@ -777,10 +777,19 @@ pub async fn create_scim_user(
             return Err(CreateScimUserError::DuplicateEmail);
         }
 
+        // `id` and `domain` come from the one `org_snapshot` read above
+        // (the domain-ownership check already required it), so one can't be
+        // stamped without the other.
+        let user_org = org_snapshot.as_ref().map(|(id, _, data)| UserOrg {
+            id,
+            domain: data.domain.as_str(),
+        });
+
         let doc = UserDoc {
             email: email.clone(),
             name: name.map(String::from),
-            org_id: org_id_owned.clone(),
+            org_id: user_org.map(|o| o.id.to_string()),
+            org_domain: user_org.map(|o| o.domain.to_string()),
             is_org_admin: false,
             active,
             external_id: external_id.map(String::from),

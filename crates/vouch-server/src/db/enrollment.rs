@@ -5,7 +5,9 @@
 //! when creating organizations and users during the OIDC enrollment flow.
 
 use super::documents::organization::{DomainClaimDoc, OrganizationDoc};
-use super::documents::user::{IdpIdentity, UpstreamLogin, UserDoc, idp_identity_index_value};
+use super::documents::user::{
+    IdpIdentity, UpstreamLogin, UserDoc, UserOrg, idp_identity_index_value,
+};
 use super::store::DocumentStore;
 use crate::error::ServiceError;
 use anyhow::{Context, Result};
@@ -36,6 +38,9 @@ pub struct EnrolledUser {
     pub email: String,
     pub name: Option<String>,
     pub org_id: Option<String>,
+    /// The org's primary domain, copied from the user doc. `None` on docs
+    /// created before this field existed.
+    pub org_domain: Option<String>,
     pub is_org_admin: bool,
     /// True when this call appended an upstream identity binding to a
     /// pre-existing account (lazy bind). False for (issuer, subject)
@@ -91,7 +96,12 @@ impl super::pool::RetryableError for EnrollUserError {
     }
 }
 
-/// Get or create the organization row for `domain`, returning its ID.
+/// Get or create the organization row for `domain`, returning its ID and
+/// its PRIMARY domain. The two differ from the input when `domain` is one
+/// of an existing org's verified *additional* domains — the "domain" index
+/// covers the whole verified set, so the fallback lookup can resolve to
+/// that org. Callers stamping a domain onto user docs must use the
+/// returned primary, never the input.
 ///
 /// Runs OUTSIDE the user-creation transaction so the unique-violation
 /// recovery path doesn't abort it. The deterministic ID makes concurrent
@@ -107,14 +117,14 @@ impl super::pool::RetryableError for EnrollUserError {
 /// `created_by_user_id = None`. That is benign: the next enrollee for the
 /// domain reuses the row and the enrollment transaction claims the admin
 /// slot via `compare_and_update`.
-async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String> {
+async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<(String, String)> {
     let id = deterministic_org_id(domain);
     let existing = match store.get::<OrganizationDoc>(&id).await? {
         Some(org) => Some(org),
         None => store.find_one::<OrganizationDoc>("domain", domain).await?,
     };
     if let Some(org) = existing {
-        return Ok(org.id);
+        return Ok((org.id, org.data.domain));
     }
 
     let doc = OrganizationDoc {
@@ -151,13 +161,13 @@ async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String
         return store
             .find_one::<OrganizationDoc>("domain", domain)
             .await?
-            .map(|org| org.id)
+            .map(|org| (org.id, org.data.domain))
             .context("domain claimed by an organization that could not be found");
     }
     match tx.insert_with_id(&id, &doc).await {
         Ok(result) => {
             tx.commit().await?;
-            Ok(result.id)
+            Ok((result.id, result.data.domain))
         }
         Err(e) if super::pool::is_unique_violation(&e) => {
             // Concurrent enrollee inserted first — re-fetch.
@@ -168,7 +178,7 @@ async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String
                     .await?
                     .context("organization vanished after unique violation")?,
             };
-            Ok(org.id)
+            Ok((org.id, org.data.domain))
         }
         Err(e) => Err(e),
     }
@@ -182,7 +192,7 @@ async fn resolve_user(
     tx: &mut super::store::StoreTransaction<'_>,
     email: &crate::email::Email,
     name: Option<&str>,
-    org_id: Option<&str>,
+    org: Option<UserOrg<'_>>,
     is_org_admin: bool,
     upstream: Option<&UpstreamLogin>,
 ) -> Result<EnrolledUser, EnrollUserError> {
@@ -215,7 +225,8 @@ async fn resolve_user(
         let new_doc = UserDoc {
             email: email.clone(),
             name: name.map(String::from),
-            org_id: org_id.map(String::from),
+            org_id: org.map(|o| o.id.to_string()),
+            org_domain: org.map(|o| o.domain.to_string()),
             is_org_admin,
             active: true,
             external_id: None,
@@ -233,6 +244,7 @@ async fn resolve_user(
             email: result.data.email.into_string(),
             name: result.data.name,
             org_id: result.data.org_id,
+            org_domain: result.data.org_domain,
             is_org_admin: result.data.is_org_admin,
             newly_bound: false,
         });
@@ -308,6 +320,7 @@ async fn resolve_user(
         email: doc.data.email.into_string(),
         name: doc.data.name,
         org_id: doc.data.org_id,
+        org_domain: doc.data.org_domain,
         is_org_admin: doc.data.is_org_admin,
         newly_bound,
     })
@@ -391,7 +404,7 @@ pub async fn enroll_user_with_org(
     // folding policy.
     let email = crate::email::Email::new(email);
 
-    let org_id = match domain {
+    let enrolled_org = match domain {
         Some(domain) => Some(get_or_create_org(store, domain).await?),
         None => None,
     };
@@ -404,8 +417,8 @@ pub async fn enroll_user_with_org(
         // One in-transaction snapshot of the org row: the admin-count
         // predicate, the CAS guard (id + version), and the CAS payload all
         // derive from it.
-        let org = match &org_id {
-            Some(oid) => tx
+        let org = match &enrolled_org {
+            Some((oid, _)) => tx
                 .get::<OrganizationDoc>(oid)
                 .await
                 .map_err(|e| ServiceError::from_db_contention(e, "Failed to load organization"))?,
@@ -428,15 +441,17 @@ pub async fn enroll_user_with_org(
             None => false,
         };
 
-        let user = resolve_user(
-            &mut tx,
-            &email,
-            name,
-            org_id.as_deref(),
-            is_org_admin,
-            upstream,
-        )
-        .await?;
+        // The pair comes from `get_or_create_org`'s own resolution, not the
+        // in-transaction snapshot: its returned domain is the org's primary
+        // domain (which differs from the enrollment input when that input is
+        // a verified additional domain), and the primary domain is
+        // write-once, so the pair stays correct even when the snapshot read
+        // above missed the just-committed org row.
+        let user_org = enrolled_org
+            .as_ref()
+            .map(|(id, domain)| UserOrg { id, domain });
+
+        let user = resolve_user(&mut tx, &email, name, user_org, is_org_admin, upstream).await?;
 
         // Claim (or repair) the org admin slot. Winning this CAS is a
         // REQUIREMENT for committing a user row that claims

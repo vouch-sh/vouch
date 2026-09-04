@@ -17,6 +17,13 @@ pub struct UserDoc {
     pub email: Email,
     pub name: Option<String>,
     pub org_id: Option<String>,
+    /// The org's primary domain, copied from the org doc when `org_id` is
+    /// set. Both `org_id` and the primary domain are write-once (see
+    /// [`super::organization::OrganizationDoc::domain`]), so the copy never
+    /// goes stale. `None` on docs created before this field existed; grant
+    /// paths fill it lazily.
+    #[serde(default)]
+    pub org_domain: Option<String>,
     pub is_org_admin: bool,
     #[serde(default = "default_active")]
     pub active: bool,
@@ -42,6 +49,7 @@ impl std::fmt::Debug for UserDoc {
             .field("email", &self.email)
             .field("name", &self.name)
             .field("org_id", &self.org_id)
+            .field("org_domain", &self.org_domain)
             .field("is_org_admin", &self.is_org_admin)
             .field("active", &self.active)
             .field("external_id", &self.external_id)
@@ -51,6 +59,17 @@ impl std::fmt::Debug for UserDoc {
             .field("idp_identities", &self.idp_identities)
             .finish()
     }
+}
+
+/// The org a `UserDoc` is bound to at construction: id and primary domain
+/// together, so neither field can be written without the other. Both
+/// writers always know both halves — enrollment's `get_or_create_org`
+/// returns the pair, and SCIM's domain-ownership check has already read
+/// the org doc.
+#[derive(Clone, Copy)]
+pub(crate) struct UserOrg<'a> {
+    pub id: &'a str,
+    pub domain: &'a str,
 }
 
 /// An upstream identity: the OIDC `(iss, sub)` pair, or for SAML the
@@ -216,9 +235,11 @@ mod tests {
 
     #[test]
     fn legacy_user_json_without_idp_identities_deserializes() {
-        // Stored user documents written before identity binding have no
-        // `idp_identities` key; they must deserialize to an empty Vec so
-        // legacy accounts keep working (lazy bind on first login).
+        // Stored user documents written before identity binding (and before
+        // `org_domain`) have neither key; they must deserialize to an empty
+        // Vec and `None` respectively, so legacy accounts keep working
+        // (lazy bind on first login, lazy org_domain backfill on first
+        // org-scoped read).
         let json = r#"{
             "email": "legacy@example.com",
             "name": null,
@@ -232,6 +253,7 @@ mod tests {
         let doc: Result<UserDoc, _> = serde_json::from_str(json);
         let doc = doc.expect("legacy user JSON must deserialize");
         assert!(doc.idp_identities.is_empty());
+        assert_eq!(doc.org_domain, None);
     }
 
     #[test]
@@ -245,6 +267,7 @@ mod tests {
             email: Email::new("rt@example.com"),
             name: None,
             org_id: None,
+            org_domain: None,
             is_org_admin: false,
             active: true,
             external_id: None,
@@ -281,6 +304,7 @@ mod tests {
             email: Email::new("user@example.com"),
             name: None,
             org_id: None,
+            org_domain: None,
             is_org_admin: false,
             active: true,
             external_id: None,

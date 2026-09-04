@@ -14,6 +14,9 @@ pub struct User {
     pub email: String,
     pub name: Option<String>,
     pub org_id: Option<String>,
+    /// The org's primary domain, copied from the org doc at creation.
+    /// `None` on docs created before this field existed.
+    pub org_domain: Option<String>,
     pub is_org_admin: bool,
     pub active: bool,
     pub external_id: Option<String>,
@@ -31,6 +34,7 @@ impl std::fmt::Debug for User {
             .field("email", &self.email)
             .field("name", &self.name)
             .field("org_id", &self.org_id)
+            .field("org_domain", &self.org_domain)
             .field("is_org_admin", &self.is_org_admin)
             .field("active", &self.active)
             .field("external_id", &self.external_id)
@@ -48,6 +52,7 @@ impl From<Document<UserDoc>> for User {
             email: doc.data.email.into_string(),
             name: doc.data.name,
             org_id: doc.data.org_id,
+            org_domain: doc.data.org_domain,
             is_org_admin: doc.data.is_org_admin,
             active: doc.data.active,
             external_id: doc.data.external_id,
@@ -80,6 +85,7 @@ pub async fn upsert_user(
         email,
         name: name.map(String::from),
         org_id: None,
+        org_domain: None,
         is_org_admin: false,
         active: true,
         external_id: None,
@@ -115,6 +121,12 @@ pub async fn upsert_user_with_org(
         email,
         name: name.map(String::from),
         org_id: org_id.map(String::from),
+        // Test helper only: unlike the two production writers
+        // (`resolve_user`, `create_scim_user`), this bypasses org lookup
+        // entirely, so there's no domain in hand to stamp here. Callers that
+        // exercise `org_domain` land on the same fallback-and-backfill path
+        // as a pre-existing doc from before this field existed.
+        org_domain: None,
         is_org_admin,
         active: true,
         external_id: None,
@@ -142,6 +154,38 @@ pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Opt
 pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Option<User>> {
     let doc = store.get::<UserDoc>(user_id).await?;
     Ok(doc.map(User::from))
+}
+
+/// An org user's org domain: `cached` (the value from their doc) when
+/// present, otherwise a live lookup whose result is written back to the
+/// doc so later calls skip it.
+///
+/// A stored value is used as-is — the primary domain is write-once (see
+/// [`UserDoc::org_domain`]). The write-back is best-effort (`store.modify`,
+/// OCC): a failure is logged and the looked-up domain is returned anyway,
+/// so it can never fail the caller's grant.
+pub async fn get_user_org_domain(
+    store: &DocumentStore,
+    user_id: &str,
+    org_id: &str,
+    cached: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(domain) = cached {
+        return Ok(Some(domain.to_string()));
+    }
+    let domain = super::organizations::get_organization_domain(store, org_id).await?;
+    if let Some(domain) = &domain {
+        let backfill = domain.clone();
+        if let Err(e) = store
+            .modify::<UserDoc, _>(user_id, move |data| {
+                data.org_domain = Some(backfill.clone());
+            })
+            .await
+        {
+            tracing::warn!(user_id, error = %e, "failed to backfill user org_domain");
+        }
+    }
+    Ok(domain)
 }
 
 /// Get multiple users by ID in a single query.
