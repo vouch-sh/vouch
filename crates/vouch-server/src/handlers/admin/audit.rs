@@ -725,6 +725,7 @@ mod tests {
             email: "target@example.com".to_string(),
             name: None,
             org_id: None,
+            org_domain: None,
             is_org_admin: false,
             active: true,
             external_id: None,

@@ -342,14 +342,14 @@ pub(crate) async fn exchange_authorization_code(
     )
     .await?;
 
-    // Snapshot org domain at session creation so federation claims survive
-    // later changes to the user's organization membership.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| ServiceError::Internal(e.to_string()))?
+        }
+        None => None,
     };
 
     // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS).

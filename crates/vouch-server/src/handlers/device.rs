@@ -507,13 +507,18 @@ pub(crate) async fn device_token(
                     OAuthError::invalid_grant(),
                 ));
             }
-            let org_domain = match user.org_id {
-                Some(org_id) => db::get_organization_domain(&state.store, &org_id)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to load organization domain for device grant: {e}");
-                        db_error()
-                    })?,
+            let org_domain = match user.org_id.as_deref() {
+                Some(org_id) => db::get_user_org_domain(
+                    &state.store,
+                    &user.id,
+                    org_id,
+                    user.org_domain.as_deref(),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to load organization domain for device grant: {e}");
+                    db_error()
+                })?,
                 None => None,
             };
 

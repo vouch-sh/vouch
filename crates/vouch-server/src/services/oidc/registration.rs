@@ -1614,12 +1614,15 @@ pub async fn delete_client_configuration(
     // client whose owning user has no org of their own.
     let user_org_domain = if let Some(user_id) = client.user_id.as_deref()
         && let Ok(Some(user)) = db::get_user_by_id(&state.store, user_id).await
-        && let Some(org_id) = user.org_id
+        && let Some(org_id) = user.org_id.as_deref()
     {
-        db::get_organization_domain(&state.store, &org_id)
-            .await
-            .ok()
-            .flatten()
+        match user.org_domain.clone() {
+            Some(domain) => Some(domain),
+            None => db::get_organization_domain(&state.store, org_id)
+                .await
+                .ok()
+                .flatten(),
+        }
     } else {
         None
     };

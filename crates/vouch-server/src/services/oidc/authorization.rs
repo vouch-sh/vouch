@@ -1229,6 +1229,7 @@ mod tests {
             email: format!("{}@example.com", id),
             name: Some("Test User".to_string()),
             org_id: org_id.map(String::from),
+            org_domain: None,
             is_org_admin: false,
             active: true,
             external_id: None,

@@ -551,6 +551,59 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
     );
 }
 
+/// Same assertion as above, but for a SCIM-provisioned user: `create_scim_user`
+/// sets `org_domain` at creation, unlike `create_user_in_org` (used by
+/// every other test in this file), which leaves it unset and forces the
+/// fallback lookup. Both paths must stamp the same audit `email_domain`.
+#[tokio::test]
+async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("scim-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = db::create_scim_user(
+        &harness.state.store,
+        Some(&org.id),
+        "scim-member@scim-audit.example.com",
+        Some("SCIM Member"),
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create SCIM user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let rows = token_issued_events(&harness, &user.id).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the grant must write exactly one oauth_token_issued row"
+    );
+    assert_eq!(
+        rows[0].email_domain.as_deref(),
+        Some("scim-audit.example.com"),
+        "a stored org_domain must produce the same audit stamp as the fallback path"
+    );
+}
+
 /// A posture-denied grant records `login_failed`, never `login_success` —
 /// temporal step-up policies treat `login_success` as proof of a completed,
 /// policy-compliant hardware login, so the denied attempt must not refresh

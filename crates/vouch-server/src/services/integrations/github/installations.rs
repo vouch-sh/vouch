@@ -437,6 +437,7 @@ mod tests {
             email: "u@example.com".to_string(),
             name: None,
             org_id: org_id.map(String::from),
+            org_domain: None,
             is_org_admin: is_admin,
             active: true,
             external_id: None,

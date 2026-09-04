@@ -20,6 +20,7 @@
 //! - [`oauth_secrets`] — OAuth client secret cap/floor OCC invariants.
 //! - [`occ_modify`] — OCC read-modify-write conversions: every mutation path uses `store.modify`, not blind get+update.
 //! - [`oidc_state`] — Upstream OIDC login state: lifecycle plus atomic consume / concurrent-replay coverage.
+//! - [`org_domain`] — `UserDoc.org_domain`: populated by both production writers, resolved and lazily backfilled by `get_user_org_domain`.
 //! - [`scim_filters`] — SCIM filter parsing and application-side co/sw matching, including multibyte input.
 //! - [`scim_groups`] — SCIM group lifecycle and membership.
 //! - [`scim_provisioning`] — SCIM user creation: duplicate/uniqueness handling, in-transaction domain-ownership validation, deterministic IDs, cross-backend races.
@@ -114,6 +115,7 @@ mod oauth_clients;
 mod oauth_secrets;
 mod occ_modify;
 mod oidc_state;
+mod org_domain;
 mod scim_filters;
 mod scim_groups;
 mod scim_provisioning;

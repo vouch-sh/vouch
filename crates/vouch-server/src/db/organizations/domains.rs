@@ -1939,6 +1939,7 @@ mod tests {
             email: crate::email::Email::new(email),
             name: None,
             org_id: Some(org.id.clone()),
+            org_domain: Some(org.domain.clone()),
             is_org_admin: false,
             active: true,
             external_id: None,
