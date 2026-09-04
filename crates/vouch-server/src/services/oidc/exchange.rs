@@ -367,7 +367,19 @@ pub(crate) async fn exchange_token(
             params.client_id,
             params.audience,
         )
-        .await?;
+        .await
+        // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+        // MUST be reported with the invalid_request error code. The policy
+        // engine answers access_denied for every decision point (the login
+        // path keeps that code), so remap here, at the only exchange caller,
+        // preserving the policy name and remediation in the description.
+        .map_err(|e| match e {
+            ServiceError::OAuth {
+                code: OAuthErrorCode::AccessDenied,
+                description,
+            } => ServiceError::oauth(OAuthErrorCode::InvalidRequest, description),
+            other => other,
+        })?;
     }
 
     let subject_email = &subject_user.email;
@@ -492,8 +504,10 @@ pub(crate) async fn exchange_token(
     // gate the fork on the subject token's hardware verification level.
     if params.requested_token_type == Some(RequestedTokenType::IdToken) {
         if !subject_decoded.hardware_verification().hardware_verified() {
+            // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+            // MUST be reported with the invalid_request error code.
             return Err(ServiceError::oauth(
-                OAuthErrorCode::AccessDenied,
+                OAuthErrorCode::InvalidRequest,
                 "ID token exchange requires a hardware-verified subject token",
             ));
         }

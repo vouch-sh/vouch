@@ -1578,7 +1578,9 @@ async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "access_denied");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" MUST
+    // yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 
     // Regression guard: the same subject token must still work for an
     // access-token exchange. The hardware gate is specific to ID-token
