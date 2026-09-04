@@ -374,18 +374,6 @@ pub(crate) async fn github_connect_page(
         Err(e) => return error_response(e),
     };
 
-    // Connecting the GitHub App mutates org-wide state; require a session
-    // backed by a key ceremony, the same bar as every other org-admin write.
-    // A bootstrap (IdP-only) session asserts at /login first.
-    if !session.hardware_verified {
-        tracing::warn!(
-            target: "security",
-            user_id = %user.id,
-            "Refusing GitHub admin action: session is not hardware-verified"
-        );
-        return Redirect::to("/login").into_response();
-    }
-
     // Get existing connected accounts
     let connected_accounts = service
         .get_org_installations(org_id)
@@ -437,7 +425,6 @@ pub(crate) async fn github_connect_page(
         user_email: Some(user.email),
         has_org: user.org_id.is_some(),
         is_org_admin: user.is_org_admin,
-        hardware_verified: session.hardware_verified,
     };
 
     GitHubConnectTemplate {
@@ -771,18 +758,6 @@ pub(crate) async fn github_reconnect(
         Ok(org_id) => org_id.to_string(),
         Err(e) => return error_response(e),
     };
-
-    // Connecting the GitHub App mutates org-wide state; require a session
-    // backed by a key ceremony, the same bar as every other org-admin write.
-    // A bootstrap (IdP-only) session asserts at /login first.
-    if !session.hardware_verified {
-        tracing::warn!(
-            target: "security",
-            user_id = %user.id,
-            "Refusing GitHub admin action: session is not hardware-verified"
-        );
-        return Redirect::to("/login").into_response();
-    }
 
     // Reconnect the installation
     match service

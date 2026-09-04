@@ -183,10 +183,11 @@ mod tests {
         );
     }
 
-    /// Client secrets outlive the session that mints them, so the portal is
-    /// closed to a session that never ran a key ceremony.
+    /// The upstream IdP is the trust root for the browser: a session minted
+    /// by IdP sign-in alone (no FIDO2 ceremony) uses the applications portal
+    /// like any other signed-in session.
     #[tokio::test]
-    async fn bootstrap_session_cannot_reach_the_applications_portal() {
+    async fn bootstrap_session_uses_the_applications_portal() {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "bootstrap-apps@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -204,31 +205,23 @@ mod tests {
         let cookie = format!("__Host-vouch_session={token}");
 
         let resp = http_get_full(&app, "/applications", &[("Cookie", &cookie)]).await;
-        assert!(
-            resp.status.is_redirection(),
-            "an unverified session must be sent to assert, got {}",
-            resp.status
-        );
         assert_eq!(
-            resp.headers
-                .get("location")
-                .expect("redirect location")
-                .to_str()
-                .expect("ascii location"),
-            "/login"
+            resp.status,
+            axum::http::StatusCode::OK,
+            "a signed-in session reads the portal without a key ceremony"
         );
 
         let resp = crate::test_utils::http_post_form_full(
             &app,
             "/applications/new",
-            "name=evil&redirect_uris=https://evil.example.com/cb",
+            "name=portal-app&application_type=web&access_scope=personal&redirect_uris=https://app.example.com/cb",
             &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
         )
         .await;
-        assert!(
-            resp.status.is_redirection(),
-            "an unverified session must not register an application, got {}",
-            resp.status
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "a signed-in session registers an application without a key ceremony"
         );
     }
 }

@@ -543,9 +543,9 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
             .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // A returning user is sent to `/login` to assert; the exploit ignores
-    // the redirect and drives `/enroll/keys` directly with the issued
-    // cookie, which the bootstrap session still permits for key management.
+    // A direct web sign-in (no CLI waiting) lands on the keys page; the
+    // bootstrap session permits key management, and the exploit drives the
+    // DELETE endpoint with the issued cookie.
     let location = resp
         .headers()
         .get(header::LOCATION)
@@ -554,8 +554,8 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
         .expect("ascii location")
         .to_string();
     assert_eq!(
-        location, "/login",
-        "direct returning-user sign-in must redirect to /login to assert, got {location}"
+        location, "/enroll/keys",
+        "direct returning-user sign-in lands on the keys page, got {location}"
     );
 
     // Extract the session cookie value the handler just issued.

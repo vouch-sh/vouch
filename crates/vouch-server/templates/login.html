@@ -35,11 +35,6 @@
         <p class="text-gray-400 text-xs mt-6">
             {{ self.tr("login-no-account-prefix") }} <a href="/enroll/start" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("login-enroll-now") }}</a>
         </p>
-        {% if auth.authenticated %}
-        <p class="text-gray-400 text-xs mt-2">
-            <a href="/enroll/keys" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("login-lost-key-link") }}</a>
-        </p>
-        {% endif %}
     </div>
 </div>
 <div id="login-config" data-rp-id="{{ rp_id }}" {% if pending_auth.is_some() %}data-pending-auth="{{ pending_auth.as_ref().unwrap() }}"{% endif %} hidden></div>

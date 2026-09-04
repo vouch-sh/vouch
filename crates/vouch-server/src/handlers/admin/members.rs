@@ -731,10 +731,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bootstrap_admin_session_is_sent_to_assert_not_shown_the_page() {
-        // The page must not render controls its own POSTs would refuse. An
-        // unverified org admin is sent to /login to touch their key, the same
-        // answer the GitHub admin flows give.
+    async fn test_bootstrap_admin_session_sees_the_page() {
+        // The upstream IdP is the trust root for the browser: an org-admin
+        // session minted by IdP sign-in alone (no FIDO2 ceremony) reads the
+        // members page like any other signed-in admin.
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
@@ -755,26 +755,18 @@ mod tests {
             crate::test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))])
                 .await;
 
-        assert!(
-            resp.status.is_redirection(),
-            "an unverified admin must be redirected, got {}",
-            resp.status
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "a signed-in admin reads the page without a key ceremony"
         );
-        let location = resp
-            .headers
-            .get("location")
-            .expect("redirect location")
-            .to_str()
-            .expect("ascii location");
-        assert_eq!(location, "/login");
     }
 
     #[tokio::test]
-    async fn test_bootstrap_admin_session_cannot_promote() {
-        // The OrgAdmin extractor refuses an org-admin session minted by
-        // upstream IdP sign-in alone (no FIDO2 ceremony): granting persistent
-        // admin to another account is an org-wide write and takes the same
-        // bar as credential issuance.
+    async fn test_bootstrap_admin_session_can_promote() {
+        // Org-admin writes take IdP-backed sign-in, not a key ceremony: the
+        // browser trust root is the upstream IdP, and hardware proof gates
+        // credential issuance and key deletion instead.
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
@@ -804,19 +796,15 @@ mod tests {
 
         assert_eq!(
             status,
-            StatusCode::FORBIDDEN,
-            "an unverified session must not promote members: {body}"
-        );
-        assert!(
-            body.contains("hardware_required"),
-            "the refusal must name the missing proof: {body}"
+            StatusCode::SEE_OTHER,
+            "a signed-in admin promotes without a key ceremony: {body}"
         );
 
-        let unchanged = crate::db::get_user_by_id(&state.store, &target.id)
+        let promoted = crate::db::get_user_by_id(&state.store, &target.id)
             .await
             .expect("target lookup")
             .expect("target exists");
-        assert!(!unchanged.is_org_admin, "target must remain a member");
+        assert!(promoted.is_org_admin, "target must now be an admin");
     }
 
     #[tokio::test]

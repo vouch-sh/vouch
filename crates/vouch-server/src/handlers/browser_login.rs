@@ -353,35 +353,40 @@ pub(crate) async fn login_page(
     }) || device_auth_pending;
 
     if !requires_reauth {
-        // Leave /login only when the session would satisfy the gate
-        // /oauth/authorize itself applies. `auth.authenticated` is the wrong
-        // question here: an enrollment bootstrap session (upstream IdP
-        // sign-in, no FIDO2) holds a valid cookie but is not
-        // hardware-verified — deciding from it bounced such sessions to an
-        // endpoint that refuses them, consuming the single-use pending id on
-        // the way (#1168). Web sign-in routes returning users here precisely
-        // to assert, so a session the gate refuses gets the form: on
-        // NeedsAuth, and on a store failure too, where rendering the form
-        // needlessly costs one touch but redirecting could strand the flow.
-        let session_token = jar
-            .get(vouch_common::SESSION_COOKIE_NAME)
-            .map(|c| c.value());
-        let authorized = match check_session_for_authorization(&state, session_token).await {
-            Ok(AuthorizationSessionState::Authenticated { .. }) => true,
-            Ok(AuthorizationSessionState::NeedsAuth) => false,
-            Err(e) => {
-                tracing::error!("Session check failed at /login; rendering the form: {e}");
-                false
-            }
-        };
-        if authorized {
-            if let Some(ref pending_id) = query.pending_auth {
+        if let Some(ref pending_id) = query.pending_auth {
+            // Bounce back to /oauth/authorize only when the gate that endpoint
+            // applies would accept the session. `auth.authenticated` is the
+            // wrong question here: an enrollment bootstrap session (upstream
+            // IdP sign-in, no FIDO2) holds a valid cookie but is not
+            // hardware-verified, so deciding from it bounced the user to an
+            // endpoint that refuses the session — consuming the single-use
+            // pending id on the way (#1168). Asking the same predicate keeps
+            // the two endpoints from disagreeing. NeedsAuth falls through to
+            // the assertion form; so does a store failure, where rendering the
+            // form needlessly costs one touch but redirecting could strand
+            // the flow.
+            let session_token = jar
+                .get(vouch_common::SESSION_COOKIE_NAME)
+                .map(|c| c.value());
+            let authorized = match check_session_for_authorization(&state, session_token).await {
+                Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+                Ok(AuthorizationSessionState::NeedsAuth) => false,
+                Err(e) => {
+                    tracing::error!("Session check failed at /login; rendering the form: {e}");
+                    false
+                }
+            };
+            if authorized {
                 return axum::response::Redirect::to(&format!(
                     "/oauth/authorize?pending_auth={}",
                     urlencoding::encode(pending_id)
                 ))
                 .into_response();
             }
+        } else if get_auth_context(&state, &jar).await.authenticated {
+            // Without a pending authorization a signed-in user has nothing to
+            // do here — IdP sign-in is the whole bar for the browser UI, so a
+            // bootstrap session goes home like any other.
             return axum::response::Redirect::to("/").into_response();
         }
     }
@@ -1101,11 +1106,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_login_page_shows_form_for_bootstrap_session_no_pending() {
-        // Web sign-in sends a returning user here with a bootstrap
-        // (NotVerified) session precisely to assert. Redirecting them to `/`
-        // because the cookie looks authenticated would skip the ceremony the
-        // redirect exists for.
+    async fn test_login_page_redirects_bootstrap_session_home_no_pending() {
+        // Without a pending authorization a signed-in user has nothing to do
+        // at /login: IdP sign-in is the whole bar for the browser UI, so a
+        // bootstrap (NotVerified) session goes home like a verified one.
         let (app, state) = crate::test_utils::test_app().await;
 
         let user =
@@ -1130,13 +1134,18 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            resp.status,
-            axum::http::StatusCode::OK,
-            "an unverified session must get the assertion form, got {} with location {:?}",
-            resp.status,
-            resp.headers.get("location")
+        assert!(
+            resp.status.is_redirection(),
+            "a signed-in session skips the form, got {}",
+            resp.status
         );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/");
     }
 
     #[tokio::test]
