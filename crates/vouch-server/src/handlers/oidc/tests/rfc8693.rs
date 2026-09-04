@@ -585,6 +585,49 @@ async fn test_rfc8693_unsupported_requested_token_type_rejected() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_requested_token_type_jwt_rejected() {
+    // RFC 8693 Section 2.1: `jwt` is accepted as a subject_token_type but is
+    // not a type this server issues, so requesting it is rejected rather than
+    // silently substituted with an access token (Section 2.2.1 requires
+    // `issued_token_type` to name what was actually issued).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-jwt-requested@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type=urn:ietf:params:oauth:token-type:jwt"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "requested_token_type=jwt should be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Unsupported requested_token_type")),
+        "description should name the parameter: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_actor_token_delegation_chain() {
     // RFC 8693 Section 2.1: Token exchange with actor token produces nested `act` claims.
     let (app, state) = test_app().await;

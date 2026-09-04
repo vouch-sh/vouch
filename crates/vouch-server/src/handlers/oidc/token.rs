@@ -17,7 +17,7 @@ use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{
     ScopeSet,
     client_credentials::exchange_client_credentials,
-    exchange::{ActorToken, SubjectToken, TokenExchangeParams, TokenType, exchange_token},
+    exchange::{ActorToken, RequestedTokenType, SubjectToken, TokenExchangeParams, exchange_token},
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
@@ -1059,7 +1059,7 @@ struct ExchangeTokens<'a> {
     /// `actor_token` + `actor_token_type`, present together or not at all.
     actor: Option<ActorToken<'a>>,
     /// `requested_token_type`, OPTIONAL.
-    requested_token_type: Option<TokenType>,
+    requested_token_type: Option<RequestedTokenType>,
 }
 
 impl<'a> ExchangeTokens<'a> {
@@ -1071,22 +1071,15 @@ impl<'a> ExchangeTokens<'a> {
     /// server does not accept, or a token and type that did not arrive
     /// together.
     fn from_request(params: &'a TokenExchangeRequestParams) -> ServiceResult<Self> {
-        let requested_token_type = match params.requested_token_type.as_deref() {
-            Some(urn) => Some(TokenType::parse(urn).ok_or_else(|| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "Unsupported requested_token_type",
-                )
-            })?),
-            None => None,
-        };
         Ok(Self {
             subject: SubjectToken::new(&params.subject_token, &params.subject_token_type)?,
             actor: ActorToken::from_params(
                 params.actor_token.as_ref(),
                 params.actor_token_type.as_deref(),
             )?,
-            requested_token_type,
+            requested_token_type: RequestedTokenType::from_param(
+                params.requested_token_type.as_deref(),
+            )?,
         })
     }
 }
