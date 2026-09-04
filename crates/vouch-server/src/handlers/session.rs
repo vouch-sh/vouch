@@ -36,10 +36,6 @@ pub(crate) struct AuthContext {
     /// Whether the user is an organization admin.
     /// Used to show/hide org admin features like connecting GitHub.
     pub is_org_admin: bool,
-    /// Whether a FIDO2 ceremony backs this session. An enrollment bootstrap
-    /// session (upstream IdP sign-in, no assertion) is authenticated but not
-    /// verified, and pages that offer privileged actions gate on this.
-    pub hardware_verified: bool,
 }
 
 impl AuthContext {
@@ -52,7 +48,6 @@ impl AuthContext {
             user_email: None,
             has_org: false,
             is_org_admin: false,
-            hardware_verified: false,
         }
     }
 }
@@ -601,11 +596,9 @@ pub(crate) async fn load_active_user(
     Ok(user)
 }
 
-/// Extract authenticated user, their org_id, and the validated token.
+/// Extract authenticated user and their org_id.
 ///
-/// Returns `(user, org_id, token)` or an error if not authenticated or no
-/// org. The token is returned so callers can gate on its claims (e.g.
-/// `hardware_verified`) without a second extraction.
+/// Returns `(user, org_id)` or an error if not authenticated or no org.
 pub(crate) async fn extract_user_with_org(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -613,7 +606,7 @@ pub(crate) async fn extract_user_with_org(
     method: &str,
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
-) -> Result<(db::User, String, ValidatedResourceToken), ServiceError> {
+) -> Result<(db::User, String), ServiceError> {
     let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
     let user = load_active_user(state, &token.sub).await?;
 
@@ -625,15 +618,16 @@ pub(crate) async fn extract_user_with_org(
         )
     })?;
 
-    Ok((user, org_id, token))
+    Ok((user, org_id))
 }
 
 /// Extract and validate an org admin from the access token.
 ///
-/// Returns the user and their org_id if they are an org admin holding a
-/// hardware-verified session. Reuses `extract_user_with_org` for token
-/// validation and the active-user lookup, then adds the admin-role and
-/// hardware checks.
+/// Returns the user and their org_id if they are an org admin. Reuses
+/// `extract_user_with_org` for token validation and the active-user lookup,
+/// then adds the admin-role check. No key ceremony is demanded: the upstream
+/// IdP is the trust root for the browser and admin surfaces, while hardware
+/// proof gates credential issuance and key deletion.
 pub(crate) async fn extract_org_admin(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -642,7 +636,7 @@ pub(crate) async fn extract_org_admin(
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
 ) -> Result<(db::User, String), ServiceError> {
-    let (user, org_id, token) =
+    let (user, org_id) =
         extract_user_with_org(state, headers, jar, method, uri, client_cert).await?;
 
     if !user.is_org_admin {
@@ -650,26 +644,6 @@ pub(crate) async fn extract_org_admin(
             StatusCode::FORBIDDEN,
             "forbidden",
             "Organization admin access required",
-        ));
-    }
-
-    // Organization administration mutates org-wide state (SCIM tokens,
-    // policies, issuer keys, membership), so it takes the same bar as
-    // credential issuance: a session backed by a key ceremony. An enrollment
-    // bootstrap session authenticates the person via the upstream IdP, never
-    // the hardware. Web sign-in routes every returning user through an
-    // assertion, so only a session that skipped every ceremony is refused.
-    if !token.hardware_verified {
-        tracing::warn!(
-            target: "security",
-            user_id = %user.id,
-            path = %uri,
-            "Refusing org-admin action: session is not hardware-verified"
-        );
-        return Err(ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "hardware_required",
-            "Organization admin actions require a security-key-verified session - sign in with your security key and try again",
         ));
     }
 
@@ -765,7 +739,6 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
         user_email,
         has_org,
         is_org_admin,
-        hardware_verified: decoded.hardware_verification().hardware_verified(),
     }
 }
 

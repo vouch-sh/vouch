@@ -324,10 +324,10 @@ async fn test_create_scim_token_cert_bound_token_with_wrong_cert_returns_401() {
 }
 
 #[tokio::test]
-async fn test_bootstrap_admin_session_cannot_mint_scim_token() {
-    // An org admin session minted by upstream IdP sign-in alone (no FIDO2
-    // ceremony) must not mint a SCIM token — a long-lived credential that
-    // would outlive any later step-up. Same bar as credential issuance.
+async fn test_bootstrap_admin_session_can_mint_scim_token() {
+    // Org-admin writes take IdP-backed sign-in, not a key ceremony: the
+    // upstream IdP is the trust root for admin surfaces, and hardware proof
+    // gates credential issuance and key deletion instead.
     let (app, state) = test_app().await;
     let org = create_test_org(&state.store, "example.com").await;
     let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
@@ -355,12 +355,12 @@ async fn test_bootstrap_admin_session_cannot_mint_scim_token() {
 
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "an unverified session must not mint SCIM tokens: {body}"
+        StatusCode::OK,
+        "a signed-in admin mints a SCIM token without a key ceremony: {body}"
     );
     assert!(
-        body.contains("hardware_required"),
-        "the refusal must name the missing proof: {body}"
+        body.contains("token"),
+        "the response must carry the minted token: {body}"
     );
 }
 

@@ -8,7 +8,7 @@
 //! - EKS (via AWS IAM and EKS Access Entries)
 
 use crate::db;
-use crate::handlers::extractors::AttestedSession;
+use crate::handlers::extractors::SignedInSession;
 use crate::handlers::session::{AuthContext, extract_session_from_cookie};
 use crate::{AppState, impl_template_response};
 use askama::Template;
@@ -45,12 +45,9 @@ impl_template_response!(IntegrationsTemplate);
 pub(crate) async fn integrations_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    session: AttestedSession,
+    session: SignedInSession,
 ) -> Response {
-    // Every action on this page — connecting or managing the GitHub App —
-    // already requires a ceremony, so a session that has not asserted would
-    // read a status screen whose every button turns it away.
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     // Check if GitHub App is configured on the server
     let github_configured = state.github_app.is_some();

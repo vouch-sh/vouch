@@ -24,7 +24,7 @@ use super::validate::{
     validate_update_format,
 };
 use super::{generate_client_secret, parse_redirect_uris, parse_resource_uris};
-use crate::handlers::extractors::AttestedSession;
+use crate::handlers::extractors::SignedInSession;
 use crate::handlers::hash_token;
 use crate::infra::i18n::Tr;
 
@@ -57,9 +57,9 @@ fn validation_error_response(err: &AppValidationError, back_url: String) -> Resp
 /// GET /applications
 pub(crate) async fn list_applications_page(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
     let applications = match db::get_oauth_clients_for_user(&state.store, user_id).await {
@@ -79,8 +79,8 @@ pub(crate) async fn list_applications_page(
 
 /// Show create application form.
 /// GET /applications/new
-pub(crate) async fn create_application_page(session: AttestedSession) -> Response {
-    let AttestedSession { auth } = session;
+pub(crate) async fn create_application_page(session: SignedInSession) -> Response {
+    let SignedInSession { auth } = session;
 
     let user_has_org = auth.has_org;
     ApplicationCreateTemplate { auth, user_has_org }.into_response()
@@ -90,10 +90,10 @@ pub(crate) async fn create_application_page(session: AttestedSession) -> Respons
 /// POST /applications/new
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -251,10 +251,10 @@ pub(crate) async fn create_application_form(
 /// GET /applications/:id
 pub(crate) async fn detail_application_page(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -333,11 +333,11 @@ pub(crate) async fn detail_application_page(
 /// POST /applications/:id
 pub(crate) async fn update_application_form(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Path(app_id): Path<String>,
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -481,10 +481,10 @@ pub(crate) async fn update_application_form(
 /// POST /applications/:id/delete
 pub(crate) async fn delete_application_form(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -519,10 +519,10 @@ pub(crate) async fn delete_application_form(
 /// POST /applications/:id/secrets
 pub(crate) async fn add_secret_form(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Path(app_id): Path<String>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
@@ -616,10 +616,10 @@ pub(crate) async fn add_secret_form(
 /// POST /applications/:id/secrets/:secret_id/delete
 pub(crate) async fn delete_secret_form(
     State(state): State<Arc<AppState>>,
-    session: AttestedSession,
+    session: SignedInSession,
     Path((app_id, secret_id)): Path<(String, String)>,
 ) -> Response {
-    let AttestedSession { auth } = session;
+    let SignedInSession { auth } = session;
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 

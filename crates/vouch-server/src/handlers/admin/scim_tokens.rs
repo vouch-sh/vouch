@@ -338,9 +338,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_for_unverified_admin_redirects_to_login() {
-        // An admin session minted by upstream IdP sign-in alone (no FIDO2
-        // ceremony) is sent to assert before seeing token-management buttons.
+    async fn page_renders_for_unverified_admin() {
+        // The upstream IdP is the trust root for the browser: an admin
+        // session minted by IdP sign-in alone (no FIDO2 ceremony) reads the
+        // token-management page like any other signed-in admin.
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
@@ -360,8 +361,11 @@ mod tests {
 
         let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
 
-        assert!(resp.status.is_redirection(), "got {}", resp.status);
-        assert_eq!(location(&resp), "/login");
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "a signed-in admin reads the page without a key ceremony"
+        );
     }
 
     #[tokio::test]
