@@ -178,5 +178,20 @@
     "verifier_id": "",
     "verifier_name": "Mike Bishop (WIT AD)",
     "update_date": "2025-06-13 18:04:51"
+  },
+  {
+    "errata_id": "9162",
+    "doc-id": "RFC9110",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "5.2",
+    "orig_text": "When a field name is repeated within a section, its combined\r\n   field value consists of the list of corresponding field line values\r\n   within that section, concatenated in order, with each field line\r\n   value separated by a comma.\r\n\r\n   For example, this section:\r\n\r\n   Example-Field: Foo, Bar\r\n   Example-Field: Baz\r\n\r\n   contains two field lines, both with the field name \"Example-Field\".\r\n   The first field line has a field line value of \"Foo, Bar\", while the\r\n   second field line value is \"Baz\".  The field value for \"Example-\r\n   Field\" is the list \"Foo, Bar, Baz\".",
+    "correct_text": "When a field name is repeated within a section, its combined\r\n   field value consists of the list of corresponding field line values\r\n   within that section, concatenated in order, with each field line\r\n   value separated by a comma SP (\", \").\r\n\r\n   For example, this section:\r\n\r\n   Example-Field: Foo, Bar\r\n   Example-Field: Baz\r\n\r\n   contains two field lines, both with the field name \"Example-Field\".\r\n   The first field line has a field line value of \"Foo, Bar\", while the\r\n   second field line value is \"Baz\".  The field value for \"Example-\r\n   Field\" is the list \"Foo, Bar, Baz\".",
+    "notes": "The original text says, \"with each field line value separated by a comma\", but in the example, it shows the field line values being separated by a comma SP (\", \") instead of just a comma (\",\"). Hence, either the given definition of \"combined field value\" is incorrect, or the example intended to demonstrate it is incorrect.",
+    "submit_date": "2026-09-01",
+    "submitter_name": "Julian Shepherd",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2026-09-02 18:59:03"
   }
 ]
