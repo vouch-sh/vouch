@@ -263,18 +263,15 @@ pub(crate) async fn register_complete(
                 success: false,
                 error_code: "state_already_used",
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::KeyRegistrationReplay,
                     Some(&checked.reg_state.user_id.to_string()),
                     Some(&checked.reg_state.user_name),
                     &audit_data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
-            }
+                .await;
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",

@@ -11,8 +11,6 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
-use serde::Serialize;
-
 use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
 use crate::crypto::document_crypto::DocumentCrypto;
@@ -93,7 +91,7 @@ macro_rules! audit_event_kinds {
     ($($(#[$attr:meta])* $variant:ident => $name:literal, $retention:ident, $group:ident;)+) => {
         /// Every audit event type the server writes.
         ///
-        /// This is the single registry: [`AuditStore::insert_event`] only
+        /// This is the single registry: [`AuditStore::record_event`] only
         /// accepts these kinds, the cleanup task derives retention from
         /// [`Self::retention`], and the operator documentation
         /// (`docs/src/admin/audit.md`) is generated from [`Self::group`] plus
@@ -323,89 +321,82 @@ impl AuditStore {
         Some(self.crypto.hmac_index(canonical.as_str()))
     }
 
-    /// Insert a new audit event with a typed `data` payload.
+    /// Record an audit event with a typed `data` payload; best-effort.
     ///
     /// `email` is masked to domain-only and HMAC-hashed for correlation.
     /// `data` must be one of the vetted payload structs in
     /// [`crate::db::documents::audit`] — [`AuditData`] is sealed there, so
     /// an ad hoc `serde_json::json!` literal cannot be passed.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization or the database write fails.
-    pub async fn insert_event<D: AuditData>(
+    /// An audit write must never fail the operation it records, so a
+    /// failed write is logged with the wire `event_type` and swallowed.
+    pub async fn record_event<D: AuditData>(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
         email: Option<&str>,
         data: &D,
-    ) -> Result<String> {
-        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
-        self.insert_event_json(kind, user_id, email, &data_json)
-            .await
-    }
-
-    /// Crate-internal raw-JSON insert path behind [`Self::insert_event`].
-    ///
-    /// `pub(super)` because only two write sites assemble their payload as
-    /// a `serde_json::Value`: `record_auth_event`'s geo-field merge in
-    /// `db/config.rs` and the flattened envelope in
-    /// [`Self::log_credential_event`]. Everything outside `db` must go
-    /// through a typed [`AuditData`] payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database write fails.
-    pub(super) async fn insert_event_json(
-        &self,
-        kind: AuditEventKind,
-        user_id: Option<&str>,
-        email: Option<&str>,
-        data_json: &str,
-    ) -> Result<String> {
+    ) {
         let email_domain = email.and_then(crate::email::Email::domain_of);
         let email_hmac = email.and_then(|e| self.email_hmac(e));
-
-        self.insert_event_raw(
+        self.record_best_effort(
             kind,
             user_id,
             email_domain.as_deref(),
             email_hmac.as_deref(),
-            jiff::Timestamp::now(),
-            data_json,
+            data,
         )
-        .await
+        .await;
     }
 
-    /// Insert a new audit event with an explicit `email_domain`, bypassing
-    /// the email→domain derivation in [`Self::insert_event`].
+    /// Record an audit event with an explicit `org_domain`, bypassing the
+    /// email→domain derivation in [`Self::record_event`]; best-effort.
     ///
     /// Used by write sites that act on behalf of an organization rather
     /// than a specific user — SCIM operations, org-lifecycle cleanup
-    /// events — and so have no email to derive a domain from. Without
-    /// this, those events are written with a NULL `email_domain` and are
-    /// invisible to org-scoped audit reads.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization or the database write fails.
-    pub async fn insert_event_with_domain<D: AuditData>(
+    /// events — and so have no email to derive a domain from: the org's
+    /// primary email domain is stamped into `email_domain` instead.
+    /// Without it, those events are written with a NULL `email_domain`
+    /// and are invisible to org-scoped audit reads.
+    pub async fn record_event_with_domain<D: AuditData>(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        org_domain: Option<&str>,
+        data: &D,
+    ) {
+        self.record_best_effort(kind, user_id, org_domain, None, data)
+            .await;
+    }
+
+    /// Shared swallow-and-log behind [`Self::record_event`] and
+    /// [`Self::record_event_with_domain`] — the one place audit write
+    /// failures are formatted.
+    async fn record_best_effort<D: AuditData>(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
         email_domain: Option<&str>,
+        email_hmac: Option<&str>,
         data: &D,
-    ) -> Result<String> {
-        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
-        self.insert_event_raw(
-            kind,
-            user_id,
-            email_domain,
-            None,
-            jiff::Timestamp::now(),
-            &data_json,
-        )
-        .await
+    ) {
+        let result = match serde_json::to_string(data).context("serialize audit data payload") {
+            Ok(data_json) => self
+                .insert_event_raw(
+                    kind,
+                    user_id,
+                    email_domain,
+                    email_hmac,
+                    jiff::Timestamp::now(),
+                    &data_json,
+                )
+                .await
+                .map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = %e, event_type = kind.as_str(), "failed to write audit event");
+        }
     }
 
     /// Insert an audit event with an explicit `created_at`.
@@ -448,7 +439,7 @@ impl AuditStore {
     }
 
     /// Test-only raw-JSON insert with the email→domain/HMAC derivation of
-    /// [`Self::insert_event`]. Tests legitimately seed arbitrary, legacy,
+    /// [`Self::record_event`]. Tests legitimately seed arbitrary, legacy,
     /// and malformed payloads that no vetted [`AuditData`] struct should
     /// ever describe.
     ///
@@ -463,12 +454,21 @@ impl AuditStore {
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
-        self.insert_event_json(kind, user_id, email, data_json)
-            .await
+        let email_domain = email.and_then(crate::email::Email::domain_of);
+        let email_hmac = email.and_then(|e| self.email_hmac(e));
+        self.insert_event_raw(
+            kind,
+            user_id,
+            email_domain.as_deref(),
+            email_hmac.as_deref(),
+            jiff::Timestamp::now(),
+            data_json,
+        )
+        .await
     }
 
-    /// Shared insert path for [`Self::insert_event`],
-    /// [`Self::insert_event_with_domain`], and (test-only)
+    /// Shared insert path for [`Self::record_event`],
+    /// [`Self::record_event_with_domain`], and (test-only)
     /// [`Self::insert_event_for_test`].
     async fn insert_event_raw(
         &self,
@@ -512,11 +512,7 @@ impl AuditStore {
 
     /// Log a credential-issuance audit event: the shared envelope flattened
     /// with the kind-specific details, written under the details' registry
-    /// kind ([`CredentialAuditDetails::KIND`]).
-    ///
-    /// Best-effort: audit writes must never fail the credential operation
-    /// that already succeeded, so failures are logged and swallowed here
-    /// instead of at every call site.
+    /// kind ([`CredentialAuditDetails::KIND`]); best-effort.
     pub async fn log_credential_event<D: CredentialAuditDetails>(
         &self,
         user_id: &str,
@@ -524,31 +520,12 @@ impl AuditStore {
         envelope: CredentialAuditEnvelope,
         details: &D,
     ) {
-        #[derive(serde::Serialize)]
-        struct Payload<'a, D: Serialize> {
-            #[serde(flatten)]
-            envelope: &'a CredentialAuditEnvelope,
-            #[serde(flatten)]
-            details: &'a D,
-        }
-
-        let result = match serde_json::to_string(&Payload {
+        let payload = crate::db::documents::audit::CredentialAuditPayload {
             envelope: &envelope,
             details,
-        }) {
-            Ok(data_json) => {
-                self.insert_event_json(D::KIND, Some(user_id), Some(user_email), &data_json)
-                    .await
-            }
-            Err(e) => Err(e.into()),
         };
-        if let Err(e) = result {
-            tracing::warn!(
-                error = %e,
-                event_type = D::KIND.as_str(),
-                "failed to write credential audit event"
-            );
-        }
+        self.record_event(D::KIND, Some(user_id), Some(user_email), &payload)
+            .await;
     }
 
     /// Query audit events with optional filters.
@@ -1087,11 +1064,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_event_with_domain_stamps_domain_without_email() {
+    async fn record_event_with_domain_stamps_domain_without_email() {
         let audit = test_audit().await;
 
-        let id = audit
-            .insert_event_with_domain(
+        audit
+            .record_event_with_domain(
                 AuditEventKind::ScimOperation,
                 None,
                 Some("example.com"),
@@ -1103,9 +1080,7 @@ mod tests {
                     details: None,
                 },
             )
-            .await
-            .unwrap();
-        assert!(!id.is_empty());
+            .await;
 
         let events = audit
             .query_events(&AuditEventFilter::default())

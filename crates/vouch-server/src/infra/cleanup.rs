@@ -308,17 +308,14 @@ async fn gc_stale_additional_domains(
                 None
             }
         };
-        if let Err(e) = audit
-            .insert_event_with_domain(
+        audit
+            .record_event_with_domain(
                 db::AuditEventKind::OrgDomainExpired,
                 None,
                 org_domain.as_deref(),
                 &data,
             )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to write org_domain_expired audit event");
-        }
+            .await;
     }
     Ok(())
 }
@@ -434,17 +431,14 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 org_id: &rec.org_id,
                 reason: "consecutive_dns_recheck_failures",
             };
-            if let Err(e) = audit
-                .insert_event_with_domain(
+            audit
+                .record_event_with_domain(
                     db::AuditEventKind::OrgDomainUnverified,
                     None,
                     org_domain.as_deref(),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
-            }
+                .await;
             if let Some(label) = released_subdomain {
                 let data = OrgSubdomainCleanupData {
                     action: "release_subdomain",
@@ -452,20 +446,14 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                     org_id: &rec.org_id,
                     reason: "backing_domain_unverified",
                 };
-                if let Err(e) = audit
-                    .insert_event_with_domain(
+                audit
+                    .record_event_with_domain(
                         db::AuditEventKind::OrgSubdomainReleased,
                         None,
                         org_domain.as_deref(),
                         &data,
                     )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to write org_subdomain_released audit event"
-                    );
-                }
+                    .await;
             }
         }
         Ok(_) => {}

@@ -1382,39 +1382,35 @@ pub(crate) async fn browser_register_complete(
     // state JWT cannot be replayed within the 5-minute validity window.
     // The witness is threaded into TokenIssuanceProof below — the only
     // path to `GrantProof::EnrollmentComplete`.
-    let registration_claim = match key_svc::consume_registration_state(&state.store, &checked)
-        .await?
-    {
-        key_svc::RegistrationStateConsumed::Won(claim) => claim,
-        key_svc::RegistrationStateConsumed::Replay => {
-            tracing::warn!(
-                user_id = %checked.reg_state.user_id,
-                "browser registration state replay rejected"
-            );
-            let audit_data = crate::db::documents::audit::RegistrationReplayData {
-                flow: "browser_register",
-                success: false,
-                error_code: "state_already_used",
-            };
-            if let Err(e) = state
-                .audit
-                .insert_event(
-                    db::AuditEventKind::KeyRegistrationReplay,
-                    Some(&checked.reg_state.user_id.to_string()),
-                    Some(&checked.reg_state.user_email),
-                    &audit_data,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+    let registration_claim =
+        match key_svc::consume_registration_state(&state.store, &checked).await? {
+            key_svc::RegistrationStateConsumed::Won(claim) => claim,
+            key_svc::RegistrationStateConsumed::Replay => {
+                tracing::warn!(
+                    user_id = %checked.reg_state.user_id,
+                    "browser registration state replay rejected"
+                );
+                let audit_data = crate::db::documents::audit::RegistrationReplayData {
+                    flow: "browser_register",
+                    success: false,
+                    error_code: "state_already_used",
+                };
+                state
+                    .audit
+                    .record_event(
+                        db::AuditEventKind::KeyRegistrationReplay,
+                        Some(&checked.reg_state.user_id.to_string()),
+                        Some(&checked.reg_state.user_email),
+                        &audit_data,
+                    )
+                    .await;
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "state_already_used",
+                    Tr::new("enroll-error-registration-link-used").to_string(),
+                ));
             }
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "state_already_used",
-                Tr::new("enroll-error-registration-link-used").to_string(),
-            ));
-        }
-    };
+        };
 
     let RegistrationCompletion {
         req,

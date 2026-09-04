@@ -461,9 +461,9 @@ async fn record_denial(
         policy,
         org_id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::PolicyDenied,
             Some(user_id),
             // The email sets `email_domain`, which is how the org audit
@@ -472,10 +472,7 @@ async fn record_denial(
             Some(user_email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write policy_denied audit event");
-    }
+        .await;
 }
 
 /// The metrics label and audit policy identifier for a deny decision.

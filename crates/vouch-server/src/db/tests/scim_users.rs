@@ -470,8 +470,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
 async fn test_scim_audit_logging() {
     let (_store, audit) = test_db().await;
 
-    // Insert audit log (insert_scim_audit now uses AuditStore directly)
-    let audit_id = insert_scim_audit(
+    record_scim_audit(
         &audit,
         "CREATE",
         "User",
@@ -480,16 +479,20 @@ async fn test_scim_audit_logging() {
         Some("Created user via SCIM"),
         Some("example.com"),
     )
-    .await
-    .expect("Failed to insert audit log");
+    .await;
 
-    assert!(!audit_id.is_empty());
+    // Record another audit log without token or org domain (None is valid)
+    record_scim_audit(&audit, "DELETE", "User", "user-789", None, None, None).await;
 
-    // Insert another audit log without token or org domain (None is valid)
-    let audit_id2 = insert_scim_audit(&audit, "DELETE", "User", "user-789", None, None, None)
+    // The write is best-effort (failures are swallowed), so assert both
+    // rows landed by querying them back.
+    let events = audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..AuditEventFilter::default()
+        })
         .await
-        .expect("Failed to insert audit log");
-
-    assert!(!audit_id2.is_empty());
-    assert_ne!(audit_id, audit_id2);
+        .expect("query audit events");
+    assert_eq!(events.len(), 2, "both SCIM audit rows must be stored");
+    assert_ne!(events[0].id, events[1].id);
 }

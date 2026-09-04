@@ -187,18 +187,15 @@ pub(crate) async fn admin_create_scim_token(
         token_id: &token_id,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminCreateScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_create_scim_token audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} created SCIM token {} for org {}",
@@ -258,18 +255,15 @@ pub(crate) async fn admin_revoke_scim_token(
         token_id: &token_id,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminRevokeScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_revoke_scim_token audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} revoked SCIM token {} for org {}",

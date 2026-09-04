@@ -99,7 +99,7 @@ pub(crate) async fn list_groups(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "list",
         "Group",
@@ -108,10 +108,7 @@ pub(crate) async fn list_groups(
         Some(&format!("{{\"count\": {}}}", resources.len())),
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     Json(ScimListResponse {
         schemas: vec![urn::LIST_RESPONSE.to_string()],
@@ -248,7 +245,7 @@ pub(crate) async fn create_group(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "create",
         "Group",
@@ -257,10 +254,7 @@ pub(crate) async fn create_group(
         Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     let base_url = &state.config().base_url;
     let Ok(members) =
@@ -568,7 +562,7 @@ pub(crate) async fn patch_group(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "update",
         "Group",
@@ -577,10 +571,7 @@ pub(crate) async fn patch_group(
         None,
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     // Return updated group
     let updated = match db::get_scim_group(&state.store, &id, &auth.org_id).await {
@@ -657,7 +648,7 @@ pub(crate) async fn delete_group(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "delete",
         "Group",
@@ -666,10 +657,7 @@ pub(crate) async fn delete_group(
         Some(&serde_json::json!({"displayName": &group.display_name}).to_string()),
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     StatusCode::NO_CONTENT.into_response()
 }

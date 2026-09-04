@@ -105,42 +105,21 @@ pub struct ClientInfo {
 /// Record an authentication event via the audit store.
 ///
 /// Awaited so the row is committed before the response is sent, and
-/// best-effort: an audit write must never fail the operation it records,
-/// so failures are logged with the wire `event_type` string and swallowed.
+/// best-effort like every [`AuditStore`] write: failures are logged with
+/// the wire `event_type` and swallowed.
 pub async fn record_auth_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
-    let kind = params.event_type.kind();
-    let result = match serde_json::to_value(&params) {
-        Ok(mut value) => {
-            if let (Some(obj), Some(geo)) = (
-                value.as_object_mut(),
-                params.client.client_ip.and_then(crate::geo::lookup),
-            ) {
-                obj.insert(
-                    "country_code".to_string(),
-                    serde_json::Value::String(geo.country_code),
-                );
-                if let Some(asn) = geo.asn {
-                    obj.insert("asn".to_string(), serde_json::json!(asn));
-                }
-                if let Some(org) = geo.org_name {
-                    obj.insert("org_name".to_string(), serde_json::Value::String(org));
-                }
-            }
-            audit
-                .insert_event_json(
-                    kind,
-                    Some(&params.user_id),
-                    email.as_deref(),
-                    &value.to_string(),
-                )
-                .await
-                .map(|_| ())
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to serialize auth event: {e}")),
+    let data = crate::db::documents::audit::AuthEventData {
+        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip),
+        params: &params,
     };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, event_type = kind.as_str(), "failed to record audit event");
-    }
+    audit
+        .record_event(
+            params.event_type.kind(),
+            Some(&params.user_id),
+            email.as_deref(),
+            &data,
+        )
+        .await;
 }
 
 #[cfg(test)]

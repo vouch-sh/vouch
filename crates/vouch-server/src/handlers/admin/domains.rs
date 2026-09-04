@@ -196,18 +196,15 @@ pub(crate) async fn admin_add_domain(
                 admin_user_id: &admin.id,
                 method: None,
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainAdded,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_added audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,
@@ -360,18 +357,15 @@ pub(crate) async fn admin_verify_domain(
                 admin_user_id: &admin.id,
                 method: Some("dns_txt"),
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainVerified,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_verified audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,
@@ -439,18 +433,15 @@ pub(crate) async fn admin_remove_domain(
                 revocation_errored: errored,
                 released_subdomain: summary.released_subdomain.clone(),
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainRemoved,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_removed audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,

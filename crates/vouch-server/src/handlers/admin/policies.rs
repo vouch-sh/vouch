@@ -231,18 +231,15 @@ pub(crate) async fn toggle_preconfigured_policy(
         slug: &slug,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} {} preconfigured policy '{}'",
@@ -385,18 +382,15 @@ pub(crate) async fn create_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyCreate,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_create audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} created custom policy '{}'",
@@ -492,18 +486,15 @@ pub(crate) async fn update_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyUpdate,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_update audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} updated custom policy '{}'", admin.email, id);
 
@@ -540,18 +531,15 @@ pub(crate) async fn delete_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyDelete,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_delete audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} deleted custom policy '{}'", admin.email, id);
 
@@ -650,18 +638,15 @@ pub(crate) async fn toggle_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} {} custom policy '{}'",

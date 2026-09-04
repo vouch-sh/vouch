@@ -95,7 +95,7 @@ pub(crate) async fn list_users(
         .collect();
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "list",
         "User",
@@ -104,10 +104,7 @@ pub(crate) async fn list_users(
         Some(&format!("{{\"count\": {}}}", resources.len())),
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     Json(ScimListResponse {
         schemas: vec![urn::LIST_RESPONSE.to_string()],
@@ -270,7 +267,7 @@ pub(crate) async fn create_user(
     };
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "create",
         "User",
@@ -279,10 +276,7 @@ pub(crate) async fn create_user(
         None,
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     let base_url = &state.config().base_url;
     let scim_user = db_user_to_scim(base_url, db_user);
@@ -512,7 +506,7 @@ pub(crate) async fn patch_user(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "update",
         "User",
@@ -524,10 +518,7 @@ pub(crate) async fn patch_user(
         ),
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     // Return updated user
     let updated = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
@@ -633,7 +624,7 @@ pub(crate) async fn delete_user(
     }
 
     // Audit log
-    if let Err(e) = db::insert_scim_audit(
+    db::record_scim_audit(
         &state.audit,
         "delete",
         "User",
@@ -642,10 +633,7 @@ pub(crate) async fn delete_user(
         None,
         auth.org_domain.as_deref(),
     )
-    .await
-    {
-        tracing::warn!("Failed to record SCIM audit: {e}");
-    }
+    .await;
 
     StatusCode::NO_CONTENT.into_response()
 }

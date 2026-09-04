@@ -3,7 +3,7 @@
 //!
 //! These are serialized to JSON and stored in the unencrypted audit table.
 //! They are NOT `DocumentType` implementations — they're the typed payload
-//! behind [`AuditData`] that `AuditStore::insert_event` serializes.
+//! behind [`AuditData`] that `AuditStore::record_event` serializes.
 //!
 //! Every payload the audit write API accepts is a named struct in this
 //! file: [`AuditData`] is sealed by a module-private supertrait, so an ad
@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::db::audit::AuditEventKind;
+use crate::db::config::AuthEventParams;
 
 /// Seal for [`AuditData`]. Private to this module on purpose: a new payload
 /// type must be added here, not implemented ad hoc elsewhere in the crate.
@@ -218,7 +219,46 @@ impl_audit_data!(
     PolicyDenialData<'_>,
     OAuthUsageData,
     ScimAuditData,
+    AuthEventData<'_>,
 );
+
+/// Geolocation of the caller's IP, flattened into audit payloads.
+///
+/// Keys are omitted when the lookup produced nothing, matching the rows
+/// written before this shared struct existed.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GeoFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+}
+
+impl GeoFields {
+    /// Geo fields for the caller's IP; all-`None` when the IP is absent,
+    /// non-global, or not in the GeoIP database.
+    #[must_use]
+    pub fn from_ip(ip: Option<std::net::IpAddr>) -> Self {
+        let (country_code, asn, org_name) = crate::geo::audit_fields(ip);
+        Self {
+            country_code,
+            asn,
+            org_name,
+        }
+    }
+}
+
+/// The stored payload of an authentication event:
+/// [`AuthEventParams`] flattened with the geolocation of the client IP.
+#[derive(Debug, Serialize)]
+pub(crate) struct AuthEventData<'a> {
+    #[serde(flatten)]
+    pub params: &'a AuthEventParams,
+    #[serde(flatten)]
+    pub geo: GeoFields,
+}
 
 /// Data payload for OAuth usage audit events.
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,12 +268,8 @@ pub(crate) struct OAuthUsageData {
     #[serde(alias = "ip_address")]
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asn: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub org_name: Option<String>,
+    #[serde(flatten)]
+    pub geo: GeoFields,
 }
 
 /// Data payload for SCIM operation audit events.
@@ -264,12 +300,8 @@ pub struct CredentialAuditEnvelope {
     #[serde(alias = "ip_address")]
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asn: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub org_name: Option<String>,
+    #[serde(flatten)]
+    pub geo: GeoFields,
 }
 
 impl CredentialAuditEnvelope {
@@ -281,10 +313,24 @@ impl CredentialAuditEnvelope {
     pub fn with_client(mut self, ip: Option<std::net::IpAddr>, user_agent: Option<String>) -> Self {
         self.client_ip = ip.map(|a| a.to_string());
         self.user_agent = user_agent;
-        (self.country_code, self.asn, self.org_name) = crate::geo::audit_fields(ip);
+        self.geo = GeoFields::from_ip(ip);
         self
     }
 }
+
+/// The stored payload of a credential audit event: the shared envelope
+/// flattened with the kind-specific details, one flat JSON object per
+/// event.
+#[derive(Serialize)]
+pub(crate) struct CredentialAuditPayload<'a, D: CredentialAuditDetails> {
+    #[serde(flatten)]
+    pub envelope: &'a CredentialAuditEnvelope,
+    #[serde(flatten)]
+    pub details: &'a D,
+}
+
+impl<D: CredentialAuditDetails> sealed::Sealed for CredentialAuditPayload<'_, D> {}
+impl<D: CredentialAuditDetails> AuditData for CredentialAuditPayload<'_, D> {}
 
 /// Domain-specific fields of a credential audit event, tied at compile time
 /// to the registry kind they are written under — a payload cannot be stored
@@ -374,9 +420,9 @@ mod tests {
             "country_code": "US"
         }"#;
         let data: OAuthUsageData = serde_json::from_str(json).unwrap();
-        assert_eq!(data.country_code.as_deref(), Some("US"));
-        assert!(data.asn.is_none());
-        assert!(data.org_name.is_none());
+        assert_eq!(data.geo.country_code.as_deref(), Some("US"));
+        assert!(data.geo.asn.is_none());
+        assert!(data.geo.org_name.is_none());
     }
 
     #[test]
@@ -386,14 +432,16 @@ mod tests {
             details: None,
             client_ip: Some("8.8.8.8".to_string()),
             user_agent: None,
-            country_code: Some("US".to_string()),
-            asn: Some(15169),
-            org_name: Some("GOOGLE".to_string()),
+            geo: GeoFields {
+                country_code: Some("US".to_string()),
+                asn: Some(15169),
+                org_name: Some("GOOGLE".to_string()),
+            },
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: OAuthUsageData = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.asn, Some(15169));
-        assert_eq!(back.org_name.as_deref(), Some("GOOGLE"));
+        assert_eq!(back.geo.asn, Some(15169));
+        assert_eq!(back.geo.org_name.as_deref(), Some("GOOGLE"));
     }
 
     #[test]
@@ -403,9 +451,7 @@ mod tests {
             details: None,
             client_ip: None,
             user_agent: None,
-            country_code: None,
-            asn: None,
-            org_name: None,
+            geo: GeoFields::default(),
         };
         let json = serde_json::to_string(&data).unwrap();
         assert!(!json.contains("\"asn\""));
@@ -417,8 +463,8 @@ mod tests {
         let json = r#"{"event_type":"token_issued","success":true}"#;
         let data: CredentialAuditEnvelope = serde_json::from_str(json).unwrap();
         assert_eq!(data.event_type, "token_issued");
-        assert!(data.asn.is_none());
-        assert!(data.org_name.is_none());
+        assert!(data.geo.asn.is_none());
+        assert!(data.geo.org_name.is_none());
     }
 
     #[test]
@@ -434,15 +480,18 @@ mod tests {
         let data = CredentialAuditEnvelope {
             event_type: "token_issued".to_string(),
             agent: Some("claude-code".to_string()),
-            asn: Some(3320),
-            org_name: Some("DTAG".to_string()),
+            geo: GeoFields {
+                asn: Some(3320),
+                org_name: Some("DTAG".to_string()),
+                ..GeoFields::default()
+            },
             ..CredentialAuditEnvelope::default()
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: CredentialAuditEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.agent.as_deref(), Some("claude-code"));
-        assert_eq!(back.asn, Some(3320));
-        assert_eq!(back.org_name.as_deref(), Some("DTAG"));
+        assert_eq!(back.geo.asn, Some(3320));
+        assert_eq!(back.geo.org_name.as_deref(), Some("DTAG"));
     }
 
     /// Every typed payload must serialize to the exact JSON shape of the
@@ -783,6 +832,100 @@ mod tests {
         for (typed, literal) in cases {
             assert_eq!(typed, literal);
         }
+    }
+
+    /// The sealed auth-event and credential payloads must serialize to the
+    /// exact JSON shape the raw-JSON paths they replaced used to write
+    /// (Value equality — key order is irrelevant, every reader parses).
+    #[test]
+    fn test_auth_and_credential_payloads_match_stored_row_shapes() {
+        use crate::db::config::{AuthEventType, ClientInfo};
+        use serde_json::json;
+
+        // Without geo: identical to serde_json::to_value(AuthEventParams),
+        // ClientInfo flattened, client_id/idp_issuer omitted when None.
+        let params = AuthEventParams {
+            user_id: "u1".to_string(),
+            event_type: AuthEventType::LoginFailed,
+            authenticator_id: Some("auth-1".to_string()),
+            client: ClientInfo {
+                client_ip: Some("192.0.2.7".parse().unwrap()),
+                user_agent: Some("vouch-cli/1.0".to_string()),
+                ..ClientInfo::default()
+            },
+            success: false,
+            failure_reason: Some("invalid assertion".to_string()),
+            client_id: None,
+            idp_issuer: None,
+        };
+        let typed = serde_json::to_value(AuthEventData {
+            params: &params,
+            geo: GeoFields::default(),
+        })
+        .unwrap();
+        assert_eq!(
+            typed,
+            json!({
+                "user_id": "u1",
+                "authenticator_id": "auth-1",
+                "client_ip": "192.0.2.7",
+                "user_agent": "vouch-cli/1.0",
+                "client_hostname": null,
+                "client_os": null,
+                "client_arch": null,
+                "client_version": null,
+                "success": false,
+                "failure_reason": "invalid assertion",
+            })
+        );
+
+        // With geo: the fields are flattened alongside, present only when
+        // the lookup produced them.
+        let typed = serde_json::to_value(AuthEventData {
+            params: &params,
+            geo: GeoFields {
+                country_code: Some("US".to_string()),
+                asn: Some(15169),
+                org_name: Some("GOOGLE".to_string()),
+            },
+        })
+        .unwrap();
+        assert_eq!(typed.get("country_code"), Some(&json!("US")));
+        assert_eq!(typed.get("asn"), Some(&json!(15169)));
+        assert_eq!(typed.get("org_name"), Some(&json!("GOOGLE")));
+
+        // Credential payload: envelope + details flattened into one flat
+        // object.
+        let envelope = CredentialAuditEnvelope {
+            event_type: "certificate_issued".to_string(),
+            success: true,
+            ..CredentialAuditEnvelope::default()
+        };
+        let details = SshCredentialDetails {
+            serial: 42,
+            principals: vec!["dev".to_string()],
+            cert_expires_at: None,
+        };
+        let typed = serde_json::to_value(CredentialAuditPayload {
+            envelope: &envelope,
+            details: &details,
+        })
+        .unwrap();
+        assert_eq!(
+            typed,
+            json!({
+                "event_type": "certificate_issued",
+                "org_id": null,
+                "authenticator_id": null,
+                "agent": null,
+                "success": true,
+                "client_ip": null,
+                "user_agent": null,
+                "serial": 42,
+                "principals": ["dev"],
+                "cert_expires_at": null,
+            })
+        );
     }
 
     #[test]
