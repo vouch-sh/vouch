@@ -17,7 +17,7 @@ use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{
     ScopeSet,
     client_credentials::exchange_client_credentials,
-    exchange::{ActorToken, SubjectToken, TokenExchangeParams, TokenType, exchange_token},
+    exchange::{ActorToken, RequestedTokenType, SubjectToken, TokenExchangeParams, exchange_token},
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
@@ -1059,7 +1059,7 @@ struct ExchangeTokens<'a> {
     /// `actor_token` + `actor_token_type`, present together or not at all.
     actor: Option<ActorToken<'a>>,
     /// `requested_token_type`, OPTIONAL.
-    requested_token_type: Option<TokenType>,
+    requested_token_type: Option<RequestedTokenType>,
 }
 
 impl<'a> ExchangeTokens<'a> {
@@ -1071,22 +1071,15 @@ impl<'a> ExchangeTokens<'a> {
     /// server does not accept, or a token and type that did not arrive
     /// together.
     fn from_request(params: &'a TokenExchangeRequestParams) -> ServiceResult<Self> {
-        let requested_token_type = match params.requested_token_type.as_deref() {
-            Some(urn) => Some(TokenType::parse(urn).ok_or_else(|| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "Unsupported requested_token_type",
-                )
-            })?),
-            None => None,
-        };
         Ok(Self {
             subject: SubjectToken::new(&params.subject_token, &params.subject_token_type)?,
             actor: ActorToken::from_params(
                 params.actor_token.as_ref(),
                 params.actor_token_type.as_deref(),
             )?,
-            requested_token_type,
+            requested_token_type: RequestedTokenType::from_param(
+                params.requested_token_type.as_deref(),
+            )?,
         })
     }
 }
@@ -1173,6 +1166,23 @@ async fn handle_token_exchange_grant(
         Ok(witness) => witness,
         Err(e) => return e.into_oauth_response().into_response(),
     };
+
+    // RFC 8693 §2.1: "The value of the 'resource' parameter MUST be an
+    // absolute URI, as specified by Section 4.3 of [RFC3986], that MAY
+    // include a query component and MUST NOT include a fragment component."
+    // Validate only — the raw string stays the audience value below, because
+    // `ResourceUri::parse` normalizes (host-only URIs gain a trailing `/`)
+    // and the issued `aud` must equal what the client sent.
+    if let Some(res) = params.resource.as_deref()
+        && crate::services::oidc::ResourceUri::parse(res).is_err()
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "Invalid resource parameter: must be an absolute URI without a fragment",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
 
     // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
     // If both are present, they must match.

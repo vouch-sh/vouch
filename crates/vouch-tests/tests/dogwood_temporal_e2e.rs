@@ -46,8 +46,22 @@ async fn seed_event(
         .expect("seed audit event");
 }
 
-/// Assert an OAuth error response is a policy denial.
-fn assert_access_denied(status: u16, json: &serde_json::Value, context: &str) {
+/// Assert an OAuth error response is a policy denial on the exchange grant.
+/// RFC 8693 §2.2.2: a subject token "unacceptable based on policy" MUST be
+/// reported with the `invalid_request` error code.
+fn assert_exchange_policy_denied(status: u16, json: &serde_json::Value, context: &str) {
+    assert_eq!(status, 400, "{context}: expected denial. Response: {json}");
+    assert_eq!(
+        json["error"].as_str().unwrap_or(""),
+        "invalid_request",
+        "{context}: expected invalid_request. Response: {json}"
+    );
+}
+
+/// Assert an OAuth error response is a policy denial on the FIDO2 assertion
+/// grant, which keeps `access_denied` (RFC 8693 §2.2.2 governs only the
+/// exchange grant).
+fn assert_login_policy_denied(status: u16, json: &serde_json::Value, context: &str) {
     assert_eq!(status, 400, "{context}: expected denial. Response: {json}");
     assert_eq!(
         json["error"].as_str().unwrap_or(""),
@@ -127,7 +141,7 @@ async fn test_exchange_step_up_denies_without_recent_login() {
     )
     .await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange without any login history");
+    assert_exchange_policy_denied(status, &json, "exchange without any login history");
     assert!(
         json["error_description"]
             .as_str()
@@ -166,7 +180,7 @@ async fn test_exchange_step_up_denies_with_stale_login() {
     .await;
     seed_event(&harness, AuditEventKind::LoginSuccess, &user.id, 1800, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange with a 30-minute-old login");
+    assert_exchange_policy_denied(status, &json, "exchange with a 30-minute-old login");
 }
 
 /// Another user's fresh login must not satisfy this user's window
@@ -189,7 +203,7 @@ async fn test_exchange_step_up_ignores_other_users_logins() {
         .expect("other user");
     seed_event(&harness, AuditEventKind::LoginSuccess, &other.id, 60, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "another principal's login must not count");
+    assert_exchange_policy_denied(status, &json, "another principal's login must not count");
 }
 
 // ── Token exchange: logout invalidates ───────────────────────────────────
@@ -206,7 +220,7 @@ async fn test_logout_invalidates_exchange_denies_after_logout() {
     seed_event(&harness, AuditEventKind::LoginSuccess, &user.id, 600, "{}").await;
     seed_event(&harness, AuditEventKind::Logout, &user.id, 300, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange after logout");
+    assert_exchange_policy_denied(status, &json, "exchange after logout");
 }
 
 /// logout → re-login → exchange is allowed again.
@@ -269,7 +283,7 @@ async fn test_exchange_ip_consistency_denies_different_ip() {
     )
     .await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "different-IP login must not satisfy the pin");
+    assert_exchange_policy_denied(status, &json, "different-IP login must not satisfy the pin");
 }
 
 // ── FIDO2 grant: aggregation policies ────────────────────────────────────
@@ -454,7 +468,7 @@ async fn test_failed_login_burst_denies_grant() {
         .await;
     }
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
-    assert_access_denied(status, &json, "5 failed logins in 10m");
+    assert_login_policy_denied(status, &json, "5 failed logins in 10m");
     assert!(
         json["error_description"]
             .as_str()
@@ -515,7 +529,7 @@ async fn test_issuance_rate_limit_denies_at_cap() {
         .await;
     }
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
-    assert_access_denied(status, &json, "10 issuances in 1h");
+    assert_login_policy_denied(status, &json, "10 issuances in 1h");
     assert!(
         json["error_description"]
             .as_str()

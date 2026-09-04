@@ -1266,7 +1266,9 @@ mod token_exchange {
 
         assert_eq!(response.status, 400);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["error"], "invalid_grant");
+        // RFC 8693 §2.2.2: an invalid subject_token MUST be reported with the
+        // invalid_request error code.
+        assert_eq!(error["error"], "invalid_request");
     }
 
     /// Test that token exchange works with valid token.

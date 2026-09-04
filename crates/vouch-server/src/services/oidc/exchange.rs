@@ -164,6 +164,44 @@ impl<'a> ActorToken<'a> {
     }
 }
 
+/// RFC 8693 §2.1 `requested_token_type`: the subset of [`TokenType`] this
+/// server will issue. [`TokenType::Jwt`] has no variant because the server
+/// never issues a token it would label with the generic `jwt` URN — RFC 8693
+/// §2.2.1 requires `issued_token_type` to name what was actually issued, and
+/// every issued token is either an access token or an ID token. `jwt` remains
+/// a valid `subject_token_type` and `actor_token_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestedTokenType {
+    /// `requested_token_type=urn:ietf:params:oauth:token-type:access_token`.
+    AccessToken,
+    /// `requested_token_type=urn:ietf:params:oauth:token-type:id_token`.
+    IdToken,
+}
+
+impl RequestedTokenType {
+    /// Parse the OPTIONAL `requested_token_type` parameter, or `None` when
+    /// the request omits it (the issued type is then at the server's
+    /// discretion per RFC 8693 §2.1 — this server issues an access token).
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` when the declared type is one this server does not
+    /// issue.
+    pub fn from_param(urn: Option<&str>) -> ServiceResult<Option<Self>> {
+        let Some(urn) = urn else {
+            return Ok(None);
+        };
+        match TokenType::parse(urn) {
+            Some(TokenType::AccessToken) => Ok(Some(Self::AccessToken)),
+            Some(TokenType::IdToken) => Ok(Some(Self::IdToken)),
+            Some(TokenType::Jwt) | None => Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Unsupported requested_token_type",
+            )),
+        }
+    }
+}
+
 /// Default lifetime for an exchanged OIDC ID token
 /// (`requested_token_type=id_token`). Short because the token is presented
 /// immediately as a federation assertion (Kubernetes, Claude/OpenAI WIF) and
@@ -184,7 +222,7 @@ pub struct TokenExchangeParams<'a> {
     /// RFC 8693 Section 2.1: The requested scope for the new token (OPTIONAL).
     pub scope: Option<&'a str>,
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
-    pub requested_token_type: Option<TokenType>,
+    pub requested_token_type: Option<RequestedTokenType>,
     /// OAuth client_id of the requesting client.
     pub client_id: &'a str,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound. The DPoP
@@ -258,7 +296,7 @@ pub(crate) async fn exchange_token(
     // path issues a clean OIDC claim set and does not carry the `act` claim,
     // so honoring `actor_token` here would silently drop the delegation chain.
     // Refuse the combination explicitly rather than ignore the input.
-    if params.requested_token_type == Some(TokenType::IdToken) && params.actor.is_some() {
+    if params.requested_token_type == Some(RequestedTokenType::IdToken) && params.actor.is_some() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "actor_token is not supported with requested_token_type=id_token",
@@ -270,8 +308,14 @@ pub(crate) async fn exchange_token(
     let subject_token = params.subject.token.expose_secret();
     let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url)
         .ok_or_else(|| {
+            // RFC 8693 §2.2.2: "If the request itself is not valid or if
+            // either the 'subject_token' or 'actor_token' are invalid for any
+            // reason, or are unacceptable based on policy, the authorization
+            // server MUST construct an error response, as specified in
+            // Section 5.2 of [RFC6749]. The value of the 'error' parameter
+            // MUST be the 'invalid_request' error code."
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Invalid or expired subject token",
             )
         })?;
@@ -285,7 +329,7 @@ pub(crate) async fn exchange_token(
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Subject token session not found",
             )
         })?;
@@ -297,12 +341,15 @@ pub(crate) async fn exchange_token(
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
-            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Subject token user not found")
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Subject token user not found",
+            )
         })?;
 
     if !subject_user.active {
         return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
+            OAuthErrorCode::InvalidRequest,
             "User account is deactivated",
         ));
     }
@@ -320,19 +367,31 @@ pub(crate) async fn exchange_token(
             params.client_id,
             params.audience,
         )
-        .await?;
+        .await
+        // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+        // MUST be reported with the invalid_request error code. The policy
+        // engine answers access_denied for every decision point (the login
+        // path keeps that code), so remap here, at the only exchange caller,
+        // preserving the policy name and remediation in the description.
+        .map_err(|e| match e {
+            ServiceError::OAuth {
+                code: OAuthErrorCode::AccessDenied,
+                description,
+            } => ServiceError::oauth(OAuthErrorCode::InvalidRequest, description),
+            other => other,
+        })?;
     }
 
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)
-    let actor_claim = if let Some(actor) = params.actor {
+    let (actor_claim, actor_user_id) = if let Some(actor) = params.actor {
         let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
         let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
             })?;
 
         // Block self-delegation: actor and subject must be different users
@@ -352,7 +411,7 @@ pub(crate) async fn exchange_token(
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
                 ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
+                    OAuthErrorCode::InvalidRequest,
                     "Actor token session not found or revoked",
                 )
             })?;
@@ -363,14 +422,15 @@ pub(crate) async fn exchange_token(
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Actor token user not found")
             })?;
         if !actor_user.active {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "User account is deactivated",
             ));
         }
+        let actor_user_id = actor_user.id.clone();
         let actor_email = actor_decoded
             .email()
             .map(str::to_string)
@@ -394,9 +454,9 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        Some(actor)
+        (Some(actor), Some(actor_user_id))
     } else {
-        None
+        (None, None)
     };
 
     // Calculate granted scope (intersection of requested and available).
@@ -443,10 +503,12 @@ pub(crate) async fn exchange_token(
     // upstream SSO but before FIDO2 registration) from minting a WIF
     // assertion that downstream relying parties trust as hardware-attested,
     // gate the fork on the subject token's hardware verification level.
-    if params.requested_token_type == Some(TokenType::IdToken) {
+    if params.requested_token_type == Some(RequestedTokenType::IdToken) {
         if !subject_decoded.hardware_verification().hardware_verified() {
+            // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+            // MUST be reported with the invalid_request error code.
             return Err(ServiceError::oauth(
-                OAuthErrorCode::AccessDenied,
+                OAuthErrorCode::InvalidRequest,
                 "ID token exchange requires a hardware-verified subject token",
             ));
         }
@@ -559,7 +621,7 @@ pub(crate) async fn exchange_token(
         &db::InsertTokenExchangeParams {
             subject_user_id: &subject_session.user_id,
             subject_token_hash: &subject_token_hash,
-            actor_user_id: None,
+            actor_user_id: actor_user_id.as_deref(),
             issued_token_hash: &issued_token_hash,
             requested_audience: params.audience,
             granted_scope: scope_string.as_deref(),
@@ -705,6 +767,8 @@ async fn issue_id_token(
         &db::InsertTokenExchangeParams {
             subject_user_id: ctx.user_id,
             subject_token_hash: ctx.subject_token_hash,
+            // Always None: actor_token with requested_token_type=id_token is
+            // rejected before this path is reached.
             actor_user_id: None,
             issued_token_hash: &issued_token_hash,
             requested_audience: ctx.audience,
@@ -905,6 +969,42 @@ mod tests {
             "access_token",
         ] {
             assert_eq!(TokenType::parse(urn), None, "{urn} must not parse");
+        }
+    }
+
+    #[test]
+    fn test_requested_token_type_accepts_issuable_types() {
+        assert_eq!(
+            RequestedTokenType::from_param(None).expect("absent param is valid"),
+            None
+        );
+        assert_eq!(
+            RequestedTokenType::from_param(Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
+                .expect("access_token is issuable"),
+            Some(RequestedTokenType::AccessToken)
+        );
+        assert_eq!(
+            RequestedTokenType::from_param(Some(protocol::TOKEN_TYPE_ID_TOKEN))
+                .expect("id_token is issuable"),
+            Some(RequestedTokenType::IdToken)
+        );
+    }
+
+    #[test]
+    fn test_requested_token_type_rejects_types_the_server_never_issues() {
+        // RFC 8693 §2.2.1: `issued_token_type` names what was actually issued,
+        // and this server only issues access tokens and ID tokens — so `jwt`
+        // is a valid subject/actor type but not a requested type.
+        for urn in [
+            protocol::TOKEN_TYPE_JWT,
+            "urn:ietf:params:oauth:token-type:saml2",
+            "urn:ietf:params:oauth:token-type:refresh_token",
+            "",
+        ] {
+            assert!(
+                RequestedTokenType::from_param(Some(urn)).is_err(),
+                "{urn} must be rejected as a requested_token_type"
+            );
         }
     }
 
