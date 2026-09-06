@@ -118,16 +118,38 @@ fn canonicalize_node(
     }
 
     // Step 3: Handle default namespace undeclaration.
-    // If this element has no namespace (or the default NS is now empty), check
-    // if an ancestor rendered a default namespace that must be undeclared.
+    // Per exc-c14n §3 point 4, `xmlns=""` is emitted only when ALL of:
+    //   1. the element visibly utilizes the default namespace (no prefix),
+    //   2. it has no default namespace node in the node-set, and
+    //   3. the nearest output ancestor that visibly utilizes the default
+    //      namespace has a default namespace node in the node-set.
+    // The original code checked only (2) and (3) and so wrongly emitted
+    // `xmlns=""` on prefixed elements, which then poisoned `rendered_ns[""]`
+    // and suppressed the `xmlns=""` that (1) requires on the nearest
+    // unprefixed descendant.
     let elem_default_ns = node.default_namespace().unwrap_or("");
     let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
 
-    // Undeclare if: element has no default NS but ancestor rendered one,
-    // AND we haven't already emitted xmlns="" (which would happen if this
-    // element itself declares xmlns="").
+    // Condition 1: the element visibly utilizes the default namespace iff it
+    // is rendered with no prefix. This mirrors `node_qualified_name` exactly
+    // so the gate agrees with the emitted tag name: an element with no
+    // namespace, the xml namespace, or whose prefix resolves to "" is emitted
+    // unprefixed and therefore visibly uses the default namespace.
+    let elem_ns_uri = node.tag_name().namespace().unwrap_or("");
+    let elem_uses_default_ns = elem_ns_uri.is_empty()
+        || elem_ns_uri == "http://www.w3.org/XML/1998/namespace"
+        || find_prefix_for_uri(node, elem_ns_uri).is_none_or(str::is_empty);
+
+    // Undeclare if: the element visibly utilizes the default namespace, its
+    // in-scope default is empty, an output ancestor rendered a non-empty
+    // default, and we haven't already emitted xmlns="" on this element
+    // (which happens when it explicitly declares xmlns="uri").
     let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
-    if !already_emitted_default && elem_default_ns.is_empty() && !ancestor_default_ns.is_empty() {
+    if elem_uses_default_ns
+        && !already_emitted_default
+        && elem_default_ns.is_empty()
+        && !ancestor_default_ns.is_empty()
+    {
         output.push_str(" xmlns=\"\"");
         new_rendered_ns.insert(String::new(), String::new());
     }
@@ -646,6 +668,124 @@ mod tests {
             result,
             r#"<root><child2 xmlns="urn:b"><child3 xmlns="">text</child3></child2></root>"#
         );
+    }
+
+    // =========================================================================
+    // exc-c14n §3 point 4 condition 1: xmlns="" only on unprefixed elements
+    //
+    // A prefixed element that explicitly writes xmlns="" against an
+    // ancestor-rendered non-empty default namespace must NOT itself receive
+    // xmlns="" (it does not visibly utilize the default namespace). The
+    // undeclaration moves to the nearest unprefixed descendant. The reference
+    // forms below were verified against `xmllint --exc-c14n` (libxml2, the
+    // engine xmlsec1 is built on).
+    // =========================================================================
+
+    // exc-c14n §3 point 4 cond. 1: a prefixed element does not visibly utilize the default namespace,
+    // so xmlns="" is never emitted on it even when it declares xmlns="".
+    #[test]
+    fn prefixed_element_xmlns_undeclaration_emits_nothing() {
+        // No unprefixed descendant exists, so the undeclaration is dropped
+        // entirely (a prefixed element has no default namespace node in the
+        // node-set and there is no unprefixed descendant to receive xmlns="").
+        let result = c14n(
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x" xmlns="">text</x:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x">text</x:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1: the xmlns="" required by the undeclaration lands on the nearest
+    // unprefixed descendant, never on the prefixed element that wrote xmlns="".
+    #[test]
+    fn prefixed_xmlns_undeclaration_moves_to_unprefixed_descendant() {
+        let result = c14n(
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1: the undeclaration reaches the nearest unprefixed descendant even
+    // when the prefixed element has attributes (no namespace prefix => visibly utilizes default).
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_attributes_reaches_unprefixed_descendant() {
+        let result = c14n(
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" b:kind="x" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" b:kind="x"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1 + SAML Core §2.7.3: a signed assertion body may carry arbitrary
+    // XML in AttributeValue; a prefixed element there that undeclares an ancestor-rendered
+    // default namespace must place xmlns="" on its unprefixed descendant.
+    #[test]
+    fn saml_attribute_value_prefixed_xmlns_undeclaration_reaches_inner() {
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:AttributeStatement><saml:Attribute Name="doc"><saml:AttributeValue><doc xmlns="urn:doc"><sig:detached xmlns:sig="urn:sig" xmlns=""><inner>payload</inner></sig:detached></doc></saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#;
+        let result = c14n(xml, "Assertion", &[]);
+        assert_eq!(
+            result,
+            r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:AttributeStatement><saml:Attribute Name="doc"><saml:AttributeValue><doc xmlns="urn:doc"><sig:detached xmlns:sig="urn:sig"><inner xmlns="">payload</inner></sig:detached></doc></saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1 + §4 (InclusiveNamespaces #default): the no-prefix gate matches the
+    // reference for both the #default-absent and #default-present cases; #default forces the
+    // default *declaration* but never places the xmlns="" *undeclaration* on a prefixed element.
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_inclusive_default_still_gates() {
+        let xml = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#;
+        let without = c14n(xml, "root", &[]);
+        let with_default = c14n(xml, "root", &["#default"]);
+        // #default does not change the placement of xmlns="" (still on <leaf>).
+        assert_eq!(
+            with_default,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+        assert_eq!(with_default, without);
+    }
+
+    // XML Signature §4.4.1: canonicalizing canonical output changes nothing, including for the
+    // bug-trigger shapes (confirms the fixed output is a stable fixed point).
+    #[test]
+    fn idempotency_prefixed_xmlns_undeclaration() {
+        let inputs = [
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x" xmlns="">text</x:mid></root>"#,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+        ];
+        for input in inputs {
+            let doc1 = roxmltree::Document::parse(input).unwrap();
+            let root1 = doc1
+                .root()
+                .children()
+                .find(|n| n.is_element())
+                .expect("No root element");
+            let first = exclusive_c14n(root1, &[]);
+
+            let doc2 =
+                roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
+            let root2 = doc2
+                .root()
+                .children()
+                .find(|n| n.is_element())
+                .expect("No root in re-parsed c14n output");
+            let second = exclusive_c14n(root2, &[]);
+
+            assert_eq!(first, second, "Idempotency failed for input: {input}");
+        }
     }
 
     /// A prefix re-bound to a different URI by a descendant must be

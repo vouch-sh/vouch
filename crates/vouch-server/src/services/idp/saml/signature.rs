@@ -955,4 +955,50 @@ mod tests {
             "Expected NoSignature for deeply nested sig, got: {err}"
         );
     }
+
+    // =========================================================================
+    // Canonicalization digest-input path (c14n_excluding_signature)
+    // =========================================================================
+
+    // exc-c14n §3 point 4 cond. 1 via XML Signature §4.4.1: a prefixed element that explicitly
+    // undeclares (xmlns="") an ancestor-rendered non-empty default namespace must NOT receive
+    // xmlns=""; it must land on the nearest unprefixed descendant. This exercises the real
+    // digest-input path -- `c14n_excluding_signature` serializes the signed element minus the
+    // Signature subtree (`serialize_node_excl`), reparses, and runs `exclusive_c14n`; those exact
+    // bytes are SHA-256-hashed and compared to <ds:DigestValue> in `verify_xml_signature`. A byte
+    // deviation here would yield `SignatureError::DigestMismatch` and reject a valid response.
+    // Reference form verified against `xmllint --exc-c14n` (libxml2, the engine xmlsec1 uses).
+    #[test]
+    fn c14n_excluding_signature_xmlns_undeclaration_on_prefixed_element() {
+        let xml = r##"<signed xmlns="urn:a" ID="s1">
+  <b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid>
+  <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="sig1"><ds:SignedInfo/></ds:Signature>
+</signed>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let signed = doc
+            .descendants()
+            .find(|n| n.has_tag_name("signed"))
+            .unwrap();
+        let sig = doc
+            .descendants()
+            .find(|n| n.has_tag_name((NS_DS, "Signature")))
+            .unwrap();
+        let vouch_out = c14n_excluding_signature(signed, sig, &[]).unwrap();
+
+        // xmlns="" must land on the unprefixed <leaf>, never on the prefixed <b:mid>.
+        let expected = "<signed xmlns=\"urn:a\" ID=\"s1\">\n  <b:mid xmlns:b=\"urn:b\"><leaf xmlns=\"\">text</leaf></b:mid>\n  \n</signed>";
+        assert_eq!(
+            vouch_out, expected,
+            "digest-input bytes diverge from reference exc-c14n form"
+        );
+        // Sanity: the digest over the fixed bytes is stable and distinct from the buggy form.
+        let digest = digest::digest(&digest::SHA256, vouch_out.as_bytes());
+        let buggy = "<signed xmlns=\"urn:a\" ID=\"s1\">\n  <b:mid xmlns:b=\"urn:b\" xmlns=\"\"><leaf>text</leaf></b:mid>\n  \n</signed>";
+        let buggy_digest = digest::digest(&digest::SHA256, buggy.as_bytes());
+        assert_ne!(
+            digest.as_ref(),
+            buggy_digest.as_ref(),
+            "fix must produce bytes that hash differently from the buggy form"
+        );
+    }
 }
