@@ -118,6 +118,104 @@ fn build_request_object_with_claims(claims: &serde_json::Value, pkcs8_bytes: &[u
     sign_jwt(pkcs8_bytes, &header, claims)
 }
 
+// ------------------------------------------------------------------------
+// In-process HTTPS mock for the `request_uri` (OIDC Core §6.2) fetch path.
+// ------------------------------------------------------------------------
+//
+// `fetch_request_object` enforces HTTPS, so a plaintext wiremock server cannot
+// drive it. These helpers stand up a one-shot `tokio-rustls` server on the
+// loopback address that serves a signed Request Object JWT, mirroring the
+// pattern in `infra/jwks` tests. The SSRF egress guard allows loopback when
+// TLS is not configured (the test default), and the request uses the
+// `127.0.0.1` IP literal to avoid a DNS lookup, so the fetch reaches the
+// handler's fetch-and-validate logic rather than a guard rejection.
+
+/// Throwaway self-signed ECDSA P-256 certificate for in-process TLS test
+/// servers. It has no IP SAN; the test client uses `danger_accept_invalid_certs`
+/// and the URL uses the `127.0.0.1` IP literal, so the missing SAN does not
+/// affect the guarantee being pinned. Valid until 2036.
+const TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
+HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
+MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
+ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
+G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
+DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
+HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
+BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
+KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
+-----END CERTIFICATE-----\n";
+const TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
++palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
+DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
+-----END PRIVATE KEY-----\n";
+
+/// A `tokio-rustls` acceptor using the throwaway self-signed cert above and an
+/// explicit aws-lc-rs provider (no reliance on a process-default provider).
+fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::sync::Arc;
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(TLS_CERT_PEM.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse test certificate");
+    let key = PrivateKeyDer::from_pem_slice(TLS_KEY_PEM.as_bytes()).expect("parse test key");
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+    .expect("configure TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("build server config");
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}
+
+/// A `reqwest` client that performs a real TLS handshake but does not verify
+/// the server certificate. Used for the `request_uri` HTTPS fetch against the
+/// in-process mock; kept off the shared `AppState::http_client` to avoid
+/// weakening any other test's trust store.
+fn https_client_trusting_any_cert() -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build test https client")
+}
+
+/// Spawn a one-shot HTTPS server on `127.0.0.1` that serves `jwt` as the body
+/// of a `GET /ro.jwt` response, and return the `https://127.0.0.1:{port}/ro.jwt`
+/// URL. The server accepts a single connection — enough for one
+/// `request_uri=` authorize request — then shuts down.
+async fn spawn_request_object_server(jwt: String) -> String {
+    use tokio::io::AsyncWriteExt;
+    let acceptor = tls_acceptor();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let port = listener.local_addr().expect("local_addr").port();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/oauth-authz-req+jwt\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {jwt}",
+        jwt.len()
+    );
+    tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.expect("accept connection");
+        let mut tls = acceptor.accept(stream).await.expect("TLS handshake");
+        if tls.write_all(response.as_bytes()).await.is_err() {
+            return;
+        }
+        let _shutdown = tls.shutdown().await;
+    });
+    format!("https://127.0.0.1:{port}/ro.jwt")
+}
+
 // ========================================================================
 // RFC 9101 — Discovery Metadata
 // ========================================================================
@@ -2614,5 +2712,188 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
         resp.contains("ES256") || status == StatusCode::BAD_REQUEST,
         "the admin form must refuse a JWKS with no key usable for the pinned ES256. \
          Got {status}: {resp}"
+    );
+}
+
+// ========================================================================
+// RFC 9101 Section 6.3 — request_uri error redirect echoes Request Object state
+// ========================================================================
+//
+// OIDC Core §6.2 / RFC 9101 §6.3: when a Request Object is fetched via an
+// HTTPS `request_uri`, the Request Object's parameters are the request's, even
+// if the same parameter is in the query. RFC 6749 §4.1.2.1 requires the error
+// response to echo the request's `state`. So when a fetched Request Object
+// passes JWT validation but fails `validate_authorize_request`, the error
+// redirect must carry the Request Object's `state` — not the query's. These
+// tests exercise that path end-to-end through a real HTTPS fetch of a signed
+// Request Object.
+
+/// Parse the `state` query parameter out of a redirect `Location` URL.
+fn location_state(location: &str) -> Option<String> {
+    let url = url::Url::parse(location).expect("Location is a valid URL");
+    url.query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+}
+
+/// Build a Request Object whose `state` is `ro_state` and which otherwise has
+/// valid claims, but carries an unsupported `prompt`. `validate_request_object`
+/// copies `prompt` through unchecked, while `validate_authorize_request`
+/// rejects it via `PromptSet::parse` — so the Request Object reaches the
+/// `handle_request_uri_fetch` error path that echoes `state` (the same trigger
+/// the sibling JAR test `test_rfc9101_authorize_rejects_unsupported_prompt_in_request_object`
+/// uses for the `request=` flow).
+fn build_request_object_with_unsupported_prompt(
+    client_id: &str,
+    issuer: &str,
+    pkcs8_bytes: &[u8],
+    ro_state: &str,
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "state": ro_state,
+        "code_challenge": sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+        "code_challenge_method": "S256",
+        "prompt": "x_vendor_ext"
+    });
+    build_request_object_with_claims(&claims, pkcs8_bytes)
+}
+
+/// The `request_uri`-fetch error path must echo the Request Object's `state`,
+/// not the query's. When the query omits `state` (the RFC 9101 §6.3 conformant
+/// construction) and a fetched Request Object passes JWT validation but fails
+/// `validate_authorize_request`, the error redirect must carry the Request
+/// Object's `state` rather than be empty (RFC 9101 §6.3 / RFC 6749 §4.1.2.1).
+#[tokio::test]
+async fn test_rfc9101_request_uri_error_redirect_echoes_request_object_state() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-state@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let ro_state = "ro-unique-state-abc123";
+    let request_jwt = build_request_object_with_unsupported_prompt(
+        &client.client_id,
+        issuer,
+        &pkcs8_bytes,
+        ro_state,
+    );
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    // The query omits `state` — the RFC 9101 §6.3 conformant pattern: the
+    // Request Object carries it, the query does not.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "a fetched Request Object failing value validation should redirect with an error, \
+         got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "should redirect with error=invalid_request, got: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "must not issue an authorization code: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}), not be empty; \
+         got: {location}",
+    );
+}
+
+/// When the query carries a *different* `state` than the Request Object, RFC
+/// 9101 §6.3 says the Request Object's value wins. The error redirect must
+/// carry the Request Object's `state`, not the query's.
+#[tokio::test]
+async fn test_rfc9101_request_uri_error_redirect_prefers_request_object_state_over_query() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-qstate@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let ro_state = "ro-distinct-state-456";
+    let query_state = "query-different-state-789";
+    let request_jwt = build_request_object_with_unsupported_prompt(
+        &client.client_id,
+        issuer,
+        &pkcs8_bytes,
+        ro_state,
+    );
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    // The query carries a *different* `state` than the Request Object.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&state={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(query_state),
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "should redirect with an error, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "should redirect with error=invalid_request, got: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}), not the query's \
+         `state` ({query_state}); got: {location}",
+    );
+    assert_ne!(
+        location_state(location).as_deref(),
+        Some(query_state),
+        "error redirect must not echo the query's `state`; got: {location}",
     );
 }

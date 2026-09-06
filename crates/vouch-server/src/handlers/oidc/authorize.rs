@@ -1012,6 +1012,12 @@ async fn handle_request_uri_fetch(
             Err(resp) => return resp,
         };
 
+    // RFC 9101 Section 6.3: "The authorization server MUST only use the
+    // parameters in the Request Object, even if the same parameter is
+    // provided in the query parameter." That governs the `state` echoed back
+    // on an error (RFC 6749 Section 4.1.2.1) as much as any other parameter.
+    let oauth_state = request_params.state.clone();
+
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
         Err(e) => {
@@ -1022,7 +1028,7 @@ async fn handle_request_uri_fetch(
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
-                .error_redirect(state, error_code, &description, query.state.as_deref())
+                .error_redirect(state, error_code, &description, oauth_state.as_deref())
                 .await;
         }
     };
