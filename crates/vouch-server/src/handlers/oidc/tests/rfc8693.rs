@@ -871,6 +871,137 @@ async fn test_rfc8693_token_lifetime_capped_by_subject() {
     );
 }
 
+/// RFC 8693 §2.2.1: `expires_in` "is the lifetime in seconds of the access
+/// token" — it describes the token it accompanies. The server's own design
+/// (the `expires_in = min(session_hours*3600, subject_remaining)` cap in
+/// `exchange_token`, mirrored by the ID-token branch's `.valid_for_seconds`)
+/// commits to bounding the *issued* token by the subject token's remaining
+/// TTL. The access-token branch must do the same: the issued JWT `exp`, the
+/// `sessions.expires_at` row, and the `token_exchange` audit row's
+/// `expires_at` must all carry the capped lifetime, not the uncapped
+/// `session_hours` one.
+///
+/// Forges a subject token with `exp = now + 60s` and a matching session row,
+/// performs an exchange, and asserts the issued token's decoded `exp`, the
+/// `sessions` row's `expires_at`, and the `token_exchange` audit row's
+/// `expires_at` all agree on the capped lifetime (~60s) rather than the full
+/// `session_hours` (28800s) lifetime.
+#[tokio::test]
+async fn test_rfc8693_access_token_exp_not_capped_by_subject_ttl() {
+    use crate::db::documents::oauth::TokenExchangeDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-cap-exp@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Mint a full-lifetime token, then re-sign it as a short-lived subject
+    // token (exp = now + 60s) with its own matching session row. This is the
+    // shape that makes the subject-TTL cap bind: the subject token's
+    // remaining TTL is far below `session_hours * 3600` (28800s).
+    let base = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let subject_token =
+        forge_short_lived_access_token(&state, &user.id, &user.email, Some(&auth_id), &base, 60)
+            .await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "Exchange should succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let issued_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let reported_expires_in = response["expires_in"].as_u64().expect("expires_in present");
+
+    // (1) The reported `expires_in` must reflect the capped lifetime (~60s),
+    //     not the full session_hours (28800s).
+    assert!(
+        reported_expires_in <= 65,
+        "reported expires_in ({reported_expires_in}s) should be capped by the \
+         subject token's remaining TTL (~60s), not the full session_hours"
+    );
+
+    // (2) The issued access token's actual JWT `exp` claim must agree with
+    //     the reported `expires_in` (within test timing slack). Before the
+    //     fix this was 28800s while the response reported ~60s.
+    let issued_claims = decode_jwt_payload(issued_token);
+    let issued_exp = issued_claims["exp"].as_i64().expect("issued exp present");
+    let issued_iat = issued_claims["iat"].as_i64().expect("issued iat present");
+    let issued_lifetime = issued_exp.saturating_sub(issued_iat);
+    assert!(
+        issued_lifetime <= 65,
+        "issued access token exp ({issued_lifetime}s remaining from iat) should \
+         be capped by subject remaining (~60s), not the full session_hours \
+         lifetime (28800s)"
+    );
+    assert_eq!(
+        issued_lifetime,
+        i64::try_from(reported_expires_in).expect("expires_in fits in i64"),
+        "the issued token's actual lifetime ({issued_lifetime}s) must equal the \
+         `expires_in` value reported to the client ({reported_expires_in}s)"
+    );
+
+    // (3) The `sessions` row's `expires_at` must match the issued token's
+    //     `exp` claim — the two records must not disagree for the same token.
+    let issued_hash = crate::crypto::hash_token(issued_token);
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &issued_hash)
+        .await
+        .expect("session lookup")
+        .expect("issued access token must be persisted as a session");
+    assert_eq!(
+        session.expires_at.as_second(),
+        issued_exp,
+        "sessions.expires_at ({}) must equal the issued token's JWT exp ({issued_exp})",
+        session.expires_at.as_second()
+    );
+
+    // (4) The `token_exchange` audit row's `expires_at` must agree with the
+    //     issued token's actual `exp` — the audit row and the `sessions` row
+    //     must record the same lifetime for one token. `issued_token_hash`
+    //     is not indexed, so look the row up by the indexed subject_user_id
+    //     and filter for the matching issued token hash.
+    let audit_rows = state
+        .store
+        .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+        .await
+        .expect("query token_exchange by subject_user_id");
+    let audit_row = audit_rows
+        .into_iter()
+        .find(|d| d.data.issued_token_hash == issued_hash)
+        .expect("a token_exchange audit row for the issued token must exist");
+    assert_eq!(
+        audit_row.data.expires_at.as_second(),
+        issued_exp,
+        "token_exchange audit row expires_at ({}) must equal the issued \
+         token's JWT exp ({issued_exp}) — the audit row and the sessions row \
+         must agree on one token's lifetime",
+        audit_row.data.expires_at.as_second()
+    );
+}
+
 #[tokio::test]
 async fn test_rfc8693_self_delegation_rejected() {
     // Self-delegation (actor == subject) must be rejected to prevent

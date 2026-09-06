@@ -372,6 +372,7 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: auth_code.auth_time,
             },

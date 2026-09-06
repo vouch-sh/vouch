@@ -173,6 +173,7 @@ pub(crate) async fn complete_login(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(Timestamp::now().as_second()),
             },

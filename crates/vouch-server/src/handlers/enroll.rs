@@ -946,6 +946,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1630,6 +1631,7 @@ pub(crate) async fn browser_register_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },

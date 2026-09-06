@@ -417,6 +417,7 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(now),
             },

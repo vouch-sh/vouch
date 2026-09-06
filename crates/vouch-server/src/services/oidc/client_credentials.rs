@@ -81,6 +81,7 @@ pub(crate) async fn exchange_client_credentials(
             binding,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
