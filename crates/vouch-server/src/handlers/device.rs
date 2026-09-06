@@ -382,6 +382,49 @@ pub(crate) async fn device_token(
                 None => None,
             };
 
+            // RFC 8705 §2 / parity with the authorization-code, client-credentials,
+            // refresh-token, and PAR grants: a client registered with
+            // `tls_client_auth` or `self_signed_tls_client_auth` authenticates by
+            // mTLS specifically, so the presented certificate must be matched
+            // against the client's registered identity (subject DN / SAN / x5c)
+            // before any token is issued. Without this gate the mTLS listener's
+            // `AcceptAnyClientCert` posture would let anyone who redeems a device
+            // code mint a cert-bound token for *their own* cert, defeating the
+            // `tls_client_certificate_bound_access_tokens` opt-in for the only
+            // client profile that has a registered cert to match against.
+            //
+            // Scoped to mTLS-client-auth methods: `authenticate_client_mtls`
+            // returns `Err("client not registered for mTLS authentication")`
+            // for any other method, and a `client_secret_basic`/`private_key_jwt`
+            // sender-constraint-only client has no registered cert identity to
+            // match (RFC 8705 §3 binds to whatever cert is presented by design).
+            //
+            // Runs before `try_consume_device_auth` so a failed mTLS client
+            // authentication does not burn the single-use device code — the
+            // legitimate holder of the registered cert can retry.
+            if let Some(ref oc) = oauth_client
+                && matches!(
+                    oc.token_endpoint_auth_method,
+                    crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                        | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+                )
+            {
+                let Some(cert) = client_cert.0.as_ref() else {
+                    return Err(oauth_error(
+                        StatusCode::UNAUTHORIZED,
+                        OAuthError {
+                            error: OAuthErrorCode::InvalidClient.as_str().to_string(),
+                            error_description: Some("mTLS client certificate required".to_string()),
+                        },
+                    ));
+                };
+                if let Err(e) =
+                    crate::services::oidc::token::authenticate_client_mtls(&state, oc, cert).await
+                {
+                    return Err(e.into_service_error().into_oauth_response().into_response());
+                }
+            }
+
             // Every sender-constraint requirement registered for this
             // client. The built-in CLI flow carries no registered client_id,
             // so there is no registration to enforce against.
