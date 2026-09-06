@@ -1692,3 +1692,213 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
     );
     assert_state_unconsumed(&state, &state_jwt, exp).await;
 }
+
+// ── finalize_enrollment_audit_and_device_auth ─────────────────────────────
+//
+// `Enrollment` is the handler's only production emit site for
+// `AuthEventType::Enrollment`. It is recorded *before* the fallible
+// `authorize_device_auth` release so a committed authenticator always has a
+// matching enrollment event even when the CLI release fails. The full
+// `browser_register_complete` path needs a Yubico-pinned attestation chain,
+// so these tests exercise the extracted tail directly — the same tail the
+// handler runs after `create_authenticator` commits.
+
+/// Build a `BrowserRegistrationState` for a real user, carrying the given
+/// `device_auth_id`. The `webauthn_state` field is real (it cannot be built
+/// any other way) but the tail under test does not consume it.
+async fn build_browser_reg_state(
+    state: &AppState,
+    user: &crate::db::User,
+    device_auth_id: String,
+) -> BrowserRegistrationState {
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    BrowserRegistrationState {
+        device_auth_id,
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    }
+}
+
+/// Query the audit store for `device_auth_approved` events for a user.
+async fn device_auth_approved_events_for(
+    state: &AppState,
+    user_id: &str,
+) -> Vec<crate::db::AuditEvent> {
+    state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events")
+}
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_fails() {
+    // Regression: `authorize_device_auth` returns Err after `create_authenticator`
+    // already committed the row. The `Enrollment` audit event must still be
+    // recorded — the pre-fix code placed it after the fallible `?`, skipping it.
+    // `device_auth_id` references no row, so `authorize_device_auth` bails at
+    // the "no device auth request found" arm — the cleanup-swept-row and the
+    // concurrent-tab-loses-CAS triggers hit the same path in production.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "da-fail@example.com").await;
+    // Stand-in for the authenticator `create_authenticator` already committed.
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let reg_state =
+        build_browser_reg_state(&state, &user, "reclaimed-device-auth".to_string()).await;
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "authorize_device_auth must fail and propagate when the device-auth row is missing"
+    );
+
+    // THE BUG FIX: the Enrollment audit row was written before the fallible
+    // device-auth release, so it survives the failure.
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded even when authorize_device_auth fails"
+    );
+    let event = enroll_events.first().expect("enrollment event");
+    let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+    assert_eq!(
+        data.get("authenticator_id")
+            .and_then(serde_json::Value::as_str),
+        Some(authenticator_id.as_str()),
+        "Enrollment audit event must reference the committed authenticator"
+    );
+    assert_eq!(
+        data.get("success").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "Enrollment audit event must report success: the authenticator IS committed"
+    );
+
+    // The DeviceAuthApproved event must NOT be recorded — the release failed.
+    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    assert!(
+        approval_events.is_empty(),
+        "no DeviceAuthApproved event may be recorded when authorize_device_auth fails"
+    );
+}
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds() {
+    // Happy-path CLI flow: a Pending device-auth row exists and
+    // `authorize_device_auth` wins the OCC CAS. Both `Enrollment` and
+    // `DeviceAuthApproved` events are recorded, and the row transitions to
+    // `Authorized` carrying the enrolling authenticator. No regression on the
+    // non-failing CLI branch.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "da-ok@example.com").await;
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let device_auth_id = crate::db::create_device_auth_request(
+        &state.store,
+        "hash-da-ok",
+        "DA-OK-CODE",
+        None,
+        expires_at,
+        5,
+    )
+    .await
+    .expect("seed pending device auth request");
+
+    let reg_state = build_browser_reg_state(&state, &user, device_auth_id).await;
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(result.is_ok(), "happy-path CLI release should succeed");
+
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded on the happy path"
+    );
+    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    assert_eq!(
+        approval_events.len(),
+        1,
+        "DeviceAuthApproved must be recorded when authorize_device_auth succeeds"
+    );
+
+    // The row transitioned to Authorized and carries the enrolling authenticator.
+    let approved = crate::db::get_device_auth_by_id(&state.store, &reg_state.device_auth_id)
+        .await
+        .expect("read device auth")
+        .expect("device auth row present");
+    let approval_auth_id = match approved.state {
+        crate::db::DeviceAuthState::Authorized(ref ap) => Some(ap.authenticator_id.as_str()),
+        _ => None,
+    };
+    assert_eq!(
+        approval_auth_id,
+        Some(authenticator_id.as_str()),
+        "device-auth row must be Authorized and reference the enrolling authenticator"
+    );
+}
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_flow() {
+    // Direct browser flow (`device_auth_id` empty): no `authorize_device_auth`
+    // call is made, so `Enrollment` is recorded and `DeviceAuthApproved` is
+    // not. No regression on the `is_empty()` branch.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "direct@example.com").await;
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let reg_state = build_browser_reg_state(&state, &user, String::new()).await;
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "direct browser flow has no device-auth release and must succeed"
+    );
+
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded for the direct browser flow"
+    );
+    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    assert!(
+        approval_events.is_empty(),
+        "no DeviceAuthApproved event may be recorded for the direct browser flow"
+    );
+}
