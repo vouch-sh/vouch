@@ -418,7 +418,6 @@ async fn check_session_and_authorize(
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: _,
             authenticator,
             auth_time: session_auth_time,
         }) => {
@@ -1219,7 +1218,6 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: _,
             authenticator,
             auth_time: session_auth_time,
         }) => {
