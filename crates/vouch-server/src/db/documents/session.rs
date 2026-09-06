@@ -42,6 +42,21 @@ pub struct SessionDoc {
     /// Organization domain (`hd` claim) at session creation time.
     #[serde(default)]
     pub org_domain: Option<String>,
+    /// OAuth `client_id` that requested this access token (the RFC 9068
+    /// `client_id` claim). Populated for every session minted by
+    /// [`create_oauth_access_token`](crate::services::auth::create_oauth_access_token):
+    /// third-party grants (`authorization_code`, `device_code`, RFC 8693
+    /// `token_exchange`, FIDO2, `client_credentials`) carry the issuing client,
+    /// and first-party CLI/UI sessions carry this deployment's `base_url`.
+    ///
+    /// Indexed so [`revoke_tokens_api`](crate::handlers::api::applications::revoke_tokens_api)
+    /// can delete every access token an application minted — not only the M2M
+    /// (`client_credentials`) sessions, which are keyed by `user_id == client_id`
+    /// and handled by `delete_sessions_for_user`. `None` only for sessions
+    /// issued before this field was added; such pre-migration rows are not
+    /// matched by the `client_id` index and remain valid until their `exp`.
+    #[serde(default)]
+    pub client_id: Option<String>,
     /// Hash of the single-use grant code (RFC 6749 authorization code or
     /// RFC 8628 device code) that this session was issued from.
     ///
@@ -74,6 +89,12 @@ impl DocumentType for SessionDoc {
                 value: auth_id.clone(),
             });
         }
+        if let Some(ref client_id) = self.client_id {
+            entries.push(IndexEntry {
+                field: "client_id",
+                value: client_id.clone(),
+            });
+        }
         if let Some(ref code_hash) = self.source_code_hash {
             entries.push(IndexEntry {
                 field: "source_code_hash",
@@ -96,9 +117,9 @@ impl DocumentType for SessionDoc {
 mod tests {
     use super::*;
 
-    /// Pre-deployment session records do not have `hardware_aaguid` or
-    /// `org_domain`. They must deserialize as `None` so old sessions continue
-    /// to work without a backfill migration.
+    /// Pre-deployment session records do not have `hardware_aaguid`,
+    /// `org_domain`, or `client_id`. They must deserialize as `None` so old
+    /// sessions continue to work without a backfill migration.
     #[test]
     fn deserializes_legacy_session_without_new_fields() {
         let legacy = r#"{
@@ -113,6 +134,7 @@ mod tests {
         assert!(doc.hardware_aaguid.is_none());
         assert!(doc.org_domain.is_none());
         assert!(doc.authorization_details.is_none());
+        assert!(doc.client_id.is_none());
     }
 
     /// The denormalized fields survive a serde roundtrip on new sessions.
@@ -128,6 +150,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: Some("ee882879-721c-4913-9775-3dfcce97072a".to_string()),
             org_domain: Some("example.com".to_string()),
+            client_id: Some("client-abc".to_string()),
             source_code_hash: Some("code-hash-abc".to_string()),
         };
         let json = serde_json::to_string(&doc).expect("serialize");
@@ -137,7 +160,50 @@ mod tests {
             Some("ee882879-721c-4913-9775-3dfcce97072a")
         );
         assert_eq!(back.org_domain.as_deref(), Some("example.com"));
+        assert_eq!(back.client_id.as_deref(), Some("client-abc"));
         assert_eq!(back.source_code_hash.as_deref(), Some("code-hash-abc"));
+    }
+
+    /// The `client_id` index is emitted only when the field is set, so
+    /// pre-migration sessions (which deserialize `client_id` to `None`) do not
+    /// pollute a `delete_sessions_for_oauth_client` lookup, while
+    /// `revoke_tokens_api` can find every session a client minted.
+    #[test]
+    fn index_entries_include_client_id_only_when_set() {
+        let mk = |client_id: Option<String>| SessionDoc {
+            user_id: "u-1".to_string(),
+            user_email: "a@example.com".to_string(),
+            token_hash: "h".to_string(),
+            authenticator_id: None,
+            session_type: SessionPurpose::OAuthAccessToken,
+            expires_at: "2099-01-01T00:00:00Z".parse().expect("parse timestamp"),
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            source_code_hash: None,
+            client_id,
+        };
+        let with_client = mk(Some("client-abc".to_string()));
+        let without_client = mk(None);
+
+        let fields: Vec<&str> = with_client
+            .index_entries()
+            .iter()
+            .map(|e| e.field)
+            .collect();
+        assert!(
+            fields.contains(&"client_id"),
+            "client_id index must be present when set: {fields:?}"
+        );
+        let fields: Vec<&str> = without_client
+            .index_entries()
+            .iter()
+            .map(|e| e.field)
+            .collect();
+        assert!(
+            !fields.contains(&"client_id"),
+            "client_id index must be absent when None: {fields:?}"
+        );
     }
 
     /// The `source_code_hash` index is emitted only when the field is set, so
@@ -156,6 +222,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
             source_code_hash: code_hash,
         };
         let with_code = mk(Some("code-hash-abc".to_string()));

@@ -1667,6 +1667,7 @@ mod tests {
                 authorization_details: None,
                 hardware_aaguid: None,
                 org_domain: None,
+                client_id: None,
                 source_code_hash: Some(&setup.device_code_hash),
             },
         )

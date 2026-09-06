@@ -1187,6 +1187,7 @@ async fn forge_auth_time(
             authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            client_id: Some(&claims.client_id),
             source_code_hash: Option::None,
         },
     )
