@@ -331,10 +331,24 @@ mod auth_security {
             .await
             .expect("Failed to get auth status");
 
-        // Expired token should return 200 but authenticated=false
+        // Expired token should return 200 but authenticated=false with the
+        // full unauthenticated SessionStatus shape: email, expires_in_seconds,
+        // and device_name all null (matches the SessionStatus contract).
         assert_eq!(response.status, 200);
         let status: serde_json::Value = response.json().expect("Failed to parse response");
         assert_eq!(status["authenticated"], false);
+        assert!(
+            status["email"].is_null(),
+            "email must be null when unauthenticated"
+        );
+        assert!(
+            status["expires_in_seconds"].is_null(),
+            "expires_in_seconds must be null when unauthenticated"
+        );
+        assert!(
+            status["device_name"].is_null(),
+            "device_name must be null when unauthenticated"
+        );
     }
 
     /// Test that protected endpoints reject missing authentication.
