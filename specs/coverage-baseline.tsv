@@ -2084,11 +2084,6 @@ rfc9068#2.2.3#024093d5	SHOULD	An authorization server wanting to include such at
 rfc9068#2.2.3#1f6a5735	SHOULD	Authorization servers SHOULD encode the corresponding claim values according to the guidance defined in [RFC7643].
 rfc9068#2.2.3#81bd6f2b	SHOULD	If an authorization request includes a scope parameter, the corresponding issued JWT access token SHOULD include a "scope" claim as defined in Section 4.2 of [R
 rfc9068#2.2.3#b5b6c478	MUST	All the individual scope strings in the "scope" claim MUST have meaning for the resources indicated in the "aud" claim.
-rfc9068#3#57090adf	SHOULD	If the values in the "scope" parameter refer to different default resource indicator values, the authorization server SHOULD reject the request with "invalid_sc
-rfc9068#3#b9182efc	SHOULD	If the request includes a "resource" parameter (as defined in [RFC8707]), the resulting JWT access token "aud" claim SHOULD have the same value as the "resource
-rfc9068#3#d80fe36b	MUST	If the request does not include a "resource" parameter, the authorization server MUST use a default resource indicator in the "aud" claim.
-rfc9068#3#de585cd8	MUST NOT	The authorization server MUST NOT issue a JWT access token if the authorization granted by the token would be ambiguous.
-rfc9068#3#ee138bbb	SHOULD	If a "scope" parameter is present in the request, the authorization server SHOULD use it to infer the value of the default resource indicator to be used in the 
 rfc9068#5#09f3f45a	MUST	To prevent cross-JWT confusion, authorization servers MUST use a distinct identifier as an "aud" claim value to uniquely identify access tokens issued by the sa
 rfc9068#6#83465a25	MUST NOT	The client MUST NOT inspect the content of the access token: the authorization server and the resource server might decide to change the token format at any tim
 rfc9101#10.3#d996357b	SHOULD	It is RECOMMENDED by this specification to use this practice for the following endpoints defined in [RFC6749], [RFC6750], and [RFC8414]:
