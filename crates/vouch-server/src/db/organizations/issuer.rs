@@ -9,7 +9,7 @@
 //! removed or un-verified.
 
 use super::validation::{
-    SubdomainLabelError, backing_apex_for_label, eligible_subdomain_labels,
+    SubdomainLabelError, backing_apexes_for_label, eligible_subdomain_labels,
     validate_subdomain_label,
 };
 use super::{ORG_SCAN_PAGE_SIZE, Organization};
@@ -247,15 +247,24 @@ pub async fn claim_subdomain(
             return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
         }
 
-        let Some(apex) = backing_apex_for_label(&data.domain, &data.additional_domains, &label)
-        else {
+        // All verified apexes of this org that derive `label` (primary
+        // domain first, then verified additional domains). The cross-org
+        // takeover check tests membership of the holder's recorded apex
+        // against this full set, not against a single find-first apex: the
+        // claimant may own the holder's apex as a non-primary additional
+        // domain whose apex hyphen-collapses to the same label as the
+        // primary, in which case `apex` (first match) differs from the
+        // holder's apex even though the claimant verified the domain itself.
+        let backing_apexes =
+            backing_apexes_for_label(&data.domain, &data.additional_domains, &label);
+        let Some(apex) = backing_apexes.first().cloned() else {
             return Err(SubdomainClaimError::NotEligible);
         };
 
         // Take the claim slot. Every branch either writes the slot row or
         // rejects, so concurrent claimants serialize on it.
         let claim_id = deterministic_subdomain_claim_id(&label);
-        let slot = SubdomainClaimDoc {
+        let mut slot = SubdomainClaimDoc {
             label: label.clone(),
             org_id: org_id.to_string(),
             apex: apex.clone(),
@@ -295,10 +304,25 @@ pub async fn claim_subdomain(
                             // (acme.com.br vs acme-com.br). A cross-org
                             // takeover must be backed by the same verified
                             // apex — owning the domain is the trust anchor.
-                            if holder.apex != apex {
+                            // Membership (not find-first): the claimant may own
+                            // the holder's apex as a non-primary additional
+                            // domain whose apex collapses to the same label as
+                            // the primary, so `apex` (first match) can differ
+                            // from `holder.apex` even though the claimant
+                            // verified the domain itself.
+                            if !backing_apexes.contains(&holder.apex) {
                                 return Err(SubdomainClaimError::Conflict);
                             }
                         }
+                        // Preserve the original domain anchor: record the
+                        // holder's apex (the apex the label was minted under),
+                        // not the claimant's first-matching apex. Same-org
+                        // reclaims are a no-op (holder and claimant share the
+                        // apex); cross-org takeovers pin the recorded apex so
+                        // a chain of takeovers keeps the original domain
+                        // anchor and a future org that owns only that apex
+                        // may take over.
+                        slot.apex = holder.apex.clone();
                         // Take over the released slot; the version CAS makes a
                         // concurrent takeover or racing release lose the race
                         // and re-run against the fresh slot state, which then
@@ -724,6 +748,10 @@ mod tests {
             .unwrap();
         assert_eq!(slot.data.org_id, claimant.id, "slot must transfer holders");
         assert!(slot.data.released_at.is_none());
+        assert_eq!(
+            slot.data.apex, "acme.com",
+            "takeover must preserve the holder's recorded apex"
+        );
     }
 
     #[tokio::test]
@@ -758,6 +786,218 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SubdomainClaimError::Conflict), "{err}");
+    }
+
+    #[tokio::test]
+    async fn cross_apex_takeover_with_both_collapsing_apexes_owned() {
+        let store = fresh_store().await;
+        // Claimant's primary is `acme-com.br` (apex `acme-com.br`) and it
+        // ALSO verified the other collapsing apex `acme.com.br` as an
+        // additional domain. Both apexes derive label `acme-com-br`.
+        let claimant = create_organization(&store, "acme-com.br", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &claimant.id, "acme.com.br", "u1", "u1@acme-com.br")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &claimant.id, "acme.com.br")
+            .await
+            .unwrap();
+
+        // Seed a released slot past cooldown, originally minted under
+        // `acme.com.br` (the claimant's non-primary apex). The find-first
+        // apex for this claimant is `acme-com.br` (the primary), so the
+        // buggy single-apex comparison would reject this takeover even
+        // though the claimant verified ownership of the holder's apex.
+        let expired_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        let claim_id = deterministic_subdomain_claim_id("acme-com-br");
+        store
+            .insert_with_id(
+                &claim_id,
+                &SubdomainClaimDoc {
+                    label: "acme-com-br".to_string(),
+                    org_id: "some-other-org".to_string(),
+                    apex: "acme.com.br".to_string(),
+                    released_at: Some(expired_release),
+                },
+            )
+            .await
+            .unwrap();
+
+        let label = claim_subdomain(&store, &claimant.id, "acme-com-br").await;
+        assert!(
+            label.is_ok(),
+            "takeover should succeed since claimant owns the holder's apex; got {label:?}"
+        );
+
+        // The takeover must preserve the holder's recorded apex, not the
+        // claimant's first-matching (primary) apex — the domain anchor the
+        // label was minted under must survive a chain of takeovers.
+        let slot = store
+            .get::<SubdomainClaimDoc>(&claim_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            slot.data.apex, "acme.com.br",
+            "takeover must preserve the holder's apex"
+        );
+        assert_eq!(slot.data.org_id, claimant.id);
+        assert!(slot.data.released_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn takeover_preserves_apex_for_subsequent_sole_owner() {
+        let store = fresh_store().await;
+        // Org A owns both collapsing apexes (primary `acme-com.br` plus
+        // verified additional `acme.com.br`). It takes over a slot minted
+        // under `acme.com.br`, then releases it. Org B owns ONLY the
+        // holder's apex `acme.com.br` (as its primary). B must be able to
+        // take over — this only works because A's takeover preserved the
+        // holder's apex instead of overwriting it with A's primary.
+        let org_a = create_organization(&store, "acme-com.br", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org_a.id, "acme.com.br", "u1", "u1@acme-com.br")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org_a.id, "acme.com.br")
+            .await
+            .unwrap();
+        let org_b = create_organization(&store, "acme.com.br", None, None)
+            .await
+            .unwrap();
+        let claim_id = deterministic_subdomain_claim_id("acme-com-br");
+
+        // Seed a released slot minted under `acme.com.br` by a prior holder.
+        let expired_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        store
+            .insert_with_id(
+                &claim_id,
+                &SubdomainClaimDoc {
+                    label: "acme-com-br".to_string(),
+                    org_id: "prior-holder".to_string(),
+                    apex: "acme.com.br".to_string(),
+                    released_at: Some(expired_release),
+                },
+            )
+            .await
+            .unwrap();
+
+        // A takes over (owns both apexes) — must preserve the holder's apex.
+        claim_subdomain(&store, &org_a.id, "acme-com-br")
+            .await
+            .unwrap();
+        let slot = store
+            .get::<SubdomainClaimDoc>(&claim_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            slot.data.apex, "acme.com.br",
+            "first takeover must keep the original anchor"
+        );
+
+        // A releases (starts a fresh cooldown); advance the clock past it.
+        release_subdomain(&store, &org_a.id).await.unwrap();
+        let slot = store
+            .get::<SubdomainClaimDoc>(&claim_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let version = slot.version;
+        let advanced_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        assert!(
+            store
+                .compare_and_update(
+                    &claim_id,
+                    version,
+                    &SubdomainClaimDoc {
+                        released_at: Some(advanced_release),
+                        ..slot.data
+                    },
+                )
+                .await
+                .unwrap(),
+            "advance the slot's release time past the cooldown"
+        );
+
+        // B (owns only the holder's apex) takes over the slot A preserved.
+        let res = claim_subdomain(&store, &org_b.id, "acme-com-br").await;
+        assert!(
+            res.is_ok(),
+            "sole owner of the preserved apex must take over; got {res:?}"
+        );
+        let slot = store
+            .get::<SubdomainClaimDoc>(&claim_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slot.data.org_id, org_b.id);
+        assert_eq!(
+            slot.data.apex, "acme.com.br",
+            "chain of takeovers must keep the original domain anchor"
+        );
+        assert!(slot.data.released_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn same_org_reclaim_keeps_non_primary_recorded_apex() {
+        let store = fresh_store().await;
+        // Org A's primary `acme-com.br` and verified additional `acme.com.br`
+        // both collapse to label `acme-com-br`. A holds a slot that was
+        // recorded under the non-primary apex `acme.com.br` (e.g. via an
+        // earlier cross-org takeover) and released it long ago. A's re-claim
+        // must NOT rewrite the recorded apex to its find-first (primary)
+        // apex — that would silently relocate the domain anchor and could
+        // block a future sole owner of `acme.com.br` from taking over.
+        let org_a = create_organization(&store, "acme-com.br", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org_a.id, "acme.com.br", "u1", "u1@acme-com.br")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org_a.id, "acme.com.br")
+            .await
+            .unwrap();
+
+        let expired_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        let claim_id = deterministic_subdomain_claim_id("acme-com-br");
+        store
+            .insert_with_id(
+                &claim_id,
+                &SubdomainClaimDoc {
+                    label: "acme-com-br".to_string(),
+                    org_id: org_a.id.clone(),
+                    apex: "acme.com.br".to_string(),
+                    released_at: Some(expired_release),
+                },
+            )
+            .await
+            .unwrap();
+
+        claim_subdomain(&store, &org_a.id, "acme-com-br")
+            .await
+            .unwrap();
+        let slot = store
+            .get::<SubdomainClaimDoc>(&claim_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            slot.data.apex, "acme.com.br",
+            "same-org re-claim must preserve the recorded non-primary apex"
+        );
+        assert_eq!(slot.data.org_id, org_a.id);
+        assert!(slot.data.released_at.is_none());
     }
 
     #[tokio::test]
