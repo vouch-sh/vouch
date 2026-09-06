@@ -316,7 +316,8 @@ pub fn validate_subdomain_label(input: &str) -> Result<String, SubdomainLabelErr
 ///
 /// [`eligible_subdomain_labels`] and [`ineligible_subdomain_candidates`]
 /// partition the labels by [`validate_subdomain_label`];
-/// [`backing_apex_for_label`] recovers the apex behind an eligible label.
+/// [`backing_apexes_for_label`] recovers the apexes behind an eligible
+/// label.
 fn verified_apex_label_pairs(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
@@ -384,19 +385,32 @@ pub fn ineligible_subdomain_candidates(
     labels
 }
 
-/// The verified registrable apex behind an eligible `label`, or `None` when
-/// no verified domain of the org derives it.
+/// All verified registrable apexes behind an eligible `label`, in
+/// encounter order (primary domain first, then verified additional
+/// domains), or empty when no verified domain of the org derives it.
 ///
-/// The claim slot records this apex so a released label can only be taken
-/// over by an org that verified ownership of the same domain.
-pub(super) fn backing_apex_for_label(
+/// A label can be derived from more than one verified apex when two
+/// distinct apexes hyphen-collapse to the same label (`acme.com.br` and
+/// `acme-com.br` both → `acme-com-br`). The claim slot records *the* apex
+/// the label was minted under, and a cross-org takeover of a released
+/// slot must be backed by that same apex — owning the domain is the trust
+/// anchor. Because the claimant may own the holder's apex as a
+/// non-primary additional domain whose apex collapses to the same label
+/// as the primary, the takeover admission check tests membership of the
+/// holder's recorded apex against this full set rather than against a
+/// single find-first apex.
+///
+/// For a fresh claim (no existing holder) the first entry is the natural
+/// apex to record on the new slot.
+pub(super) fn backing_apexes_for_label(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
     label: &str,
-) -> Option<String> {
+) -> Vec<String> {
     verified_apex_label_pairs(primary_domain, additional_domains)
         .into_iter()
-        .find_map(|(apex, candidate)| (candidate == label).then_some(apex))
+        .filter_map(|(apex, candidate)| (candidate == label).then_some(apex))
+        .collect()
 }
 
 #[cfg(test)]
