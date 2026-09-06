@@ -863,12 +863,20 @@ async fn handle_client_credentials_grant(
         Ok(result) => result,
         Err(resp) => return resp,
     }) else {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication required for client_credentials grant",
-        )
-        .into_oauth_response()
-        .into_response();
+        // RFC 6749 §5.2: the client attempted authentication via the
+        // `Authorization` header field, so the 401 MUST carry a matching
+        // `WWW-Authenticate` challenge. Derive the presentation from the
+        // request so a malformed `Basic` header still owes the challenge —
+        // mirroring `introspect`/`revoke` and the `authorization_code` grant.
+        return with_client_auth_challenge(
+            ClientAuthPresentation::of(&headers, &auth),
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication required for client_credentials grant",
+            )
+            .into_oauth_response()
+            .into_response(),
+        );
     };
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
@@ -1108,12 +1116,20 @@ async fn handle_token_exchange_grant(
         Ok(result) => result,
         Err(resp) => return resp,
     }) else {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication required for token exchange",
-        )
-        .into_oauth_response()
-        .into_response();
+        // RFC 6749 §5.2: the client attempted authentication via the
+        // `Authorization` header field, so the 401 MUST carry a matching
+        // `WWW-Authenticate` challenge. Derive the presentation from the
+        // request so a malformed `Basic` header still owes the challenge —
+        // mirroring `introspect`/`revoke` and the `authorization_code` grant.
+        return with_client_auth_challenge(
+            ClientAuthPresentation::of(&headers, &auth),
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication required for token exchange",
+            )
+            .into_oauth_response()
+            .into_response(),
+        );
     };
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
