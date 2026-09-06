@@ -223,14 +223,38 @@ pub(crate) async fn register_start(
 
 /// Complete registration - verify attestation and store credential
 /// (WebAuthn Level 2 Section 7.1, Step 4-22).
+///
+/// The caller is re-bound to the registration state here, mirroring
+/// `register_start`'s `AuthenticatedToken(token)`. A captured state JWT is
+/// server-signed but not encrypted; `try_consume_challenge_state` only
+/// prevents replay by a *second* caller, not the first. Without this check a
+/// holder of a leaked-but-still-valid state JWT could complete enrollment
+/// with an attacker-controlled YubiKey and enroll a credential on a victim
+/// account by satisfying only the open RFC 7591 client-level signature gate.
 pub(crate) async fn register_complete(
     State(state): State<Arc<AppState>>,
+    AuthenticatedToken(token): AuthenticatedToken,
     client_info: db::ClientInfo,
     ValidJson(req): ValidJson<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
     let checked = RegistrationCompletion::validate(req, &state).await?;
+
+    // Bind the caller to the state JWT's user_id. `register_start` minted
+    // the state from `token.sub`; completion must assert the same principal
+    // before consuming the state or storing a credential. A mismatched
+    // caller is rejected here, *before* the single-use consume, so the
+    // legitimate holder can still complete the enrollment with the same
+    // state token.
+    if token.sub != checked.reg_state.user_id.to_string() {
+        tracing::warn!(
+            caller_sub = %token.sub,
+            state_user_id = %checked.reg_state.user_id,
+            "register_complete caller does not match state JWT user_id"
+        );
+        return Err(ServiceError::Forbidden("state_user_mismatch"));
+    }
 
     // Account must be active. A user deactivated after obtaining the
     // registration state (valid for five minutes) must not register a new
@@ -973,7 +997,12 @@ mod tests {
         )
         .await;
 
-        // Build a valid RegistrationState JWT with a far-future expiry.
+        // Build a valid RegistrationState JWT bound to the authenticated
+        // caller's user id (the fix requires `token.sub == reg_state.user_id`
+        // before any other check runs). The pre-consume below still
+        // exercises the replay path: the bearer matches the state, the
+        // mismatch check passes, and the consume returns Replay.
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
         let signer = &state.state_signer;
         let challenge = Challenge::from(vec![2u8; 32]);
         let now = jiff::Timestamp::now();
@@ -981,8 +1010,8 @@ mod tests {
             .checked_add(jiff::Span::new().minutes(5))
             .map_or(now.as_second().saturating_add(300), |t| t.as_second());
         let reg_state = RegistrationState {
-            user_id: Uuid::new_v4(),
-            user_name: "replay-test@example.com".to_string(),
+            user_id: user_uuid,
+            user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
@@ -1163,6 +1192,200 @@ mod tests {
         assert_ne!(
             json["message"], "user_deactivated",
             "active user must not receive user_deactivated: {json}"
+        );
+    }
+
+    // ========================================================================
+    // Register Complete — Caller Binding (state JWT must match caller)
+    // ========================================================================
+    //
+    // A captured register_start state JWT must not let an attacker enroll a
+    // genuine YubiKey against the victim's account by satisfying only the
+    // client-level RFC 9421 signature. The completion handler asserts that
+    // the bearer's `sub` equals the state JWT's `user_id` before any
+    // account-active or single-use work.
+
+    /// Build a bearer-token session for `user` exactly the way `register_start`
+    /// expects (so the test reflects the legitimate CLI flow), plus a
+    /// `RegistrationState` JWT bound to a caller-chosen user id.
+    async fn register_complete_session(state: &AppState, email: &str) -> (crate::db::User, String) {
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        (user, token)
+    }
+
+    /// Mint a valid `RegistrationState` JWT bound to `user_id`.
+    async fn register_state_for(state: &AppState, user: &crate::db::User) -> (String, i64) {
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
+            user_name: user.email.clone(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
+            challenge: Challenge::from(vec![7u8; 32]),
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let jwt = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+        (jwt, exp)
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_rejects_state_user_mismatch() {
+        // Attacker captures the victim's state JWT and submits completion
+        // under their own bearer token. The mismatch must be rejected with
+        // 403 forbidden / state_user_mismatch *before* the single-use
+        // consume, so the victim can still spend the state later.
+        let (app, state) = test_app().await;
+        let (victim, victim_token) =
+            register_complete_session(&state, "victim-mismatch@example.com").await;
+        let (attacker, attacker_token) =
+            register_complete_session(&state, "attacker-mismatch@example.com").await;
+        assert_ne!(attacker.id, victim.id, "test setup must distinct users");
+
+        // A fresh state JWT bound to the victim's user id (what the
+        // victim's `register_start` would have minted).
+        let (state_jwt, exp) = register_state_for(&state, &victim).await;
+
+        // Binary fields are well-formed so the body parses and the state
+        // decodes; their contents are never consumed because the mismatch
+        // check fires first.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {attacker_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "mismatch must 403: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "forbidden");
+        assert_eq!(json["message"], "state_user_mismatch");
+
+        // The rejected mismatch must NOT have consumed the victim's state
+        // token. `consume_challenge_state_for_test` is the only way to splice
+        // into the single-use store, so this assertion consumes the token as
+        // a side-effect — that's why the legitimate retry below uses a
+        // *fresh* state JWT.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let consume =
+            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+        assert!(
+            consume.is_ok(),
+            "a rejected mismatch consumed the victim's registration state: {consume:?}"
+        );
+
+        // The legitimate retry: the victim spends a fresh state JWT with
+        // a matching bearer. The caller-binding check passes, the
+        // active-user check passes (victim is active), the consume
+        // succeeds, and the request lands in WebAuthn verification —
+        // never at the 403 caller-binding guard.
+        let (state_jwt, _exp) = register_state_for(&state, &victim).await;
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [],
+            "client_data_json": [],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {victim_token}"))],
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "victim with matching bearer must not get forbidden: {resp_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_requires_authentication() {
+        // A request that satisfies the client-level RFC 9421 signature
+        // (the harness signs it transparently using the test client
+        // registered for the deployment's `base_url`) but carries a Bearer
+        // token that is NOT a deployment-issued OAuth access token must be
+        // rejected at the `AuthenticatedToken` extractor. The bug being
+        // fixed: `register_complete` previously had no `AuthenticatedToken`
+        // extractor at all, so such a request reached the handler.
+        use base64::Engine;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "no-auth-complete@example.com").await;
+        let (state_jwt, _exp) = register_state_for(&state, &user).await;
+
+        // Forge a JWT whose `client_id` claim is the deployment's own
+        // `base_url` (so the RFC 9421 `extract_client_id` resolver hits
+        // the registered test client and the signature middleware passes)
+        // but whose signature is bogus — the `AuthenticatedToken`
+        // extractor decodes the token against the deployment's OIDC key
+        // and must reject it with `invalid_token`.
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "client_id": state.config().base_url.as_str(),
+                // No `sub`, no `iss`, no `exp` — `decode_token` fails the
+                // signature check long before these claims are read.
+            })
+            .to_string(),
+        );
+        let bogus_sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
+        let forged_jwt = format!("{header}.{payload}.{bogus_sig}");
+
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {forged_jwt}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing user bearer must 401: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(
+            json["code"], "invalid_token",
+            "expected the AuthenticatedToken extractor to reject the forged token, got: {json}"
         );
     }
 

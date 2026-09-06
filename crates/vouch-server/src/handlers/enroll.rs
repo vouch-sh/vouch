@@ -1354,16 +1354,42 @@ pub(crate) async fn browser_register_start(
 /// type, origin, state decode — cannot be reordered after it. The account must
 /// also still be active, which is a database read rather than a body check and so
 /// runs between the two.
+///
+/// The caller is re-bound to the session cookie established at
+/// `browser_register_start` here, mirroring the start handler's
+/// `extract_session_from_cookie`. `browser_register_start` minted the state
+/// from the cookie's `sub`; completion must assert the same principal before
+/// consuming the state or storing a credential. Without this check a holder
+/// of a leaked-but-still-valid state JWT could complete enrollment with an
+/// attacker-controlled YubiKey against the victim's account by passing only
+/// the per-route body checks.
 #[expect(
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
 )]
 pub(crate) async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     client_info: ClientInfo,
     ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
     let checked = RegistrationCompletion::validate(req, &state).await?;
+
+    // Bind the caller to the state JWT's user_id. `browser_register_start`
+    // minted the state from the session cookie's `sub`; completion must
+    // assert the same principal before consuming the state. A mismatched
+    // caller is rejected here, *before* the single-use consume, so the
+    // legitimate holder can still complete the enrollment with the same
+    // state token.
+    let session = extract_session_from_cookie(&state, &jar).await?;
+    if session.sub != checked.reg_state.user_id.to_string() {
+        tracing::warn!(
+            caller_sub = %session.sub,
+            state_user_id = %checked.reg_state.user_id,
+            "browser_register_complete caller does not match state JWT user_id"
+        );
+        return Err(ServiceError::Forbidden("state_user_mismatch"));
+    }
 
     // A user deactivated after obtaining the registration state (valid for
     // five minutes) must not register a new hardware key.
