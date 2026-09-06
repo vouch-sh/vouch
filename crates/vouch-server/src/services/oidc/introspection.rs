@@ -215,7 +215,7 @@ pub async fn introspect_token(
     }
 
     // RFC 9396: authorization_details from session (already a Value).
-    let authorization_details = session.authorization_details;
+    let authorization_details = session.authorization_details.clone();
 
     // RFC 7662 §2.2 `token_type`: derived from the confirmation claim the
     // token actually carries, by the same rule issuance used to advertise it.

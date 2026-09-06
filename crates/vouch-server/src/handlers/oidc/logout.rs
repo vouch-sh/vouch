@@ -493,7 +493,8 @@ async fn clear_user_session(
                         client: client_info,
                         ..Default::default()
                     };
-                    db::record_auth_event(&state.audit, params, Some(session.user_email)).await;
+                    db::record_auth_event(&state.audit, params, Some(session.user_email.clone()))
+                        .await;
                 }
             }
         }

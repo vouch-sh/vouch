@@ -96,8 +96,11 @@ pub(crate) async fn status(
     }
 
     // Get authenticator name from server-side session record
-    let device_name = match session.and_then(|s| s.authenticator_id) {
-        Some(auth_id) => db::get_authenticator_by_id(&state.store, &auth_id)
+    let device_name = match session
+        .as_deref()
+        .and_then(|s| s.authenticator_id.as_deref())
+    {
+        Some(auth_id) => db::get_authenticator_by_id(&state.store, auth_id)
             .await
             .ok()
             .flatten()
@@ -166,7 +169,12 @@ pub(crate) async fn logout(
                             client: client_info,
                             ..Default::default()
                         };
-                        db::record_auth_event(&state.audit, params, Some(session.user_email)).await;
+                        db::record_auth_event(
+                            &state.audit,
+                            params,
+                            Some(session.user_email.clone()),
+                        )
+                        .await;
                     }
                 }
             }

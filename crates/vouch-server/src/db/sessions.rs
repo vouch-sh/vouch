@@ -7,8 +7,8 @@ use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Re-export SessionPurpose from documents module
@@ -218,24 +218,23 @@ pub struct SessionCache {
 }
 
 struct CacheEntry {
-    value: Option<Session>,
+    /// Shared with every caller that got a hit; hits must stay a refcount
+    /// bump, never a deep copy. `Session` is plain immutable data — do not
+    /// reach for `Arc::make_mut`, which would either copy-on-write or mutate
+    /// the cached entry in place depending on the live refcount.
+    value: Option<Arc<Session>>,
     inserted_at: Instant,
 }
 
 /// Result of a cache probe, distinguishing a miss from a cached
 /// "no such session" answer (negative caching).
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Hit is the common case on the auth hot path and is destructured \
-              immediately; boxing would add an allocation per lookup"
-)]
 enum CacheLookup {
     /// No fresh entry for this key — consult the database.
     Miss,
     /// Cached knowledge that the database has no session for this key.
     NegativeHit,
     /// Cached session.
-    Hit(Session),
+    Hit(Arc<Session>),
 }
 
 impl SessionCache {
@@ -265,7 +264,7 @@ impl SessionCache {
         &self,
         store: &DocumentStore,
         token_hash: &str,
-    ) -> Result<Option<Session>> {
+    ) -> Result<Option<Arc<Session>>> {
         // Test-only fault injection: the hash was registered via
         // [`Self::inject_fault`]; return a store-style `Err` so callers can
         // exercise their DB-error propagation path without a real outage.
@@ -283,7 +282,9 @@ impl SessionCache {
         // Snapshot generation before the async DB fetch so we can
         // detect invalidations that occurred during the await.
         let gen_before = self.generation.load(Ordering::SeqCst);
-        let result = get_session_by_token_hash(store, token_hash, Timestamp::now()).await?;
+        let result = get_session_by_token_hash(store, token_hash, Timestamp::now())
+            .await?
+            .map(Arc::new);
         self.insert_if_valid(token_hash.to_string(), result.clone(), gen_before);
         Ok(result)
     }
@@ -360,7 +361,7 @@ impl SessionCache {
     /// `expected_gen` was captured. The generation is re-checked under
     /// the lock so no invalidation can race between the check and the
     /// actual map write.
-    fn insert_if_valid(&self, key: String, value: Option<Session>, expected_gen: u64) {
+    fn insert_if_valid(&self, key: String, value: Option<Arc<Session>>, expected_gen: u64) {
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
@@ -398,8 +399,8 @@ impl SessionCache {
 mod tests {
     use super::*;
 
-    fn fake_session(token_hash: &str) -> Session {
-        Session {
+    fn fake_session(token_hash: &str) -> Arc<Session> {
+        Arc::new(Session {
             id: "sess-1".to_string(),
             user_id: "user-1".to_string(),
             user_email: "test@example.com".to_string(),
@@ -412,7 +413,7 @@ mod tests {
             hardware_aaguid: None,
             org_domain: None,
             source_code_hash: None,
-        }
+        })
     }
 
     #[test]
@@ -425,6 +426,32 @@ mod tests {
             generation,
         );
         assert!(matches!(cache.get("hash-a"), CacheLookup::Hit(_)));
+    }
+
+    /// Two hits for the same key must return the same allocation — the point
+    /// of storing `Arc<Session>` is that a hit is a refcount bump, and a
+    /// reintroduced deep copy would pass every shape-only `matches!` test.
+    #[test]
+    fn cache_hit_shares_the_cached_allocation() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-share".to_string(),
+            Some(fake_session("hash-share")),
+            generation,
+        );
+        let first = match cache.get("hash-share") {
+            CacheLookup::Hit(session) => Some(session),
+            CacheLookup::Miss | CacheLookup::NegativeHit => None,
+        };
+        let second = match cache.get("hash-share") {
+            CacheLookup::Hit(session) => Some(session),
+            CacheLookup::Miss | CacheLookup::NegativeHit => None,
+        };
+        assert!(
+            matches!((&first, &second), (Some(a), Some(b)) if Arc::ptr_eq(a, b)),
+            "both lookups must hit and share the cached allocation"
+        );
     }
 
     #[test]
