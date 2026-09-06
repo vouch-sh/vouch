@@ -271,6 +271,19 @@ pub(crate) async fn check_ssh_revocation(
             "Serial must be a numeric string (u64)",
         ));
     }
+    // Canonicalize to the u64 decimal the write path stores
+    // (record_ssh_certificate_issuance / revoke_all_ssh_certificates_for_user
+    // both use u64::to_string()). The validator above admits leading-zero
+    // forms (e.g. "012345"); without normalization the byte-equality DB
+    // lookup would miss the stored "12345" and report revoked:false for a
+    // genuinely revoked serial.
+    let serial = serial.parse::<u64>().map(|n| n.to_string()).map_err(|_| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_serial",
+            "Serial must be a numeric string (u64)",
+        )
+    })?;
 
     let revoked = db::is_ssh_certificate_revoked(&state.store, &serial)
         .await
@@ -1044,6 +1057,142 @@ mod tests {
         let (status, _body) = http_get(&app, "/v1/credentials/ssh/krl/", &[]).await;
 
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ------------------------------------------------------------------------
+    // SSH serial canonicalization — regressions for the leading-zero
+    // byte-equality mismatch. The write path (record_ssh_certificate_issuance /
+    // revoke_all_ssh_certificates_for_user) stores serials only as the canonical
+    // u64::to_string(); the per-serial read path must normalize to the same form
+    // before the byte-equality DB lookup, or a validator-accepted non-canonical
+    // decimal of a revoked serial (e.g. "012345" for stored "12345") reports
+    // revoked:false — contradicting the canonical-form answer and the KRL list.
+    // ------------------------------------------------------------------------
+
+    /// Primary regression: a validator-accepted non-canonical (leading-zero)
+    /// decimal of a revoked serial must report `revoked: true` and echo back the
+    /// canonical serial, matching the canonical-form answer for the same u64.
+    /// Before the fix, `GET .../krl/12345` returned `revoked:true` while
+    /// `GET .../krl/012345` returned `{serial:"012345", revoked:false}`.
+    #[tokio::test]
+    async fn test_ssh_revocation_check_leading_zero_matches_canonical_for_revoked() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "leadzero@example.com").await;
+        let serial: u64 = 12_345;
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future expires_at");
+        crate::db::record_ssh_certificate_issuance(
+            &state.store,
+            serial,
+            &user.id,
+            "leadzero@example.com",
+            &["leadzero".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+        crate::db::revoke_user_credentials(&state.store, &user.id, None, None)
+            .await
+            .expect("revoke user credentials");
+
+        // Canonical form: revoked.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/12345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "12345");
+        assert_eq!(resp["revoked"], true);
+
+        // Non-canonical leading-zero form: same logical u64, must agree AND echo
+        // back the canonical serial so the response signals which value was
+        // actually looked up (the raw input used to be echoed back unchanged).
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/012345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            resp["serial"], "12345",
+            "leading-zero input must be echoed back as the canonical u64 decimal"
+        );
+        assert_eq!(
+            resp["revoked"], true,
+            "leading-zero form of a revoked serial must match the canonical-form answer"
+        );
+    }
+
+    /// `"0"` is already canonical and must round-trip unchanged; `"00"` denotes
+    /// the same u64 and must normalize to the canonical `"0"`. Guards the
+    /// zero-special-case (the write path stores `0u64.to_string() == "0"`).
+    #[tokio::test]
+    async fn test_ssh_revocation_check_zero_forms_canonical() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/0", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "0");
+        assert_eq!(resp["revoked"], false);
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/00", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            resp["serial"], "0",
+            "\"00\" must normalize to canonical \"0\""
+        );
+        assert_eq!(resp["revoked"], false);
+    }
+
+    /// The per-serial endpoint must not contradict the KRL list for the same
+    /// logical serial. After revoking serial 12345, the KRL list contains the
+    /// canonical `"12345"`, and the per-serial endpoint — queried with a
+    /// leading-zero form of the same logical serial — must agree it is revoked.
+    /// This is the cross-endpoint consistency the bug report flagged as a
+    /// codebase inconsistency (`get_ssh_krl` returns canonical strings; the
+    /// per-serial endpoint used to return the opposite answer for a
+    /// validator-accepted non-canonical formatting of the same u64).
+    #[tokio::test]
+    async fn test_per_serial_endpoint_agrees_with_krl_list_for_same_logical_serial() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "krl-agree@example.com").await;
+        let serial: u64 = 12_345;
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future expires_at");
+        crate::db::record_ssh_certificate_issuance(
+            &state.store,
+            serial,
+            &user.id,
+            "krl-agree@example.com",
+            &["krl-agree".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+        crate::db::revoke_user_credentials(&state.store, &user.id, None, None)
+            .await
+            .expect("revoke");
+
+        // KRL list returns the canonical stored string.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let list: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let revoked_serials = list["revoked_serials"]
+            .as_array()
+            .expect("revoked_serials array");
+        assert!(
+            revoked_serials.iter().any(|s| s == "12345"),
+            "KRL list must contain the canonical revoked serial, got: {revoked_serials:?}"
+        );
+
+        // Per-serial endpoint queried with a leading-zero form must agree with
+        // the KRL list for the same logical serial.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/00012345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "12345");
+        assert_eq!(resp["revoked"], true);
     }
 
     // ========================================================================
