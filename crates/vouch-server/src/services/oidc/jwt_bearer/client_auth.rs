@@ -6,8 +6,9 @@
 
 use super::jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 use super::validate::{
-    JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified, map_algorithm,
-    parse_assertion_header, validate_client_assertion_algorithm, validate_jwt_assertion,
+    CLOCK_SKEW_SECONDS, JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified,
+    map_algorithm, parse_assertion_header, validate_client_assertion_algorithm,
+    validate_jwt_assertion,
 };
 use crate::AppState;
 use crate::db::claim::ClaimError;
@@ -29,10 +30,25 @@ use std::sync::Arc;
 /// type system prevents double-commit and ensures the value is either
 /// committed or dropped — dropping without committing is the correct
 /// behavior for retryable error paths.
+///
+/// The replay-prevention record's retention horizon is derived from the
+/// validated assertion's own `exp` claim (see [`PendingJti::commit`]),
+/// satisfying RFC 7523 §3 item 7: the used `jti` is retained *"for the
+/// length of time for which the JWT would be considered valid based on the
+/// applicable `exp` instant"* — which, with the validator's clock-skew
+/// tolerance, is `exp + CLOCK_SKEW_SECONDS`. Retaining for `now +
+/// max_lifetime` instead would let the record become cleanup-eligible
+/// while the validator still accepts the assertion, opening a replay
+/// window (see `commit` for the arithmetic).
 pub struct PendingJti {
     jti: Option<String>,
     client_id: String,
-    max_lifetime: i64,
+    /// The validated assertion's `exp` claim (seconds since the Unix
+    /// epoch). Only the *validated* `exp` is safe to retain against: it
+    /// has already cleared the `exp - iat ≤ max_lifetime` bound in the
+    /// validator, so deriving `expires_at` from it cannot extend the
+    /// record beyond what the assertion's own validity permits.
+    assertion_exp: i64,
 }
 
 /// Witness that a JWT client assertion passed RFC 7523 §3 validation
@@ -69,6 +85,27 @@ impl PendingJti {
     /// `jti` (non-FAPI clients — the commit is a no-op), and
     /// `Err(InvalidCredentials)` when a concurrent caller already claimed
     /// the same JTI.
+    ///
+    /// # Replay-window invariant (RFC 7523 §3 item 7)
+    ///
+    /// The record's `expires_at` is set to `assertion_exp +
+    /// CLOCK_SKEW_SECONDS`, not `now + max_lifetime`. `assertion_exp` is
+    /// the validated `exp` of the assertion that produced this `PendingJti`
+    /// — it has already cleared the validator's `exp - iat ≤ max_lifetime`
+    /// bound, so this cannot retain the row beyond what the assertion's
+    /// own validity permits. The periodic cleanup task deletes rows as
+    /// soon as `expires_at < now`, while the validator
+    /// ([`validate_jwt_assertion`]) accepts an assertion until `now ≤ exp +
+    /// CLOCK_SKEW_SECONDS`. Deriving `expires_at` from `exp` (rather than
+    /// from `now + max_lifetime`) keeps the record alive until *at least*
+    /// the moment the validator stops accepting the assertion, so a
+    /// cleanup tick can never open a window in which a verbatim replay
+    /// would re-issue a token. The two `CLOCK_SKEW_SECONDS` terms that
+    /// compose the replay-acceptance interval — `exp`-skew at replay time
+    /// (the `+ CLOCK_SKEW_SECONDS` below) and `iat`-skew at mint time
+    /// (already folded into `exp = iat + lifetime`) — are both covered,
+    /// because `exp` is the assertion's actual expiry, not a server-now
+    /// proxy that diverges from it.
     pub async fn commit(
         self,
         state: &Arc<AppState>,
@@ -78,8 +115,12 @@ impl PendingJti {
         };
         // Not a database call: a timestamp overflow here is an internal
         // fault, and `DatabaseError` is the variant that renders it as a 500.
-        let expires_at = Timestamp::now()
-            .checked_add(self.max_lifetime.seconds())
+        // `assertion_exp` is the validated `exp` (seconds since epoch);
+        // `CLOCK_SKEW_SECONDS` is the same constant the validator applies
+        // to `exp`, so the record outlives the validator's acceptance
+        // window exactly.
+        let expires_at = Timestamp::from_second(self.assertion_exp)
+            .and_then(|t| t.checked_add(CLOCK_SKEW_SECONDS.seconds()))
             .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
         db::store_jwt_assertion_jti(&state.store, &jti, &self.client_id, expires_at)
@@ -248,10 +289,16 @@ pub async fn authenticate_client_jwt(
     // 8. Build a PendingJti for the caller to commit after the full
     //    request succeeds. This avoids consuming the JTI on retryable
     //    errors like `use_dpop_nonce`.
+    //
+    // The record's retention horizon is derived from the validated `exp`
+    // (see `PendingJti::commit`), not from `now + max_lifetime`, so the
+    // record outlives the validator's `exp + CLOCK_SKEW_SECONDS`
+    // acceptance window and a cleanup tick can never open a replay
+    // window (RFC 7523 §3 item 7).
     let pending_jti = PendingJti {
         jti: validated.claims.jti.clone(),
         client_id: client.client_id.clone(),
-        max_lifetime,
+        assertion_exp: validated.claims.exp,
     };
 
     // Update last used timestamp
@@ -537,7 +584,7 @@ mod tests {
         let pending = PendingJti {
             jti: Some("unique-jti-abc".to_string()),
             client_id: "client-1".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         let result = pending.commit(&state).await;
@@ -554,7 +601,7 @@ mod tests {
         let first = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         // First commit succeeds.
@@ -568,7 +615,7 @@ mod tests {
         let second = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
         let result = second.commit(&state).await;
 
@@ -586,7 +633,7 @@ mod tests {
         let pending = PendingJti {
             jti: None,
             client_id: "client-no-jti".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         let result = pending.commit(&state).await;
@@ -612,7 +659,7 @@ mod tests {
         let first_pending = PendingJti {
             jti: Some(jti.clone()),
             client_id: "client-retry".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
         // Intentionally do NOT call commit — simulates a retryable error path.
         drop(first_pending);
@@ -622,13 +669,93 @@ mod tests {
         let second_pending = PendingJti {
             jti: Some(jti),
             client_id: "client-retry".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
         let result = second_pending.commit(&state).await;
 
         assert!(
             matches!(result, Ok(Some(_))),
             "commit on retry must succeed when the first PendingJti was not committed: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // Regression: PendingJti::commit MUST derive `expires_at` from the
+    // validated assertion's `exp` (specifically `exp + CLOCK_SKEW_SECONDS`),
+    // NOT from `now + max_lifetime`. If it used `now + max_lifetime`, a row
+    // committed for an assertion minted near `max_lifetime` could become
+    // cleanup-eligible while the validator still accepts the assertion
+    // (until `exp + CLOCK_SKEW_SECONDS`), opening a replay window once a
+    // cleanup tick lands in that interval (RFC 7523 §3 item 7).
+    //
+    // This test is deterministic and needs no real-time advance: under the
+    // fix, `commit` computes `expires_at` purely from `assertion_exp`, so a
+    // commit with a past `exp` yields a past `expires_at` (cleanup-eligible
+    // immediately) and a commit with a future `exp` yields a future
+    // `expires_at` (not cleanup-eligible).
+    // ========================================================================
+    #[tokio::test]
+    async fn test_commit_expires_at_binds_to_assertion_exp_plus_clock_skew() {
+        let state = make_state().await;
+        let now = Timestamp::now().as_second();
+
+        // (a) Commit a JTI whose `exp` is far in the past. Under the fix the
+        // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is also in the past,
+        // so cleanup must delete it. Under the bug (`now + max_lifetime`),
+        // the row would be `now + 300` seconds in the future and would NOT
+        // be deleted — this assertion is the one that inverts under the bug.
+        let past = PendingJti {
+            jti: Some("exp-bound-jti-past".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: now.saturating_sub(3600),
+        };
+        let _claim = past.commit(&state).await.expect("past-exp commit succeeds");
+        let deleted_past = db::delete_expired_jwt_assertion_jtis(&state.store)
+            .await
+            .expect("cleanup must not error");
+        assert_eq!(
+            deleted_past, 1,
+            "JTI committed with a past exp MUST be cleanup-eligible — \
+             this fails if `expires_at` is computed from `now + max_lifetime` \
+             instead of `exp + CLOCK_SKEW_SECONDS` (RFC 7523 §3 item 7)"
+        );
+
+        // (b) Commit a JTI whose `exp` is in the future. Under the fix the
+        // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is in the future, so
+        // cleanup must NOT delete it, and a verbatim replay must still
+        // collide on the `(jti, client_id)` PRIMARY KEY.
+        let future_exp = now.saturating_add(3600);
+        let future = PendingJti {
+            jti: Some("exp-bound-jti-future".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: future_exp,
+        };
+        let _claim = future
+            .commit(&state)
+            .await
+            .expect("future-exp commit succeeds");
+        let deleted_future = db::delete_expired_jwt_assertion_jtis(&state.store)
+            .await
+            .expect("cleanup must not error");
+        assert_eq!(
+            deleted_future, 0,
+            "JTI committed with a future exp MUST NOT be cleanup-eligible — \
+             this fails if `expires_at` is computed from `now + max_lifetime` \
+             (the row would be retained but for the wrong reason, and the \
+             replay-window arithmetic would still diverge from `exp`)"
+        );
+
+        // The future-exp row is still present, so a verbatim replay must
+        // collide.
+        let replay = PendingJti {
+            jti: Some("exp-bound-jti-future".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: future_exp,
+        };
+        let replayed = replay.commit(&state).await;
+        assert!(
+            matches!(replayed, Err(ClientAuthError::InvalidCredentials)),
+            "Replay of a still-retained JTI must be rejected: {replayed:?}"
         );
     }
 

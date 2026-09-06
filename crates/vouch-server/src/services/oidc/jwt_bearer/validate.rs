@@ -14,7 +14,15 @@ use serde::{Deserialize, Serialize};
 ///
 /// 10 seconds is the FAPI 2.0 recommended tolerance. Modern NTP-synced
 /// systems should not drift beyond this.
-const CLOCK_SKEW_SECONDS: i64 = 10;
+///
+/// Exposed `pub(crate)` so the JTI replay-prevention record
+/// ([`crate::services::oidc::jwt_bearer::client_auth::PendingJti::commit`])
+/// can derive its retention horizon from the *same* skew the validator
+/// applies to `exp`. The record must outlive the validator's
+/// `exp + CLOCK_SKEW_SECONDS` acceptance window, so the two values must
+/// never drift apart — sharing the constant makes that a compile-time
+/// guarantee (RFC 7523 §3 item 7).
+pub(crate) const CLOCK_SKEW_SECONDS: i64 = 10;
 
 /// JWT assertion claims (RFC 7523 Section 3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
