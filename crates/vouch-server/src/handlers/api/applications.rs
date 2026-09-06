@@ -713,7 +713,12 @@ pub(crate) async fn revoke_tokens_api(
         ));
     }
 
-    // Revoke all secrets (effectively revoking all tokens)
+    // Revoke all secrets. This blocks new issuance only —
+    // `db::revoke_all_oauth_client_secrets` sets `revoked_at` on
+    // `OAuthClientSecretDoc` rows, which the token-endpoint client-auth path
+    // consults; the resource-protection and introspection paths never read
+    // `revoked_at`. Already-minted access tokens are invalidated by the
+    // session deletes below.
     db::revoke_all_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -728,15 +733,17 @@ pub(crate) async fn revoke_tokens_api(
     // Terminate live M2M (client_credentials) sessions.
     //
     // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
-    // sessions whose `user_id` equals the OAuth client's `client_id`.
-    // Revoking secrets is not enough on its own: the session cache may still
-    // serve unexpired tokens until their TTL elapses.  Deleting those sessions
-    // and invalidating the cache makes the `TokenRevoked` audit event accurate.
+    // sessions whose `user_id` equals the OAuth client's `client_id`, so this
+    // delete reaches exactly the M2M sessions for this client. Revoking
+    // secrets is not enough on its own: the session cache may still serve
+    // unexpired tokens until their TTL elapses. Deleting those sessions and
+    // invalidating the cache is what closes the M2M half of revocation.
     //
-    // Fail closed: if session deletion fails, do not report revocation success.
-    // Secrets are already revoked, but unexpired M2M access tokens could still
-    // validate via DB-backed session lookup, so the caller must be told the
-    // revocation was incomplete (and retry) rather than see a 204 + TokenRevoked.
+    // Fail closed: if session deletion fails, do not report revocation
+    // success. Secrets are already revoked, but unexpired M2M access tokens
+    // could still validate via DB-backed session lookup, so the caller must
+    // be told the revocation was incomplete (and retry) rather than see a
+    // 204 + TokenRevoked.
     db::delete_sessions_for_user(&state.store, &client.client_id)
         .await
         .map_err(|e| {
@@ -751,6 +758,40 @@ pub(crate) async fn revoke_tokens_api(
             )
         })?;
     state.session_cache.invalidate_for_user(&client.client_id);
+
+    // Terminate user-issued access-token sessions minted for this client.
+    //
+    // `authorization_code`, `device_code`, RFC 8693 `token_exchange`, and
+    // FIDO2-assertion grants all persist sessions under the *real resource
+    // owner's* `user_id` (not the client's), so the M2M delete above — which
+    // filters by `user_id == client_id` — cannot reach them. Those sessions
+    // carry the issuing client's id on the `client_id` index (stamped by
+    // `create_oauth_access_token` from the RFC 9068 `client_id` claim), so a
+    // client-scoped delete is what "revoke all tokens for an application"
+    // must cover. Without it the tokens keep validating at resource
+    // endpoints until their `exp`.
+    //
+    // Pre-migration sessions issued before the `client_id` index existed
+    // deserialize `client_id` to `None` and so are not matched; they remain
+    // valid until their `exp` (bounded by `session_hours`). New tokens minted
+    // after this change are revocable on demand.
+    //
+    // Fail closed, as above: a failure here means some user-issued tokens for
+    // this client may still validate, so do not report revocation success.
+    db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete user-issued sessions for client {}: {e}",
+                client.client_id
+            );
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+    state.session_cache.invalidate_for_client(&client.client_id);
 
     // Log the event
     db::record_oauth_event(
