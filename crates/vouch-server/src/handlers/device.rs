@@ -533,6 +533,7 @@ pub(crate) async fn device_token(
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
+                    max_lifetime_secs: None,
                     // Verbatim from the approval, so the claims the credential
                     // endpoints gate on reflect what the browser actually did
                     // — `auth_time` in particular is the ceremony instant

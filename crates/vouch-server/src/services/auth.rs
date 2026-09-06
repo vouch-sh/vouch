@@ -591,6 +591,14 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     /// Optional audience override (for token exchange with explicit audience).
     /// When `None`, defaults to `client_id`.
     pub audience: Option<&'a str>,
+    /// Ceiling on the issued token's lifetime, in seconds. When `Some(secs)`,
+    /// the JWT `exp` claim and the `sessions.expires_at` row are stamped
+    /// `now + secs` instead of `now + session_hours*3600`. Used by RFC 8693
+    /// token exchange to cap the issued token by the subject token's
+    /// remaining TTL — `expires_in` reported to the client (RFC 8693 §2.2.1)
+    /// then describes the token it accompanies. `None` for every grant that
+    /// is not token exchange; those keep the full `session_hours` lifetime.
+    pub max_lifetime_secs: Option<u64>,
     /// Authentication assurance level — bundles `hardware_verified`,
     /// `auth_time`, `amr`, and `acr` to prevent inconsistent combinations.
     /// The `auth_time` claim is derived from this field, so a token issued
@@ -692,8 +700,16 @@ impl<'a> TokenBinding<'a> {
 pub(crate) struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
-    /// Token lifetime in seconds.
+    /// Token lifetime in seconds (the value the caller should report as
+    /// RFC 8693 §2.2.1 `expires_in`, and which matches the JWT `exp - iat`).
     pub expires_in: u64,
+    /// The absolute expiration timestamp stamped into the JWT `exp` claim
+    /// and the `sessions.expires_at` row. Callers that record an audit row
+    /// for the issued token should use this directly so the audit row, the
+    /// `sessions` row, and the JWT `exp` claim all record the same lifetime
+    /// for one token (rather than re-deriving it from a separately-stamped
+    /// `now` that can drift from the mint-time `now`).
+    pub expires_at: Timestamp,
     /// RFC 6749 §5.1 `token_type`, derived from the binding stamped into the
     /// token so the advertisement cannot contradict the `cnf` claim.
     pub token_type: &'static str,
@@ -738,9 +754,18 @@ pub(crate) async fn create_oauth_access_token(
     );
 
     let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config().session_hours)
-        .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;
-    let duration = Span::new().hours(session_hours);
+    // The lifetime in seconds is the configured `session_hours * 3600` unless
+    // the caller supplied a ceiling (RFC 8693 token exchange caps the issued
+    // token by the subject token's remaining TTL). The same value drives the
+    // JWT `exp` claim and the `sessions.expires_at` row, and is returned as
+    // `expires_in` so the value the client receives describes the token it
+    // accompanies (RFC 8693 §2.2.1).
+    let session_secs = params
+        .max_lifetime_secs
+        .unwrap_or_else(|| state.config().session_hours.saturating_mul(3600));
+    let session_secs_i64 = i64::try_from(session_secs)
+        .map_err(|_| ServiceError::Internal("Invalid session lifetime".to_string()))?;
+    let duration = Span::new().seconds(session_secs_i64);
     let expires = now
         .checked_add(duration)
         .map_err(|_| ServiceError::Internal("Time overflow".to_string()))?;
@@ -811,12 +836,13 @@ pub(crate) async fn create_oauth_access_token(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
-    let expires_in = state.config().session_hours.saturating_mul(3600);
+    let expires_in = session_secs;
 
     Ok(CreateSessionResult {
         token_type: params.binding.token_type(),
         token: SecretString::from(token),
         expires_in,
+        expires_at: expires,
     })
 }
 

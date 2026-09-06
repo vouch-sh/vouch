@@ -1115,6 +1115,7 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
             binding: TokenBinding::new(dpop_witness.as_ref(), mtls_thumbprint),
             act: Option::None,
             audience: spec.audience,
+            max_lifetime_secs: Option::None,
             hardware_verification,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: Option::None,
@@ -1192,6 +1193,88 @@ async fn forge_auth_time(
     )
     .await
     .expect("Failed to persist the forged-auth_time session");
+
+    token
+}
+
+/// Re-sign `base` with a custom `exp` claim stamped onto its claims and
+/// persist a session row for the new token.
+///
+/// The base token is minted by [`create_test_session_with`] (with its full
+/// `session_hours` lifetime), so this is the way a test produces a
+/// still-decodable (non-expired), session-backed access token with a
+/// shorter-than-default remaining TTL — the exact shape an RFC 8693
+/// `subject_token` must have to exercise the subject-TTL cap. The returned
+/// token is signed with this server's key, decodes via
+/// [`crate::services::auth::decode_token`], and its `sessions` row is found
+/// by the exchange path's `get_session_by_token_hash` lookup, so a token
+/// exchange request submitted with it as `subject_token` walks the whole
+/// production validation path.
+///
+/// `exp_seconds_from_now` must be positive; the resulting token must still
+/// be valid at the time `decode_token` runs in `exchange_token` (no leeway,
+/// see `crypto::jwt`).
+///
+/// Takes `user_id`/`email`/`auth_id` directly rather than a
+/// [`TestSessionSpec`] so a test that has already moved a `spec` into
+/// [`create_test_session_with`] to mint `base` can still call this helper
+/// without rebuilding or cloning the struct.
+pub async fn forge_short_lived_access_token(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: Option<&str>,
+    base: &str,
+    exp_seconds_from_now: i64,
+) -> String {
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    assert!(
+        exp_seconds_from_now > 0,
+        "exp_seconds_from_now must be positive so the forged subject token is still valid"
+    );
+
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(base, &state.oidc_key, &state.config().base_url)
+            .expect("the token this deployment just minted must decode");
+
+    let now = jiff::Timestamp::now().as_second();
+    claims.exp = now
+        .checked_add(exp_seconds_from_now)
+        .expect("exp_seconds_from_now fits in i64");
+    // Keep `nbf`/`iat` honest so nothing else about the token contradicts
+    // the shortened lifetime; `jti` must change so the new token's hash is
+    // distinct from the base token's.
+    claims.iat = now;
+    claims.nbf = Some(now);
+    claims.jti = uuid::Uuid::now_v7().to_string();
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the short-lived access token");
+
+    let (hardware_aaguid, org_domain) = resolve_session_snapshot(state, user_id, auth_id).await;
+    let expires_at =
+        jiff::Timestamp::from_second(claims.exp).expect("the forged exp is a valid Unix second");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash: &crate::crypto::hash_token(&token),
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+            source_code_hash: Option::None,
+        },
+    )
+    .await
+    .expect("Failed to persist the short-lived session");
 
     token
 }
