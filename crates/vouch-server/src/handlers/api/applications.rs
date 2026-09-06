@@ -461,13 +461,16 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
-    if client.is_fapi()
-        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
-    {
+    // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
+    // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
+    // shared client secret, regardless of auth method. Block every FAPI
+    // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
+    // (reachable since #214) mint dead secrets the token endpoint refuses.
+    if client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
-            "FAPI clients using private_key_jwt do not use client secrets",
+            "FAPI clients do not use client secrets",
         ));
     }
 

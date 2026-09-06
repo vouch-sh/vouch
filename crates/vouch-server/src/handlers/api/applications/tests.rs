@@ -2458,3 +2458,159 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
         "absent access_scope must preserve existing value"
     );
 }
+
+// ========================================================================
+// #214 / FAPI-over-mTLS: the JSON API secret-minting guard must block every
+// FAPI client, not just `private_key_jwt`. mTLS-FAPI clients previously
+// slipped past the narrow `== PrivateKeyJwt` guard and persisted a dead
+// secret row. Mirrors the web-handler regression coverage above.
+// ========================================================================
+
+async fn setup_user_with_fapi_app(
+    state: &crate::AppState,
+    email: &str,
+    auth_method: crate::db::TokenEndpointAuthMethod,
+) -> (String, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(auth_method),
+            tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+            jwks: TestJwks::Shared,
+            dpop_bound_access_tokens: true,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    (client.app_id, token)
+}
+
+#[tokio::test]
+async fn test_add_secret_rejects_mtls_fapi_client() {
+    let (app, state) = test_app().await;
+    let (app_id, token) = setup_user_with_fapi_app(
+        &state,
+        "api-mtls-fapi-secret@example.com",
+        crate::db::TokenEndpointAuthMethod::TlsClientAuth,
+    )
+    .await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should exist for an mTLS FAPI client, got {secrets:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_add_secret_rejects_self_signed_mtls_fapi_client() {
+    let (app, state) = test_app().await;
+    let (app_id, token) = setup_user_with_fapi_app(
+        &state,
+        "api-self-signed-mtls-fapi-secret@example.com",
+        crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+    )
+    .await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should exist for a self-signed mTLS FAPI client, got {secrets:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "api-privkeyjwt-fapi-secret@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            dpop_bound_access_tokens: true,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", client.app_id),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should exist for a private_key_jwt FAPI client, got {secrets:?}"
+    );
+}
