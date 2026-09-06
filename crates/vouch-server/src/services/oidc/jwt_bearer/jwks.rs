@@ -89,12 +89,20 @@ fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
 /// Matching strategy:
 /// 1. If `kid` is present in the header, match by `kid`.
 /// 2. Otherwise, match by algorithm/key type.
+///
+/// In both branches a candidate that matches the selector but cannot be
+/// built into a `DecodingKey` (wrong `kty` for the algorithm, or
+/// missing/invalid `x`/`y`/`n`/`e`/`crv` components) is skipped and the search
+/// continues, so an unbuildable key earlier in the set does not mask a usable
+/// one later. An error is returned only when no candidate is usable, in which
+/// case the first candidate's build error is preserved for diagnostics.
 pub fn find_matching_key(
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
     // Try matching by kid first
     if let Some(ref kid) = header.kid {
+        let mut first_build_err = None;
         for key in &jwks.keys {
             if key.kid.as_deref() == Some(kid) {
                 // Enforce the same `use`/`alg` constraints as the algorithm-fallback
@@ -112,20 +120,34 @@ pub fn find_matching_key(
                 {
                     continue;
                 }
-                return build_decoding_key_from_jwk(key, header.alg);
+                // A `kid` match that selects a key `build_decoding_key_from_jwk`
+                // cannot construct (wrong `kty` for the algorithm, or
+                // missing/invalid `x`/`y`/`n`/`e` components) is treated like the
+                // metadata mismatches above: skip it and keep scanning, so a later
+                // key carrying the same `kid` can still verify the assertion. The
+                // first build error is preserved so the all-candidates-fail case
+                // reports the same error a single-key set would.
+                match build_decoding_key_from_jwk(key, header.alg) {
+                    Ok(decoding_key) => return Ok(decoding_key),
+                    Err(e) if first_build_err.is_none() => first_build_err = Some(e),
+                    Err(_) => {}
+                }
             }
         }
         tracing::debug!("No key with kid '{kid}' found in JWKS");
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        ));
+        return Err(first_build_err.unwrap_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "No matching key found in JWKS",
+            )
+        }));
     }
 
     // Fall back to matching by algorithm/key type. The kty-per-alg rule is
     // `KeyType::for_alg`, shared with the write-time usability checks so the
     // two cannot disagree about which keys are selectable.
     let expected_kty = KeyType::for_alg(header.alg);
+    let mut first_build_err = None;
 
     for key in &jwks.keys {
         if key.kty == expected_kty {
@@ -141,14 +163,27 @@ pub fn find_matching_key(
             {
                 continue;
             }
-            return build_decoding_key_from_jwk(key, header.alg);
+            // A candidate matching by `kty` that `build_decoding_key_from_jwk`
+            // cannot construct (missing/invalid `x`/`y`/`n`/`e`, or a wrong
+            // curve for OKP) is skipped and the search continues, mirroring
+            // the kid-match path. The `kty` selector does not check component
+            // presence, so a later key of the same `kty` can still satisfy the
+            // assertion. The first build error is preserved for the
+            // all-candidates-fail case.
+            match build_decoding_key_from_jwk(key, header.alg) {
+                Ok(decoding_key) => return Ok(decoding_key),
+                Err(e) if first_build_err.is_none() => first_build_err = Some(e),
+                Err(_) => {}
+            }
         }
     }
 
-    Err(ServiceError::oauth(
-        OAuthErrorCode::InvalidClient,
-        "No matching key found in JWKS",
-    ))
+    Err(first_build_err.unwrap_or_else(|| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "No matching key found in JWKS",
+        )
+    }))
 }
 
 /// Minimum interval between JWKS URI force-refreshes (seconds).
@@ -346,6 +381,23 @@ mod tests {
             n: Some(RSA_N.to_string()),
             e: Some(RSA_E.to_string()),
             x5c: None,
+        }
+    }
+
+    /// An RSA key with no `n`/`e` components — metadata-complete (right `kty`,
+    /// absent `use`/`alg`) but unbuildable. `is_usable_for` does not check
+    /// component presence for RSA, so this passes write-time validation and
+    /// reaches the runtime matcher, reproducing the production scenario a
+    /// single malformed key ahead of a valid one creates.
+    fn malformed_rsa_jwk_entry(
+        kid: Option<&str>,
+        alg: Option<&str>,
+        use_: Option<&str>,
+    ) -> JwkEntry {
+        JwkEntry {
+            n: None,
+            e: None,
+            ..rsa_jwk_entry(kid, alg, use_)
         }
     }
 
@@ -629,6 +681,115 @@ mod tests {
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_ok());
+    }
+
+    // =======================================================================
+    // find_matching_key: skip unbuildable candidates (short-circuit fix)
+    //
+    // A key that matches the selector (by `kid` or by `kty`) but cannot be
+    // built into a `DecodingKey` — wrong `kty` for the algorithm, or
+    // missing/invalid `x`/`y`/`n`/`e`/`crv` components — is "not usable for
+    // this assertion," the same category as the `use`/`alg` metadata
+    // mismatches the loops already `continue` past. The search must skip it
+    // and try later candidates, returning an error only when none are usable.
+    // =======================================================================
+
+    // RFC 7517 §4: a `kty`-matched key that cannot be built is skipped, and a
+    // later key of the same `kty` satisfies the assertion. The algorithm
+    // fallback is reached whenever the JWS header carries no `kid`, so a
+    // single malformed key ahead of a valid one is reachable without any
+    // duplicate-`kid` precondition.
+    #[test]
+    fn test_find_matching_key_alg_fallback_skips_malformed_rsa() {
+        let jwks = JwkSet {
+            keys: vec![
+                malformed_rsa_jwk_entry(None, None, None), // kty=Rsa, missing n/e
+                rsa_jwk_entry(None, None, None),           // valid RSA
+            ],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should skip the malformed first key and build the valid RSA key"
+        );
+    }
+
+    // RFC 7517 §4.2.2 makes `kid` uniqueness a SHOULD, not a MUST, and the
+    // write-time gates do not reject duplicate `kid`s. When two keys share a
+    // `kid` and the first is the wrong `kty` for the header's algorithm (RSA
+    // vs an ES256 header — the wrong-`kty`-for-`alg` arm of
+    // `build_decoding_key_from_jwk`), the search must skip it and use the
+    // later, buildable sibling carrying the same `kid`.
+    #[test]
+    fn test_find_matching_key_kid_match_skips_unbuildable_sibling() {
+        // First key: RSA with kid="dup", wrong kty for ES256.
+        // Second key: EC with kid="dup", valid for ES256.
+        let jwks = JwkSet {
+            keys: vec![
+                rsa_jwk_entry(Some("dup"), None, None),
+                ec_jwk_entry(Some("dup"), None, None),
+            ],
+        };
+        let hdr = header(JwsAlgorithm::Es256, Some("dup"));
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should skip the unbuildable RSA key and build the valid EC sibling"
+        );
+    }
+
+    // RFC 7517 §4: a single algorithm-fallback candidate that is unbuildable
+    // reports the build error (not the generic "no matching key"), matching
+    // the pre-fix behavior for a one-key set so error reporting is unchanged.
+    #[test]
+    fn test_find_matching_key_alg_fallback_single_unbuildable_returns_build_error() {
+        let jwks = JwkSet {
+            keys: vec![malformed_rsa_jwk_entry(None, None, None)],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let err = find_matching_key(&jwks, &hdr).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component")
+        );
+    }
+
+    // RFC 7517 §4: when every algorithm-fallback candidate is unbuildable,
+    // the FIRST candidate's build error is returned (not the last's, and not
+    // the generic "no matching key" fallback) — keeping error reporting
+    // identical to the single-key case the pre-fix code produced.
+    #[test]
+    fn test_find_matching_key_alg_fallback_all_unbuildable_returns_first_error() {
+        // First: missing `n` -> "RSA key missing n component".
+        // Second: has `n` but missing `e` -> "RSA key missing e component".
+        let first = JwkEntry {
+            n: None,
+            e: None,
+            ..rsa_jwk_entry(None, None, None)
+        };
+        let second = JwkEntry {
+            e: None,
+            ..rsa_jwk_entry(None, None, None)
+        };
+        let jwks = JwkSet {
+            keys: vec![first, second],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let err = find_matching_key(&jwks, &hdr).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component"),
+            "all-candidates-fail must return the FIRST build error, not the last's"
+        );
     }
 
     // =======================================================================

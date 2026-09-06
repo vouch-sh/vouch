@@ -240,6 +240,81 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     );
 }
 
+// RFC 9101 / RFC 7517 §4.2.2: JAR request-object verification reaches
+// `find_matching_key` via `jar.rs -> find_matching_key_with_refresh_client`.
+// `kid` uniqueness is a SHOULD, not a MUST, and the write-time gates do not
+// reject duplicate `kid`s. With two keys sharing `kid="jar-test-key-1" — the
+// first unbuildable (EC missing `x`/`y`), the second valid — the kid-match
+// branch must skip the unbuildable first key and verify the Request Object
+// against the valid sibling. Pre-fix this returned `invalid_request_object`.
+#[tokio::test]
+async fn test_rfc9101_authorize_skips_unbuildable_key_before_valid() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-malformed@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Register a JAR client whose inline JWKS has a malformed EC key (missing
+    // x/y, same kid) FIRST, then the valid EC signing key.
+    let (pkcs8_bytes, valid_jwk) = generate_es256_signing_key();
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": "jar-test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk, valid_jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request={}",
+            client.client_id,
+            urlencoding::encode(&request_jwt),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "JAR with malformed-first key should still verify against the valid sibling, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Location header");
+    assert!(
+        location.contains("code="),
+        "Successful response must include authorization code: {location}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc9101_authorize_request_object_with_pkce() {
     // Verify PKCE parameters from the Request Object are used.
