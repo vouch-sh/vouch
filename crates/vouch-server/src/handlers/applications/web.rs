@@ -545,9 +545,12 @@ pub(crate) async fn add_secret_form(
         );
     }
 
-    if client.is_fapi()
-        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
-    {
+    // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
+    // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
+    // shared client secret, regardless of auth method. Block every FAPI
+    // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
+    // (reachable since #214) mint dead secrets the token endpoint refuses.
+    if client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-fapi-no-secrets"),
@@ -662,7 +665,10 @@ pub(crate) async fn delete_secret_form(
         .filter(|s| s.id != secret_id && s.is_valid(&now))
         .count();
 
-    if other_active == 0 {
+    // FAPI clients cannot authenticate with a secret (minting is blocked),
+    // so the last-secret floor does not apply: pre-guard secret rows must
+    // remain deletable instead of being pinned forever.
+    if other_active == 0 && !client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-secret-last-active"),
@@ -1055,6 +1061,239 @@ mod tests {
         assert!(
             record.keys.as_ref().is_some_and(|k| k.inline().is_some()),
             "a rejected update must not drop the JWKS"
+        );
+    }
+
+    // ========================================================================
+    // #214 / FAPI-over-mTLS: the secret-minting guard must block *every* FAPI
+    // client, not just `private_key_jwt`. An mTLS-FAPI client previously
+    // slipped past the narrow `== PrivateKeyJwt` guard and minted a dead
+    // `vouch_...` secret the token endpoint can never accept.
+    // ========================================================================
+
+    async fn mint_secret_mtls_fapi_client(
+        email: &str,
+        auth_method: crate::db::TokenEndpointAuthMethod,
+    ) -> (
+        axum::Router,
+        std::sync::Arc<crate::AppState>,
+        String,
+        crate::test_utils::TestOAuthClient,
+    ) {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(auth_method),
+                tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        (app, state, session_token, client)
+    }
+
+    // Regression for #214: an mTLS-FAPI (`tls_client_auth`) client must NOT
+    // be able to mint a client secret via direct POST. Previously the narrow
+    // `== PrivateKeyJwt` guard let it through and rendered a plaintext
+    // `SecretAddedTemplate` while persisting a dead secret row.
+    //
+    // `error_page` and `SecretAddedTemplate` both render as HTTP 200 HTML
+    // (the `impl_template_into_response!` macro sets no status), so the
+    // guard is verified by response content + persisted rows, not by status.
+    #[tokio::test]
+    async fn test_web_add_secret_mints_unusable_secret_for_mtls_fapi_client() {
+        let (app, state, session_token, client) = mint_secret_mtls_fapi_client(
+            "mtls-fapi-secret@example.com",
+            crate::db::TokenEndpointAuthMethod::TlsClientAuth,
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "mTLS FAPI client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("FAPI clients do not use client secrets"),
+            "the error page must explain that FAPI clients do not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should exist for an mTLS FAPI client, got {secrets:?}"
+        );
+    }
+
+    // The self-signed mTLS variant (`self_signed_tls_client_auth`) is the
+    // other FAPI auth method #214 made reachable; it must be blocked too.
+    #[tokio::test]
+    async fn test_web_add_secret_rejects_self_signed_mtls_fapi_client() {
+        let (app, state, session_token, client) = mint_secret_mtls_fapi_client(
+            "self-signed-mtls-fapi-secret@example.com",
+            crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "self-signed mTLS FAPI client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("FAPI clients do not use client secrets"),
+            "the error page must explain that FAPI clients do not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should exist for a self-signed mTLS FAPI client, got {secrets:?}"
+        );
+    }
+
+    // The originally-blocked `private_key_jwt` FAPI case must remain blocked
+    // after widening the guard from `is_fapi() && == PrivateKeyJwt` to
+    // `is_fapi()` — the wider net must not re-open the case it used to catch.
+    #[tokio::test]
+    async fn test_web_add_secret_rejects_private_key_jwt_fapi_client() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "privkeyjwt-fapi-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "private_key_jwt FAPI client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("FAPI clients do not use client secrets"),
+            "the error page must explain that FAPI clients do not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should exist for a private_key_jwt FAPI client, got {secrets:?}"
+        );
+    }
+
+    // No regression on the happy path: a non-FAPI Web client (the only kind
+    // the "Add Secret" UI surfaces) must still be able to mint a second
+    // secret and see the plaintext value rendered exactly once.
+    #[tokio::test]
+    async fn test_web_add_secret_succeeds_for_non_fapi_web_client() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "non-fapi-web-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "non-FAPI Web client must be able to mint a secret, got {status}: {body}"
+        );
+        assert!(
+            body.contains("vouch_"),
+            "the response must render the freshly minted plaintext secret: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            secrets.len(),
+            2,
+            "the new secret row must be persisted alongside the seeded one: {secrets:?}"
         );
     }
 }
