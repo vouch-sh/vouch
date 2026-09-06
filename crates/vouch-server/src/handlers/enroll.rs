@@ -1517,61 +1517,20 @@ pub(crate) async fn browser_register_complete(
     // Unix epoch (`unwrap_or(0)`).
     let auth_now = AuthTime::from_passkey_registration(&passkey);
 
-    // Mark device authorization as complete (only for CLI-initiated flows)
-    if reg_state.device_auth_id.is_empty() {
-        tracing::debug!(
-            "browser_register_complete: no device_auth_id, skipping device auth authorization \
-             (direct browser enrollment)"
-        );
-    } else {
-        db::authorize_device_auth(
-            &state.store,
-            db::AuthorizeDeviceAuthParams {
-                id: &reg_state.device_auth_id,
-                user_id: &reg_state.user_id.to_string(),
-                user_email: &reg_state.user_email,
-                authenticator_id: &authenticator_id,
-                // The WebAuthn registration ceremony just completed above.
-                verification: db::DeviceApproval::Observed(auth_now),
-            },
-        )
-        .await
-        .inspect_err(|e| {
-            tracing::error!(
-                "Failed to authorize device auth '{}': {}",
-                reg_state.device_auth_id,
-                e
-            );
-        })?;
-
-        let event = db::AuthEventParams {
-            user_id: reg_state.user_id.to_string(),
-            event_type: db::AuthEventType::DeviceAuthApproved,
-            authenticator_id: Some(authenticator_id.clone()),
-            success: true,
-            client: client_info.clone(),
-            ..Default::default()
-        };
-        db::record_auth_event(&state.audit, event, Some(reg_state.user_email.clone())).await;
-    }
-
-    // Log enrollment event
-    let auth_event_params = AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
-        event_type: AuthEventType::Enrollment,
-        authenticator_id: Some(authenticator_id.clone()),
-        success: true,
-        client: client_info,
-        ..AuthEventParams::default()
-    };
-    db::record_auth_event(
-        &state.audit,
-        auth_event_params,
-        Some(reg_state.user_email.clone()),
+    // Audit the enrollment and release the CLI's device-auth row. The
+    // `Enrollment` audit row is recorded before the fallible
+    // `authorize_device_auth` call so a committed authenticator always has a
+    // matching `AuthEventType::Enrollment` event even when the CLI release
+    // fails — `create_authenticator` above is not in a shared transaction
+    // with the device-auth release.
+    finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        auth_now,
+        client_info,
     )
-    .await;
-
-    crate::infra::metrics::record_auth_event("enrollment");
+    .await?;
 
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",
@@ -1674,6 +1633,83 @@ pub(crate) async fn browser_register_complete(
         .header(header::SET_COOKIE, cookie.to_string())
         .body(Body::from(html))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+/// Record the `Enrollment` audit event for a committed authenticator and, for
+/// CLI-initiated flows, release the waiting device-authorization row.
+///
+/// `create_authenticator` (the caller) persists the authenticator row
+/// outside any shared transaction with `authorize_device_auth`, so the
+/// `Enrollment` audit row is recorded *before* the fallible device-auth
+/// release below. This guarantees every committed authenticator has a
+/// matching `AuthEventType::Enrollment` event even when the CLI release fails
+/// — this is the only production emit site for `Enrollment`. The
+/// `DeviceAuthApproved` audit row is recorded only when the release succeeds,
+/// since it semantically asserts the row transitioned to `Authorized`.
+async fn finalize_enrollment_audit_and_device_auth(
+    state: &AppState,
+    reg_state: &BrowserRegistrationState,
+    authenticator_id: &str,
+    auth_now: AuthTime,
+    client_info: ClientInfo,
+) -> Result<(), ServiceError> {
+    // Log enrollment event — the authenticator is already committed, so this
+    // row must be written before the fallible device-auth release below.
+    let auth_event_params = AuthEventParams {
+        user_id: reg_state.user_id.to_string(),
+        event_type: AuthEventType::Enrollment,
+        authenticator_id: Some(authenticator_id.to_string()),
+        success: true,
+        client: client_info.clone(),
+        ..AuthEventParams::default()
+    };
+    db::record_auth_event(
+        &state.audit,
+        auth_event_params,
+        Some(reg_state.user_email.clone()),
+    )
+    .await;
+
+    crate::infra::metrics::record_auth_event("enrollment");
+
+    // Mark device authorization as complete (only for CLI-initiated flows)
+    if reg_state.device_auth_id.is_empty() {
+        tracing::debug!(
+            "browser_register_complete: no device_auth_id, skipping device auth authorization \
+             (direct browser enrollment)"
+        );
+    } else {
+        db::authorize_device_auth(
+            &state.store,
+            db::AuthorizeDeviceAuthParams {
+                id: &reg_state.device_auth_id,
+                user_id: &reg_state.user_id.to_string(),
+                user_email: &reg_state.user_email,
+                authenticator_id,
+                // The WebAuthn registration ceremony just completed above.
+                verification: db::DeviceApproval::Observed(auth_now),
+            },
+        )
+        .await
+        .inspect_err(|e| {
+            tracing::error!(
+                "Failed to authorize device auth '{}': {}",
+                reg_state.device_auth_id,
+                e
+            );
+        })?;
+
+        let event = db::AuthEventParams {
+            user_id: reg_state.user_id.to_string(),
+            event_type: db::AuthEventType::DeviceAuthApproved,
+            authenticator_id: Some(authenticator_id.to_string()),
+            success: true,
+            client: client_info,
+            ..Default::default()
+        };
+        db::record_auth_event(&state.audit, event, Some(reg_state.user_email.clone())).await;
+    }
+    Ok(())
 }
 
 // ============================================================================
