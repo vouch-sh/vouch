@@ -1955,8 +1955,6 @@ pub async fn validate_oauth_client_credentials(
         return Ok(None);
     }
 
-    update_oauth_client_last_used(store, &client.id).await?;
-
     Ok(Some(client))
 }
 
@@ -2627,6 +2625,48 @@ mod tests {
             .expect("validate");
 
         assert!(result.is_none());
+    }
+
+    // `validate_oauth_client_credentials` must be pure credential validation:
+    // an observational `last_used_at` write that fails must NOT fail credential
+    // validation. The five sibling `last_used_at` callers (mTLS, public,
+    // private_key_jwt, two SCIM) keep the write separate and swallow it; before
+    // the fix the secret path bundled the write into this DB function with
+    // `.await?`, so a transient `last_used_at` UPDATE failure surfaced as
+    // `Err` — making a fully-authenticated secret-based confidential client get
+    // HTTP 500 / `server_error` while the other auth methods proceeded.
+    //
+    // `set_last_used_remaining_successes(0)` faults every
+    // `update_last_used_at` call with a non-retryable `Err` (it is not in
+    // `RETRYABLE_SQL_STATES`, so it escapes `with_dsql_retry!` immediately).
+    // Under the pre-fix code this test fails at `result.expect(...)`: the
+    // coupled `update_oauth_client_last_used(...).await?` propagated the
+    // faulty `Err` out of `validate_oauth_client_credentials`. Post-fix the
+    // function performs credential validation only — it never touches
+    // `update_last_used_at` — so the same fault is not even exercised and the
+    // call returns `Ok(Some(client))`.
+    #[tokio::test]
+    async fn test_validate_credentials_succeeds_when_last_used_update_fails() {
+        let mut store = test_store().await;
+        let (client, _secret, hash) = create_client_and_secret(&store).await;
+
+        // Fault every `update_last_used_at` write with a non-retryable `Err`.
+        store.set_last_used_remaining_successes(0);
+
+        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
+            .await
+            .expect("credential validation must not fail when the last_used_at write fails");
+        assert!(
+            result.is_some(),
+            "validated client must be returned even under an injected last_used_at fault"
+        );
+
+        // Control: with the fault cleared, validation still returns the client.
+        store.set_last_used_remaining_successes(u64::MAX);
+        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
+            .await
+            .expect("validate with fault cleared");
+        assert!(result.is_some());
     }
 
     #[tokio::test]
