@@ -528,6 +528,100 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
     );
 }
 
+/// The FIDO2 assertion grant must stamp the access-token `auth_time` claim
+/// from the ceremony-receipt instant (`LoginAssertionResult::verified_at`),
+/// not a fresh `Timestamp::now()` captured later in the handler — the
+/// `LoginAssertionResult::verified_at` doc contract the browser-login and
+/// device-code flows already honor.
+///
+/// This is the achievable analog of the device-code grant's
+/// `test_device_grant_auth_time_is_ceremony_instant_not_poll_instant`. The
+/// FIDO2 grant stamps `verified_at` inside `verify_assertion_inner` with no
+/// `for_test`-style injection seam, so the assertion is range-bound to the
+/// request window plus the `auth_time <= iat` ordering invariant, rather
+/// than pinned to an injected instant. It catches regressions where the
+/// claim is omitted, set to epoch, future-dated, or set outside the request
+/// window; pinning the exact ceremony instant requires the test-seam
+/// follow-up noted in the test plan.
+#[tokio::test]
+async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("auth-time@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    // Bracket the exchange with integer-second wall-clock captures.
+    // `auth_time` is stamped at ceremony receipt inside
+    // `verify_login_assertion`; `iat` is stamped strictly later inside
+    // `create_oauth_access_token` (after the org-domain fetch and JWT
+    // signing). Both therefore fall inside `[t_before, t_after]`, and
+    // `auth_time <= iat` must hold.
+    let t_before = jiff::Timestamp::now().as_second();
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    let t_after = jiff::Timestamp::now().as_second();
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be a JWT string");
+
+    // JWT payload is the middle segment, base64url-encoded JSON.
+    let parts: Vec<&str> = access_token.split('.').collect();
+    assert!(
+        parts.len() >= 2,
+        "access_token must be a JWT: {access_token}",
+    );
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("JWT payload must be valid base64url");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&payload).expect("JWT payload must be valid JSON");
+
+    // OIDC Core §2: `auth_time` is "Time when the End-User authentication
+    // occurred." Must be present and an integer Unix second within the
+    // request window — the ceremony receipt, not a value outside it.
+    let auth_time = claims["auth_time"]
+        .as_i64()
+        .expect("auth_time must be an integer Unix second");
+    assert!(
+        t_before <= auth_time && auth_time <= t_after,
+        "auth_time ({auth_time}) must be within the request window \
+         [{t_before}, {t_after}] — it should be the ceremony-receipt instant"
+    );
+
+    // `iat` is stamped strictly later inside `create_oauth_access_token`,
+    // so `auth_time <= iat` must hold (the buggy pre-org-domain-fetch `now`
+    // also preceded `iat`; this invariant is necessary but not, by itself,
+    // sufficient to catch the mis-sourcing — see the test seam follow-up).
+    let iat = claims["iat"]
+        .as_i64()
+        .expect("iat must be an integer Unix second");
+    assert!(
+        auth_time <= iat,
+        "auth_time ({auth_time}) must not be later than iat ({iat})"
+    );
+    assert!(
+        t_before <= iat && iat <= t_after,
+        "iat ({iat}) must be within the request window [{t_before}, {t_after}]"
+    );
+}
+
 /// A successful FIDO2 grant for an org member stamps the org's domain into
 /// the `oauth_token_issued` event's `email_domain` — the hot-path formula
 /// (`fido2_grant.rs`) must reproduce what the full lookup would have done.
