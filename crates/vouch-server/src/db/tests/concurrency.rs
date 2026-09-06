@@ -1086,3 +1086,115 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
         after.state
     );
 }
+
+/// A `Consumed` device-auth row must survive the authenticator-deletion
+/// cascade with its `Consumed` status and `user_id` attribution intact —
+/// `handlers::device::revoke_sessions_for_device_replay` keys its post-hoc
+/// replay-revocation sweep (RFC 6749 §10.5 defense-in-depth) on
+/// `DeviceAuthState::Consumed { user_id }`, so corrupting the row back to
+/// `Denied` would suppress that sweep on a detected device-code replay.
+///
+/// `delete_authenticator` writes each matched `DeviceAuthRequestDoc` back
+/// with `compare_and_update` (a version guard) rather than a blind
+/// `update_by_index`, so a row a concurrent `try_consume_device_auth`
+/// committed `Consumed` is preserved instead of being overwritten with stale
+/// `Authorized → Denied` data. This sequential test pins the helper's
+/// `Consumed`-preservation invariant (it does not touch `status` when it is
+/// already `Consumed`); the concurrent lost-update race requires a
+/// multi-connection PostgreSQL harness — the SQLite in-memory backend
+/// serialises writes via a single-writer pool, so the race window does not
+/// open there (see the accompanying test plan for the Postgres procedure).
+#[tokio::test]
+async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_revocation() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "consumed-cascade@example.com", None)
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "consumed-cascade@example.com",
+            name: "Cascade Key",
+            credential_id: b"cred-consumed-cascade",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    let device_code_hash = "consumed_cascade_device_code";
+    let request_id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "CSCD-CONS",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create device auth request");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &request_id,
+            user_id: &user_id,
+            user_email: "consumed-cascade@example.com",
+            authenticator_id: &auth_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("authorize device auth");
+
+    // Consume the device code first — the row is now `Consumed` with the
+    // user attribution recorded by the atomic consume (`try_consume_device_auth`
+    // is the only path to a `DeviceCodeClaim` witness).
+    let (approval, _claim) = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume device auth");
+    assert_eq!(
+        approval.user_id, user_id,
+        "consume must return the recorded user attribution"
+    );
+
+    // Delete the authenticator — the cascade must NOT regress the row.
+    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+
+    let after = get_device_auth_by_id(&store, &request_id)
+        .await
+        .expect("get device auth")
+        .expect("device auth request must still exist after cascade");
+    let consumed_uid = match &after.state {
+        DeviceAuthState::Consumed { user_id } => user_id.clone(),
+        _ => None,
+    };
+    assert_eq!(
+        consumed_uid.as_deref(),
+        Some(user_id.as_str()),
+        "cascade must not regress a Consumed device-auth row; got state {:?}",
+        after.state
+    );
+
+    // The cascade must also have detached the row from the deleted
+    // authenticator — `find_all` by the old `authenticator_id` no longer
+    // reaches it — so a future cascade on a recreated (hypothetical) key id
+    // never touches this consumed approval.
+    use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+    let still_referencing = store
+        .find_all::<DeviceAuthRequestDoc>("authenticator_id", &auth_id)
+        .await
+        .expect("find device-auth by authenticator_id")
+        .into_iter()
+        .any(|d| d.id == request_id);
+    assert!(
+        !still_referencing,
+        "the cascade must detach the consumed device-auth row from the deleted authenticator"
+    );
+}
