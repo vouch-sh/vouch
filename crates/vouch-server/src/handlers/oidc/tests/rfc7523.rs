@@ -1701,3 +1701,162 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
         "error_description must mention sender-constrained: {response_body}"
     );
 }
+
+// ========================================================================
+// Regression: residual-window JTI replay after cleanup (RFC 7523 §3 item 7)
+//
+// The JTI replay-prevention record's `expires_at` MUST be derived from the
+// validated assertion's `exp` (`exp + CLOCK_SKEW_SECONDS`), not from
+// `now_commit + jwt_assertion_max_lifetime_seconds`. With the latter, an
+// assertion minted at the slice upper bound (`lifetime = max_lifetime`)
+// has its JTI record become cleanup-eligible at `commit_now + max_lifetime`
+// while the validator (`validate_jwt_assertion`) still accepts the
+// assertion until `exp + CLOCK_SKEW_SECONDS = commit_now + max_lifetime +
+// CLOCK_SKEW_SECONDS` — a ~10 s window in which a cleanup tick deletes the
+// row and a verbatim replay re-issues an access token.
+//
+// This test composes the full handler path through that residual window:
+// it waits until the OLD (buggy) `expires_at` would be cleanup-eligible,
+// runs the cleanup routine the periodic task runs, then replays the same
+// assertion. Under the fix: cleanup deletes nothing (`expires_at = exp +
+// skew` is still in the future) and the replay collides on the
+// still-present `(jti, client_id)` PRIMARY KEY → no second token. Under
+// the bug: cleanup deletes the row and the replay re-issues a second
+// access token.
+//
+// `jwt_assertion_max_lifetime_seconds` is overridden to 2 s to compress the
+// residual-window opening from ~300 s to ~2 s of real wall-clock so the
+// test is CI-tractable. The mechanism is config-independent (the arithmetic
+// holds for any `max_lifetime`); this exercises the slice upper bound
+// (`lifetime = max_lifetime`).
+// ========================================================================
+
+/// Build a JWT client assertion with explicit `iat`/`exp` (seconds since
+/// epoch) and a fixed `jti`, signed with the given ES256 key. The shared
+/// `build_client_assertion` helper hardcodes `exp = iat + 60`; the
+/// residual-window regression needs `exp = iat + max_lifetime` with a
+/// short `max_lifetime`, so the assertion is built inline.
+fn build_client_assertion_with_exp(
+    client_id: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+    iat: i64,
+    exp: i64,
+    jti: &str,
+) -> String {
+    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": iat,
+        "exp": exp,
+        "jti": jti
+    });
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
+/// Override `jwt_assertion_max_lifetime_seconds` on an already-built test
+/// app to compress the residual-window opening to ~2 s of real wall-clock.
+/// The handler re-reads `state.config()` (an `ArcSwap`) on each request,
+/// so a post-build `store` takes effect for the very next token request.
+async fn override_jwt_assertion_max_lifetime(
+    state: &std::sync::Arc<crate::AppState>,
+    seconds: i64,
+) {
+    let mut new_config = (**state.config()).clone();
+    new_config.jwt_assertion_max_lifetime_seconds = seconds;
+    state.config.store(std::sync::Arc::new(new_config));
+}
+
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_residual_window() {
+    // The regression: after a cleanup tick lands in the residual window,
+    // a verbatim replay MUST be rejected (under the bug it would succeed
+    // and re-issue a second access token).
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "residual-after@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    // Compress the residual window to ~2 s of real wall-clock.
+    override_jwt_assertion_max_lifetime(&state, 2).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let fixed_jti = "residual-window-replay-after-cleanup";
+    let now = jiff::Timestamp::now().as_second();
+    // `iat = now`, `exp = now + 2` ⇒ `lifetime = max_lifetime` (the slice
+    // upper bound; the no-skew residual window is the full 10 s of
+    // CLOCK_SKEW). Validator admits this assertion until `exp + 10`.
+    let assertion = build_client_assertion_with_exp(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        now,
+        now + 2,
+        fixed_jti,
+    );
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+
+    // First use: 200 + access_token. PendingJti::commit records the JTI
+    // with `expires_at = exp + CLOCK_SKEW_SECONDS` under the fix.
+    let (status1, resp1) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(status1, StatusCode::OK, "first use must succeed: {resp1}");
+    let resp1_json: serde_json::Value = serde_json::from_str(&resp1).expect("Valid JSON");
+    let first_token = resp1_json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Advance the real clock 2.5 s: the OLD (buggy) `expires_at =
+    // commit_now + 2` is now ~0.5 s in the past (cleanup-eligible), while
+    // the validator still accepts the verbatim assertion until `exp + 10`
+    // (~9.5 s in the future). 2.5 s of `tokio::time::sleep` is the
+    // lightweight alternative to a production-code clock seam.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+    // Run the same cleanup routine `infra/cleanup.rs:221` runs on a real
+    // tick. Under the fix, the row's `expires_at = exp + CLOCK_SKEW` is
+    // still ~9.5 s in the future, so cleanup deletes nothing — this
+    // assertion is the one that inverts under the bug (where `expires_at =
+    // commit_now + max_lifetime` would be ~0.5 s in the past and
+    // `deleted == 1`).
+    let deleted = db::delete_expired_jwt_assertion_jtis(&state.store)
+        .await
+        .expect("cleanup must not error");
+    assert_eq!(
+        deleted, 0,
+        "JTI committed at the slice upper bound MUST NOT be cleanup-eligible \
+         while the validator still accepts the assertion (RFC 7523 §3 item 7) \
+         — `expires_at` must be `exp + CLOCK_SKEW_SECONDS`, not \
+         `now_commit + max_lifetime`. `deleted == 1` here means the \
+         residual-window replay bug is present"
+    );
+
+    // Verbatim replay (same `jti`, same `exp`, same signature). The row is
+    // still present, so the deterministic `(jti, client_id)` PRIMARY KEY
+    // collision rejects the replay. Under the bug, the row was deleted and
+    // a second, distinct access token would be issued here.
+    let (status2, resp2) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert!(
+        status2 == StatusCode::UNAUTHORIZED || status2 == StatusCode::BAD_REQUEST,
+        "Verbatim replay after cleanup in the residual window MUST be \
+         rejected (RFC 7523 §3 item 7), got {status2}: {resp2}"
+    );
+    // Defensive: no second access token may have been issued.
+    if let Ok(resp2_json) = serde_json::from_str::<serde_json::Value>(&resp2) {
+        assert!(
+            resp2_json.get("access_token").is_none(),
+            "No access token may be issued for a verbatim replay after \
+             cleanup in the residual window: {resp2}"
+        );
+    }
+    // The first token is unaffected (defensive; this line mainly documents
+    // that the legitimate issuance is untouched).
+    assert!(!first_token.is_empty());
+}
