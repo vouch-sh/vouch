@@ -395,6 +395,125 @@ async fn test_scim_create_user_rejects_nul_in_username_domain() {
     assert_eq!(error["scimType"], "invalidValue");
 }
 
+/// A `userName` that contains `@` but is not a valid email — an empty
+/// local part, whitespace in the local part, or a display-name-wrapped
+/// address — must be rejected as `400 invalidValue` even when the trailing
+/// domain suffix matches the org's verified domain.
+///
+/// The handler's `"userName must be an email address"` contract covers the
+/// local part, not just the domain suffix. The pre-fix shape check
+/// (`Email::domain_of(...).is_none()`) inspected only the suffix after the
+/// last `@`, so each of these slipped through and was **persisted verbatim**
+/// (ASCII-lowercased) as the user's primary identifier and deterministic
+/// user-id input — an undeliverable address. `Email::is_valid_address`
+/// inspects the local part, closing the gap while leaving the empty-domain
+/// (`foo@`) case to the org-domain-ownership gate and a NUL in the local
+/// part to the store's `validate_index_entry` guard.
+#[tokio::test]
+async fn test_scim_create_user_rejects_malformed_username_with_clean_domain_suffix() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-malformed-uname", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    for raw_name in [
+        "a b@test-org.example.com",              // whitespace in local part
+        "@test-org.example.com",                 // empty local part
+        "Ada Lovelace ada@test-org.example.com", // display-name-wrapped
+    ] {
+        let body = serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": raw_name,
+            "active": true
+        });
+        let (status, body) = http_post_json(
+            &app,
+            "/scim/v2/Users",
+            &body.to_string(),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "malformed userName {raw_name:?} must be rejected as 400, but was persisted: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["scimType"], "invalidValue");
+        assert_eq!(error["detail"], "userName must be an email address");
+    }
+}
+
+/// A malformed email supplied via `emails[]` (the fallback branch when
+/// `userName` has no `@`) is rejected by the same handler shape check, so
+/// the fix cannot be bypassed by routing the bad address through `emails`
+/// instead of `userName`.
+#[tokio::test]
+async fn test_scim_create_user_rejects_malformed_email_in_emails_array() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-malformed-emails", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "alice",  // no '@' → falls back to emails[]
+        "emails": [{"value": "a b@test-org.example.com", "primary": true}],
+        "active": true
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "malformed emails[] value must be rejected as 400: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(error["detail"], "userName must be an email address");
+}
+
+/// An empty-domain `userName` (`foo@`) is rejected by the domain-ownership
+/// gate with the distinct `"Email domain is not verified"` message — not by
+/// the local-part shape check. This pins the boundary the shape check
+/// preserves: the empty-domain case is the ownership layer's job.
+#[tokio::test]
+async fn test_scim_create_user_empty_domain_username_rejected_by_ownership_gate() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-empty-domain", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "foo@",
+        "active": true
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "foo@ must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(
+        error["detail"], "Email domain is not verified for this organization",
+        "empty-domain userName must hit the ownership gate, not the shape check"
+    );
+}
+
 #[tokio::test]
 async fn test_scim_patch_user_rejects_nul_external_id() {
     // PATCH pulls externalId out of a raw serde_json::Value (no DTO
