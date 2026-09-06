@@ -341,6 +341,9 @@ pub struct DocumentStore {
     /// [`Self::set_delete_remaining_successes`].
     #[cfg(test)]
     delete_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// See [`AuthorizeTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    authorize_test_hook: Option<AuthorizeTestHook>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -372,6 +375,22 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Boxed future returned by an [`AuthorizeTestHook`].
+#[cfg(test)]
+pub(crate) type AuthorizeHookFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// Test-only hook invoked inside `authorize_device_auth` between the read
+/// and the compare-and-update, receiving `(id, attempt)`.
+///
+/// Lets tests deterministically interleave a concurrent device-code poll
+/// (`update_device_auth_poll_time`) — which bumps the row's OCC version
+/// without changing its status — into the get-to-CAS window, forcing the
+/// authorize to retry. Mirrors [`ModifyTestHook`] for the device-auth
+/// authorize path. No-op in non-test builds and when no hook is installed.
+#[cfg(test)]
+pub(crate) type AuthorizeTestHook = Arc<dyn Fn(&str, u32) -> AuthorizeHookFuture + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -385,6 +404,8 @@ impl DocumentStore {
             delete_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
+            #[cfg(test)]
+            authorize_test_hook: None,
         }
     }
 
@@ -409,6 +430,26 @@ impl DocumentStore {
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
+        }
+    }
+
+    /// Install a hook that runs inside `authorize_device_auth` between the
+    /// read and the compare-and-update. Lets tests deterministically force an
+    /// OCC retry by injecting a concurrent device-code poll (which bumps the
+    /// row's version without changing its status) into the get-to-CAS window.
+    #[cfg(test)]
+    pub(crate) fn set_authorize_test_hook(&mut self, hook: AuthorizeTestHook) {
+        self.authorize_test_hook = Some(hook);
+    }
+
+    /// Run the installed `authorize_test_hook` for `id` at `attempt`, if any.
+    /// Invoked by `authorize_device_auth` between the read and the
+    /// compare-and-update on every retry attempt. No-op in non-test builds
+    /// and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) async fn run_authorize_test_hook(&self, id: &str, attempt: u32) {
+        if let Some(hook) = &self.authorize_test_hook {
+            hook(id, attempt).await;
         }
     }
 

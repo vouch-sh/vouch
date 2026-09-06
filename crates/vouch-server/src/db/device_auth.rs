@@ -268,10 +268,21 @@ pub struct AuthorizeDeviceAuthParams<'a> {
 /// Authorize a device auth request.
 ///
 /// Uses `compare_and_update` (OCC) so two concurrent authorization
-/// attempts cannot both succeed under PostgreSQL READ COMMITTED — the
-/// loser sees a version mismatch and is reported as a conflict. The
+/// attempts cannot both succeed under PostgreSQL READ COMMITTED. The
 /// blind `tx.update` it replaced would have let both writers commit,
 /// each clobbering the other's user attribution.
+///
+/// Retries on version mismatch: a concurrent device-code poll
+/// ([`update_device_auth_poll_time`]) rewrites the row and bumps its OCC
+/// version even though it only changes `last_poll_at`. A single-shot CAS
+/// would spuriously fail a valid approval (the WebAuthn ceremony already
+/// succeeded, the row is still `Pending`) whenever a poll commits inside
+/// the get-to-CAS window. On each retry the row is re-read and
+/// `status == Pending` is re-checked, so a concurrent authorize that
+/// already won still makes the loser bail — preserving the
+/// single-transition invariant. Bounded by
+/// [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES) with the same
+/// backoff [`DocumentStore::modify`] uses.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     params: AuthorizeDeviceAuthParams<'_>,
@@ -288,43 +299,50 @@ pub async fn authorize_device_auth(
         bail!("authorize_device_auth called with empty id");
     }
 
-    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    let Some(doc) = doc else {
-        bail!(
-            "authorize_device_auth: no device auth request \
-             found with id '{}'",
-            id
-        );
-    };
+    for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
+        let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
+        let Some(doc) = doc else {
+            bail!(
+                "authorize_device_auth: no device auth request \
+                 found with id '{}'",
+                id
+            );
+        };
 
-    if doc.data.status != DeviceAuthStatus::Pending {
-        bail!(
-            "authorize_device_auth: device auth request '{}' \
-             already has status '{:?}'",
-            id,
-            doc.data.status
-        );
+        if doc.data.status != DeviceAuthStatus::Pending {
+            bail!(
+                "authorize_device_auth: device auth request '{}' \
+                 already has status '{:?}'",
+                id,
+                doc.data.status
+            );
+        }
+
+        #[cfg(test)]
+        store.run_authorize_test_hook(id, attempt).await;
+
+        let version = doc.version;
+        let mut data = doc.data;
+        data.status = DeviceAuthStatus::Authorized;
+        data.user_id = Some(user_id.to_string());
+        data.user_email = Some(user_email.to_string());
+        data.authenticator_id = Some(authenticator_id.to_string());
+        let hw = HardwareVerification::from(verification);
+        data.hardware_verified = hw.hardware_verified();
+        data.auth_time = hw.auth_time();
+        if store.compare_and_update(id, version, &data).await? {
+            return Ok(());
+        }
+        if attempt < super::pool::MAX_DSQL_RETRIES {
+            tokio::time::sleep(super::pool::retry_backoff(attempt)).await;
+        }
     }
-
-    let version = doc.version;
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Authorized;
-    data.user_id = Some(user_id.to_string());
-    data.user_email = Some(user_email.to_string());
-    data.authenticator_id = Some(authenticator_id.to_string());
-    let verification = HardwareVerification::from(verification);
-    data.hardware_verified = verification.hardware_verified();
-    data.auth_time = verification.auth_time();
-    let won = store.compare_and_update(id, version, &data).await?;
-    if !won {
-        bail!(
-            "authorize_device_auth: device auth request '{}' was \
-             concurrently modified",
-            id
-        );
-    }
-
-    Ok(())
+    bail!(
+        "authorize_device_auth: device auth request '{}' was \
+         concurrently modified after {} retries",
+        id,
+        super::pool::MAX_DSQL_RETRIES
+    );
 }
 
 /// Deny a device auth request.
