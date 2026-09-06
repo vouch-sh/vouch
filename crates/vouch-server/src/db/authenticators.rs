@@ -225,16 +225,45 @@ fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
 /// last-key guard and User-doc version bump in `services::keys::delete_key`,
 /// the full account teardown in `delete_user`, or removing a member's whole
 /// key set as one unit.
+///
+/// The detach step (1) reads each matching `DeviceAuthRequestDoc` and writes
+/// it back with optimistic concurrency (`compare_and_update`) using the
+/// version it read. A blind `update_by_index` would overwrite a concurrent
+/// `try_consume_device_auth` that committed `Consumed` between our read and
+/// our write — its unconditional `UPDATE … version = version + 1` carries no
+/// version guard, so it silently clobbers the newer row, corrupting
+/// `Consumed → Denied` and suppressing the post-hoc replay-revocation sweep
+/// (`handlers::device::revoke_sessions_for_device_replay` only fires on
+/// `Consumed`). The version guard preserves that concurrent write instead:
+/// on PostgreSQL READ COMMITTED the `WHERE version = expected` clause matches
+/// zero rows once the consume has committed, so the row's `Consumed` state
+/// survives and the cascade moves on without revoking its attribution; on
+/// Aurora DSQL the read-write anomaly aborts this transaction at commit and
+/// the entry-point `with_dsql_retry!` wrapper retries the whole cascade
+/// against the fresh `Consumed` row, which `detach_authenticator_from_device_auth`
+/// leaves untouched. Either way, consumed requests keep their attribution for
+/// replay revocation (RFC 6749 §10.5 defense-in-depth).
 pub async fn delete_authenticator(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
 ) -> Result<()> {
-    tx.update_by_index::<DeviceAuthRequestDoc, _>(
-        "authenticator_id",
-        authenticator_id,
-        detach_authenticator_from_device_auth,
-    )
-    .await?;
+    let mut docs = tx
+        .find_all::<DeviceAuthRequestDoc>("authenticator_id", authenticator_id)
+        .await?;
+    for doc in &mut docs {
+        detach_authenticator_from_device_auth(&mut doc.data);
+        // `compare_and_update` returns `Ok(false)` when a concurrent writer
+        // (e.g. `try_consume_device_auth`) committed first and our read is
+        // now stale. Leave that row as the winner wrote it rather than
+        // overwriting it with our stale `Authorized → Denied` view — on
+        // PostgreSQL READ COMMITTED the no-op preserves the concurrent
+        // `Consumed` write; on Aurora DSQL the resulting read-write anomaly
+        // aborts this transaction at commit and the entry-point retry
+        // wrapper re-runs the cascade against the fresh row.
+        let _won = tx
+            .compare_and_update::<DeviceAuthRequestDoc>(&doc.id, doc.version, &doc.data)
+            .await?;
+    }
     tx.delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
         .await?;
     tx.delete(authenticator_id).await?;

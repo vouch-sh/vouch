@@ -309,20 +309,31 @@ pub(crate) async fn revoke_member_credentials(
 
     let key_count = authenticators.len();
     // One transaction for the whole set: revoking a member's credentials must
-    // not be able to land half-applied and leave them some working keys.
-    let mut tx = state
-        .store
-        .begin()
-        .await
-        .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
-    for auth in &authenticators {
-        db::delete_authenticator(&mut tx, &auth.id)
+    // not be able to land half-applied and leave them some working keys. The
+    // transaction is wrapped in `with_dsql_retry!` so that an OCC conflict —
+    // including a `delete_authenticator` cascade that loses a race against a
+    // concurrent `try_consume_device_auth` on the device-auth row, which the
+    // per-row version guard surfaces as a serialization abort at commit on
+    // Aurora DSQL — retries the whole cascade against fresh state instead of
+    // surfacing as a hard admin-facing failure. `delete_key` and `delete_user`
+    // already wrap their cascades this way; this closes the same gap for the
+    // admin credential-revocation path.
+    crate::with_dsql_retry!(async {
+        let mut tx = state
+            .store
+            .begin()
             .await
-            .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
-    }
-    tx.commit()
-        .await
-        .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key revocation"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
+        for auth in &authenticators {
+            db::delete_authenticator(&mut tx, &auth.id)
+                .await
+                .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key revocation"))?;
+        Ok::<(), ServiceError>(())
+    })?;
 
     // Sessions, SSH certificates, and the GitHub refresh token all go, or the
     // request fails.
