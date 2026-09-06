@@ -12,7 +12,7 @@ use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
 use crate::assurance::{ACR_AAL3, AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
-use crate::db::{self, Authenticator, OAuthClient, Session, User};
+use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
@@ -1237,8 +1237,6 @@ pub async fn validate_dpop_if_present(
 pub struct OidcValidatedSession {
     /// The authenticated user.
     pub user: User,
-    /// The database session record.
-    pub session: Session,
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
     ///
@@ -1343,7 +1341,6 @@ pub async fn validate_session_token(
 
     Ok(Some(OidcValidatedSession {
         user,
-        session,
         authenticator,
         scope: decoded.scope().cloned(),
         client_id,

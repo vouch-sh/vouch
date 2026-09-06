@@ -8,7 +8,7 @@
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{
-    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode, Session,
+    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode,
     TokenEndpointAuthMethod, User,
 };
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -519,8 +519,6 @@ pub enum AuthorizationSessionState {
     Authenticated {
         /// The authenticated user.
         user: Box<User>,
-        /// The session.
-        session: Box<Session>,
         /// The authenticator used.
         authenticator: Box<Authenticator>,
         /// When the session's FIDO2 ceremony happened, from the access
@@ -877,7 +875,6 @@ pub async fn check_session_for_authorization(
             };
             Ok(AuthorizationSessionState::Authenticated {
                 user: Box::new(validated.user),
-                session: Box::new(validated.session),
                 authenticator: Box::new(authenticator),
                 auth_time: validated.auth_time,
             })

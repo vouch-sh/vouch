@@ -267,13 +267,13 @@ async fn extract_resource_token(
         client_id: access_claims.client_id,
         aud: access_claims.aud,
         scope: access_claims.scope,
-        authenticator_id: session.authenticator_id,
+        authenticator_id: session.authenticator_id.clone(),
         hardware_verified: access_claims.hardware_verified,
         auth_time: access_claims.auth_time,
         token_hash,
         dpop_source,
-        hardware_aaguid: session.hardware_aaguid,
-        org_domain: session.org_domain,
+        hardware_aaguid: session.hardware_aaguid.clone(),
+        org_domain: session.org_domain.clone(),
     })
 }
 
