@@ -665,7 +665,10 @@ pub(crate) async fn delete_secret_form(
         .filter(|s| s.id != secret_id && s.is_valid(&now))
         .count();
 
-    if other_active == 0 {
+    // FAPI clients cannot authenticate with a secret (minting is blocked),
+    // so the last-secret floor does not apply: pre-guard secret rows must
+    // remain deletable instead of being pinned forever.
+    if other_active == 0 && !client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-secret-last-active"),

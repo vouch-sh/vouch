@@ -649,7 +649,11 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    if other_active == 0 {
+    // FAPI clients cannot authenticate with a secret at all (minting is
+    // blocked above), so any remaining secret rows are dead weight from
+    // before the FAPI guard; the last-secret floor would pin them forever.
+    // Only non-FAPI clients need the floor to avoid locking themselves out.
+    if other_active == 0 && !client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",

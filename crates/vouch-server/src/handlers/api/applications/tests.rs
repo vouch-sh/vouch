@@ -2614,3 +2614,112 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
         "no secret rows should exist for a private_key_jwt FAPI client, got {secrets:?}"
     );
 }
+
+// ========================================================================
+// FAPI delete-floor exemption: FAPI clients cannot authenticate with a
+// secret (minting is blocked for every FAPI profile), so a dead secret row
+// minted before the guard must remain deletable. The unconditional
+// "last active secret" floor previously pinned it forever.
+// ========================================================================
+
+async fn setup_user_with_fapi_app_and_secret(
+    state: &crate::AppState,
+    email: &str,
+) -> (String, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+            jwks: TestJwks::Shared,
+            dpop_bound_access_tokens: true,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: true, // simulates a pre-guard mTLS-FAPI client with a dead secret row
+            ..Default::default()
+        },
+    )
+    .await;
+    (client.app_id, token)
+}
+
+// FAPI 2.0 Security Profile §5.3.1: confidential clients use asymmetric
+// auth, so a FAPI client's last (unusable) secret must be deletable.
+#[tokio::test]
+async fn test_delete_last_secret_allowed_for_fapi_client() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_user_with_fapi_app_and_secret(&state, "api-fapi-del-last@example.com").await;
+    let auth = bearer(&token);
+
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let secret_id = json["secrets"][0]["id"].as_str().expect("secret id");
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a FAPI client's last dead secret must be deletable, body: {body}"
+    );
+
+    let now = jiff::Timestamp::now();
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.iter().all(|s| !s.is_valid(&now)),
+        "the dead secret must be revoked, got {secrets:?}"
+    );
+}
+
+// FAPI 2.0 Security Profile §5.3.1: the exemption is FAPI-scoped; the
+// non-FAPI floor stays intact (see test_delete_last_secret_rejected above
+// for the sibling negative case at the handler level).
+#[tokio::test]
+async fn test_delete_last_secret_still_rejected_for_non_fapi_client() {
+    let (app, state) = test_app().await;
+    let (app_id, token) = setup_user_with_app(&state, "api-nonfapi-del-last@example.com").await;
+    let auth = bearer(&token);
+
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let secret_id = json["secrets"][0]["id"].as_str().expect("secret id");
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "last_secret");
+}
