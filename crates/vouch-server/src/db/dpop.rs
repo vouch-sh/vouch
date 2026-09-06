@@ -175,3 +175,12 @@ pub async fn delete_expired_dpop_nonces(store: &DocumentStore, _now: &str) -> Re
 pub async fn delete_expired_dpop_jtis(store: &DocumentStore, _now: &str) -> Result<u64> {
     store.delete_expired(DpopJtiDoc::DOC_TYPE).await
 }
+
+/// Test-only access to the deterministic JTI document ID, so integration tests
+/// can read back a `DpopJtiDoc` committed by [`check_and_store_dpop_jti`] and
+/// assert on its `expires_at` (e.g. that JTI retention covers the full
+/// skew-extended proof-validity window — RFC 9449 §4.3 step 11).
+#[cfg(test)]
+pub(crate) fn dpop_jti_id_for_test(jti: &str) -> String {
+    deterministic_dpop_jti_id(jti)
+}
