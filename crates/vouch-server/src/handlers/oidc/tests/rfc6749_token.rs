@@ -677,6 +677,71 @@ async fn test_token_malformed_basic_header_challenges_with_basic() {
 }
 
 #[tokio::test]
+async fn test_client_credentials_malformed_basic_header_challenges_with_basic() {
+    // Regression for the `client_credentials` grant: the `Ok(None)` arm of
+    // `complete_client_auth` used to return a raw `invalid_client` 401 without
+    // `with_client_auth_challenge`, so RFC 6749 §5.2's `WWW-Authenticate: Basic`
+    // was omitted when the client attempted `Authorization: Basic`. A malformed
+    // header still classifies as `AuthorizationHeader`, so the challenge is owed.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", "Basic !!!not-base64!!!")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "client_credentials with malformed Basic must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "client_credentials must carry WWW-Authenticate: Basic owed by RFC 6749 §5.2; \
+         got {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
+async fn test_token_exchange_malformed_basic_header_challenges_with_basic() {
+    // Regression for the `token_exchange` grant: same defect and fix as
+    // `test_client_credentials_malformed_basic_header_challenges_with_basic`.
+    // `subject_token` and `subject_token_type` only need to be present to clear
+    // `TokenRequestForm::parse`; their values never reach `ExchangeTokens::from_request`
+    // because the client-auth check returns first.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token=anything&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+        &[("Authorization", "Basic !!!not-base64!!!")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "token_exchange with malformed Basic must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "token_exchange must carry WWW-Authenticate: Basic owed by RFC 6749 §5.2; \
+         got {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
 async fn test_fido2_grant_basic_auth_failure_challenges_with_basic() {
     // The fido2-assertion grant requires `private_key_jwt`, so a client that
     // presents Basic credentials is rejected as `invalid_client`. It attempted
@@ -772,6 +837,21 @@ fn no_credential_requests() -> Vec<(&'static str, &'static str)> {
              &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
         ),
         (
+            "/oauth/token",
+            // RFC 6749 §4.4.2: client auth is REQUIRED for client_credentials.
+            "grant_type=client_credentials",
+        ),
+        (
+            "/oauth/token",
+            // RFC 8693 §2.1: client auth is REQUIRED for token exchange.
+            // `subject_token` and `subject_token_type` only need to be present
+            // to clear `TokenRequestForm::parse`; the client-auth check returns
+            // before `ExchangeTokens::from_request` ever runs.
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token=anything\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+        ),
+        (
             "/oauth/par",
             "response_type=code&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
@@ -792,12 +872,12 @@ async fn test_no_credentials_challenges_uniformly_across_endpoints() {
         assert_eq!(
             response.status,
             StatusCode::UNAUTHORIZED,
-            "{path} must reject a request carrying no client credentials: {}",
+            "{path} ({body}) must reject a request carrying no client credentials: {}",
             response.body
         );
         assert!(
             www_authenticate(&response).starts_with("Basic"),
-            "{path} must advertise Basic when no credentials were presented, got: {:?}",
+            "{path} ({body}) must advertise Basic when no credentials were presented, got: {:?}",
             www_authenticate(&response)
         );
     }
