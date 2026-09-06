@@ -1366,6 +1366,29 @@ async fn complete_pending_auth(
         }
     }
 
+    // Steps 5 & 6: Validate requested ACR (RFC 9470) and `resource` against the
+    // client's registered URIs (RFC 8707). The authenticated no-re-auth path
+    // runs the same checks in `issue_code_after_reauth_check`; the shared
+    // `validate_code_request_constraints` helper keeps the two continuation
+    // paths consistent so the same client, resource, and user obtain the same
+    // answer regardless of whether the session needed (re-)authentication.
+    // Placed before PAR consumption so a rejected request does not burn the
+    // pushed authorization request — matching the ordering of the
+    // authenticated no-re-auth path.
+    if let Err(resp) = validate_code_request_constraints(
+        state,
+        &resolved.client,
+        &resolved.redirect_uri,
+        pending.resource.as_deref(),
+        pending.acr_values.as_deref(),
+        pending.state.as_deref(),
+        resolved.response_mode,
+    )
+    .await
+    {
+        return resp;
+    }
+
     let par_proof = match pending.par_request_uri {
         None => db::ParConsumptionProof::not_pushed(),
         Some(ref request_uri) => {
@@ -1751,6 +1774,68 @@ async fn authorize_authenticated_user(
     .await
 }
 
+/// Validate ACR (RFC 9470) and `resource` registered-set (RFC 8707 §2.1)
+/// constraints that gate authorization-code issuance at the authorization
+/// endpoint.
+///
+/// Both `/oauth/authorize` continuation paths that issue a code — the
+/// authenticated no-re-auth path ([`issue_code_after_reauth_check`]) and the
+/// pending-auth resume path ([`complete_pending_auth`]) — funnel through this
+/// helper so they enforce identical constraints and return the same
+/// authorization-endpoint redirect errors. A guard added here cannot be
+/// silently missing from one path the way Step 6 (`is_valid_resource_uri`)
+/// was missing from the pending path: for the same client, `resource`, and
+/// user, the answer must not depend on whether the session needed
+/// (re-)authentication.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+async fn validate_code_request_constraints(
+    state: &Arc<AppState>,
+    client: &OAuthClient,
+    redirect_uri: &str,
+    resource: Option<&str>,
+    acr_values: Option<&str>,
+    oauth_state: Option<&str>,
+    response_mode: ResponseMode,
+) -> Result<(), Response> {
+    // Step 5: Validate requested ACR (RFC 9470).
+    if let Some(acr) = acr_values {
+        let acr_ok = acr.split_whitespace().any(|v| v == ACR_AAL3);
+        if !acr_ok {
+            return Err(oauth_error_response(
+                state,
+                client,
+                redirect_uri,
+                OAuthErrorCode::UnmetAuthenticationRequirements,
+                "The requested authentication context class is not supported",
+                oauth_state,
+                response_mode,
+            )
+            .await);
+        }
+    }
+
+    // Step 6: Validate resource parameter against registered URIs (RFC 8707).
+    if let Some(resource) = resource
+        && !client.is_valid_resource_uri(resource)
+    {
+        return Err(oauth_error_response(
+            state,
+            client,
+            redirect_uri,
+            OAuthErrorCode::InvalidTarget,
+            "The requested resource is not registered for this client",
+            oauth_state,
+            response_mode,
+        )
+        .await);
+    }
+
+    Ok(())
+}
+
 /// Validate ACR, resource, consume PAR if needed, and issue the authorization code.
 ///
 /// Called after access and re-auth checks have passed in `authorize_authenticated_user`.
@@ -1768,37 +1853,23 @@ async fn issue_code_after_reauth_check(
     par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
 ) -> Response {
-    // Step 5: Validate requested ACR (RFC 9470).
-    if let Some(acr) = validated.acr_values() {
-        let acr_ok = acr.split_whitespace().any(|v| v == ACR_AAL3);
-        if !acr_ok {
-            return oauth_error_response(
-                state,
-                oauth_client,
-                validated.redirect_uri(),
-                OAuthErrorCode::UnmetAuthenticationRequirements,
-                "The requested authentication context class is not supported",
-                validated.state(),
-                response_mode,
-            )
-            .await;
-        }
-    }
-
-    // Step 6: Validate resource parameter against registered URIs (RFC 8707).
-    if let Some(resource) = validated.resource()
-        && !oauth_client.is_valid_resource_uri(resource)
+    // Steps 5 & 6: Validate requested ACR (RFC 9470) and `resource` against the
+    // client's registered URIs (RFC 8707). Shared with `complete_pending_auth`
+    // via `validate_code_request_constraints` so both authorization-endpoint
+    // continuation paths enforce identical constraints and return the same
+    // redirect errors for the same client, resource, and user.
+    if let Err(resp) = validate_code_request_constraints(
+        state,
+        oauth_client,
+        validated.redirect_uri(),
+        validated.resource(),
+        validated.acr_values(),
+        validated.state(),
+        response_mode,
+    )
+    .await
     {
-        return oauth_error_response(
-            state,
-            oauth_client,
-            validated.redirect_uri(),
-            OAuthErrorCode::InvalidTarget,
-            "The requested resource is not registered for this client",
-            validated.state(),
-            response_mode,
-        )
-        .await;
+        return resp;
     }
 
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
