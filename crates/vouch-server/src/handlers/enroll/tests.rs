@@ -61,6 +61,15 @@ fn valid_client_data_json() -> String {
     URL_SAFE_NO_PAD.encode(json.as_bytes())
 }
 
+/// Build the `Cookie` header value for a session token.
+///
+/// Mirrors how the live `Set-Cookie` header is structured
+/// (`create_session_cookie`) so the receipt path in the test harness is
+/// symmetric with the cookie the server would set after `browser_login_complete`.
+fn session_cookie_header(token: &str) -> String {
+    format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
+}
+
 /// Decode the payload claims of a JWT without verifying the signature.
 ///
 /// Splits the token on `.`, base64url-decodes the second part (payload),
@@ -209,11 +218,27 @@ async fn test_enrollment_complete_oversized_credential_id() {
 async fn test_browser_register_complete_rejects_replayed_state() {
     let (app, state) = test_app().await;
 
-    // Build a valid BrowserRegistrationState JWT and record its expiry.
-    let user_id = Uuid::now_v7();
+    // Build a real user + session so the state JWT and the cookie share
+    // the same `user_id`. The fix re-binds the caller to that id; without
+    // a matching cookie the request would now be rejected as missing a
+    // session before reaching the replay check.
+    let user = create_test_user(&state.store, "replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
     let (_ccr, webauthn_state) = state
         .webauthn
-        .start_passkey_registration(user_id, "replay@example.com", "replay@example.com", None)
+        .start_passkey_registration(user_id, &user.email, &user.email, None)
         .expect("start_passkey_registration");
 
     let now = jiff::Timestamp::now();
@@ -221,7 +246,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
     let reg_state = BrowserRegistrationState {
         device_auth_id: String::new(),
         user_id,
-        user_email: "replay@example.com".to_string(),
+        user_email: user.email.clone(),
         webauthn_state,
         iat: now.as_second(),
         exp,
@@ -248,11 +273,15 @@ async fn test_browser_register_complete_rejects_replayed_state() {
     })
     .to_string();
 
+    let cookie = session_cookie_header(&token);
     let (status, resp_body) = http_post_json(
         &app,
         "/enroll/webauthn/complete",
         &body,
-        &[("Origin", "https://test.example.com")],
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
     )
     .await;
 
@@ -1286,17 +1315,36 @@ async fn device_verify_page_ignores_invalid_user_code() {
 // certificate under a pinned Yubico root is exactly what the change makes
 // impossible. The claim mapping those assertions covered now lives in
 // `services::auth::tests::test_verified_hardware_sets_amr_acr_and_flag`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "end-to-end self-attestation forging: ES256 keypair, COSE_Key, \
+              authData, clientData, attStmt, plus the caller-binding session \
+              and cookie setup the fix requires"
+)]
 #[tokio::test]
 async fn test_browser_register_complete_rejects_self_attestation() {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
     let (app, state) = test_app().await;
 
-    // Pre-create the user so `complete_enrollment_after_identity`-style rows
-    // exist; `browser_register_complete` itself enrolls the authenticator
-    // against `reg_state.user_id`.
-    let user_id = Uuid::now_v7();
+    // Pre-create the user + session so `complete_enrollment_after_identity`-style
+    // rows exist and the cookie's `sub` matches the state JWT's `user_id`.
+    // The fix re-binds the caller to that id; without a matching cookie the
+    // request would be rejected before the attestation check runs.
     let user_email = "auth-time-regression@example.com";
+    let user = create_test_user(&state.store, user_email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
     // 1. Build a valid BrowserRegistrationState JWT and extract the challenge.
     let (ccr, webauthn_state) = state
@@ -1444,6 +1492,7 @@ async fn test_browser_register_complete_rejects_self_attestation() {
         Some(body),
         &[
             ("Content-Type", "application/json"),
+            ("Cookie", session_cookie_header(&session_token).as_str()),
             ("Origin", "https://test.example.com"),
         ],
     )
@@ -1509,6 +1558,22 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     // for five minutes) must not complete key registration (issue #846).
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
+    // The session is minted BEFORE deactivation; sessions survive
+    // `update_user_active_status` (admin tooling revokes sessions in a
+    // separate step). The cookie therefore still extracts a token whose
+    // `sub` matches the state JWT — the caller-binding check passes, and
+    // the deactivated-user guard fires as it did before the fix.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     crate::db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
@@ -1540,17 +1605,199 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     })
     .to_string();
 
+    let cookie = session_cookie_header(&token);
     let (status, resp) = http_post_json(
         &app,
         "/enroll/webauthn/complete",
         &body,
-        &[("Origin", "https://test.example.com")],
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
     )
     .await;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
         "deactivated user must not complete key registration: {resp}"
+    );
+}
+
+// ── browser_register_complete re-binds the caller to the state JWT ────────
+//
+// Mirrors the fix applied to the CLI `register_complete`: the cookie
+// identified by `extract_session_from_cookie` must hold the same `sub` as
+// the state JWT's `user_id`. A captured state JWT is server-signed but not
+// encrypted; without this check an attacker who holds it could complete
+// the enrollment against the victim's account while presenting only the
+// per-route body checks.
+
+/// Build a user + a session cookie the way `browser_register_start` would
+/// establish one (so the caller is genuinely a logged-in account) and
+/// return both the user row and the raw `Cookie` header value.
+async fn browser_user_session(state: &AppState, email: &str) -> (crate::db::User, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    (user, session_cookie_header(&token))
+}
+
+/// Mint a `BrowserRegistrationState` JWT bound to `user.id`, returning the
+/// token and the expiry timestamp the consume test helper needs.
+async fn browser_register_state(state: &AppState, user: &crate::db::User) -> (String, i64) {
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_id, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let exp = now.as_second() + 300;
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp,
+    };
+    let jwt = reg_state
+        .encode(&state.state_signer)
+        .await
+        .expect("encode state");
+    (jwt, exp)
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_rejects_state_user_mismatch() {
+    // Attacker captures the victim's state JWT and submits the completion
+    // under their own session cookie. The mismatch must be rejected with
+    // 403 forbidden / state_user_mismatch *before* the single-use consume,
+    // so the victim can still spend the state later.
+    let (app, state) = test_app().await;
+    let (victim, victim_cookie) =
+        browser_user_session(&state, "victim-browser-mismatch@example.com").await;
+    let (attacker, attacker_cookie) =
+        browser_user_session(&state, "attacker-browser-mismatch@example.com").await;
+    assert_ne!(victim.id, attacker.id, "test setup must distinct users");
+
+    let (state_jwt, exp) = browser_register_state(&state, &victim).await;
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", attacker_cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "mismatched cookie must 403: {resp_body}"
+    );
+    assert!(
+        resp_body.contains("state_user_mismatch"),
+        "expected 'state_user_mismatch' in body, got: {resp_body}"
+    );
+
+    // The rejected mismatch must NOT have consumed the victim's state
+    // token. `consume_challenge_state_for_test` is the only way to splice
+    // into the single-use store, so this assertion consumes the token as
+    // a side-effect — that's why the legitimate retry below uses a
+    // *fresh* state JWT.
+    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    let consume =
+        crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+    assert!(
+        consume.is_ok(),
+        "a rejected mismatch consumed the victim's registration state: {consume:?}"
+    );
+
+    // The legitimate retry: the victim spends a fresh state JWT with a
+    // matching cookie. The caller-binding check passes, the active-user
+    // check passes (victim is active), the consume succeeds, and the
+    // request lands in the AAGUID/x5c check — `valid_attestation_object`
+    // rejects minimal bytes there with `attestation_cert_required`. Must
+    // NOT 403 at the caller-binding guard.
+    let (state_jwt, _exp) = browser_register_state(&state, &victim).await;
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", victim_cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "victim with matching cookie must not 403: {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_requires_session() {
+    // Without a session cookie the request must be rejected by
+    // `extract_session_from_cookie` before any state work: the WebAuthn
+    // ceremony must not be readable by an anonymous caller of the open
+    // `/enroll/webauthn/complete` route.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "no-session@example.com").await;
+    let (state_jwt, _exp) = browser_register_state(&state, &user).await;
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "missing cookie must 401: {resp_body}"
+    );
+    assert!(
+        resp_body.contains("unauthorized") || resp_body.contains("invalid_session"),
+        "expected unauthorized/invalid_session, got: {resp_body}"
     );
 }
 
