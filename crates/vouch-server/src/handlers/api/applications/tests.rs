@@ -2756,15 +2756,13 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
 // secret row. Mirrors the web-handler regression coverage above.
 // ========================================================================
 
-async fn setup_user_with_fapi_app(
-    state: &crate::AppState,
-    email: &str,
-    auth_method: crate::db::TokenEndpointAuthMethod,
-) -> (String, String) {
-    let user = create_test_user(&state.store, email).await;
+#[tokio::test]
+async fn test_add_secret_rejects_mtls_fapi_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "api-mtls-fapi-secret@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session_with(
-        state,
+        &state,
         TestSessionSpec {
             user_id: &user.id,
             email: &user.email,
@@ -2777,7 +2775,7 @@ async fn setup_user_with_fapi_app(
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(auth_method),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
@@ -2787,18 +2785,7 @@ async fn setup_user_with_fapi_app(
         },
     )
     .await;
-    (client.app_id, token)
-}
-
-#[tokio::test]
-async fn test_add_secret_rejects_mtls_fapi_client() {
-    let (app, state) = test_app().await;
-    let (app_id, token) = setup_user_with_fapi_app(
-        &state,
-        "api-mtls-fapi-secret@example.com",
-        crate::db::TokenEndpointAuthMethod::TlsClientAuth,
-    )
-    .await;
+    let app_id = client.app_id;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -2825,12 +2812,35 @@ async fn test_add_secret_rejects_mtls_fapi_client() {
 #[tokio::test]
 async fn test_add_secret_rejects_self_signed_mtls_fapi_client() {
     let (app, state) = test_app().await;
-    let (app_id, token) = setup_user_with_fapi_app(
+    let user = create_test_user(&state.store, "api-self-signed-mtls-fapi-secret@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
         &state,
-        "api-self-signed-mtls-fapi-secret@example.com",
-        crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
     )
     .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(
+                crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+            ),
+            tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+            jwks: TestJwks::Shared,
+            dpop_bound_access_tokens: true,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
     let auth = bearer(&token);
 
     let (status, body) = http_post_json(
@@ -2912,14 +2922,16 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
 // "last active secret" floor previously pinned it forever.
 // ========================================================================
 
-async fn setup_user_with_fapi_app_and_secret(
-    state: &crate::AppState,
-    email: &str,
-) -> (String, String) {
-    let user = create_test_user(&state.store, email).await;
+// FAPI 2.0 Security Profile §5.3.2.1 item 6: mTLS-FAPI clients authenticate
+// only via mutual TLS, so a FAPI client's last (unusable) secret must be
+// deletable.
+#[tokio::test]
+async fn test_delete_last_secret_allowed_for_fapi_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "api-fapi-del-last@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session_with(
-        state,
+        &state,
         TestSessionSpec {
             user_id: &user.id,
             email: &user.email,
@@ -2937,22 +2949,12 @@ async fn setup_user_with_fapi_app_and_secret(
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
             fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
-            with_secret: true, // simulates a pre-guard mTLS-FAPI client with a dead secret row
+            with_secret: true, // a pre-guard mTLS-FAPI client with a dead secret row
             ..Default::default()
         },
     )
     .await;
-    (client.app_id, token)
-}
-
-// FAPI 2.0 Security Profile §5.3.2.1 item 6: mTLS-FAPI clients authenticate
-// only via mutual TLS, so a FAPI client's last (unusable) secret must be
-// deletable.
-#[tokio::test]
-async fn test_delete_last_secret_allowed_for_fapi_client() {
-    let (app, state) = test_app().await;
-    let (app_id, token) =
-        setup_user_with_fapi_app_and_secret(&state, "api-fapi-del-last@example.com").await;
+    let app_id = client.app_id;
     let auth = bearer(&token);
 
     let (_, body) = http_get(

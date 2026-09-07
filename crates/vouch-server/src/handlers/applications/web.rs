@@ -1196,17 +1196,18 @@ mod tests {
     // `vouch_...` secret the token endpoint can never accept.
     // ========================================================================
 
-    async fn mint_secret_mtls_fapi_client(
-        email: &str,
-        auth_method: crate::db::TokenEndpointAuthMethod,
-    ) -> (
-        axum::Router,
-        std::sync::Arc<crate::AppState>,
-        String,
-        crate::test_utils::TestOAuthClient,
-    ) {
+    // Regression for #214: an mTLS-FAPI (`tls_client_auth`) client must NOT
+    // be able to mint a client secret via direct POST. Previously the narrow
+    // `== PrivateKeyJwt` guard let it through and rendered a plaintext
+    // `SecretAddedTemplate` while persisting a dead secret row.
+    //
+    // `error_page` and `SecretAddedTemplate` both render as HTTP 200 HTML
+    // (the `impl_template_into_response!` macro sets no status), so the
+    // guard is verified by response content + persisted rows, not by status.
+    #[tokio::test]
+    async fn test_web_add_secret_mints_unusable_secret_for_mtls_fapi_client() {
         let (app, state) = test_app().await;
-        let user = create_test_user(&state.store, email).await;
+        let user = create_test_user(&state.store, "mtls-fapi-secret@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let session_token = create_test_session_with(
             &state,
@@ -1222,7 +1223,7 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(auth_method),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
                 tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
                 jwks: TestJwks::Shared,
                 dpop_bound_access_tokens: true,
@@ -1230,24 +1231,6 @@ mod tests {
                 with_secret: false,
                 ..Default::default()
             },
-        )
-        .await;
-        (app, state, session_token, client)
-    }
-
-    // Regression for #214: an mTLS-FAPI (`tls_client_auth`) client must NOT
-    // be able to mint a client secret via direct POST. Previously the narrow
-    // `== PrivateKeyJwt` guard let it through and rendered a plaintext
-    // `SecretAddedTemplate` while persisting a dead secret row.
-    //
-    // `error_page` and `SecretAddedTemplate` both render as HTTP 200 HTML
-    // (the `impl_template_into_response!` macro sets no status), so the
-    // guard is verified by response content + persisted rows, not by status.
-    #[tokio::test]
-    async fn test_web_add_secret_mints_unusable_secret_for_mtls_fapi_client() {
-        let (app, state, session_token, client) = mint_secret_mtls_fapi_client(
-            "mtls-fapi-secret@example.com",
-            crate::db::TokenEndpointAuthMethod::TlsClientAuth,
         )
         .await;
 
@@ -1282,9 +1265,33 @@ mod tests {
     // other FAPI auth method #214 made reachable; it must be blocked too.
     #[tokio::test]
     async fn test_web_add_secret_rejects_self_signed_mtls_fapi_client() {
-        let (app, state, session_token, client) = mint_secret_mtls_fapi_client(
-            "self-signed-mtls-fapi-secret@example.com",
-            crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "self-signed-mtls-fapi-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(
+                    crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+                ),
+                tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
         )
         .await;
 

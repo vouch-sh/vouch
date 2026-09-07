@@ -724,7 +724,69 @@ pub(crate) async fn revoke_tokens_api(
     // written after the sweeps either way, with `details` naming a partial
     // outcome, so a failed sweep cannot leave revoked secrets with no
     // `TokenRevoked` event while the caller is told to retry.
-    let sessions_revoked = revoke_client_sessions(&state, &client).await;
+    //
+    // The sweeps fail closed: if either fails, revocation is not reported as
+    // successful. Secrets are already revoked, but unexpired access tokens
+    // could still validate via DB-backed session lookup, so the caller must
+    // be told the revocation was incomplete (and retry) rather than see a
+    // 204.
+    let sessions_revoked: Result<(), ServiceError> = async {
+        // Terminate live M2M (client_credentials) sessions.
+        //
+        // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
+        // sessions whose `user_id` equals the OAuth client's `client_id`, so this
+        // delete reaches exactly the M2M sessions for this client. Revoking
+        // secrets is not enough on its own: the session cache may still serve
+        // unexpired tokens until their TTL elapses. Deleting those sessions and
+        // invalidating the cache is what closes the M2M half of revocation.
+        db::delete_sessions_for_user(&state.store, &client.client_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete M2M sessions for {}: {e}",
+                    client.client_id
+                );
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+        state.session_cache.invalidate_for_user(&client.client_id);
+
+        // Terminate user-issued access-token sessions minted for this client.
+        //
+        // `authorization_code`, `device_code`, RFC 8693 `token_exchange`, and
+        // FIDO2-assertion grants all persist sessions under the *real resource
+        // owner's* `user_id` (not the client's), so the M2M delete above — which
+        // filters by `user_id == client_id` — cannot reach them. Those sessions
+        // carry the issuing client's id on the `client_id` index (stamped by
+        // `create_oauth_access_token` from the RFC 9068 `client_id` claim), so a
+        // client-scoped delete is what "revoke all tokens for an application"
+        // must cover. Without it the tokens keep validating at resource
+        // endpoints until their `exp`.
+        //
+        // Pre-migration sessions issued before the `client_id` index existed
+        // deserialize `client_id` to `None` and so are not matched; they remain
+        // valid until their `exp` (bounded by `session_hours`). New tokens minted
+        // after this change are revocable on demand.
+        db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete user-issued sessions for client {}: {e}",
+                    client.client_id
+                );
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+        state.session_cache.invalidate_for_client(&client.client_id);
+        Ok(())
+    }
+    .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
@@ -751,74 +813,6 @@ pub(crate) async fn revoke_tokens_api(
     );
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Terminate every live session issued to or for an OAuth client, after its
-/// secrets have been revoked.
-///
-/// Fails closed: if either sweep fails, the caller must not report
-/// revocation success. Secrets are already revoked, but unexpired access
-/// tokens could still validate via DB-backed session lookup, so the caller
-/// must be told the revocation was incomplete (and retry) rather than see a
-/// 204.
-async fn revoke_client_sessions(
-    state: &AppState,
-    client: &db::OAuthClient,
-) -> Result<(), ServiceError> {
-    // Terminate live M2M (client_credentials) sessions.
-    //
-    // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
-    // sessions whose `user_id` equals the OAuth client's `client_id`, so this
-    // delete reaches exactly the M2M sessions for this client. Revoking
-    // secrets is not enough on its own: the session cache may still serve
-    // unexpired tokens until their TTL elapses. Deleting those sessions and
-    // invalidating the cache is what closes the M2M half of revocation.
-    db::delete_sessions_for_user(&state.store, &client.client_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to delete M2M sessions for {}: {e}",
-                client.client_id
-            );
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-    state.session_cache.invalidate_for_user(&client.client_id);
-
-    // Terminate user-issued access-token sessions minted for this client.
-    //
-    // `authorization_code`, `device_code`, RFC 8693 `token_exchange`, and
-    // FIDO2-assertion grants all persist sessions under the *real resource
-    // owner's* `user_id` (not the client's), so the M2M delete above — which
-    // filters by `user_id == client_id` — cannot reach them. Those sessions
-    // carry the issuing client's id on the `client_id` index (stamped by
-    // `create_oauth_access_token` from the RFC 9068 `client_id` claim), so a
-    // client-scoped delete is what "revoke all tokens for an application"
-    // must cover. Without it the tokens keep validating at resource
-    // endpoints until their `exp`.
-    //
-    // Pre-migration sessions issued before the `client_id` index existed
-    // deserialize `client_id` to `None` and so are not matched; they remain
-    // valid until their `exp` (bounded by `session_hours`). New tokens minted
-    // after this change are revocable on demand.
-    db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to delete user-issued sessions for client {}: {e}",
-                client.client_id
-            );
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-    state.session_cache.invalidate_for_client(&client.client_id);
-    Ok(())
 }
 
 #[cfg(test)]

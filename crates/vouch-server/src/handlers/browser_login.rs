@@ -1797,31 +1797,13 @@ mod tests {
     // never vanishes from the audit log. The full handler path needs a real
     // signed assertion, so these tests exercise the extracted tail directly.
 
-    async fn login_audit_events(
-        state: &AppState,
-        event_type: &str,
-        user_id: &str,
-    ) -> Vec<crate::db::AuditEvent> {
-        state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec![event_type.to_string()]),
-                user_id: Some(user_id.to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("query audit events")
-    }
-
-    async fn finalize_login_fixture(
-        state: &AppState,
-        email: &str,
-    ) -> (
-        crate::db::User,
-        crate::db::Authenticator,
-        db::ChallengeStateClaim,
-    ) {
-        let user = crate::test_utils::create_test_user(&state.store, email).await;
+    #[tokio::test]
+    async fn finalize_login_session_records_login_success_on_happy_path() {
+        // Positive: the tail succeeds — LoginSuccess is recorded, LoginFailed
+        // is not, and a session cookie is issued.
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "finalize-ok@example.com").await;
         let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
         let authenticator = crate::db::get_authenticator_by_id(&state.store, &auth_id)
             .await
@@ -1832,21 +1814,11 @@ mod tests {
             .expect("valid expiry");
         let claim = crate::db::consume_challenge_state_for_test(
             &state.store,
-            &format!("test-state-jwt-{email}"),
+            "test-state-jwt-finalize-ok@example.com",
             expires_at,
         )
         .await
         .expect("consume challenge state");
-        (user, authenticator, claim)
-    }
-
-    #[tokio::test]
-    async fn finalize_login_session_records_login_success_on_happy_path() {
-        // Positive: the tail succeeds — LoginSuccess is recorded, LoginFailed
-        // is not, and a session cookie is issued.
-        let state = crate::test_utils::test_app_state().await;
-        let (user, authenticator, claim) =
-            finalize_login_fixture(&state, "finalize-ok@example.com").await;
 
         let response = finalize_login_session(
             &state,
@@ -1867,9 +1839,25 @@ mod tests {
         .expect("happy path must succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
-        let successes = login_audit_events(&state, "login_success", &user.id).await;
+        let successes = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
         assert_eq!(successes.len(), 1, "LoginSuccess must be recorded");
-        let failures = login_audit_events(&state, "login_failed", &user.id).await;
+        let failures = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
         assert!(failures.is_empty(), "no LoginFailed on the happy path");
     }
 
@@ -1882,8 +1870,23 @@ mod tests {
         // does not exist, so `authorize_device_auth` fails after the counter
         // commit — the cleanup-swept-row trigger from production.
         let state = crate::test_utils::test_app_state().await;
-        let (user, authenticator, claim) =
-            finalize_login_fixture(&state, "finalize-fail@example.com").await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "finalize-fail@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = crate::db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = crate::db::consume_challenge_state_for_test(
+            &state.store,
+            "test-state-jwt-finalize-fail@example.com",
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
 
         let session_token = "finalize-fail-session-token";
         let expires_at = Timestamp::now()
@@ -1927,7 +1930,15 @@ mod tests {
 
         // THE BUG FIX: the failure leaves a LoginFailed audit trace instead
         // of no AuthEvents row at all.
-        let failures = login_audit_events(&state, "login_failed", &user.id).await;
+        let failures = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
         assert_eq!(
             failures.len(),
             1,
@@ -1941,7 +1952,15 @@ mod tests {
                 .is_some_and(|r| r.starts_with("post_verification")),
             "failure_reason must identify the post-verification stage"
         );
-        let successes = login_audit_events(&state, "login_success", &user.id).await;
+        let successes = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
         assert!(
             successes.is_empty(),
             "no LoginSuccess may be recorded when session creation did not complete"
