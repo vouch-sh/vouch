@@ -1692,3 +1692,86 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
     );
     assert_state_unconsumed(&state, &state_jwt, exp).await;
 }
+
+// ── Upstream email shape validation at the enrollment chokepoint ────────
+//
+// `complete_enrollment_after_identity` is the single funnel both the OIDC
+// and SAML callbacks feed. RFC 5322 §3.4.1 addr-spec requires a non-empty
+// local part with no unquoted whitespace or angle brackets; a misconfigured
+// IdP emitting a display-name-wrapped or local-part-less email claim must
+// be rejected before `enroll_user_with_org` persists it as the primary
+// identifier (the same `Email::is_valid_address` rule SCIM create enforces).
+
+// RFC 5322 §3.4.1: a display-name-wrapped mailbox is not an addr-spec.
+#[tokio::test]
+async fn test_enrollment_rejects_display_name_wrapped_email() {
+    let state = test_app_state().await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-1", None).await;
+    let identity = IdentityResult {
+        email: "Alice Example <alice@example.com>".to_string(),
+        domain: Some("example.com>".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = crate::db::get_user_by_email(&state.store, "alice example <alice@example.com>")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a malformed upstream email must not be persisted"
+    );
+}
+
+// RFC 5322 §3.4.1: addr-spec requires a non-empty local part.
+#[tokio::test]
+async fn test_enrollment_rejects_empty_local_part_email() {
+    let state = test_app_state().await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-2", None).await;
+    let identity = IdentityResult {
+        email: "@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = crate::db::get_user_by_email(&state.store, "@example.com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "an email with no local part must not be persisted"
+    );
+}
+
+// RFC 5322 §3.4.1: a well-formed addr-spec passes the shape gate (the
+// positive control pinning that the guard does not over-reject).
+#[tokio::test]
+async fn test_enrollment_accepts_well_formed_email() {
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "shape-ok@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "good-email-state", None).await;
+    let identity = IdentityResult {
+        email: "shape-ok@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a valid email must proceed through enrollment"
+    );
+}

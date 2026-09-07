@@ -732,6 +732,25 @@ pub(crate) async fn complete_enrollment_after_identity(
     oidc_state_claim: db::OidcStateClaim,
     client_info: ClientInfo,
 ) -> Response {
+    // Shape-check the upstream-supplied email before it becomes the primary
+    // identifier (same `Email::is_valid_address` rule the SCIM create path
+    // enforces): a misconfigured IdP emitting a display-name-wrapped,
+    // whitespace-bearing, or local-part-less value must not be persisted
+    // verbatim by `enroll_user_with_org`, which only trims and lowercases.
+    // This chokepoint covers both the OIDC and SAML callback paths.
+    if !crate::email::Email::is_valid_address(&identity.email) {
+        tracing::warn!(
+            email = %redact_email(&identity.email),
+            "rejected IdP enrollment: upstream email is not a valid address"
+        );
+        return ErrorTemplate {
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-invalid-email").to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
