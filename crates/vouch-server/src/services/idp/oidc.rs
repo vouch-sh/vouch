@@ -648,11 +648,19 @@ fn find_decoding_key(
         }
     }
 
-    // Last resort: the first key we can actually use (no kid/algorithm matched)
+    // Last resort: the first key of the token's algorithm family (no
+    // kid/algorithm matched). The same `family()` guard as the branches above
+    // applies: a wrong-family key here would be rejected downstream with
+    // `InvalidKeyFormat` anyway, and returning it would mask a usable
+    // same-family key later in the set, making acceptance depend on JWKS
+    // array order.
     tracing::warn!("No JWK matched by kid or algorithm, falling back to first usable key in JWKS");
     for jwk in &jwks.keys {
         match jsonwebtoken::DecodingKey::from_jwk(jwk) {
-            Ok(key) => return Ok(key),
+            Ok(key) if key.family() == expected_family => return Ok(key),
+            Ok(_) => tracing::warn!(
+                "Skipping last-resort JWK whose family does not match the ID token alg ({alg:?})"
+            ),
             Err(e) => tracing::warn!(error = %e, "Skipping unusable JWK"),
         }
     }

@@ -260,6 +260,53 @@ fn find_decoding_key_skips_wrong_family_when_matching_by_algorithm() {
     );
 }
 
+/// The last-resort branch (no `kid` in the header, no JWK carrying a
+/// matching `alg` member) must apply the same family guard as the other two
+/// branches: a wrong-family first key would be rejected downstream with
+/// `InvalidKeyFormat` and would mask a usable same-family key later in the
+/// set, making acceptance depend on JWKS array order.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_last_resort_skips_wrong_family_key() {
+    // Strip the `alg` member so neither key matches the algorithm-fallback
+    // branch and the scan reaches the last-resort branch.
+    let strip_alg = |mut jwk: serde_json::Value| {
+        if let Some(obj) = jwk.as_object_mut() {
+            obj.remove("alg");
+        }
+        jwk
+    };
+    let jwks = jwks_of(vec![strip_alg(rsa_jwk("rsa-1")), strip_alg(ec_jwk("ec-1"))]);
+    let key = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect("the EC key must be selected in the last-resort scan");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "ES256 token must skip the wrong-family RSA first key in the last-resort scan"
+    );
+}
+
+/// When the last-resort scan finds only wrong-family keys, the error must
+/// state no usable key exists rather than returning a key `decode` would
+/// reject with `InvalidKeyFormat`.
+// OIDC Core §10.1: a key set with no usable key verifies nothing.
+#[test]
+fn find_decoding_key_last_resort_rejects_all_wrong_family() {
+    let strip_alg = |mut jwk: serde_json::Value| {
+        if let Some(obj) = jwk.as_object_mut() {
+            obj.remove("alg");
+        }
+        jwk
+    };
+    let jwks = jwks_of(vec![strip_alg(rsa_jwk("rsa-1"))]);
+    let err = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect_err("a wrong-family last-resort key must not resolve");
+    assert!(
+        err.to_string().contains("no key usable"),
+        "expected the no-usable-key error, got: {err}"
+    );
+}
+
 // ── Test helpers for verify_id_token ────────────────────────────────────
 
 /// Build an `OidcProvider` that points all endpoints at the given mock server.
