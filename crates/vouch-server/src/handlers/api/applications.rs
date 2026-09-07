@@ -478,13 +478,16 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
-    if client.is_fapi()
-        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
-    {
+    // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
+    // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
+    // shared client secret, regardless of auth method. Block every FAPI
+    // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
+    // (reachable since #214) mint dead secrets the token endpoint refuses.
+    if client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
-            "FAPI clients using private_key_jwt do not use client secrets",
+            "FAPI clients do not use client secrets",
         ));
     }
 
@@ -645,7 +648,13 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    if other_active == 0 {
+    // FAPI clients cannot authenticate with a secret (minting is blocked for
+    // every FAPI profile, and `authenticate_client` refuses a secret from a
+    // FAPI client at every secret-verifying endpoint), so any remaining
+    // secret rows are dead weight from before those guards; the last-secret
+    // floor would pin them forever. The authoritative check is the same
+    // exemption inside `revoke_oauth_client_secret`'s transaction.
+    if other_active == 0 && !client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",

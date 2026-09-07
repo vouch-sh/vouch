@@ -23,11 +23,12 @@ use crate::AppState;
 use crate::assurance::HardwareVerification;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
+use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
 use crate::handlers::extractors::ValidJson;
-use crate::handlers::session::{create_session_cookie, get_auth_context};
+use crate::handlers::session::{create_session_cookie, get_auth_context, session_cookie_max_age};
 use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
@@ -555,10 +556,6 @@ async fn log_login_failure(
 /// request body. Consuming the single-use challenge state needs the checked
 /// request as an argument, so a malformed request cannot invalidate the state
 /// token it carries and lock the user out of the flow.
-#[expect(
-    clippy::too_many_lines,
-    reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
-)]
 pub(crate) async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
@@ -688,21 +685,107 @@ pub(crate) async fn browser_login_complete(
         verification_result.user_verified
     );
 
+    // The assertion has verified; every remaining step (counter commit,
+    // device-auth release, session creation) is fallible. If any of them
+    // errors, record a `LoginFailed` audit row so the verified hardware
+    // ceremony never vanishes from AuthEvents — the same audit-ordering
+    // guarantee `browser_register_complete` provides for `Enrollment`.
+    finalize_login_session(
+        &state,
+        LoginSessionParams {
+            jar: &jar,
+            user: &user,
+            authenticator: &authenticator,
+            new_counter: verification_result.new_counter,
+            auth_now: verification_result.verified_at,
+            challenge_claim,
+            pending_auth: auth_state.pending_auth,
+            client_info,
+        },
+    )
+    .await
+}
+
+/// Parameters for [`finalize_login_session`].
+struct LoginSessionParams<'a> {
+    jar: &'a CookieJar,
+    user: &'a db::User,
+    authenticator: &'a db::Authenticator,
+    /// Verifier-reported WebAuthn counter (u32); stored bit-identical as i32.
+    new_counter: u32,
+    /// The instant the assertion verified, stamped by the verifier itself.
+    /// It backs both the browser session and the device approval, so the
+    /// token the device-code grant later mints reports the ceremony instant
+    /// rather than the CLI's poll instant.
+    auth_now: AuthTime,
+    challenge_claim: db::ChallengeStateClaim,
+    pending_auth: Option<String>,
+    client_info: ClientInfo,
+}
+
+/// Run every fallible step that follows a verified login assertion: commit
+/// the authenticator counter, release a waiting CLI device authorization,
+/// create the OAuth session, and record the `LoginSuccess` audit event.
+///
+/// The caller records a `LoginFailed` audit row when this returns `Err`, so
+/// a verified hardware ceremony (and any state it already committed, such as
+/// the counter update) always leaves an AuthEvents trace even when a
+/// post-verification step fails — the same audit-ordering guarantee
+/// `browser_register_complete` provides for `Enrollment`.
+async fn finalize_login_session(
+    state: &AppState,
+    params: LoginSessionParams<'_>,
+) -> Result<Response, ServiceError> {
+    let user_id = params.user.id.clone();
+    let user_email = params.user.email.clone();
+    let authenticator_id = params.authenticator.id.clone();
+    let client_info = params.client_info.clone();
+
+    let result = finalize_login_session_inner(state, params).await;
+
+    if let Err(ref e) = result {
+        // The assertion verified and the counter update may already have
+        // committed, but a later step failed: leave a `LoginFailed` trace
+        // so the ceremony never vanishes from AuthEvents.
+        log_login_failure(
+            &state.audit,
+            client_info,
+            &user_id,
+            Some(&user_email),
+            Some(&authenticator_id),
+            &format!("post_verification: {e}"),
+        )
+        .await;
+    }
+
+    result
+}
+
+/// The fallible tail of [`finalize_login_session`]; see its doc comment.
+async fn finalize_login_session_inner(
+    state: &AppState,
+    params: LoginSessionParams<'_>,
+) -> Result<Response, ServiceError> {
+    let LoginSessionParams {
+        jar,
+        user,
+        authenticator,
+        new_counter,
+        auth_now,
+        challenge_claim,
+        pending_auth,
+        client_info,
+    } = params;
+
     // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
-    let new_counter = verification_result.new_counter.cast_signed();
+    let new_counter = new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
-
-    // The instant the assertion above verified, stamped by the verifier
-    // itself. It backs both the browser session and the device approval, so
-    // the token the device-code grant later mints reports the ceremony
-    // instant rather than the CLI's poll instant.
-    let auth_now = verification_result.verified_at;
 
     // Release a CLI waiting on `vouch enroll`: the assertion just verified is
     // the possession proof the upstream IdP sign-in cannot provide, so the
     // device authorization is authorized from here.
-    if let Some(enrollment) = pending_device_auth(&state, &jar).await?
+    if let Some(enrollment) = pending_device_auth(state, jar).await?
         && let Some(ref device_auth_id) = enrollment.device_auth_id
     {
         // The enrollment session must belong to whoever just asserted;
@@ -774,7 +857,7 @@ pub(crate) async fn browser_login_complete(
     };
 
     let session_result = create_oauth_access_token(
-        &state,
+        state,
         CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
@@ -784,6 +867,7 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },
@@ -830,11 +914,13 @@ pub(crate) async fn browser_login_complete(
     );
 
     // Create session cookie
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
 
     // Determine redirect URL
-    let redirect_url = if let Some(pending_id) = auth_state.pending_auth {
+    let redirect_url = if let Some(pending_id) = pending_auth {
         format!(
             "/oauth/authorize?pending_auth={}",
             urlencoding::encode(&pending_id)
@@ -849,7 +935,6 @@ pub(crate) async fn browser_login_complete(
         redirect_url: Some(redirect_url),
         error: None,
     };
-
     Ok(([(header::SET_COOKIE, cookie.to_string())], Json(response)).into_response())
 }
 
@@ -1700,5 +1785,166 @@ mod tests {
         );
         let event = events.first().expect("one event");
         assert_eq!(event.email_domain.as_deref(), Some("example.com"));
+    }
+
+    // ── finalize_login_session audit ordering ──────────────────────────────
+    //
+    // After the WebAuthn assertion verifies, every remaining step is
+    // fallible. `finalize_login_session` guarantees an AuthEvents row either
+    // way: `LoginSuccess` when the session is created, `LoginFailed` with a
+    // `post_verification` reason when a later step errors — so a verified
+    // hardware ceremony (whose counter update may already have committed)
+    // never vanishes from the audit log. The full handler path needs a real
+    // signed assertion, so these tests exercise the extracted tail directly.
+
+    async fn login_audit_events(
+        state: &AppState,
+        event_type: &str,
+        user_id: &str,
+    ) -> Vec<crate::db::AuditEvent> {
+        state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec![event_type.to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events")
+    }
+
+    async fn finalize_login_fixture(
+        state: &AppState,
+        email: &str,
+    ) -> (
+        crate::db::User,
+        crate::db::Authenticator,
+        db::ChallengeStateClaim,
+    ) {
+        let user = crate::test_utils::create_test_user(&state.store, email).await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = crate::db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = crate::db::consume_challenge_state_for_test(
+            &state.store,
+            &format!("test-state-jwt-{email}"),
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
+        (user, authenticator, claim)
+    }
+
+    #[tokio::test]
+    async fn finalize_login_session_records_login_success_on_happy_path() {
+        // Positive: the tail succeeds — LoginSuccess is recorded, LoginFailed
+        // is not, and a session cookie is issued.
+        let state = crate::test_utils::test_app_state().await;
+        let (user, authenticator, claim) =
+            finalize_login_fixture(&state, "finalize-ok@example.com").await;
+
+        let response = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &CookieJar::new(),
+                user: &user,
+                authenticator: &authenticator,
+                new_counter: 7,
+                auth_now: crate::crypto::webauthn_verify::AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                ),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+        )
+        .await
+        .expect("happy path must succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let successes = login_audit_events(&state, "login_success", &user.id).await;
+        assert_eq!(successes.len(), 1, "LoginSuccess must be recorded");
+        let failures = login_audit_events(&state, "login_failed", &user.id).await;
+        assert!(failures.is_empty(), "no LoginFailed on the happy path");
+    }
+
+    #[tokio::test]
+    async fn finalize_login_session_records_login_failed_when_post_verification_step_fails() {
+        // Regression (sibling of the Enrollment audit-ordering fix): before
+        // the fix, a post-verification failure returned 500 with NO
+        // AuthEvents row at all for the verified assertion. Trigger: the
+        // enrollment session in the jar carries a device_auth_id whose row
+        // does not exist, so `authorize_device_auth` fails after the counter
+        // commit — the cleanup-swept-row trigger from production.
+        let state = crate::test_utils::test_app_state().await;
+        let (user, authenticator, claim) =
+            finalize_login_fixture(&state, "finalize-fail@example.com").await;
+
+        let session_token = "finalize-fail-session-token";
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(10))
+            .expect("valid expiry");
+        crate::db::create_enrollment_session(
+            &state.store,
+            &user.id,
+            &user.email,
+            &hash_token(session_token),
+            Some("missing-device-auth-row"),
+            expires_at,
+        )
+        .await
+        .expect("seed enrollment session");
+        let jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            session_token,
+        ));
+
+        let result = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &jar,
+                user: &user,
+                authenticator: &authenticator,
+                new_counter: 9,
+                auth_now: crate::crypto::webauthn_verify::AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                ),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "device-auth release must fail when the row is missing"
+        );
+
+        // THE BUG FIX: the failure leaves a LoginFailed audit trace instead
+        // of no AuthEvents row at all.
+        let failures = login_audit_events(&state, "login_failed", &user.id).await;
+        assert_eq!(
+            failures.len(),
+            1,
+            "LoginFailed must be recorded when a post-verification step fails"
+        );
+        let event = failures.first().expect("login_failed event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert!(
+            data.get("failure_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|r| r.starts_with("post_verification")),
+            "failure_reason must identify the post-verification stage"
+        );
+        let successes = login_audit_events(&state, "login_success", &user.id).await;
+        assert!(
+            successes.is_empty(),
+            "no LoginSuccess may be recorded when session creation did not complete"
+        );
     }
 }

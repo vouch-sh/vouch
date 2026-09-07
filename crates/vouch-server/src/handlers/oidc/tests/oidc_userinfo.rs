@@ -112,6 +112,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(jiff::Timestamp::now().as_second()),
             },

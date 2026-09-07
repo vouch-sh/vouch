@@ -415,6 +415,7 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             // The ceremony-receipt instant from `verify_login_assertion` —
             // the `auth_time` any token resting on this ceremony must report
             // (see `LoginAssertionResult::verified_at`). Stamping this

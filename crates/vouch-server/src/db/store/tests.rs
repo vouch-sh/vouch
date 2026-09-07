@@ -1188,3 +1188,100 @@ async fn transition_retries_over_benign_bump_and_rejects_real_change() {
         "the winner's write is never overwritten"
     );
 }
+
+// update_by_index version guard.
+//
+// Every write `update_by_index` issues is guarded by the version read from
+// the index, so a row another writer committed between that read and the
+// write is never overwritten with stale data. This is the lost update that
+// let the authenticator-deletion cascade regress a `Consumed` device-auth
+// row to `Denied` (and with it suppress the replay-revocation sweep): the
+// cascade's blind `UPDATE … version = version + 1` clobbered whatever
+// `try_consume_device_auth` had just committed. The seam bumps the listed
+// rows' versions inside the transaction, after the index read and before
+// the writes — exactly what a concurrent commit in that window looks like
+// to the transaction on PostgreSQL READ COMMITTED.
+// ========================================================================
+
+#[tokio::test]
+async fn tx_update_by_index_rejects_row_changed_since_read() {
+    let mut store = test_store().await;
+    let untouched = store
+        .insert(&TestDoc {
+            name: "guarded".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    let raced = store
+        .insert(&TestDoc {
+            name: "guarded".to_string(),
+            value: 2,
+        })
+        .await
+        .unwrap();
+    store.set_update_by_index_stale_once(vec![raced.id.clone()]);
+
+    let mut tx = store.begin().await.unwrap();
+    let err = tx
+        .update_by_index::<TestDoc, _>("name", "guarded", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap_err();
+    let conflict = err.downcast_ref::<VersionConflict>().unwrap();
+    assert_eq!(
+        conflict.id, raced.id,
+        "the conflict names the row that moved"
+    );
+    assert_eq!(conflict.expected, raced.version);
+    assert!(
+        crate::db::pool::is_retryable_db_error(&err),
+        "an enclosing with_dsql_retry! must re-run the operation from a fresh read"
+    );
+    drop(tx);
+
+    // Nothing was overwritten: the transaction rolled back, so the row that
+    // raced keeps the concurrent writer's data and every sibling is as it was.
+    let raced_after = store.get::<TestDoc>(&raced.id).await.unwrap().unwrap();
+    assert_eq!(raced_after.data.value, 2, "the concurrent write survives");
+    let untouched_after = store.get::<TestDoc>(&untouched.id).await.unwrap().unwrap();
+    assert_eq!(untouched_after.data.value, 1);
+    assert_eq!(untouched_after.version, untouched.version);
+}
+
+#[tokio::test]
+async fn update_by_index_retries_from_fresh_read_after_conflict() {
+    // The standalone form wraps the guarded transaction in `with_dsql_retry!`:
+    // the first attempt loses to the injected concurrent write, the retry
+    // reads the row again and applies the modifier to that fresh state —
+    // exactly once.
+    let mut store = test_store().await;
+    let doc = store
+        .insert(&TestDoc {
+            name: "retried".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    store.set_update_by_index_stale_once(vec![doc.id.clone()]);
+
+    let updated = store
+        .update_by_index::<TestDoc, _>("name", "retried", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let after = store.get::<TestDoc>(&doc.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.data.value, 101,
+        "the modifier is applied exactly once, to the re-read row"
+    );
+    assert_eq!(
+        after.version,
+        doc.version + 1,
+        "the failed attempt rolled back its version bump along with everything else"
+    );
+}

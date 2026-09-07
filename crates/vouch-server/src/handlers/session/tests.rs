@@ -555,3 +555,21 @@ async fn test_dpop_non_use_nonce_error_omits_nonce_header() {
         "non-UseNonce DPoP errors must remain invalid_token, got: {body}"
     );
 }
+
+/// The session cookie's `Max-Age` is derived from the minted token's own
+/// `expires_in`, so a lifetime ceiling applied at issuance (the RFC 8693
+/// exchange path caps by the subject token's remaining TTL) reaches the
+/// cookie too, instead of being re-derived from `session_hours` at the
+/// call site and drifting from the token it carries.
+#[test]
+fn test_session_cookie_max_age_tracks_minted_lifetime() {
+    use super::{create_session_cookie, session_cookie_max_age};
+
+    let cookie = create_session_cookie("tok", session_cookie_max_age(60));
+    assert_eq!(cookie.max_age().map(|d| d.whole_seconds()), Some(60));
+    assert_eq!(
+        session_cookie_max_age(u64::MAX),
+        i64::MAX,
+        "saturates, never wraps"
+    );
+}

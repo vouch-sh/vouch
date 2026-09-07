@@ -575,6 +575,13 @@ pub(crate) async fn exchange_token(
             binding: params.binding,
             act: actor_claim,
             audience,
+            // Thread the subject-TTL cap into the issued token: `expires_in`
+            // is already `min(session_hours*3600, subject_remaining)` above,
+            // so passing it as `max_lifetime_secs` makes the JWT `exp` claim
+            // and the `sessions.expires_at` row honor that cap — the value
+            // reported to the client (RFC 8693 §2.2.1 `expires_in`) then
+            // describes the token it accompanies.
+            max_lifetime_secs: Some(expires_in),
             // Propagate hardware verification from the subject token so
             // non-FIDO2 tokens (e.g., JWT bearer) cannot be laundered into
             // hardware-verified tokens via exchange. The reconstruction drops
@@ -599,23 +606,15 @@ pub(crate) async fn exchange_token(
     )
     .await?;
 
-    // Log the token exchange for audit (best-effort — failures are non-fatal)
-    let now = Timestamp::now();
+    // Log the token exchange for audit (best-effort — failures are non-fatal).
+    // The audit row's `expires_at` is taken from the minted token's actual
+    // expiration (`session_result.expires_at`) so the `token_exchange` audit
+    // row, the `sessions` row, and the JWT `exp` claim all record the same
+    // lifetime for one token — re-deriving it from a separately-stamped `now`
+    // would let the audit row drift from the mint-time value.
     let issued_token_hash = hash_token(session_result.token.expose_secret());
     let scope_string = granted_scope.as_ref().map(|s| s.to_space_separated());
-    let expires_at = if let Ok(expires_seconds) = i64::try_from(expires_in)
-        && let Some(exp) = now.as_second().checked_add(expires_seconds)
-        && let Ok(ts) = Timestamp::from_second(exp)
-    {
-        ts
-    } else {
-        tracing::warn!(
-            "token exchange audit: expires_at overflow ({expires_in}s from {}), \
-             recording `now` instead",
-            now.as_second()
-        );
-        now
-    };
+    let expires_at = session_result.expires_at;
     if let Err(e) = db::insert_token_exchange(
         &state.store,
         &db::InsertTokenExchangeParams {
@@ -662,7 +661,7 @@ pub(crate) async fn exchange_token(
         access_token: session_result.token.clone(),
         issued_token_type: TokenType::AccessToken.as_urn().to_string(),
         token_type: session_result.token_type.to_string(),
-        expires_in,
+        expires_in: session_result.expires_in,
         scope: granted_scope,
         authorization_details: effective_ad,
     })
