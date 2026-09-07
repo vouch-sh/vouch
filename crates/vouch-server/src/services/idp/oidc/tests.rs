@@ -87,6 +87,22 @@ fn rsa_jwk(kid: &str) -> serde_json::Value {
     })
 }
 
+/// EC P-256 public key from RFC 7517-style test vectors. `DecodingKey::from_jwk`
+/// dispatches solely on `kty`, so this builds as the `Ec` family regardless of
+/// the `kid` it carries — the wrong-family sibling that lets a same-`kid` RSA
+/// entry mask it in the kid-match branch.
+fn ec_jwk(kid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kty": "EC",
+        "alg": "ES256",
+        "use": "sig",
+        "kid": kid,
+        "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+    })
+}
+
 /// A key type `jsonwebtoken` has no decoder for, shaped like the ML-DSA
 /// entry in RFC 9964 Appendix A.1.
 fn unusable_jwk(kid: &str) -> serde_json::Value {
@@ -171,6 +187,76 @@ fn find_decoding_key_kid_match_reports_build_error_when_all_unusable() {
     assert!(
         err.to_string().contains("Failed to build key from JWK"),
         "expected the preserved build error, got: {err}"
+    );
+}
+
+/// RFC 7517 Section 4.5 makes `kid` uniqueness a SHOULD, not a MUST, so a
+/// buildable same-`kid` entry whose `kty` differs from the ID token's `alg`
+/// family (an RSA key sharing a `kid` with an EC key, when the token is
+/// ES256) must not mask a valid same-`kid`/same-family sibling later in the
+/// set. `DecodingKey::from_jwk` builds both `kty`s as `Ok`, so the only thing
+/// that distinguishes the wrong-family first entry from the right-family
+/// second one is the built key's `AlgorithmFamily` — the family guard.
+//
+// Regression for the buildable-but-wrong-family duplicate-`kid` case that
+// commit 5af9b4e2 left unhandled: that commit's regression test covers only
+// the *unbuildable* duplicate (`unusable_jwk("dup")`); this covers the
+// buildable wrong-family one.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_kid_match_skips_wrong_family_duplicate() {
+    let jwks = jwks_of(vec![rsa_jwk("dup"), ec_jwk("dup")]); // RSA first
+    let key = find_decoding_key(&jwks, Some("dup"), Algorithm::ES256)
+        .expect("expected the EC sibling to be selected");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "EC-signed ID token must use the EC sibling, not the masked RSA first key"
+    );
+}
+
+/// When every same-`kid` entry is buildable but none share the token's
+/// algorithm family, the reported error must name the family mismatch — not
+/// the misleading "No key with kid … found", which would imply the `kid` was
+/// absent from the JWKS. The wrong-family sentinel mirrors the unbuildable
+/// sentinel the commit under review added.
+// OIDC Core §10.1: a kid present but unusable for the token's alg reports why.
+#[test]
+fn find_decoding_key_kid_match_reports_wrong_family_when_all_wrong_family() {
+    let jwks = jwks_of(vec![rsa_jwk("dup")]);
+    let err = find_decoding_key(&jwks, Some("dup"), Algorithm::ES256)
+        .expect_err("a buildable but wrong-family kid-matched key must not resolve");
+    assert!(
+        err.to_string().contains("family does not match"),
+        "expected the wrong-family sentinel, got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("No key with kid"),
+        "must not report the missing-kid message when the kid matched: {err}"
+    );
+}
+
+/// Defense-in-depth for the algorithm-fallback (no-`kid`) branch: a
+/// self-inconsistent JWK (`kty=RSA, alg=ES256`) passes the `alg`-member
+/// filter and builds as RSA — rejected downstream by `jsonwebtoken::decode`
+/// with `InvalidKeyFormat`. The `family()` guard skips it the same way the
+/// kid-match branch skips a wrong-family duplicate, so a later same-family
+/// sibling tagged with the same `alg` member is reached.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_skips_wrong_family_when_matching_by_algorithm() {
+    // Self-inconsistent RSA tagged ES256 (kty/alg disagree): passes the
+    // alg-member filter but builds as the Rsa family.
+    let mut rsa = rsa_jwk("rsa-1");
+    rsa["alg"] = serde_json::json!("ES256");
+    // EC tagged ES256: passes the same filter and builds as the Ec family.
+    let jwks = jwks_of(vec![rsa, ec_jwk("ec-1")]);
+    let key = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect("the EC sibling must be selected, not the self-inconsistent RSA");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "ES256 token must skip the RSA-tagged-ES256 entry and use the EC sibling"
     );
 }
 
@@ -743,6 +829,59 @@ async fn verify_id_token_happy_path() {
     let upstream = result.upstream.expect("upstream identity must be set");
     assert_eq!(upstream.issuer, issuer);
     assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
+}
+
+/// Regression for the buildable-but-wrong-family duplicate-`kid` case
+/// (introduced in commit 5af9b4e2): a validly-signed ES256 ID token whose
+/// verifying EC key shares its `kid` with an RSA entry earlier in the JWKS
+/// must verify regardless of JWKS array order. The unfixed branch returned
+/// the first same-`kid` key that built (the RSA sibling) and
+/// `jsonwebtoken::decode` rejected it with `InvalidKeyFormat`; the family
+/// guard skips the RSA sibling and reaches the EC one, so both orderings
+/// accept. RFC 7517 does not normatively define JWKS array order, so
+/// verification must not flip on it.
+// OIDC Core §10.1: a JWK usable for the token's algorithm must verify it.
+#[tokio::test]
+async fn verify_id_token_wrong_family_kid_duplicate_accepts_regardless_of_order() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ec_key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let ec_kid = ec_key.public_key_jwk().unwrap().kid().unwrap().to_string();
+    let ec_jwk_json = serde_json::to_value(crate::crypto::jwk::Jwk::Ec(
+        ec_key.public_key_jwk().unwrap(),
+    ))
+    .unwrap();
+
+    for jwks_keys in [
+        // Arm A: RSA (wrong family, same kid) FIRST — the ordering the
+        // unfixed branch rejected with `InvalidKeyFormat`.
+        serde_json::json!({ "keys": [rsa_jwk(&ec_kid), ec_jwk_json.clone()] }),
+        // Arm B: EC (matching family, same kid) FIRST — the ordering that
+        // worked even before the fix.
+        serde_json::json!({ "keys": [ec_jwk_json.clone(), rsa_jwk(&ec_kid)] }),
+    ] {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce-abc";
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(jwks_keys.to_string()))
+            .mount(&server)
+            .await;
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["hd"] = serde_json::json!("example.com");
+        let token = sign_test_jwt(&ec_key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce).await;
+        assert!(
+            result.is_ok(),
+            "wrong-family sibling first must not mask the EC key: {result:?}"
+        );
+    }
 }
 
 /// A token missing the required `sub` claim must fail verification
