@@ -1950,46 +1950,6 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
 // so these tests exercise the extracted tail directly — the same tail the
 // handler runs after `create_authenticator` commits.
 
-/// Build a `BrowserRegistrationState` for a real user, carrying the given
-/// `device_auth_id`. The `webauthn_state` field is real (it cannot be built
-/// any other way) but the tail under test does not consume it.
-async fn build_browser_reg_state(
-    state: &AppState,
-    user: &crate::db::User,
-    device_auth_id: String,
-) -> BrowserRegistrationState {
-    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
-    let (_ccr, webauthn_state) = state
-        .webauthn
-        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
-        .expect("start_passkey_registration");
-    let now = jiff::Timestamp::now();
-    BrowserRegistrationState {
-        device_auth_id,
-        user_id: user_uuid,
-        user_email: user.email.clone(),
-        webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
-    }
-}
-
-/// Query the audit store for `device_auth_approved` events for a user.
-async fn device_auth_approved_events_for(
-    state: &AppState,
-    user_id: &str,
-) -> Vec<crate::db::AuditEvent> {
-    state
-        .audit
-        .query_events(&crate::db::AuditEventFilter {
-            event_types: Some(vec!["device_auth_approved".to_string()]),
-            user_id: Some(user_id.to_string()),
-            ..Default::default()
-        })
-        .await
-        .expect("query device_auth_approved events")
-}
-
 #[tokio::test]
 async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_fails() {
     // Regression: `authorize_device_auth` returns Err after `create_authenticator`
@@ -2003,8 +1963,20 @@ async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_f
     // Stand-in for the authenticator `create_authenticator` already committed.
     let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let reg_state =
-        build_browser_reg_state(&state, &user, "reclaimed-device-auth".to_string()).await;
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: "reclaimed-device-auth".to_string(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(
         &state,
@@ -2042,7 +2014,15 @@ async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_f
     );
 
     // The DeviceAuthApproved event must NOT be recorded — the release failed.
-    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    let approval_events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
     assert!(
         approval_events.is_empty(),
         "no DeviceAuthApproved event may be recorded when authorize_device_auth fails"
@@ -2072,7 +2052,20 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
     .await
     .expect("seed pending device auth request");
 
-    let reg_state = build_browser_reg_state(&state, &user, device_auth_id).await;
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id,
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(
         &state,
@@ -2090,7 +2083,15 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
         1,
         "Enrollment audit event must be recorded on the happy path"
     );
-    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    let approval_events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
     assert_eq!(
         approval_events.len(),
         1,
@@ -2122,7 +2123,20 @@ async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_fl
     let user = create_test_user(&state.store, "direct@example.com").await;
     let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let reg_state = build_browser_reg_state(&state, &user, String::new()).await;
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(
         &state,
@@ -2143,7 +2157,15 @@ async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_fl
         1,
         "Enrollment audit event must be recorded for the direct browser flow"
     );
-    let approval_events = device_auth_approved_events_for(&state, &user.id).await;
+    let approval_events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
     assert!(
         approval_events.is_empty(),
         "no DeviceAuthApproved event may be recorded for the direct browser flow"

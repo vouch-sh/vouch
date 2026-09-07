@@ -1191,20 +1191,6 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
 // `Enrollment` event in CLI-initiated WebAuthn enrollment).
 // ========================================================================
 
-async fn scim_operation_events(state: &crate::AppState) -> Vec<serde_json::Value> {
-    state
-        .audit
-        .query_events(&crate::db::AuditEventFilter {
-            event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
-        })
-        .await
-        .expect("query audit events")
-        .into_iter()
-        .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
-        .collect()
-}
-
 #[tokio::test]
 async fn test_scim_create_group_audits_committed_group_when_member_add_fails() {
     // The group row commits before members are added one at a time. A
@@ -1226,7 +1212,17 @@ async fn test_scim_create_group_audits_committed_group_when_member_add_fails() {
         "a NUL-bearing member must fail the request, got {status}: {body}"
     );
 
-    let events = scim_operation_events(&state).await;
+    let events: Vec<serde_json::Value> = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .into_iter()
+        .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
+        .collect();
     let creates: Vec<_> = events
         .iter()
         .filter(|e| e["operation"] == "create" && e["resource_type"] == "Group")
@@ -1303,7 +1299,17 @@ async fn test_scim_patch_group_audits_partially_applied_member_ops() {
         "the first member op must have been applied: {group}"
     );
 
-    let events = scim_operation_events(&state).await;
+    let events: Vec<serde_json::Value> = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .into_iter()
+        .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
+        .collect();
     let partial = events.iter().find(|e| {
         e["operation"] == "update" && e["resource_type"] == "Group" && e["resource_id"] == group_id
     });
