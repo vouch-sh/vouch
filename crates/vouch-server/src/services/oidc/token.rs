@@ -397,32 +397,10 @@ pub(crate) async fn exchange_authorization_code(
     let access_token = session_result.token;
     let expires_in = session_result.expires_in;
 
-    // Extract the per-client ID token signing algorithm.
-    // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
-    let id_token_alg =
-        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
-
-    // Generate ID token (with at_hash computed from the access token)
-    let id_token = generate_id_token(
-        state,
-        IdTokenParams {
-            client_id: &auth_code.client_id,
-            user_id: &auth_code.user_id,
-            email: &auth_code.email,
-            nonce: auth_code.nonce.as_deref(),
-            expires_in,
-            binding: params.binding,
-            scope: &auth_code.scope,
-            hardware_verification: HardwareVerification::Verified {
-                auth_time: auth_code.auth_time,
-            },
-            access_token: Some(access_token.expose_secret()),
-            id_token_alg,
-        },
-    )
-    .await?;
-
-    // Record usage event for registered clients
+    // Record usage event for registered clients. The session is committed,
+    // so this is written before the fallible ID-token signing below: a
+    // signing failure must not leave a persisted access token with no
+    // `TokenIssued` event.
     if let Some(auth_client) = authenticated_client {
         // The user-org half of `resolve_event_org_domain`'s "prefer user,
         // fall back to client" rule was already resolved above for the
@@ -455,6 +433,31 @@ pub(crate) async fn exchange_authorization_code(
         )
         .await;
     }
+
+    // Extract the per-client ID token signing algorithm.
+    // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
+    let id_token_alg =
+        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
+
+    // Generate ID token (with at_hash computed from the access token)
+    let id_token = generate_id_token(
+        state,
+        IdTokenParams {
+            client_id: &auth_code.client_id,
+            user_id: &auth_code.user_id,
+            email: &auth_code.email,
+            nonce: auth_code.nonce.as_deref(),
+            expires_in,
+            binding: params.binding,
+            scope: &auth_code.scope,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: auth_code.auth_time,
+            },
+            access_token: Some(access_token.expose_secret()),
+            id_token_alg,
+        },
+    )
+    .await?;
 
     if let Some(proof) = params.binding.dpop_proof() {
         tracing::info!(

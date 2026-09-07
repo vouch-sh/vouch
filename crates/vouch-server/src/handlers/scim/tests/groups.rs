@@ -1184,3 +1184,133 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
         );
     }
 }
+
+// ========================================================================
+// Audit ordering: a committed change must have its audit row even when a
+// later step of the same request fails (the class behind the missing
+// `Enrollment` event in CLI-initiated WebAuthn enrollment).
+// ========================================================================
+
+async fn scim_operation_events(state: &crate::AppState) -> Vec<serde_json::Value> {
+    state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .into_iter()
+        .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
+        .collect()
+}
+
+#[tokio::test]
+async fn test_scim_create_group_audits_committed_group_when_member_add_fails() {
+    // The group row commits before members are added one at a time. A
+    // rejected member fails the request, but the group exists, so its
+    // `create` audit row must exist too.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-create-audit-partial", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamAudit","members":[{"value":"bad\u0000member"}]}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "a NUL-bearing member must fail the request, got {status}: {body}"
+    );
+
+    let events = scim_operation_events(&state).await;
+    let creates: Vec<_> = events
+        .iter()
+        .filter(|e| e["operation"] == "create" && e["resource_type"] == "Group")
+        .collect();
+    assert_eq!(
+        creates.len(),
+        1,
+        "the committed group must have its create audit row, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_audits_partially_applied_member_ops() {
+    // Member operations commit one at a time. When a later one fails, the
+    // earlier ones are already applied, so the request must leave an
+    // `update` audit row that says so.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-audit-partial", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"partial-patch@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamPartial"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // First op adds a real member (commits); second names an unknown one.
+    let patch_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"add","path":"members","value":[{{"value":"{user_id}"}}]}},{{"op":"add","path":"members","value":[{{"value":"bad\u0000member"}}]}}]}}"#
+    );
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch_body),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "the NUL-bearing member must fail the request, got {status}: {body}"
+    );
+
+    // The first op really committed.
+    let (_, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        group["members"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|m| m["value"] == user_id)),
+        "the first member op must have been applied: {group}"
+    );
+
+    let events = scim_operation_events(&state).await;
+    let partial = events.iter().find(|e| {
+        e["operation"] == "update" && e["resource_type"] == "Group" && e["resource_id"] == group_id
+    });
+    let details: serde_json::Value = partial
+        .and_then(|e| e["details"].as_str())
+        .map(|d| serde_json::from_str(d).expect("details JSON"))
+        .expect("the partially applied PATCH must leave an update audit row");
+    assert_eq!(details["partial"], true);
+    assert_eq!(details["memberOpsApplied"], 1);
+}

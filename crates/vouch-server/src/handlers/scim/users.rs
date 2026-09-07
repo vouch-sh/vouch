@@ -498,6 +498,29 @@ pub(crate) async fn patch_user(
                 .into_response();
         }
         Err(crate::services::auth::DeactivationError::Persist(e)) => {
+            if patched.deactivated {
+                // `revoke_then_persist` already withdrew the user's sessions
+                // and SSH certificates; that committed change gets its audit
+                // row even though the `active = false` write then failed.
+                db::record_scim_audit(
+                    &state.audit,
+                    "update",
+                    "User",
+                    &id,
+                    Some(&auth.token_id),
+                    Some(
+                        &serde_json::json!({
+                            "active": patched.active,
+                            "deactivated": true,
+                            "accessRevoked": true,
+                            "persisted": false
+                        })
+                        .to_string(),
+                    ),
+                    auth.org_domain.as_deref(),
+                )
+                .await;
+            }
             if let Some(resp) = super::invalid_index_value_response(&e) {
                 return resp.into_response();
             }
@@ -619,6 +642,18 @@ pub(crate) async fn delete_user(
                 .into_response();
         }
         Err(e) => {
+            // Access was already revoked above; that committed change gets
+            // its audit row even though the delete itself failed.
+            db::record_scim_audit(
+                &state.audit,
+                "delete",
+                "User",
+                &id,
+                Some(&auth.token_id),
+                Some(&serde_json::json!({"accessRevoked": true, "deleted": false}).to_string()),
+                auth.org_domain.as_deref(),
+            )
+            .await;
             tracing::error!("Failed to delete user: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

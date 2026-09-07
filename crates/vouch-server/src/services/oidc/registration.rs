@@ -570,7 +570,27 @@ pub async fn register_client(
         ServiceError::Internal("Failed to create client".to_string())
     })?;
 
-    // 16. Generate client_secret for confidential clients
+    // 16. Record audit event — the client row is committed, so its audit row
+    // is written before the fallible secret-generation step below; a secret
+    // failure must not leave a registered client with no `ClientRegistered`
+    // event.
+    let base_url = &state.config().base_url;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::ClientRegistered,
+            user_id: authenticated_user_id,
+            ip_address: None,
+            user_agent: None,
+            details: Some("RFC 7591 dynamic registration"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
+        },
+    )
+    .await;
+
+    // 17. Generate client_secret for confidential clients
     let client_secret = if matches!(
         jwks_auth.auth_method,
         TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost
@@ -593,23 +613,6 @@ pub async fn register_client(
     } else {
         None
     };
-
-    // 17. Record audit event
-    let base_url = &state.config().base_url;
-    db::record_oauth_event(
-        &state.audit,
-        &state.store,
-        &db::RecordOAuthEventParams {
-            oauth_client_id: &client.id,
-            event_type: OAuthEventType::ClientRegistered,
-            user_id: authenticated_user_id,
-            ip_address: None,
-            user_agent: None,
-            details: Some("RFC 7591 dynamic registration"),
-            org_domain: db::RecordedOrgDomain::Unresolved,
-        },
-    )
-    .await;
 
     // Derive client_id_issued_at from created_at
     let client_id_issued_at = client.created_at.as_second();
