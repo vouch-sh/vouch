@@ -827,6 +827,16 @@ fn is_retryable_code(code: &str) -> bool {
 /// Downcasts through `anyhow::Error` → `sqlx::Error::Database` and
 /// inspects the SQLSTATE code.
 pub(crate) fn is_retryable_db_error(err: &anyhow::Error) -> bool {
+    // An application-level version-guard loss inside a transaction (see
+    // `StoreTransaction::update_by_index`) is the same event as a DSQL
+    // serialization abort: the row moved under the writer, re-run from a
+    // fresh read.
+    if err
+        .downcast_ref::<super::store::VersionConflict>()
+        .is_some()
+    {
+        return true;
+    }
     if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>()
         && let sqlx::Error::Database(db_err) = sqlx_err
         && let Some(code) = db_err.code()

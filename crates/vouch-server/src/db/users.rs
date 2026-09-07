@@ -340,6 +340,14 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // both manageable and discoverable in that admin's normal list.
         // Personal and public applications have no other legitimate owner
         // and are unlinked.
+        // The client doc's version is the serialization point for all
+        // secret-set mutations (`update_oauth_client`,
+        // `update_oauth_client_registration` write via `compare_and_update`).
+        // `update_by_index` guards each write with the version it read, so a
+        // client update committed between this read and the write is never
+        // overwritten with the stale doc: the cascade fails with a retryable
+        // `VersionConflict` and the entry-point `with_dsql_retry!` re-runs
+        // it from a fresh read.
         let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
         tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
             d.user_id = match (d.access_scope, successor.as_deref()) {

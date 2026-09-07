@@ -564,3 +564,105 @@ async fn test_concurrent_admin_deletes_never_strand_org_apps() {
         }
     }
 }
+
+/// Step-6 client reassignment in `delete_user` must write under the OCC
+/// version guard: `OAuthClientDoc`'s version is the serialization point for
+/// all secret-set mutations (`update_oauth_client` /
+/// `update_oauth_client_registration` write via `compare_and_update`), and a
+/// blind `UPDATE ... version = version + 1` between a `find_all` read and
+/// the write would silently overwrite a concurrently-committed client
+/// update with the stale doc — the same lost-update anomaly the
+/// authenticator-deletion cascade had for `DeviceAuthRequestDoc`. The guard
+/// lives in `update_by_index` itself, whose lost write is a retryable
+/// `VersionConflict` that the entry-point `with_dsql_retry!` re-runs from a
+/// fresh read.
+///
+/// This sequential test pins the reassignment against a doc whose version
+/// has already advanced past the initial insert (several prior committed
+/// updates), asserting it lands on the LATEST doc state with every
+/// non-`user_id` field intact. The guard itself is pinned at the store level
+/// by `store::tests::tx_update_by_index_rejects_row_changed_since_read`.
+#[tokio::test]
+async fn test_delete_user_client_reassignment_writes_against_latest_version() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (creator_id, _) = upsert_user_with_org(
+        &store,
+        "occ-app-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (admin_id, _) = upsert_user_with_org(
+        &store,
+        "occ-app-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let org_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "OCC Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    // Advance the client doc's version with committed OCC updates — the
+    // reassignment must read and re-write the LATEST state, not version 1.
+    let occ_redirects = vec!["https://occ.example.com/callback".to_string()];
+    for name in ["OCC Org App v2", "OCC Org App v3"] {
+        update_oauth_client(
+            &store,
+            &UpdateOAuthClientParams {
+                id: &org_app,
+                name,
+                description: Some("occ regression fixture"),
+                redirect_uris: &occ_redirects,
+                access_scope: None,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: crate::db::TokenEndpointAuthMethod::default(),
+                keys: None,
+                fapi_profile: crate::db::FapiProfile::None,
+                dpop_bound_access_tokens: false,
+                post_logout_redirect_uris: None,
+            },
+        )
+        .await
+        .expect("update client");
+    }
+
+    assert!(
+        delete_user(&store, &creator_id).await.expect("delete_user"),
+        "creator must be deleted"
+    );
+
+    let org_client = get_oauth_client_by_id(&store, &org_app)
+        .await
+        .expect("lookup org app")
+        .expect("org app still exists");
+    assert_eq!(
+        org_client.user_id.as_deref(),
+        Some(admin_id.as_str()),
+        "org-scoped app must transfer to the org admin"
+    );
+    // The reassignment modified ONLY user_id: the latest committed name and
+    // redirect URIs survive. Under the pre-fix blind update a stale doc
+    // (read before a concurrent update committed) would have clobbered them.
+    assert_eq!(
+        org_client.name, "OCC Org App v3",
+        "reassignment must write against the latest doc state"
+    );
+    assert_eq!(
+        org_client.redirect_uris, occ_redirects,
+        "non-user_id fields must be preserved by the reassignment"
+    );
+}

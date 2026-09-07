@@ -327,19 +327,29 @@ pub(crate) async fn revoke_member_credentials(
             // succeeded, so a partial failure of `revoke_user_access`
             // cannot leave the member locked out with live long-lived
             // credentials.
-            let mut tx =
-                state.store.begin().await.map_err(|e| {
+            //
+            // The transaction runs under `with_dsql_retry!`, as every
+            // `delete_authenticator` caller must: the cascade's guarded
+            // device-auth detach fails with a retryable conflict when a
+            // concurrent `try_consume_device_auth` commits first (and Aurora
+            // DSQL aborts the same interleaving at commit), so the whole
+            // cascade is re-run against fresh state instead of surfacing to
+            // the admin as a failed revocation. `delete_key` and
+            // `delete_user` already wrap their cascades this way.
+            crate::with_dsql_retry!(async {
+                let mut tx = state.store.begin().await.map_err(|e| {
                     ServiceError::from_db_contention(e, "Failed to start transaction")
                 })?;
-            for auth in &authenticators {
-                db::delete_authenticator(&mut tx, &auth.id)
-                    .await
-                    .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
-            }
-            tx.commit().await.map_err(|e| {
-                ServiceError::from_db_contention(e, "Failed to commit key revocation")
-            })?;
-            Ok::<(), ServiceError>(())
+                for auth in &authenticators {
+                    db::delete_authenticator(&mut tx, &auth.id)
+                        .await
+                        .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+                }
+                tx.commit().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to commit key revocation")
+                })?;
+                Ok::<(), ServiceError>(())
+            })
         },
     )
     .await

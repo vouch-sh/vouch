@@ -225,6 +225,20 @@ fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
 /// last-key guard and User-doc version bump in `services::keys::delete_key`,
 /// the full account teardown in `delete_user`, or removing a member's whole
 /// key set as one unit.
+///
+/// The detach step (1) is a `StoreTransaction::update_by_index`, whose every
+/// write is guarded by the version read from the index. A `Consumed` row that
+/// `try_consume_device_auth` committed between this transaction's read and
+/// its write is therefore never overwritten with the stale `Authorized →
+/// Denied` view — the guarded `UPDATE` matches zero rows, the operation
+/// fails with a retryable `VersionConflict`, and the entry point's
+/// `with_dsql_retry!` re-runs the whole cascade against the fresh row, which
+/// `detach_authenticator_from_device_auth` leaves `Consumed`. Consumed
+/// requests thus keep their attribution for the replay-revocation sweep
+/// (`handlers::device::revoke_sessions_for_device_replay` only fires on
+/// `Consumed`; RFC 6749 §10.5 defense-in-depth). Every caller must run
+/// inside `with_dsql_retry!` — `services::keys::delete_key`, `delete_user`,
+/// and the admin `revoke_member_credentials` handler all do.
 pub async fn delete_authenticator(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
