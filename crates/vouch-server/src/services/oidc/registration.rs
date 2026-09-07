@@ -1600,12 +1600,23 @@ pub async fn delete_client_configuration(
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
-    db::delete_oauth_client(&state.store, &client.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
-            ServiceError::Internal("Failed to delete client".to_string())
-        })?;
+    // Delete the client and revoke every session it minted (M2M and
+    // user-issued). RFC 7592 §2.3: "the authorization server SHOULD ...
+    // invalidate all existing authorization grants and currently active
+    // access tokens ... associated with this client" — without the session
+    // delete, tokens issued to the deleted dynamically registered client
+    // keep validating at resource endpoints until `exp`.
+    db::delete_oauth_client_and_revoke_sessions(
+        &state.store,
+        &state.session_cache,
+        &client.id,
+        &client.client_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
+        ServiceError::Internal("Failed to delete client".to_string())
+    })?;
 
     // The client doc is already deleted above, so `Unresolved`'s client-org
     // fallback (a lookup by `client.id`) would always miss. `client.org_id`

@@ -500,8 +500,18 @@ pub(crate) async fn delete_application_form(
         }
     };
 
-    // Delete the application
-    if let Err(e) = db::delete_oauth_client(&state.store, &app_id).await {
+    // Delete the application and revoke every session it minted (M2M and
+    // user-issued). Web-UI twin of `delete_application_api`: without the
+    // session delete, access tokens minted for the deleted application keep
+    // validating at resource endpoints until `exp`.
+    if let Err(e) = db::delete_oauth_client_and_revoke_sessions(
+        &state.store,
+        &state.session_cache,
+        &app_id,
+        &client.client_id,
+    )
+    .await
+    {
         tracing::error!("Failed to delete application: {}", e);
         return error_page(
             Tr::new("apps-error-title-error"),
@@ -862,6 +872,118 @@ mod tests {
     // ========================================================================
     // #546 — Web form update validation: empty name + empty redirect_uris
     // ========================================================================
+
+    /// Deleting an application from the web UI must revoke every access token
+    /// it minted, exactly like `delete_application_api`. Regression for the
+    /// web-UI sibling of the `revoke_tokens_api` bug: `delete_application_form`
+    /// used to call the bare `delete_oauth_client`, so user-issued sessions
+    /// (keyed by the resource owner's `user_id`, tagged with the issuing
+    /// `client_id`) and M2M sessions (`user_id == client_id`, RFC 9068 §2.2)
+    /// kept validating until `exp`. Without the fix the session rows survive
+    /// the delete and this test fails.
+    #[tokio::test]
+    async fn test_web_delete_application_revokes_minted_sessions() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-delete-revokes@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // A user-issued access token for this client and an M2M session.
+        create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                client_id: Some(&client.client_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &client.client_id,
+                email: &format!("{}@clients", client.client_id),
+                auth_id: Some(&auth_id),
+                client_id: Some(&client.client_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // A sibling client's token must survive (no over-revocation).
+        let other_client = create_test_oauth_client(&state.store, &user.id).await;
+        create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                client_id: Some(&other_client.client_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let sessions_for = |client_id: String| {
+            let store = state.store.clone();
+            async move {
+                store
+                    .count::<crate::db::documents::session::SessionDoc>("client_id", &client_id)
+                    .await
+                    .expect("count must not error")
+            }
+        };
+        assert!(
+            sessions_for(client.client_id.clone()).await >= 1,
+            "client must have minted sessions before the delete"
+        );
+
+        // Delete via the browser form.
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/applications/{}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "delete should redirect");
+
+        // Every session minted by the deleted client is gone — both the
+        // user-issued one (client_id index) and the M2M one (user_id index).
+        assert_eq!(
+            sessions_for(client.client_id.clone()).await,
+            0,
+            "sessions tagged with the deleted client must be gone"
+        );
+        assert_eq!(
+            state
+                .store
+                .count::<crate::db::documents::session::SessionDoc>("user_id", &client.client_id)
+                .await
+                .expect("count must not error"),
+            0,
+            "M2M sessions for the deleted client must be gone"
+        );
+
+        // The sibling client's session survives.
+        assert!(
+            sessions_for(other_client.client_id.clone()).await >= 1,
+            "deleting one application must not revoke another client's sessions"
+        );
+    }
 
     #[tokio::test]
     async fn test_web_update_form_rejects_empty_name() {

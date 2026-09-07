@@ -1614,6 +1614,104 @@ async fn test_rfc7592_delete_client_succeeds() {
     );
 }
 
+/// RFC 7592 §2.3: "the authorization server SHOULD ... invalidate all
+/// existing authorization grants and currently active access tokens ...
+/// associated with this client."
+///
+/// Regression for the dynamic-registration sibling of the
+/// `revoke_tokens_api` bug: `delete_client_configuration` used to call the
+/// bare `delete_oauth_client`, so sessions minted for the deleted client —
+/// both user-issued grants (session keyed by the resource owner's `user_id`,
+/// tagged with the issuing `client_id`) and M2M `client_credentials`
+/// sessions (`user_id == client_id`, RFC 9068 §2.2) — kept validating at
+/// resource endpoints until `exp`. Without the fix the session rows survive
+/// the DELETE and this test fails.
+#[tokio::test]
+async fn test_rfc7592_delete_client_revokes_minted_sessions() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // A user-issued access token minted for the dynamically registered
+    // client, plus an M2M session (user_id == client_id).
+    let user = create_test_user(&state.store, "rfc7592-delete-revokes@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let user_access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client_id,
+            email: &format!("{client_id}@clients"),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The user-issued token validates before the client is deleted.
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {user_access_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "user-issued token should validate before the client is deleted"
+    );
+
+    // DELETE the dynamically registered client — 204.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The user-issued token must be dead and every session row gone.
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {user_access_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "user-issued access token must NOT validate after the client is deleted"
+    );
+    assert_eq!(
+        state
+            .store
+            .count::<crate::db::documents::session::SessionDoc>("client_id", &client_id)
+            .await
+            .expect("count must not error"),
+        0,
+        "sessions tagged with the deleted client must be gone"
+    );
+    assert_eq!(
+        state
+            .store
+            .count::<crate::db::documents::session::SessionDoc>("user_id", &client_id)
+            .await
+            .expect("count must not error"),
+        0,
+        "M2M sessions for the deleted client must be gone"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7592_delete_client_missing_bearer_token() {
     let (app, _state) = test_app().await;

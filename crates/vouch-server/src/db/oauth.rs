@@ -980,6 +980,43 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
     })
 }
 
+/// Delete an OAuth client and revoke every access token it minted.
+///
+/// Deleting a client is a stronger revocation intent than the "revoke all
+/// tokens" endpoint, so it must revoke at least as much: [`delete_oauth_client`]
+/// alone removes the client row, its secrets, and its JWKS cache, but leaves
+/// every already-minted session validating at resource endpoints until `exp`.
+/// This chokepoint removes both session shapes before deleting the client:
+///
+/// * M2M (`client_credentials`) sessions, keyed by `user_id == client_id`
+///   (RFC 9068 §2.2), via
+///   [`delete_sessions_for_user`](super::sessions::delete_sessions_for_user);
+/// * user-issued sessions (`authorization_code`, `device_code`, RFC 8693
+///   `token_exchange`, FIDO2), keyed by the resource owner's `user_id` but
+///   tagged with the issuing client on the `client_id` index, via
+///   [`delete_sessions_for_oauth_client`](super::sessions::delete_sessions_for_oauth_client).
+///
+/// Ordering is fail-closed: sessions are deleted (and the cache invalidated)
+/// before the client row. If the client delete then fails, the caller sees the
+/// error and can retry, and no orphaned token keeps validating in the
+/// meantime. Pre-migration sessions with `client_id == None` are not matched
+/// by the client-scoped delete and remain valid until `exp`, matching
+/// `revoke_tokens_api`.
+///
+/// * `id` is the client's document id; `client_id` is its OAuth `client_id`.
+pub async fn delete_oauth_client_and_revoke_sessions(
+    store: &DocumentStore,
+    session_cache: &super::sessions::SessionCache,
+    id: &str,
+    client_id: &str,
+) -> Result<u64> {
+    super::sessions::delete_sessions_for_user(store, client_id).await?;
+    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
+    session_cache.invalidate_for_user(client_id);
+    session_cache.invalidate_for_client(client_id);
+    delete_oauth_client(store, id).await
+}
+
 /// Update last used timestamp for an OAuth client.
 ///
 /// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
