@@ -1094,16 +1094,15 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
 /// `DeviceAuthState::Consumed { user_id }`, so corrupting the row back to
 /// `Denied` would suppress that sweep on a detected device-code replay.
 ///
-/// `delete_authenticator` writes each matched `DeviceAuthRequestDoc` back
-/// with `compare_and_update` (a version guard) rather than a blind
-/// `update_by_index`, so a row a concurrent `try_consume_device_auth`
-/// committed `Consumed` is preserved instead of being overwritten with stale
-/// `Authorized → Denied` data. This sequential test pins the helper's
-/// `Consumed`-preservation invariant (it does not touch `status` when it is
-/// already `Consumed`); the concurrent lost-update race requires a
-/// multi-connection PostgreSQL harness — the SQLite in-memory backend
-/// serialises writes via a single-writer pool, so the race window does not
-/// open there (see the accompanying test plan for the Postgres procedure).
+/// `delete_authenticator` detaches rows through `update_by_index`, whose
+/// writes are guarded by the version read from the index, so a row a
+/// concurrent `try_consume_device_auth` committed `Consumed` is never
+/// overwritten with stale `Authorized → Denied` data — the cascade fails
+/// with a retryable `VersionConflict` and re-runs against the fresh row.
+/// This sequential test pins the helper's `Consumed`-preservation invariant
+/// (it does not touch `status` when it is already `Consumed`); the guard
+/// itself is pinned at the store level by
+/// `store::tests::tx_update_by_index_rejects_row_changed_since_read`.
 #[tokio::test]
 async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_revocation() {
     let (store, _audit) = test_db().await;

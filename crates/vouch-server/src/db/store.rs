@@ -94,16 +94,35 @@ pub struct InvalidIndexValue {
     pub field: &'static str,
 }
 
+/// A document changed between an index read and the guarded write that
+/// followed it: the row's `version` no longer matched the one read.
+///
+/// Raised by [`StoreTransaction::update_by_index`] so the caller's
+/// transaction aborts instead of overwriting the newer row with stale data.
+/// [`crate::db::pool::is_retryable_db_error`] treats it as a transient
+/// conflict, so an enclosing `with_dsql_retry!` re-runs the whole operation
+/// against the fresh row — the same shape as an application-level
+/// `compare_and_update` loss.
+#[derive(Debug, thiserror::Error)]
+#[error("document `{id}` was modified concurrently (expected version {expected})")]
+pub(crate) struct VersionConflict {
+    /// The document whose version moved under the writer.
+    pub id: String,
+    /// The version the writer read and expected to still hold.
+    pub expected: i32,
+}
+
 /// Maximum documents per `update_by_index` batch.
 ///
-/// Both [`DocumentStore::update_by_index`] and [`StoreTransaction::update_by_index`]
-/// process matching documents in groups of this size. The standalone form
-/// commits each batch; the transactional form keeps every batch within the
-/// caller's single transaction but performs each batch's index maintenance
-/// with one set-based `DELETE` and one multi-row `INSERT`, so the operation's
+/// [`StoreTransaction::update_by_index`] processes matching documents in
+/// groups of this size, keeping every batch within the caller's single
+/// transaction but performing each batch's index maintenance with one
+/// set-based `DELETE` and one multi-row `INSERT`, so the operation's
 /// statement count tracks the number of documents (roughly one `UPDATE` per
 /// doc) rather than ~5× it. 500 docs × ~3 statements keeps a transaction
 /// well within DSQL's 3,000-statement-per-transaction budget.
+/// [`DocumentStore::update_by_index`] is the same operation in a transaction
+/// of its own.
 const UPDATE_BY_INDEX_BATCH: usize = 500;
 
 /// Reject an index entry whose value contains a NUL (0x00) byte.
@@ -351,6 +370,15 @@ pub struct DocumentStore {
     /// [`Self::set_last_used_remaining_successes`].
     #[cfg(test)]
     last_used_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only seam for [`StoreTransaction::update_by_index`]: ids whose
+    /// `version` is bumped once, inside the transaction, between the index
+    /// read and the guarded writes. To the transaction that is exactly what a
+    /// row a concurrent writer committed in that window looks like on
+    /// PostgreSQL READ COMMITTED. Drained on first use so a retried
+    /// transaction runs clean. Compiled out of non-test builds. See
+    /// [`Self::set_update_by_index_stale_once`].
+    #[cfg(test)]
+    update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -397,7 +425,19 @@ impl DocumentStore {
             delete_remaining_successes: None,
             #[cfg(test)]
             last_used_remaining_successes: None,
+            #[cfg(test)]
+            update_by_index_stale_once: None,
         }
+    }
+
+    /// Install the [`StoreTransaction::update_by_index`] stale-row seam: the
+    /// next transactional `update_by_index` on this store (or any
+    /// transaction it begins) bumps the `version` of every listed id after
+    /// reading the index and before writing, so those rows look concurrently
+    /// modified. Consumed on first use. See the field doc for the rationale.
+    #[cfg(test)]
+    pub(crate) fn set_update_by_index_stale_once(&mut self, ids: Vec<String>) {
+        self.update_by_index_stale_once = Some(Arc::new(std::sync::Mutex::new(ids)));
     }
 
     /// Install a hook that runs inside `modify` between the read and the CAS.
@@ -549,6 +589,8 @@ impl DocumentStore {
             crypto: &self.crypto,
             #[cfg(test)]
             statement_count: 0,
+            #[cfg(test)]
+            update_by_index_stale_once: self.update_by_index_stale_once.clone(),
         })
     }
 
@@ -1067,32 +1109,33 @@ impl DocumentStore {
 
     /// Update all documents matching an index, applying a modifier function.
     ///
-    /// Decrypts each matching document, applies the modifier, re-encrypts,
-    /// and updates within batched transactions. Each batch processes up to
-    /// 500 documents (~3 statements per doc) to stay within DSQL's
-    /// 3,000-statement transaction limit.
+    /// [`StoreTransaction::update_by_index`] in a transaction of its own:
+    /// every matching document is read, modified, and written back under the
+    /// same per-row version guard, so a row another writer changed between
+    /// the read and the write is never overwritten with stale data — the
+    /// transaction aborts on the [`VersionConflict`] and is retried from a
+    /// fresh read (up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)).
+    ///
+    /// The whole set commits atomically, so the statement budget is that of
+    /// one transaction (~1 statement per document plus 2 per 500-document
+    /// batch); this suits the bounded sets it is used on, such as one
+    /// client's secrets.
     ///
     /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
-    /// Returns an error if any read/write operation fails.
+    /// Returns an error if any read/write operation fails, or if the version
+    /// conflict persists after retries.
     pub async fn update_by_index<T, F>(&self, field: &str, value: &str, modifier: F) -> Result<u64>
     where
         T: DocumentType,
         F: Fn(&mut T),
     {
         crate::with_dsql_retry!(async {
-            let mut docs = self.find_all::<T>(field, value).await?;
-            let count = docs.len() as u64;
-            for batch in docs.chunks_mut(UPDATE_BY_INDEX_BATCH) {
-                let mut tx = self.begin().await?;
-                for doc in batch.iter_mut() {
-                    modifier(&mut doc.data);
-                    tx.update(&doc.id, &doc.data).await?;
-                }
-                tx.commit().await?;
-            }
+            let mut tx = self.begin().await?;
+            let count = tx.update_by_index::<T, _>(field, value, &modifier).await?;
+            tx.commit().await?;
             Ok(count)
         })
     }
@@ -1404,6 +1447,10 @@ pub struct StoreTransaction<'a> {
     /// Compiled out of non-test builds.
     #[cfg(test)]
     statement_count: u64,
+    /// See [`DocumentStore::set_update_by_index_stale_once`]. Compiled out of
+    /// non-test builds.
+    #[cfg(test)]
+    update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl StoreTransaction<'_> {
@@ -1821,16 +1868,26 @@ impl StoreTransaction<'_> {
     /// to roughly the number of documents instead of roughly five times it,
     /// so the cascade stays within DSQL's 3,000-statement-per-transaction
     /// budget on the realistic in-flight device-auth sizes the revoke path
-    /// reaches. The standalone [`DocumentStore::update_by_index`] performs
-    /// the same 500-doc batching with per-batch `commit()` boundaries for
-    /// callers that do not require cross-batch atomicity.
+    /// reaches. The standalone [`DocumentStore::update_by_index`] runs the
+    /// same operation in a transaction of its own.
+    ///
+    /// Every write is guarded by the version read from the index: the
+    /// `UPDATE` matches only `version = <read>`, so a row a concurrent
+    /// writer committed between this transaction's read and its write is
+    /// left as that writer left it and the whole operation fails with
+    /// [`VersionConflict`] instead of silently overwriting it (the
+    /// lost-update that let a `Consumed` device-auth row be regressed to
+    /// `Denied` by the authenticator-deletion cascade). The error is
+    /// retryable, so callers run inside `with_dsql_retry!` and re-run the
+    /// cascade against the fresh row.
     ///
     /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
-    /// Returns an error if any read/write operation fails, or if a modified
-    /// document emits an index value containing a NUL byte ([`InvalidIndexValue`]).
+    /// Returns an error if any read/write operation fails, if a modified
+    /// document emits an index value containing a NUL byte ([`InvalidIndexValue`]),
+    /// or if a matched document changed since it was read ([`VersionConflict`]).
     /// Any error aborts the caller's transaction — the transaction is rolled
     /// back when dropped, so no partial batch is ever persisted.
     pub async fn update_by_index<T, F>(
@@ -1847,25 +1904,48 @@ impl StoreTransaction<'_> {
         let count = docs.len() as u64;
         let now_str = Timestamp::now().to_string();
 
+        // Test-only: make the listed rows look concurrently modified by
+        // bumping their version now, after the read above and before any
+        // guarded write below. See `DocumentStore::set_update_by_index_stale_once`.
+        #[cfg(test)]
+        {
+            let stale: Vec<String> = self
+                .update_by_index_stale_once
+                .as_ref()
+                .and_then(|list| list.lock().ok().map(|mut ids| ids.drain(..).collect()))
+                .unwrap_or_default();
+            for id in stale {
+                let bump = Query::update()
+                    .table(Documents::Table)
+                    .value(Documents::Version, Expr::col(Documents::Version).add(1))
+                    .and_where(Expr::col(Documents::Id).eq(id.as_str()))
+                    .to_owned();
+                crate::tx_execute!(self.tx, bump)?;
+            }
+        }
+
         for batch in docs.chunks_mut(UPDATE_BY_INDEX_BATCH) {
             // Apply the modifier and serialise each document before issuing
             // any writes for the batch. A serialisation error or a NUL index
             // value (see [`validate_index_entry`]) therefore fails fast and
             // leaves the transaction untouched for this batch.
-            let mut prepared: Vec<(String, SerializedDoc)> = Vec::with_capacity(batch.len());
+            let mut prepared: Vec<(String, i32, SerializedDoc)> = Vec::with_capacity(batch.len());
             for doc in batch.iter_mut() {
                 modifier(&mut doc.data);
                 let serialized = serialize_and_encrypt(self.crypto, &doc.id, &doc.data)?;
                 for entry in &serialized.indexes {
                     validate_index_entry(entry)?;
                 }
-                prepared.push((doc.id.clone(), serialized));
+                prepared.push((doc.id.clone(), doc.version, serialized));
             }
 
             // Per-document `UPDATE`: each document's re-encrypted data differs,
             // so this cannot be collapsed into one statement the way the index
-            // maintenance below can.
-            for (id, serialized) in &prepared {
+            // maintenance below can. Each is guarded by the version read from
+            // the index, exactly as `compare_and_update` is: zero rows
+            // affected means another writer committed first, and the whole
+            // operation fails rather than overwriting that write.
+            for (id, version, serialized) in &prepared {
                 let encapped: Option<&str> = serialized.encrypted.encapped_key.as_deref();
                 let expires_ref: Option<&str> = serialized.expires_str.as_deref();
                 let update_stmt = {
@@ -1882,20 +1962,30 @@ impl StoreTransaction<'_> {
                             Expr::val(T::CURRENT_VERSION.cast_signed()),
                         )
                         .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
-                        .value(Documents::Version, Expr::col(Documents::Version).add(1))
-                        .and_where(Expr::col(Documents::Id).eq(id.as_str()));
+                        .value(Documents::Version, Expr::val(version.saturating_add(1)))
+                        .and_where(Expr::col(Documents::Id).eq(id.as_str()))
+                        .and_where(Expr::col(Documents::Version).eq(*version));
                     q.to_owned()
                 };
-                crate::tx_execute!(self.tx, update_stmt)?;
+                let result = crate::tx_execute!(self.tx, update_stmt)?;
                 #[cfg(test)]
                 {
                     self.statement_count = self.statement_count.saturating_add(1);
                 }
+                if result.rows_affected() == 0 {
+                    return Err(VersionConflict {
+                        id: id.clone(),
+                        expected: *version,
+                    }
+                    .into());
+                }
             }
 
             // One set-based `DELETE` of every old index row for the batch.
-            let ids: Vec<sea_query::Value> =
-                prepared.iter().map(|(id, _)| id.as_str().into()).collect();
+            let ids: Vec<sea_query::Value> = prepared
+                .iter()
+                .map(|(id, _, _)| id.as_str().into())
+                .collect();
             let delete_idx_stmt = Query::delete()
                 .from_table(DocumentIndexes::Table)
                 .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids))
@@ -1909,7 +1999,7 @@ impl StoreTransaction<'_> {
             // One multi-row `INSERT` of every new index row for the batch.
             // Guarded by `total_entries` so a document type that emits no
             // index entries does not produce an empty `INSERT`.
-            let total_entries: usize = prepared.iter().map(|(_, s)| s.indexes.len()).sum();
+            let total_entries: usize = prepared.iter().map(|(_, _, s)| s.indexes.len()).sum();
             if total_entries > 0 {
                 let mut insert_idx_stmt = Query::insert()
                     .into_table(DocumentIndexes::Table)
@@ -1920,7 +2010,7 @@ impl StoreTransaction<'_> {
                         DocumentIndexes::IndexValue,
                     ])
                     .to_owned();
-                for (id, serialized) in &prepared {
+                for (id, _, serialized) in &prepared {
                     for entry in &serialized.indexes {
                         let index_id = uuid::Uuid::now_v7().to_string();
                         let hashed = self.crypto.hmac_index(&entry.value);
