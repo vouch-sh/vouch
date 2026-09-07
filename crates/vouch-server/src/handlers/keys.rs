@@ -449,6 +449,13 @@ pub(crate) async fn rename_key(
         )
     })?;
 
+    // Defense-in-depth active-user gate. `AuthenticatedToken` establishes
+    // token validity only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors `delete_key` and `register_start`
+    // in this file; see `session::load_active_user`.
+    let _user = super::session::load_active_user(&state, &token.sub).await?;
+
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
@@ -469,6 +476,14 @@ pub(crate) async fn delete_key(
             "Key ID must be a valid UUID",
         ));
     }
+
+    // Defense-in-depth active-user gate. `SteppedUpToken` establishes token
+    // validity and recent hardware verification but does not load the user
+    // record, so a deactivated user holding a live session (e.g. one produced
+    // by a writer that bypasses `services::auth::revoke_then_persist`) would
+    // otherwise reach the destructive delete below. Mirrors `register_start`
+    // and the credentials/device handlers; see `session::load_active_user`.
+    let _user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -1424,6 +1439,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+    /// A deactivated user holding a live session must not rename a security
+    /// key. `AuthenticatedToken` validates the token only, so the handler
+    /// must reject deactivated accounts itself — same fixture and expected
+    /// response as `test_delete_key_rejects_deactivated_user` below.
+    #[tokio::test]
+    async fn test_rename_key_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-rename@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Deactivate WITHOUT deleting the session — the
+        // deactivated-with-live-session fixture the sibling tests use.
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"Hijacked Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deactivated user must not rename a key; got body: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+    }
+
     // ========================================================================
     // Rename Key — Negative
     // ========================================================================
@@ -1931,5 +1994,68 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(surviving_keys(&state, &user.id).await, 1);
+    }
+
+    /// A deactivated user holding a live stepped-up session must not delete a
+    /// security key. `SteppedUpToken` enforces token validity and recent
+    /// hardware verification but does not load the user record, so the
+    /// handler must reject deactivated accounts itself before reaching the
+    /// destructive `key_svc::delete_key`. Production deactivation flows revoke
+    /// sessions before persisting `active=false` (#1151), but the
+    /// deactivated-with-live-session state is still defended per-handler by
+    /// every sibling in this file (`register_start`, `register_complete`).
+    /// This fixture is the exact one those siblings test against:
+    /// `update_user_active_status(false)` with the session row left intact.
+    #[tokio::test]
+    async fn test_delete_key_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                ..Default::default() // auth_time = now, satisfies SteppedUpToken's 60s gate
+            },
+        )
+        .await;
+
+        // Deactivate WITHOUT deleting the session — the exact fixture
+        // `test_register_start_rejects_deactivated_user` (above) uses to
+        // exercise the deactivated-with-live-session state that #1151 closed
+        // on the production path but the codebase still defends per-handler.
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let before = surviving_keys(&state, &user.id).await;
+        assert_eq!(before, 2, "fixture: both keys present before deletion");
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{key_b}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        // Mirrors the response `register_start` returns for the same fixture
+        // (see `test_register_start_rejects_deactivated_user` above): 401
+        // "User account is deactivated".
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deactivated user must not delete a key; got body: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "deactivated user must not have destroyed their key"
+        );
     }
 }

@@ -68,6 +68,18 @@ pub(crate) async fn rename_key_form(
         Err(_) => return Redirect::to("/enroll/start").into_response(),
     };
 
+    // Defense-in-depth active-user gate. `extract_session_from_cookie`
+    // validates the session only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors the sibling `delete_key` in this
+    // file and `handlers::keys::rename_key`; see `session::load_active_user`.
+    if super::session::load_active_user(&state, &token.sub)
+        .await
+        .is_err()
+    {
+        return Redirect::to("/enroll/start").into_response();
+    }
+
     let name = match ResourceLabel::parse(&form.name) {
         Ok(name) => name,
         Err(err) => {
@@ -115,6 +127,15 @@ pub(crate) async fn delete_key(
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
+    // Defense-in-depth active-user gate. `SteppedUpToken` establishes token
+    // validity and recent hardware verification but does not load the user
+    // record, so a deactivated user holding a live session (e.g. one produced
+    // by a writer that bypasses `services::auth::revoke_then_persist`) would
+    // otherwise reach the destructive delete below. Mirrors the sibling
+    // `handlers::keys::delete_key` and `register_start`; see
+    // `session::load_active_user`.
+    let _user = super::session::load_active_user(&state, &token.sub).await?;
+
     // Whether we just deleted the key this very session is bound to (so the
     // browser knows to re-authenticate rather than reload into a dead session).
     let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());

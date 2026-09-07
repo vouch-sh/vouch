@@ -109,6 +109,56 @@ async fn rename_updates_name() {
 }
 
 #[tokio::test]
+async fn rename_rejects_deactivated_user() {
+    // Defense-in-depth: a deactivated user holding a live session must not
+    // rename their security key over the cookie route. Same
+    // deactivated-with-live-session fixture as `delete_rejects_deactivated_user`
+    // below; the handler redirects to /enroll/start (cookie surface) instead
+    // of performing the rename.
+    let harness = TestHarness::new().await;
+    let (user, auth_id, token) = harness
+        .create_authenticated_user("keys-rename-deactivated@example.com")
+        .await
+        .expect("create authed user");
+
+    // Deactivate WITHOUT deleting the session.
+    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let resp = rename_key(&harness, &token, &auth_id, "name=hijacked-name").await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "deactivated rename must redirect away, body: {}",
+        resp.body
+    );
+    assert_eq!(
+        resp.headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "/enroll/start",
+        "deactivated user must be sent to enrollment start, not the keys page"
+    );
+
+    // The key name must be unchanged. Reactivate first so the read-back uses
+    // a working session regardless of gates elsewhere on the cookie surface.
+    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, true)
+        .await
+        .expect("reactivate user");
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let renamed = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .any(|k| k.get("name").and_then(Value::as_str) == Some("hijacked-name"));
+    assert!(!renamed, "deactivated user must not have renamed the key");
+}
+
+#[tokio::test]
 async fn rename_rejects_invalid_name_with_redirect() {
     // A failed rename (here, a name longer than the 100-char limit) must
     // redirect back to /enroll/keys (PRG + flash), not return a raw JSON error
@@ -381,6 +431,74 @@ async fn delete_rejects_bootstrap_session_without_fido2_auth_time() {
     assert!(
         resp.body.contains("insufficient_user_authentication"),
         "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // Both keys must survive the rejected deletion.
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| k.get("id").and_then(Value::as_str).unwrap_or(""))
+        .collect();
+    assert!(
+        ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
+        "both keys must survive the rejected deletion, got ids: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_rejects_deactivated_user() {
+    // Defense-in-depth: a deactivated user holding a live stepped-up session
+    // must not delete their own security key over the cookie route.
+    // Production deactivation writers route through
+    // `services::auth::revoke_then_persist` (#1151), which deletes the session
+    // rows before persisting `active=false`, so a subsequent cookie-authed
+    // request would fail at the cookie extractor; but a writer that bypasses
+    // `revoke_then_persist` (or any future such writer) leaves the dangerous
+    // state this fixture manufactures — `update_user_active_status(false)`
+    // with the session row left intact. Mirrors the bearer-route regression
+    // `handlers::keys::tests::test_delete_key_rejects_deactivated_user`, the
+    // `test_register_start_rejects_deactivated_user` sibling, and the
+    // RFC 7662 fixture in `oidc/tests/rfc7662.rs`.
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("deactivated-delete-cookie@example.com")
+        .await
+        .expect("create user");
+    // Two keys so the "last key" guard would otherwise permit deletion.
+    let kept = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create kept authenticator");
+    let doomed = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create doomed authenticator");
+    let token = harness
+        .create_session(&user.id, &user.email, &kept)
+        .await
+        .expect("create fresh stepped-up session");
+
+    // Deactivate WITHOUT deleting the session — the exact fixture the
+    // deactivated-with-live-session siblings use.
+    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let resp = delete_key(&harness, &token, &doomed).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated user must not delete a key, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("User account is deactivated"),
+        "expected a deactivation refusal, body: {}",
         resp.body
     );
 

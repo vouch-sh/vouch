@@ -72,6 +72,49 @@ async fn load_active_user_for_scope(
     Ok(user)
 }
 
+/// Load the requesting user and the application, enforcing the account-active
+/// invariant and ownership before any state-changing operation.
+///
+/// `AuthenticatedToken` establishes token validity only — it does not load
+/// the user record — so a deactivated user holding a live session would
+/// otherwise reach the destructive operations below. This is the shared gate
+/// for the delete/secret/revoke handlers, mirroring
+/// [`load_active_user_for_scope`] on the create/update path; see
+/// `session::load_active_user`.
+async fn load_active_owned_client(
+    state: &AppState,
+    user_id: &str,
+    app_id: &str,
+) -> Result<db::OAuthClient, ServiceError> {
+    // Active-user gate first: a deactivated account is rejected before we
+    // disclose whether the application exists.
+    crate::handlers::session::load_active_user(state, user_id).await?;
+
+    let client = db::get_oauth_client_by_id(&state.store, app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get application: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
+
+    if client.user_id.as_deref() != Some(user_id) {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Application not found",
+        ));
+    }
+
+    Ok(client)
+}
+
 /// Create a new application (API).
 /// POST /api/v1/applications
 pub(crate) async fn create_application_api(
@@ -384,28 +427,9 @@ pub(crate) async fn delete_application_api(
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application for deletion: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Active-user gate + ownership check (deactivated users must not delete
+    // applications).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
     db::delete_oauth_client(&state.store, &app_id)
         .await
@@ -431,27 +455,9 @@ pub(crate) async fn add_secret_api(
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Active-user gate + ownership check (deactivated users must not mint
+    // client secrets).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
     if !client.application_type.requires_secret() {
         return Err(ServiceError::api(
@@ -579,27 +585,9 @@ pub(crate) async fn delete_secret_api(
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Active-user gate + ownership check (deactivated users must not revoke
+    // secrets).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
     let secret = db::get_oauth_client_secret_by_id(&state.store, &secret_id)
         .await
@@ -690,28 +678,9 @@ pub(crate) async fn revoke_tokens_api(
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application for token revocation: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Active-user gate + ownership check (deactivated users must not revoke
+    // an application's tokens).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
     // Revoke all secrets (effectively revoking all tokens)
     db::revoke_all_oauth_client_secrets(&state.store, &app_id)
