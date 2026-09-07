@@ -716,7 +716,7 @@ mod tests {
         );
     }
 
-    // RFC 7517 §4.2.2 makes `kid` uniqueness a SHOULD, not a MUST, and the
+    // RFC 7517 §4.5 makes `kid` uniqueness a SHOULD, not a MUST, and the
     // write-time gates do not reject duplicate `kid`s. When two keys share a
     // `kid` and the first is the wrong `kty` for the header's algorithm (RSA
     // vs an ES256 header — the wrong-`kty`-for-`alg` arm of

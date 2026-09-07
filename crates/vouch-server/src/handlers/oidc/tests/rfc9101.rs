@@ -240,7 +240,7 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     );
 }
 
-// RFC 9101 / RFC 7517 §4.2.2: JAR request-object verification reaches
+// RFC 9101 / RFC 7517 §4.5: JAR request-object verification reaches
 // `find_matching_key` via `jar.rs -> find_matching_key_with_refresh_client`.
 // `kid` uniqueness is a SHOULD, not a MUST, and the write-time gates do not
 // reject duplicate `kid`s. With two keys sharing `kid="jar-test-key-1" — the
