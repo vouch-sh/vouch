@@ -126,7 +126,14 @@ impl KeyResolver for OAuthClientKeyResolver {
                     continue; // skip JWKs without kid
                 };
                 if kid == keyid {
-                    let public_key = jwk_to_p256_public_key(jwk)?;
+                    // A kid-matching JWK that is not a well-formed P-256 key
+                    // must not abort the scan: RFC 7517 §4.5 makes `kid`
+                    // uniqueness a SHOULD, so a later key carrying the same
+                    // `kid` can still verify the signature (same candidate-skip
+                    // rule as the JWT bearer and upstream-IdP key searches).
+                    let Some(public_key) = jwk_to_p256_public_key(jwk) else {
+                        continue;
+                    };
                     let verifier = EcdsaP256Verifier::new(&public_key);
                     let arc: Arc<dyn VerifyingAlgorithm> = Arc::new(verifier);
                     return Some(arc);

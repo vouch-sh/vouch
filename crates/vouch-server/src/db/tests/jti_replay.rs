@@ -293,3 +293,98 @@ async fn test_delete_expired_dpop_jtis() {
         "Valid JTI should still block replay, got: {result:?}"
     );
 }
+
+// ------------------------------------------------------------------------
+// DPoP JTI replay-after-cleanup (DB primitive behavior).
+//
+// `insert_with_id` is a plain INSERT that collides on PRIMARY KEY regardless
+// of the existing row's `expires_at`, so an expired-but-present row still
+// blocks replay until `delete_expired` physically removes it. After cleanup
+// the same `jti` can be committed again. This is the DB half of the RFC 9449
+// §4.3 step 11 replay defense; the cross-layer invariant — that the retention
+// `validate_dpop_common` passes covers the skew-extended proof-validity
+// window so cleanup never reopens a replay gap — lives in
+// `services/oidc/dpop.rs::tests` (the `services` layer can import both
+// `RecencyWindow`/`PROOF_SKEW_SECONDS` and these DB primitives; the `db`
+// layer may not import `services`).
+//
+// Deterministic: a negative `validity_seconds` puts `expires_at` in the
+// past, simulating elapsed time without depending on the real clock.
+// ------------------------------------------------------------------------
+#[tokio::test]
+async fn test_dpop_jti_replay_succeeds_after_cleanup() {
+    use crate::db::claim::ClaimError;
+
+    let (store, _audit) = test_db().await;
+
+    // Commit with a negative validity → `expires_at` in the past, simulating
+    // that the retention window has already elapsed.
+    let _claim = check_and_store_dpop_jti(&store, "replay-after-cleanup", -300)
+        .await
+        .expect("first use commits the JTI");
+
+    // Expired-but-present row still blocks replay (PRIMARY KEY collision).
+    let blocked = check_and_store_dpop_jti(&store, "replay-after-cleanup", 600).await;
+    assert!(
+        matches!(blocked, Err(ClaimError::AlreadyConsumed)),
+        "expired-but-present JTI row must still block replay until cleanup: got {blocked:?}"
+    );
+
+    // Cleanup physically removes the expired row.
+    let deleted = delete_expired_dpop_jtis(&store, "")
+        .await
+        .expect("delete_expired should not error");
+    assert!(
+        deleted >= 1,
+        "cleanup should remove the expired JTI row, deleted = {deleted}"
+    );
+
+    // After cleanup the SAME jti is accepted again — this is the DB primitive
+    // that the JTI-retention-vs-freshness-window invariant must account for:
+    // once the row is gone, only the retention duration controls whether a
+    // replay is possible. See `services/oidc/dpop.rs::tests` for the
+    // call-site guard that the retention outlives the proof-validity window.
+    let replayed = check_and_store_dpop_jti(&store, "replay-after-cleanup", 600).await;
+    assert!(
+        replayed.is_ok(),
+        "after cleanup the replay insert succeeds (DB primitive): got {replayed:?}"
+    );
+}
+
+// ------------------------------------------------------------------------
+// Sanity: a not-yet-expired JTI is NOT removed by cleanup and keeps
+// blocking replay. The retention passed to `check_and_store_dpop_jti`
+// controls how long the row lives; cleanup only deletes rows whose
+// `expires_at < now`. This complements `test_dpop_jti_replay_succeeds_after_cleanup`
+// (the expired case) and `test_delete_expired_dpop_jtis` (the valid case),
+// making the retention → cleanup → replay relationship explicit at the DB
+// layer without crossing into `services`.
+// ------------------------------------------------------------------------
+#[tokio::test]
+async fn test_dpop_jti_within_retention_survives_cleanup_and_blocks_replay() {
+    use crate::db::claim::ClaimError;
+
+    let (store, _audit) = test_db().await;
+
+    // A positive retention the fix's caller would pass (e.g. max_age + skew).
+    let retention: i64 = 360;
+    let _claim = check_and_store_dpop_jti(&store, "within-retention", retention)
+        .await
+        .expect("first use commits the JTI");
+
+    // Cleanup of not-yet-expired rows is a no-op.
+    let deleted = delete_expired_dpop_jtis(&store, "")
+        .await
+        .expect("delete_expired should not error");
+    assert_eq!(
+        deleted, 0,
+        "a JTI within its retention window must not be cleaned up"
+    );
+
+    // Replay is still blocked while the row is present.
+    let blocked = check_and_store_dpop_jti(&store, "within-retention", retention).await;
+    assert!(
+        matches!(blocked, Err(ClaimError::AlreadyConsumed)),
+        "JTI within its retention window must block replay: got {blocked:?}"
+    );
+}

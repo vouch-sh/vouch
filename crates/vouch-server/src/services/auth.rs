@@ -805,6 +805,7 @@ pub(crate) async fn create_oauth_access_token(
             authorization_details: params.authorization_details,
             hardware_aaguid: params.hardware_aaguid,
             org_domain: params.org_domain,
+            client_id: Some(params.client_id),
             source_code_hash: params.source_code_hash,
         },
     )

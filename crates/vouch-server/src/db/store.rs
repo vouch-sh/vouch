@@ -319,6 +319,18 @@ fn index_value_condition<T: sea_query::IntoIden>(
 // DocumentStore
 // ============================================================================
 
+/// Outcome of [`DocumentStore::transition`].
+#[derive(Debug)]
+pub enum Transition<A, R> {
+    /// The precondition held on the row version that was written; the
+    /// mutation committed.
+    Applied(A),
+    /// The precondition rejected the current row; nothing was written.
+    Rejected(R),
+    /// No document with that id exists.
+    NotFound,
+}
+
 /// Core abstraction for the encrypted document store.
 ///
 /// Wraps a database pool and a crypto implementation. All serialization,
@@ -341,9 +353,16 @@ pub struct DocumentStore {
     /// [`Self::set_delete_remaining_successes`].
     #[cfg(test)]
     delete_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
-    /// See [`AuthorizeTestHook`]. Compiled out of non-test builds.
+    /// Test-only fault-injection budget for [`DocumentStore::update_last_used_at`]:
+    /// the next `n` `update_last_used_at` calls succeed (each consuming one
+    /// unit), after which every subsequent `update_last_used_at` returns a
+    /// non-retryable `Err` before opening its transaction — exercising the
+    /// caller's best-effort error-handling contract without a real DB outage.
+    /// Mirrors the test hook pattern and is compiled out of non-test builds,
+    /// so production behavior is unchanged. See
+    /// [`Self::set_last_used_remaining_successes`].
     #[cfg(test)]
-    authorize_test_hook: Option<AuthorizeTestHook>,
+    last_used_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -351,8 +370,9 @@ pub struct DocumentStore {
 pub(crate) type ModifyHookFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
 
-/// Test-only hook invoked inside [`DocumentStore::modify`] between the
-/// internal read and the compare-and-update, receiving `(doc_id, attempt)`.
+/// Test-only hook invoked inside [`DocumentStore::transition`] (and so
+/// [`DocumentStore::modify`]) between the internal read and the
+/// compare-and-update, receiving `(doc_id, attempt)`.
 ///
 /// Lets tests deterministically interleave a concurrent write into the OCC
 /// window (forcing a version-conflict retry) without relying on
@@ -375,22 +395,6 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
-/// Boxed future returned by an [`AuthorizeTestHook`].
-#[cfg(test)]
-pub(crate) type AuthorizeHookFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
-
-/// Test-only hook invoked inside `authorize_device_auth` between the read
-/// and the compare-and-update, receiving `(id, attempt)`.
-///
-/// Lets tests deterministically interleave a concurrent device-code poll
-/// (`update_device_auth_poll_time`) — which bumps the row's OCC version
-/// without changing its status — into the get-to-CAS window, forcing the
-/// authorize to retry. Mirrors [`ModifyTestHook`] for the device-auth
-/// authorize path. No-op in non-test builds and when no hook is installed.
-#[cfg(test)]
-pub(crate) type AuthorizeTestHook = Arc<dyn Fn(&str, u32) -> AuthorizeHookFuture + Send + Sync>;
-
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -405,7 +409,7 @@ impl DocumentStore {
             #[cfg(test)]
             delete_remaining_successes: None,
             #[cfg(test)]
-            authorize_test_hook: None,
+            last_used_remaining_successes: None,
         }
     }
 
@@ -430,26 +434,6 @@ impl DocumentStore {
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
-        }
-    }
-
-    /// Install a hook that runs inside `authorize_device_auth` between the
-    /// read and the compare-and-update. Lets tests deterministically force an
-    /// OCC retry by injecting a concurrent device-code poll (which bumps the
-    /// row's version without changing its status) into the get-to-CAS window.
-    #[cfg(test)]
-    pub(crate) fn set_authorize_test_hook(&mut self, hook: AuthorizeTestHook) {
-        self.authorize_test_hook = Some(hook);
-    }
-
-    /// Run the installed `authorize_test_hook` for `id` at `attempt`, if any.
-    /// Invoked by `authorize_device_auth` between the read and the
-    /// compare-and-update on every retry attempt. No-op in non-test builds
-    /// and when no hook is installed.
-    #[cfg(test)]
-    pub(crate) async fn run_authorize_test_hook(&self, id: &str, attempt: u32) {
-        if let Some(hook) = &self.authorize_test_hook {
-            hook(id, attempt).await;
         }
     }
 
@@ -484,6 +468,51 @@ impl DocumentStore {
             let Some(next) = current.checked_sub(1) else {
                 return Err(anyhow::anyhow!(
                     "injected delete fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// `update_last_used_at` calls to `successes`, after which every
+    /// subsequent `update_last_used_at` returns a non-retryable `Err` before
+    /// opening its transaction. The fault fires at the entry to
+    /// `update_last_used_at`, so the exercised control-flow shape is "the
+    /// observational `last_used_at` write fails" — exactly the shape the
+    /// `authenticate_client` secret branch and SCIM callers must treat as
+    /// best-effort (swallow and continue) rather than fail the request. Absent
+    /// in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_last_used_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.last_used_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `update_last_used_at` success budget,
+    /// returning `Ok` while budget remains and a non-retryable `Err` once it
+    /// is exhausted. No-op (`Ok`) when [`Self::set_last_used_remaining_successes`]
+    /// was not called (no budget installed). The CAS loop avoids underflow if
+    /// a budget is shared via [`Clone`]. See
+    /// [`Self::set_last_used_remaining_successes`].
+    #[cfg(test)]
+    fn consume_last_used_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.last_used_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected last_used fault: remaining-successes budget exhausted"
                 ));
             };
             if budget
@@ -913,6 +942,10 @@ impl DocumentStore {
     ///
     /// Returns an error if the database write fails.
     pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.consume_last_used_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let now_str = Timestamp::now().to_string();
             let stmt = {
@@ -932,7 +965,7 @@ impl DocumentStore {
     /// On version conflict the document is re-read and the modifier is
     /// re-applied, up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)
     /// times.  Transient DSQL errors are handled by `compare_and_update`
-    /// internally.
+    /// internally. An unconditional [`Self::transition`].
     ///
     /// Returns `false` if the document does not exist.
     ///
@@ -944,9 +977,54 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T),
     {
+        match self
+            .transition::<T, (), std::convert::Infallible, _>(id, |data| {
+                modifier(data);
+                Ok(())
+            })
+            .await?
+        {
+            Transition::Applied(()) => Ok(true),
+            Transition::NotFound => Ok(false),
+            Transition::Rejected(never) => match never {},
+        }
+    }
+
+    /// Read a document, let `decide` check a precondition and mutate it, and
+    /// write it back under optimistic concurrency — re-reading and deciding
+    /// again on every version conflict, up to
+    /// [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES) times.
+    ///
+    /// This is the primitive for every single-use or state-machine document
+    /// (device-auth requests, OIDC states, authorization codes, PAR
+    /// requests): `decide` returns `Ok(a)` to commit the mutation it made or
+    /// `Err(r)` to leave the row untouched. Because the precondition is
+    /// re-evaluated against the freshly read row on each attempt, two
+    /// properties hold at once:
+    ///
+    /// - **exactly one winner** — of two concurrent callers, the loser's
+    ///   retry reads the winner's write and its precondition rejects it;
+    /// - **benign writers are invisible** — a concurrent write that bumps the
+    ///   version without changing what the precondition looks at (a
+    ///   device-code poll stamping `last_poll_at`, a cascade clearing an
+    ///   unrelated field) costs a retry, not a spurious failure.
+    ///
+    /// A single-shot `get` + `compare_and_update` that bails on `false`
+    /// conflates the two, which is how a valid device approval came to fail
+    /// whenever the CLI's poll landed inside its read-to-write window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a read or write fails, or if the version conflict
+    /// persists after retries.
+    pub async fn transition<T, A, R, F>(&self, id: &str, decide: F) -> Result<Transition<A, R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
         for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
             let Some(doc) = self.get::<T>(id).await? else {
-                return Ok(false);
+                return Ok(Transition::NotFound);
             };
             #[cfg(test)]
             if let Some(hook) = &self.modify_test_hook {
@@ -954,12 +1032,19 @@ impl DocumentStore {
             }
             let version = doc.version;
             let mut data = doc.data;
-            modifier(&mut data);
+            let applied = match decide(&mut data) {
+                Ok(applied) => applied,
+                Err(rejected) => return Ok(Transition::Rejected(rejected)),
+            };
             if self.compare_and_update(id, version, &data).await? {
-                return Ok(true);
+                return Ok(Transition::Applied(applied));
             }
             if attempt < super::pool::MAX_DSQL_RETRIES {
-                tracing::debug!(doc_id = id, attempt, "version conflict in modify, retrying");
+                tracing::debug!(
+                    doc_id = id,
+                    attempt,
+                    "version conflict in transition, retrying"
+                );
                 tokio::time::sleep(super::pool::retry_backoff(attempt)).await;
             }
         }

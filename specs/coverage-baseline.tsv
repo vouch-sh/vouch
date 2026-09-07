@@ -1007,26 +1007,6 @@ rfc5280#4.2.1.4#feb6c1d9	MUST	When qualifiers are used with the special policy a
 rfc5280#4.2.1.5#71c70a07	SHOULD	Conforming CAs SHOULD mark this extension as critical.
 rfc5280#4.2.1.5#f6508aec	SHOULD	Each issuerDomainPolicy named in the policy mappings extension SHOULD also be asserted in a certificate policies extension in the same certificate.
 rfc5280#4.2.1.5#fcf953e5	MUST NOT	Policies MUST NOT be mapped either to or from the special value anyPolicy (Section 4.2.1.4).
-rfc5280#4.2.1.6#022ba562	MUST NOT	addition, while the string " " is a legal domain name, subjectAltName extensions with a dNSName of " " MUST NOT be used.
-rfc5280#4.2.1.6#0354d481	MUST	If the subject field contains an empty sequence, then the issuing CA MUST include a subjectAltName extension that is marked as critical.
-rfc5280#4.2.1.6#0d12130d	MUST	Because the subject alternative name is considered to be definitively bound to the public key, all parts of the subject alternative name MUST be verified by the
-rfc5280#4.2.1.6#1d7a5c2e	MUST NOT	Finally, the use of the DNS representation for Internet mail addresses (subscriber.example.com instead of subscriber@example.com) MUST NOT be used; such identit
-rfc5280#4.2.1.6#27bf357f	MUST	When the subjectAltName extension contains an Internet mail address, the address MUST be stored in the rfc822Name.
-rfc5280#4.2.1.6#292e8234	MUST	The name MUST include both a scheme (e.g., "http" or "ftp") and a scheme-specific-part.
-rfc5280#4.2.1.6#2e8360c6	MUST	When the subjectAltName extension contains a domain name system label, the domain name MUST be stored in the dNSName (an IA5String).
-rfc5280#4.2.1.6#4d2d1ee8	MUST	For IP version 6, as specified in [RFC2460], the octet string MUST contain exactly sixteen octets.
-rfc5280#4.2.1.6#697dc166	SHOULD	When including the subjectAltName extension in a certificate that has a non-empty subject distinguished name, conforming CAs SHOULD mark the subjectAltName exte
-rfc5280#4.2.1.6#6d6e6bda	MUST	If the subjectAltName extension is present, the sequence MUST contain at least one entry.
-rfc5280#4.2.1.6#6f5e42a5	MUST	The DN MUST be unique for each subject entity certified by the one CA as defined by the issuer field.
-rfc5280#4.2.1.6#788c06db	MUST	Further, if the only subject identity included in the certificate is an alternative name form (e.g., an electronic mail address), then the subject distinguished
-rfc5280#4.2.1.6#813038c6	MUST	Whenever such identities are to be bound into a certificate, the subject alternative name (or issuer alternative name) extension MUST be used; however, a DNS na
-rfc5280#4.2.1.6#95697efe	MUST	The name MUST NOT be a relative URI, and it MUST follow the URI syntax and encoding rules specified in [RFC3986].
-rfc5280#4.2.1.6#a863229e	MUST	When the subjectAltName extension contains a URI, the name MUST be stored in the uniformResourceIdentifier (an IA5String).
-rfc5280#4.2.1.6#b34f466f	MUST	For IP version 4, as specified in [RFC791], the octet string MUST contain exactly four octets.
-rfc5280#4.2.1.6#bd35e5a2	MUST	The name MUST be in the "preferred name syntax", as specified by Section 3.5 of [RFC1034] and as modified by Section 2.1 of [RFC1123].
-rfc5280#4.2.1.6#bdf8b166	MUST	When the subjectAltName extension contains an iPAddress, the address MUST be stored in the octet string in "network byte order", as specified in [RFC791].
-rfc5280#4.2.1.6#c4e8c54b	MUST	URIs that include an authority ([RFC3986], Section 3.2) MUST include a fully qualified domain name or IP address as the host.
-rfc5280#4.2.1.6#ce2ce51f	MUST NOT	Unlike the subject field, conforming CAs MUST NOT issue certificates with subjectAltNames containing empty GeneralName fields.
 rfc5280#4.2.1.7#03093f03	SHOULD	Where present, conforming CAs SHOULD mark this extension as non- critical.
 rfc5280#4.2.1.7#d55bcb82	MUST	Issuer alternative name MUST be encoded as in 4.2.1.6.
 rfc5280#4.2.1.8#e5eeb562	MUST	Conforming CAs MUST mark this extension as non-critical.
@@ -2084,11 +2064,6 @@ rfc9068#2.2.3#024093d5	SHOULD	An authorization server wanting to include such at
 rfc9068#2.2.3#1f6a5735	SHOULD	Authorization servers SHOULD encode the corresponding claim values according to the guidance defined in [RFC7643].
 rfc9068#2.2.3#81bd6f2b	SHOULD	If an authorization request includes a scope parameter, the corresponding issued JWT access token SHOULD include a "scope" claim as defined in Section 4.2 of [R
 rfc9068#2.2.3#b5b6c478	MUST	All the individual scope strings in the "scope" claim MUST have meaning for the resources indicated in the "aud" claim.
-rfc9068#3#57090adf	SHOULD	If the values in the "scope" parameter refer to different default resource indicator values, the authorization server SHOULD reject the request with "invalid_sc
-rfc9068#3#b9182efc	SHOULD	If the request includes a "resource" parameter (as defined in [RFC8707]), the resulting JWT access token "aud" claim SHOULD have the same value as the "resource
-rfc9068#3#d80fe36b	MUST	If the request does not include a "resource" parameter, the authorization server MUST use a default resource indicator in the "aud" claim.
-rfc9068#3#de585cd8	MUST NOT	The authorization server MUST NOT issue a JWT access token if the authorization granted by the token would be ambiguous.
-rfc9068#3#ee138bbb	SHOULD	If a "scope" parameter is present in the request, the authorization server SHOULD use it to infer the value of the default resource indicator to be used in the 
 rfc9068#5#09f3f45a	MUST	To prevent cross-JWT confusion, authorization servers MUST use a distinct identifier as an "aud" claim value to uniquely identify access tokens issued by the sa
 rfc9068#6#83465a25	MUST NOT	The client MUST NOT inspect the content of the access token: the authorization server and the resource server might decide to change the token format at any tim
 rfc9101#10.3#d996357b	SHOULD	It is RECOMMENDED by this specification to use this practice for the following endpoints defined in [RFC6749], [RFC6750], and [RFC8414]:
@@ -3697,19 +3672,6 @@ xmldsig-core1#4.6#11f2cbdd	MUST	Note, if the application wishes to exclude the <
 xmldsig-core1#4.6#20aa0b58	MUST	This attribute is purely advisory; no validation of the MimeType information is required by this specification.
 xmldsig-core1#4.6#a2710f5a	SHOULD	Applications which require normative type and encoding information for signature validation should specify Transforms with well defined resulting types and/or e
 xmldsig-core1#5.2#d2376ee1	MUST	<complexType name="SignaturePropertyType" mixed="true"> <choice maxOccurs="unbounded"> <any namespace="##other" processContents="lax" /> <!-- (1,1) elements fro
-xmldsig-core1#6.1#1bf573ef	MUST	3 Exclusive XML Canonicalization 1.0 (with comments) http://www.w3.org/2001/10/xml-exc-c14n#WithComments Transform Required.
-xmldsig-core1#6.1#28c96088	SHOULD	2 HMAC-SHA256 http://www.w3.org/2001/04/xmldsig-more#hmac-sha256 Recommended.
-xmldsig-core1#6.1#46e71c16	MUST	3 SHA512 http://www.w3.org/2001/04/xmlenc#sha512 Encoding Required.
-xmldsig-core1#6.1#5385ebaa	MUST	This may be implemented via the XPath specification specified in 6.6.4: Enveloped Signature Transform; it must have the same effect as that specified by the XPa
-xmldsig-core1#6.1#81e3ba60	SHOULD	2 Enveloped Signature (**note) http://www.w3.org/2000/09/xmldsig#enveloped-signature Recommended.
-xmldsig-core1#6.1#92000f4d	MUST	9 DSAwithSHA256 http://www.w3.org/2009/xmldsig11#dsa-sha256 [section 6.4.1 DSA] Canonicalization Required.
-xmldsig-core1#6.1#94139a07	SHOULD	3 DSAwithSHA1 (signature verification) http://www.w3.org/2000/09/xmldsig#dsa-sha1 [section 6.4.1 DSA] Recommended.
-xmldsig-core1#6.1#bb740908	SHOULD	3 Exclusive XML Canonicalization 1.0 (omit comments) http://www.w3.org/2001/10/xml-exc-c14n# Recommended.
-xmldsig-core1#6.1#c3e5b78a	SHOULD	Use of XPath filter is recommended over use of XSLT.
-xmldsig-core1#6.1#d5e00ab8	MUST	Such parameter elements have a descriptive element name, which is frequently algorithm specific, and must be in the XML Signature namespace or an algorithm spec
-xmldsig-core1#6.1#ddbfe736	MUST	1 base64 (*note) http://www.w3.org/2000/09/xmldsig#base64 MAC Required.
-xmldsig-core1#6.1#e3cff523	SHOULD	When using transforms, we RECOMMEND selecting the least expressive choice that still accomplishes the needs of the use case at hand: Use of XPath filter 2.0 is 
-xmldsig-core1#6.1#e9a94cc7	MUST	1 HMAC-SHA224 http://www.w3.org/2001/04/xmldsig-more#hmac-sha224 Signature Required.
 xmldsig-core1#6.2#264ed95c	SHOULD	Use of SHA-256 is strongly recommended over SHA-1 because recent advances in cryptanalysis (see e.g. [SHA-1-Analysis]) have cast doubt on the long-term collisio
 xmldsig-core1#6.2#bcc1446c	SHOULD NOT	Digest algorithms that are known not to be collision resistant should not be used in DigestMethod elements.
 xmldsig-core1#6.2#c2534a3a	MUST	Therefore, SHA-1 support is required in this specification only for backwards-compatibility reasons.

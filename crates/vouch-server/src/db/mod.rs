@@ -60,7 +60,7 @@ pub use users::{upsert_user, upsert_user_with_org};
 pub use sessions::{
     CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
     delete_expired_sessions, delete_session_by_token_hash, delete_sessions_for_code_replay,
-    delete_sessions_for_user, get_session_by_token_hash,
+    delete_sessions_for_oauth_client, delete_sessions_for_user, get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions
@@ -142,13 +142,13 @@ pub use oauth::{
     OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain, RedirectUriError,
     UpdateClientRegistrationParams, UpdateOAuthClientParams, client_keys_to_stored,
     create_oauth_client, create_oauth_client_secret, delete_expired_jwt_assertion_jtis,
-    delete_oauth_client, get_oauth_client_by_client_id, get_oauth_client_by_id,
-    get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
-    get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
-    is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
-    resolve_event_org_domain, revoke_all_oauth_client_secrets, revoke_oauth_client_secret,
-    revoke_registration_access_token, store_jwt_assertion_jti, update_oauth_client,
-    update_oauth_client_last_used, update_oauth_client_registration,
+    delete_oauth_client, delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id,
+    get_oauth_client_by_id, get_oauth_client_secret_by_id, get_oauth_client_secrets,
+    get_oauth_clients_for_user, get_oauth_secret_by_hash, get_oauth_usage_stats,
+    is_loopback_redirect_host, is_valid_post_logout_redirect_uri_str, parse_jwks_set,
+    record_oauth_event, resolve_event_org_domain, revoke_all_oauth_client_secrets,
+    revoke_oauth_client_secret, revoke_registration_access_token, store_jwt_assertion_jti,
+    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials, validate_redirect_uri,
 };
 
@@ -166,6 +166,10 @@ pub use dpop::{
     DpopJtiClaim, check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
     generate_dpop_nonce, validate_and_consume_dpop_nonce,
 };
+// Test-only access to the deterministic DPoP JTI document ID, so integration
+// tests can read back a committed JTI and assert on its retention window.
+#[cfg(test)]
+pub(crate) use dpop::dpop_jti_id_for_test;
 
 // Re-export credentials types and functions
 pub use credentials::{
