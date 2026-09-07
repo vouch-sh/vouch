@@ -341,6 +341,16 @@ pub struct DocumentStore {
     /// [`Self::set_delete_remaining_successes`].
     #[cfg(test)]
     delete_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only fault-injection budget for [`DocumentStore::update_last_used_at`]:
+    /// the next `n` `update_last_used_at` calls succeed (each consuming one
+    /// unit), after which every subsequent `update_last_used_at` returns a
+    /// non-retryable `Err` before opening its transaction — exercising the
+    /// caller's best-effort error-handling contract without a real DB outage.
+    /// Mirrors the test hook pattern and is compiled out of non-test builds,
+    /// so production behavior is unchanged. See
+    /// [`Self::set_last_used_remaining_successes`].
+    #[cfg(test)]
+    last_used_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -385,6 +395,8 @@ impl DocumentStore {
             delete_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
+            #[cfg(test)]
+            last_used_remaining_successes: None,
         }
     }
 
@@ -443,6 +455,51 @@ impl DocumentStore {
             let Some(next) = current.checked_sub(1) else {
                 return Err(anyhow::anyhow!(
                     "injected delete fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// `update_last_used_at` calls to `successes`, after which every
+    /// subsequent `update_last_used_at` returns a non-retryable `Err` before
+    /// opening its transaction. The fault fires at the entry to
+    /// `update_last_used_at`, so the exercised control-flow shape is "the
+    /// observational `last_used_at` write fails" — exactly the shape the
+    /// `authenticate_client` secret branch and SCIM callers must treat as
+    /// best-effort (swallow and continue) rather than fail the request. Absent
+    /// in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_last_used_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.last_used_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `update_last_used_at` success budget,
+    /// returning `Ok` while budget remains and a non-retryable `Err` once it
+    /// is exhausted. No-op (`Ok`) when [`Self::set_last_used_remaining_successes`]
+    /// was not called (no budget installed). The CAS loop avoids underflow if
+    /// a budget is shared via [`Clone`]. See
+    /// [`Self::set_last_used_remaining_successes`].
+    #[cfg(test)]
+    fn consume_last_used_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.last_used_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected last_used fault: remaining-successes budget exhausted"
                 ));
             };
             if budget
@@ -872,6 +929,10 @@ impl DocumentStore {
     ///
     /// Returns an error if the database write fails.
     pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.consume_last_used_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let now_str = Timestamp::now().to_string();
             let stmt = {

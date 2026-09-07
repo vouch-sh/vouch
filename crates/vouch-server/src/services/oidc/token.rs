@@ -884,6 +884,11 @@ pub async fn authenticate_client(
             return Err(ClientAuthError::InvalidCredentials);
         }
 
+        // Update last used timestamp
+        if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
+            tracing::warn!("Failed to update OAuth client last_used: {e}");
+        }
+
         Ok((
             AuthenticatedClient {
                 client,
@@ -1950,6 +1955,63 @@ mod tests {
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "must return MtlsVerificationFailed for wrong auth method, got: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // authenticate_client — best-effort last_used_at (regression test)
+    // ========================================================================
+    //
+    // The `last_used_at` timestamp UPDATE is an observational write: it must
+    // never fail an already-authenticated request. Five of the six
+    // `last_used_at` call sites (mTLS, public, private_key_jwt, two SCIM)
+    // keep the write separate from validation and swallow it at the service
+    // layer. The secret-based path was the lone outlier — it bundled the
+    // write into `validate_oauth_client_credentials` via `.await?`, so a
+    // transient `last_used_at` failure surfaced as HTTP 500 / `server_error`
+    // for a fully-authenticated secret-based confidential client while the
+    // other auth methods proceeded. The fix moves the write out of the DB
+    // function and adds the same `if let Err(e) = ... { tracing::warn! }`
+    // swallow the other branches use.
+
+    /// A secret-based confidential client authenticates successfully even
+    /// when the observational `last_used_at` UPDATE fails — the write is
+    /// swallowed at the service layer, matching the public/mTLS/private_key_jwt
+    /// branches.
+    #[tokio::test]
+    async fn test_authenticate_client_secret_swallows_last_used_failure() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::build_test_app_state(Vec::new(), |store| {
+            // Fault every `update_last_used_at` write with a non-retryable
+            // `Err` (not in `RETRYABLE_SQL_STATES`, so it escapes
+            // `with_dsql_retry!` immediately).
+            store.set_last_used_remaining_successes(0);
+        })
+        .await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "last-used-secret@example.com").await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(&state, &creds).await;
+        assert!(
+            result.is_ok(),
+            "secret-based auth must not fail when only the last_used_at write fails: {result:?}"
+        );
+        let (auth, verification) = result.expect("checked Ok above");
+        assert!(
+            !auth.is_public,
+            "secret-based client is confidential, not public"
+        );
+        assert!(
+            verification.is_some(),
+            "secret verification witness must be present for a secret-authenticated client"
         );
     }
 
