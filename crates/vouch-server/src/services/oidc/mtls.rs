@@ -55,7 +55,15 @@ pub(crate) struct ClientCertificate {
     /// Subject Alternative Name — URIs.
     pub san_uri: Vec<String>,
     /// Subject Alternative Name — IP addresses.
-    pub san_ip: Vec<String>,
+    ///
+    /// Stored as a canonical [`std::net::IpAddr`] (parsed from the raw
+    /// `iPAddress` SAN octets per RFC 5280 §4.2.1.6) rather than a formatted
+    /// string, so the `tls_client_auth` SAN-IP comparison (RFC 8705 §2.1.2)
+    /// is representation-agnostic: every valid textual form of one address
+    /// (`2001:db8::1`, `2001:db8:0:0:0:0:0:1`, `2001:DB8::1`, …) reduces to
+    /// the same 128-bit value here and compares equal against the registered
+    /// `tls_client_auth_san_ip` string.
+    pub san_ip: Vec<std::net::IpAddr>,
 }
 
 /// Errors from mTLS certificate processing.
@@ -114,7 +122,9 @@ pub(crate) fn parse_client_certificate(der: &[u8]) -> Result<ClientCertificate, 
                             san_uri.push(uri.to_string());
                         }
                         GeneralName::IpAddress(ip) => {
-                            san_ip.push(format_ip_bytes(ip.as_bytes()));
+                            if let Some(addr) = parse_ip_bytes(ip.as_bytes()) {
+                                san_ip.push(addr);
+                            }
                         }
                         _ => {}
                     }
@@ -133,21 +143,48 @@ pub(crate) fn parse_client_certificate(der: &[u8]) -> Result<ClientCertificate, 
     })
 }
 
-/// Format IP address bytes to string.
-fn format_ip_bytes(bytes: &[u8]) -> String {
+/// Parse IP address bytes into a canonical [`std::net::IpAddr`].
+///
+/// Per RFC 5280 §4.2.1.6, an `iPAddress` GeneralName carries 32 bits (IPv4)
+/// or 128 bits (IPv6) in network byte order. Any other length is not a valid
+/// IP GeneralName and returns `None` so the malformed entry is dropped from
+/// the parsed SANs rather than admitted into the comparison set.
+///
+/// Returning a canonical `IpAddr` (rather than a formatted string) is what
+/// makes the `tls_client_auth` SAN-IP comparison (RFC 8705 §2.1.2)
+/// representation-agnostic: the registered `tls_client_auth_san_ip` value is
+/// parsed to the same `IpAddr` type before comparison, so every valid textual
+/// form of one address (`2001:db8::1`, `2001:db8:0:0:0:0:0:1`, `2001:DB8::1`,
+/// …) reduces to the same 128-bit value and compares equal regardless of the
+/// specific rendering either side used.
+fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
     match bytes {
-        [a, b, c, d] => format!("{a}.{b}.{c}.{d}"),
+        [a, b, c, d] => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            *a, *b, *c, *d,
+        ))),
         [..] if bytes.len() == 16 => {
-            let mut parts = Vec::new();
-            for chunk in bytes.chunks(2) {
-                if let (Some(&a), Some(&b)) = (chunk.first(), chunk.get(1)) {
-                    parts.push(format!("{a:02x}{b:02x}"));
-                }
-            }
-            parts.join(":")
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(bytes);
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)))
         }
-        _ => hex::encode(bytes),
+        _ => None,
     }
+}
+
+/// Canonicalize an RFC 4514 distinguished-name string for comparison.
+///
+/// Parses the string into a DER `RdnSequence` (via
+/// [`x509_cert::name::RdnSequence`]'s `FromStr`) and re-renders it,
+/// so both sides of a DN comparison reduce to the same rendering regardless
+/// of the spacing and attribute-name casing the input used. Returns `None`
+/// when the string is not a parseable RFC 4514 DN, in which case the caller
+/// falls back to exact string comparison.
+fn canonicalize_dn(dn: &str) -> Option<String> {
+    use std::str::FromStr as _;
+    let rdns = x509_cert::name::RdnSequence::from_str(dn).ok()?;
+    let der = der::Encode::to_der(&rdns).ok()?;
+    let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
+    Some(rdns.to_string())
 }
 
 /// Verify `tls_client_auth` — match certificate against registered
@@ -164,7 +201,20 @@ pub(crate) fn verify_tls_client_auth(
 ) -> Result<(), MtlsError> {
     if let Some(expected) = expected_subject_dn {
         let found = cert.subject_dn.as_deref().unwrap_or("");
-        if found == expected {
+        // Compare DNs via a canonical form, not one specific rendering:
+        // `found` is whatever `Name::to_string` emitted at parse time, while
+        // the registered `tls_client_auth_subject_dn` is operator-supplied
+        // RFC 4514 text. Round-tripping both sides through the DER encoding
+        // (RFC 4514 string -> RdnSequence -> canonical string) makes the
+        // comparison insensitive to spacing and attribute-name case
+        // (`CN=a, O=b` vs `cn=a,o=b`). If either side does not parse as an
+        // RFC 4514 DN the comparison falls back to exact string equality,
+        // preserving the previous behavior (fail closed on mismatch).
+        let matches = match (canonicalize_dn(expected), canonicalize_dn(found)) {
+            (Some(e), Some(f)) => e == f,
+            _ => expected == found,
+        };
+        if matches {
             return Ok(());
         }
         return Err(MtlsError::SubjectMismatch {
@@ -174,7 +224,14 @@ pub(crate) fn verify_tls_client_auth(
     }
 
     if let Some(expected) = expected_san_dns {
-        if cert.san_dns.iter().any(|d| d == expected) {
+        // RFC 4343: DNS names compare case-insensitively (RFC 6125 §6.4.1
+        // for certificate identity matching), so `Client.Example.COM` in the
+        // SAN must match a registered `client.example.com`.
+        if cert
+            .san_dns
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(expected))
+        {
             return Ok(());
         }
         return Err(MtlsError::SubjectMismatch {
@@ -204,12 +261,28 @@ pub(crate) fn verify_tls_client_auth(
     }
 
     if let Some(expected) = expected_san_ip {
-        if cert.san_ip.iter().any(|i| i == expected) {
+        // Normalize both sides to a canonical `IpAddr` before comparing so that
+        // any valid textual representation of the registered
+        // `tls_client_auth_san_ip` (RFC 5952 canonical `2001:db8::1`,
+        // uncompressed `2001:db8:0:0:0:0:0:1`, uppercase `2001:DB8::1`, …)
+        // matches the same 128-bit address carried by the certificate's
+        // `iPAddress` SAN bytes (RFC 5280 §4.2.1.6). Comparing raw strings
+        // would only match the one rendering `parse_ip_bytes` happens to
+        // emit, rejecting every other valid form with `SubjectMismatch`.
+        if let Ok(expected_addr) = expected.parse::<std::net::IpAddr>()
+            && cert.san_ip.contains(&expected_addr)
+        {
             return Ok(());
         }
+        let found = cert
+            .san_ip
+            .iter()
+            .map(std::net::IpAddr::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         return Err(MtlsError::SubjectMismatch {
             expected: format!("IP:{expected}"),
-            found: format!("IP:{}", cert.san_ip.join(",")),
+            found: format!("IP:{found}"),
         });
     }
 
@@ -315,15 +388,41 @@ mod tests {
     }
 
     #[test]
-    fn test_format_ip_bytes_v4() {
-        assert_eq!(format_ip_bytes(&[192, 168, 1, 1]), "192.168.1.1");
+    fn test_parse_ip_bytes_v4() {
+        let addr = parse_ip_bytes(&[192, 168, 1, 1]);
+        assert_eq!(
+            addr,
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                192, 168, 1, 1
+            )))
+        );
     }
 
     #[test]
-    fn test_format_ip_bytes_v6() {
+    fn test_parse_ip_bytes_v6() {
         let bytes = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-        let result = format_ip_bytes(&bytes);
-        assert_eq!(result, "2001:0db8:0000:0000:0000:0000:0000:0001");
+        let result = parse_ip_bytes(&bytes);
+        assert_eq!(
+            result,
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                0x2001, 0x0db8, 0, 0, 0, 0, 0, 1
+            )))
+        );
+        // The canonical `IpAddr` (not a formatted string) is what the
+        // comparison path relies on: every valid text form of this address
+        // parses back to this same value.
+        assert_eq!(
+            "2001:db8::1".parse::<std::net::IpAddr>().unwrap(),
+            result.unwrap(),
+            "RFC 5952 canonical compressed form must reduce to the same IpAddr"
+        );
+        assert_eq!(
+            "2001:0db8:0000:0000:0000:0000:0000:0001"
+                .parse::<std::net::IpAddr>()
+                .unwrap(),
+            result.unwrap(),
+            "fully-expanded zero-padded form must reduce to the same IpAddr"
+        );
     }
 
     // =========================================================================
@@ -369,51 +468,63 @@ mod tests {
     }
 
     // =========================================================================
-    // format_ip_bytes — IPv6 leading-zero padding
+    // parse_ip_bytes — IPv6 leading-zero groups are canonical, not formatted
     // =========================================================================
 
-    /// IPv6 bytes with leading zeros must be zero-padded to 4 hex digits per group.
-    /// For example, the bytes [0x00, 0x01, ...] must produce "0001:..." not "1:...".
+    /// IPv6 bytes with leading zeros must parse to the canonical `IpAddr`
+    /// (so all valid text forms of that address compare equal), rather than
+    /// to a specific zero-padded string rendering.
     #[test]
-    fn test_format_ip_bytes_zero_padding() {
+    fn test_parse_ip_bytes_v6_leading_zeros_canonical() {
         // 0x0001:0000:0000:0000:0000:0000:0000:0001
         let bytes = [
             0x00u8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x01,
         ];
-        let result = format_ip_bytes(&bytes);
-        assert_eq!(result, "0001:0000:0000:0000:0000:0000:0000:0001");
-        assert!(
-            result.starts_with("0001"),
-            "leading-zero group must be zero-padded: got {result}"
-        );
+        let result = parse_ip_bytes(&bytes);
+        let expected = std::net::IpAddr::V6(std::net::Ipv6Addr::new(1, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(result, Some(expected));
+        // RFC 5952 canonical, uncompressed, uppercase, and fully zero-padded
+        // forms all reduce to the same canonical `IpAddr` — this is the
+        // property the comparison path depends on.
+        for form in [
+            "1::1",
+            "1:0:0:0:0:0:0:1",
+            "1:0::0:0:0:1",
+            "0001:0000:0000:0000:0000:0000:0000:0001",
+            "1::0000:0000:0000:0:1",
+        ] {
+            assert_eq!(
+                form.parse::<std::net::IpAddr>().unwrap(),
+                expected,
+                "form {form:?} must reduce to the same canonical IpAddr"
+            );
+        }
     }
 
     // =========================================================================
-    // format_ip_bytes — unknown / non-standard length falls back to hex
+    // parse_ip_bytes — non-standard lengths are dropped (None), never panic
     // =========================================================================
 
-    /// Bytes that are neither 4 (IPv4) nor 16 (IPv6) bytes long must fall
-    /// back to `hex::encode` rather than panicking or producing garbage.
+    /// Bytes that are neither 4 (IPv4) nor 16 (IPv6) bytes long are not a valid
+    /// `iPAddress` GeneralName (RFC 5280 §4.2.1.6) and must return `None` so
+    /// they are dropped from the parsed SANs — not panic or produce garbage.
     #[test]
-    fn test_format_ip_bytes_unknown_length() {
+    fn test_parse_ip_bytes_unknown_length_returns_none() {
         // 5 bytes — not IPv4 (4) or IPv6 (16)
-        assert_eq!(
-            format_ip_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x42]),
-            "deadbeef42"
-        );
+        assert_eq!(parse_ip_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x42]), None);
     }
 
-    /// A single byte must also fall back to hex (not crash).
+    /// A single byte must also return `None` (not crash).
     #[test]
-    fn test_format_ip_bytes_single_byte_hex_fallback() {
-        assert_eq!(format_ip_bytes(&[0x0f]), "0f");
+    fn test_parse_ip_bytes_single_byte_returns_none() {
+        assert_eq!(parse_ip_bytes(&[0x0f]), None);
     }
 
-    /// An empty byte slice must produce an empty string (hex of nothing).
+    /// An empty byte slice must return `None` (no IP at all).
     #[test]
-    fn test_format_ip_bytes_empty_slice() {
-        assert_eq!(format_ip_bytes(&[]), "");
+    fn test_parse_ip_bytes_empty_slice_returns_none() {
+        assert_eq!(parse_ip_bytes(&[]), None);
     }
 
     // =========================================================================
@@ -607,8 +718,8 @@ mod tests {
         let cert_der = make_self_signed_cert_with_san("test-san-ip", &[], &[], &[], &[ip]);
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
-        // IP SAN must be extracted correctly
-        assert_eq!(cert.san_ip, vec!["192.168.1.1"]);
+        // IP SAN must be extracted as a canonical IpAddr
+        assert_eq!(cert.san_ip, vec![ip]);
 
         // Matching IP SAN succeeds
         assert!(
@@ -620,6 +731,102 @@ mod tests {
         assert!(
             verify_tls_client_auth(&cert, None, None, None, None, Some("10.0.0.1")).is_err(),
             "non-matching IP SAN should fail"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — SAN IP v6 (RFC 8705 §2.1.2 + RFC 5952)
+    // =========================================================================
+    //
+    // Regression coverage for the IPv6 SAN-IP comparison bug: the cert-side
+    // `iPAddress` SAN is parsed from its raw 16 octets, and the registered
+    // `tls_client_auth_san_ip` string is parsed to the same `IpAddr` before
+    // comparison, so every valid textual representation of one address must
+    // authenticate — not only the one rendering the old `format_ip_bytes`
+    // helper happened to emit.
+
+    /// Every valid text form of the cert's IPv6 SAN must authenticate against
+    /// a `tls_client_auth_san_ip` registered in that same form. This is the
+    /// core RFC 8705 §2.1.2 interoperability guarantee and the behaviour that
+    /// was broken by the previous verbatim `String == String` comparison.
+    #[test]
+    fn test_verify_tls_client_auth_san_ipv6_registered_form() {
+        let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1));
+        let cert_der = make_self_signed_cert_with_san("test-san-ipv6", &[], &[], &[], &[ip]);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // The cert-side SAN is the canonical IpAddr built from the 16 octets.
+        assert_eq!(cert.san_ip, vec![ip]);
+
+        // Every valid textual representation of the same 128-bit address must
+        // match — these all parse to the same IpAddr as the cert's SAN bytes.
+        let matching_forms = [
+            "2001:db8::1",                             // RFC 5952 canonical compressed
+            "2001:db8:0:0:0:0:0:1",                    // uncompressed, no zero-padding
+            "2001:0db8:0000:0000:0000:0000:0000:0001", // fully-expanded zero-padded
+            "2001:DB8::1",                             // uppercase hex
+            "2001:db8::0000:0000:0000:0:1",            // mixed compressed/padded
+        ];
+        for form in matching_forms {
+            assert!(
+                form.parse::<std::net::Ipv6Addr>().is_ok(),
+                "test fixture: {form:?} must be a valid Ipv6Addr"
+            );
+            assert!(
+                verify_tls_client_auth(&cert, None, None, None, None, Some(form)).is_ok(),
+                "registered form {form:?} must match the cert's IPv6 SAN (same address)"
+            );
+        }
+
+        // A genuinely different IPv6 address must still be rejected.
+        assert!(
+            verify_tls_client_auth(&cert, None, None, None, None, Some("2001:db8::2")).is_err(),
+            "a different IPv6 address must not match"
+        );
+    }
+
+    /// A malformed `tls_client_auth_san_ip` that does not parse to any IpAddr
+    /// must be rejected with `SubjectMismatch` rather than panicking or
+    /// accidentally authenticating.
+    #[test]
+    fn test_verify_tls_client_auth_san_ip_unparseable_rejected() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1));
+        let cert_der = make_self_signed_cert_with_san("test-san-ip-bad", &[], &[], &[], &[ip]);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        let result = verify_tls_client_auth(&cert, None, None, None, None, Some("not-an-ip"));
+        assert!(
+            matches!(result, Err(MtlsError::SubjectMismatch { .. })),
+            "unparseable registered IP must yield SubjectMismatch, got: {result:?}"
+        );
+    }
+
+    /// An IPv4 address registered as an IPv6 text form (or vice versa) must
+    /// NOT authenticate against a cert carrying the other family: per
+    /// RFC 5280 §4.2.1.6 the `iPAddress` GeneralName encodes the family in
+    /// its byte length (4 = IPv4, 16 = IPv6), so the two are distinct
+    /// GeneralNames and a registered V4 string must not match a V6 cert SAN
+    /// even when both denote the same 32-bit value.
+    #[test]
+    fn test_verify_tls_client_auth_san_ip_v4_mapped_v6_distinct() {
+        let v6 = std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0xffff, 0x1234, 0x5678,
+        ));
+        let cert_der = make_self_signed_cert_with_san("test-san-v4mapped", &[], &[], &[], &[v6]);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // The IPv4 form `18.52.86.120` denotes the same 32-bit value as the
+        // IPv4-mapped IPv6 cert SAN, but they are different GeneralName
+        // encodings and must not compare equal.
+        assert!(
+            verify_tls_client_auth(&cert, None, None, None, None, Some("18.52.86.120")).is_err(),
+            "IPv4 text must not match an IPv4-mapped IPv6 SAN (different family)"
+        );
+        // The native IPv6 text form of the same mapped address must match.
+        assert!(
+            verify_tls_client_auth(&cert, None, None, None, None, Some("::ffff:18.52.86.120"))
+                .is_ok(),
+            "the IPv6 text form of the mapped address must match"
         );
     }
 
@@ -643,7 +850,7 @@ mod tests {
         assert_eq!(cert.san_dns, vec!["api.example.com"]);
         assert_eq!(cert.san_email, vec!["admin@example.com"]);
         assert_eq!(cert.san_uri, vec!["https://example.com/client"]);
-        assert_eq!(cert.san_ip, vec!["10.0.0.1"]);
+        assert_eq!(cert.san_ip, vec![ip]);
         assert!(
             cert.subject_dn
                 .as_deref()
@@ -752,6 +959,104 @@ mod tests {
         assert!(
             matches!(result, Err(MtlsError::CertificateNotRegistered)),
             "empty keys array must return CertificateNotRegistered"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — SAN DNS case-insensitivity (RFC 4343 / RFC 6125)
+    // =========================================================================
+
+    // RFC 4343 (and RFC 6125 §6.4.1 for certificate identity matching): DNS
+    // names compare case-insensitively, so a SAN of `Client.Example.COM`
+    // must match a registered `client.example.com` and vice versa.
+    #[test]
+    fn test_verify_tls_client_auth_san_dns_case_insensitive() {
+        let cert_der = make_self_signed_cert_with_san(
+            "test-san-dns-case",
+            &["Client.Example.COM"],
+            &[],
+            &[],
+            &[],
+        );
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("client.example.com"), None, None, None)
+                .is_ok(),
+            "lowercase registered name must match mixed-case SAN"
+        );
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("CLIENT.EXAMPLE.COM"), None, None, None)
+                .is_ok(),
+            "uppercase registered name must match mixed-case SAN"
+        );
+    }
+
+    // RFC 6125 §6.4.1: case folding must not make distinct names match.
+    #[test]
+    fn test_verify_tls_client_auth_san_dns_case_fold_rejects_different_name() {
+        let cert_der = make_self_signed_cert_with_san(
+            "test-san-dns-neg",
+            &["Client.Example.COM"],
+            &[],
+            &[],
+            &[],
+        );
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("other.example.com"), None, None, None)
+                .is_err(),
+            "a different DNS name must still mismatch"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — subject DN canonical comparison (RFC 4514)
+    // =========================================================================
+
+    // RFC 8705 §2.1.2 matches the certificate subject against the registered
+    // `tls_client_auth_subject_dn` expressed as an RFC 4514 string. The
+    // comparison must not depend on one specific rendering: spacing after
+    // commas and attribute-type casing vary between producers.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_rendering_insensitive() {
+        let cert_der = make_test_cert("dn-canon");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+
+        // The registered value uses lowercase attribute types; the parsed
+        // rendering uses `CN=`. Canonical comparison must equate them.
+        let lowercased_attr = rendered.replace("CN=", "cn=");
+        assert_ne!(rendered, lowercased_attr, "precondition: strings differ");
+        assert!(
+            verify_tls_client_auth(&cert, Some(&lowercased_attr), None, None, None, None).is_ok(),
+            "attribute-type case must not affect DN matching"
+        );
+    }
+
+    // RFC 4514: canonicalization must not make distinct DNs match.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_canonical_still_rejects_mismatch() {
+        let cert_der = make_test_cert("dn-canon-neg");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, Some("cn=different"), None, None, None, None).is_err(),
+            "a different DN must still mismatch after canonicalization"
+        );
+    }
+
+    // A registered value that is not a parseable RFC 4514 DN falls back to
+    // exact string comparison and (mismatching) fails closed.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_unparseable_expected_fails_closed() {
+        let cert_der = make_test_cert("dn-unparseable");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, Some("not a dn at all"), None, None, None, None).is_err(),
+            "an unparseable registered DN must not match"
         );
     }
 }
