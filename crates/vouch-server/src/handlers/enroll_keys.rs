@@ -68,6 +68,18 @@ pub(crate) async fn rename_key_form(
         Err(_) => return Redirect::to("/enroll/start").into_response(),
     };
 
+    // Defense-in-depth active-user gate. `extract_session_from_cookie`
+    // validates the session only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors the sibling `delete_key` in this
+    // file and `handlers::keys::rename_key`; see `session::load_active_user`.
+    if super::session::load_active_user(&state, &token.sub)
+        .await
+        .is_err()
+    {
+        return Redirect::to("/enroll/start").into_response();
+    }
+
     let name = match ResourceLabel::parse(&form.name) {
         Ok(name) => name,
         Err(err) => {

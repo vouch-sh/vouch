@@ -425,6 +425,13 @@ pub(crate) async fn rename_key(
         )
     })?;
 
+    // Defense-in-depth active-user gate. `AuthenticatedToken` establishes
+    // token validity only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors `delete_key` and `register_start`
+    // in this file; see `session::load_active_user`.
+    let _user = super::session::load_active_user(&state, &token.sub).await?;
+
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
@@ -1207,6 +1214,54 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// A deactivated user holding a live session must not rename a security
+    /// key. `AuthenticatedToken` validates the token only, so the handler
+    /// must reject deactivated accounts itself — same fixture and expected
+    /// response as `test_delete_key_rejects_deactivated_user` below.
+    #[tokio::test]
+    async fn test_rename_key_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-rename@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Deactivate WITHOUT deleting the session — the
+        // deactivated-with-live-session fixture the sibling tests use.
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"Hijacked Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deactivated user must not rename a key; got body: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
     }
 
     // ========================================================================

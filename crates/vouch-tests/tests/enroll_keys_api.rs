@@ -109,6 +109,56 @@ async fn rename_updates_name() {
 }
 
 #[tokio::test]
+async fn rename_rejects_deactivated_user() {
+    // Defense-in-depth: a deactivated user holding a live session must not
+    // rename their security key over the cookie route. Same
+    // deactivated-with-live-session fixture as `delete_rejects_deactivated_user`
+    // below; the handler redirects to /enroll/start (cookie surface) instead
+    // of performing the rename.
+    let harness = TestHarness::new().await;
+    let (user, auth_id, token) = harness
+        .create_authenticated_user("keys-rename-deactivated@example.com")
+        .await
+        .expect("create authed user");
+
+    // Deactivate WITHOUT deleting the session.
+    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let resp = rename_key(&harness, &token, &auth_id, "name=hijacked-name").await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "deactivated rename must redirect away, body: {}",
+        resp.body
+    );
+    assert_eq!(
+        resp.headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "/enroll/start",
+        "deactivated user must be sent to enrollment start, not the keys page"
+    );
+
+    // The key name must be unchanged. Reactivate first so the read-back uses
+    // a working session regardless of gates elsewhere on the cookie surface.
+    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, true)
+        .await
+        .expect("reactivate user");
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let renamed = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .any(|k| k.get("name").and_then(Value::as_str) == Some("hijacked-name"));
+    assert!(!renamed, "deactivated user must not have renamed the key");
+}
+
+#[tokio::test]
 async fn rename_rejects_invalid_name_with_redirect() {
     // A failed rename (here, a name longer than the 100-char limit) must
     // redirect back to /enroll/keys (PRG + flash), not return a raw JSON error
