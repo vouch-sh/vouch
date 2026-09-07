@@ -3697,19 +3697,6 @@ xmldsig-core1#4.6#11f2cbdd	MUST	Note, if the application wishes to exclude the <
 xmldsig-core1#4.6#20aa0b58	MUST	This attribute is purely advisory; no validation of the MimeType information is required by this specification.
 xmldsig-core1#4.6#a2710f5a	SHOULD	Applications which require normative type and encoding information for signature validation should specify Transforms with well defined resulting types and/or e
 xmldsig-core1#5.2#d2376ee1	MUST	<complexType name="SignaturePropertyType" mixed="true"> <choice maxOccurs="unbounded"> <any namespace="##other" processContents="lax" /> <!-- (1,1) elements fro
-xmldsig-core1#6.1#1bf573ef	MUST	3 Exclusive XML Canonicalization 1.0 (with comments) http://www.w3.org/2001/10/xml-exc-c14n#WithComments Transform Required.
-xmldsig-core1#6.1#28c96088	SHOULD	2 HMAC-SHA256 http://www.w3.org/2001/04/xmldsig-more#hmac-sha256 Recommended.
-xmldsig-core1#6.1#46e71c16	MUST	3 SHA512 http://www.w3.org/2001/04/xmlenc#sha512 Encoding Required.
-xmldsig-core1#6.1#5385ebaa	MUST	This may be implemented via the XPath specification specified in 6.6.4: Enveloped Signature Transform; it must have the same effect as that specified by the XPa
-xmldsig-core1#6.1#81e3ba60	SHOULD	2 Enveloped Signature (**note) http://www.w3.org/2000/09/xmldsig#enveloped-signature Recommended.
-xmldsig-core1#6.1#92000f4d	MUST	9 DSAwithSHA256 http://www.w3.org/2009/xmldsig11#dsa-sha256 [section 6.4.1 DSA] Canonicalization Required.
-xmldsig-core1#6.1#94139a07	SHOULD	3 DSAwithSHA1 (signature verification) http://www.w3.org/2000/09/xmldsig#dsa-sha1 [section 6.4.1 DSA] Recommended.
-xmldsig-core1#6.1#bb740908	SHOULD	3 Exclusive XML Canonicalization 1.0 (omit comments) http://www.w3.org/2001/10/xml-exc-c14n# Recommended.
-xmldsig-core1#6.1#c3e5b78a	SHOULD	Use of XPath filter is recommended over use of XSLT.
-xmldsig-core1#6.1#d5e00ab8	MUST	Such parameter elements have a descriptive element name, which is frequently algorithm specific, and must be in the XML Signature namespace or an algorithm spec
-xmldsig-core1#6.1#ddbfe736	MUST	1 base64 (*note) http://www.w3.org/2000/09/xmldsig#base64 MAC Required.
-xmldsig-core1#6.1#e3cff523	SHOULD	When using transforms, we RECOMMEND selecting the least expressive choice that still accomplishes the needs of the use case at hand: Use of XPath filter 2.0 is 
-xmldsig-core1#6.1#e9a94cc7	MUST	1 HMAC-SHA224 http://www.w3.org/2001/04/xmldsig-more#hmac-sha224 Signature Required.
 xmldsig-core1#6.2#264ed95c	SHOULD	Use of SHA-256 is strongly recommended over SHA-1 because recent advances in cryptanalysis (see e.g. [SHA-1-Analysis]) have cast doubt on the long-term collisio
 xmldsig-core1#6.2#bcc1446c	SHOULD NOT	Digest algorithms that are known not to be collision resistant should not be used in DigestMethod elements.
 xmldsig-core1#6.2#c2534a3a	MUST	Therefore, SHA-1 support is required in this specification only for backwards-compatibility reasons.

@@ -542,16 +542,31 @@ fn verify_signature_with_certs(
         return Err(SignatureError::NoCertificateMatch);
     }
 
+    let mut first_parse_err = None;
     for cert_der in signing_certificates {
         match try_verify_with_cert(algorithm_uri, sig_bytes, signed_info_bytes, cert_der) {
             Ok(()) => return Ok(()),
             Err(SignatureError::SignatureInvalid) => continue,
             Err(SignatureError::NoCertificateMatch) => continue,
+            // A per-candidate DER/SPKI parse failure only disqualifies that
+            // certificate: IdP metadata routinely lists multiple
+            // KeyDescriptors during certificate rotation (SAML Metadata
+            // Section 2.4.1.1), so a malformed entry must not mask a valid
+            // certificate later in the list. The first parse error is
+            // preserved so the all-candidates-fail case still reports it.
+            Err(SignatureError::Other(e)) => {
+                tracing::warn!(error = %e, "Skipping unparseable IdP signing certificate");
+                if first_parse_err.is_none() {
+                    first_parse_err = Some(SignatureError::Other(e));
+                }
+            }
+            // The signature algorithm is loop-invariant: if it is
+            // unsupported, no candidate can succeed.
             Err(e) => return Err(e),
         }
     }
 
-    Err(SignatureError::NoCertificateMatch)
+    Err(first_parse_err.unwrap_or(SignatureError::NoCertificateMatch))
 }
 
 /// Attempt to verify a signature using a single DER-encoded X.509 certificate.
@@ -917,6 +932,79 @@ mod tests {
         }
         out.extend_from_slice(content);
         out
+    }
+
+    // =========================================================================
+    // Certificate-loop candidate scan tests
+    // =========================================================================
+
+    /// Sign `message` with `key_pair` using RSA-PKCS1-SHA256.
+    fn rsa_sign(key_pair: &aws_lc_rs::rsa::KeyPair, message: &[u8]) -> Vec<u8> {
+        let mut sig = vec![0u8; key_pair.public_modulus_len()];
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        key_pair
+            .sign(
+                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                &rng,
+                message,
+                &mut sig,
+            )
+            .unwrap();
+        sig
+    }
+
+    /// SAML Metadata §2.4.1.1: IdP metadata may list several KeyDescriptor
+    /// certificates (normal during certificate rotation), so a malformed DER
+    /// entry earlier in the list must not mask a valid certificate later on.
+    #[test]
+    fn cert_loop_skips_unparseable_cert_before_valid_one() {
+        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let good_cert = build_self_signed_der(&key_pair);
+        let message = b"signed-info bytes";
+        let sig = rsa_sign(&key_pair, message);
+
+        let certs = vec![vec![0xde, 0xad, 0xbe, 0xef], good_cert];
+        let result = verify_signature_with_certs(SIG_RSA_SHA256, &sig, message, &certs);
+        assert!(
+            result.is_ok(),
+            "a malformed certificate must not mask a valid later one: {result:?}"
+        );
+    }
+
+    // SAML Metadata §2.4.1.1: when every candidate certificate is unparseable,
+    // the first parse error is reported for diagnostics.
+    #[test]
+    fn cert_loop_reports_parse_error_when_all_certs_unparseable() {
+        let err = verify_signature_with_certs(
+            SIG_RSA_SHA256,
+            b"sig",
+            b"message",
+            &[vec![0xde, 0xad, 0xbe, 0xef]],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SignatureError::Other(_)),
+            "expected the preserved parse error, got: {err}"
+        );
+    }
+
+    // XML Signature §6.1: an unsupported algorithm fails the whole scan (the
+    // algorithm is loop-invariant, so no candidate could succeed).
+    #[test]
+    fn cert_loop_aborts_on_unsupported_algorithm() {
+        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let cert = build_self_signed_der(&key_pair);
+        let err = verify_signature_with_certs(
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+            b"sig",
+            b"message",
+            &[cert],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SignatureError::UnsupportedAlgorithm(_)),
+            "expected UnsupportedAlgorithm, got: {err}"
+        );
     }
 
     // =========================================================================
