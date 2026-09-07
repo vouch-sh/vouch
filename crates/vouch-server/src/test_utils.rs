@@ -1305,6 +1305,7 @@ pub async fn forge_short_lived_access_token(
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
             source_code_hash: Option::None,
+            client_id: Some(&claims.client_id),
         },
     )
     .await

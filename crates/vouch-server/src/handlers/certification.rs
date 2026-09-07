@@ -33,7 +33,7 @@ use crate::{
     AppState, db,
     error::OAuthErrorCode,
     handlers::browser_login::hmac_sha256_base64url,
-    handlers::session::create_session_cookie,
+    handlers::session::{create_session_cookie, session_cookie_max_age},
     services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
@@ -202,10 +202,9 @@ pub(crate) async fn complete_login(
         }
     };
 
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let cookie = create_session_cookie(
         session_result.token.expose_secret(),
-        session_hours.saturating_mul(3600),
+        session_cookie_max_age(session_result.expires_in),
     );
 
     // ── 6. Redirect to authorize endpoint with pending_auth ──────────────

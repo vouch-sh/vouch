@@ -322,7 +322,6 @@ enroll-error-registration-link-used = This registration link has already been us
 enroll-error-attestation-failed = Attestation verification failed: { $detail }
 enroll-error-key-already-registered = This security key is already registered
 enroll-error-key-serialize-failed = Failed to serialize key
-enroll-error-invalid-session-hours = Invalid session hours
 enroll-error-browser-session-create-failed = Failed to create session
 enroll-error-render-failed = Failed to render template
 login-error-invalid-user-handle = Invalid user handle format
