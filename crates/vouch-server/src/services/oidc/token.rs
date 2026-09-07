@@ -180,6 +180,11 @@ pub enum ClientAuthError {
     InvalidCredentials,
     /// Client requires secret but none provided.
     SecretRequired,
+    /// A FAPI 2.0 client presented a client secret. FAPI clients authenticate
+    /// only with `private_key_jwt` or mTLS, so a secret — which can only be a
+    /// row minted before secret minting was blocked for FAPI profiles — is
+    /// never a valid credential for them.
+    FapiSecretRejected,
     /// Database error.
     DatabaseError(String),
     /// mTLS certificate verification failed.
@@ -213,6 +218,7 @@ impl ClientAuthError {
             Self::InvalidClient
             | Self::InvalidCredentials
             | Self::SecretRequired
+            | Self::FapiSecretRejected
             | Self::MtlsVerificationFailed(_) => ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
                 "Client authentication failed",
@@ -864,6 +870,24 @@ pub async fn authenticate_client(
     }
 
     if requires_secret {
+        // FAPI 2.0 Security Profile §5.3.2.1 item 6: the authorization server
+        // "shall authenticate clients using one of the following methods:
+        // MTLS as specified in Section 2 of [RFC8705], or private_key_jwt as
+        // specified in Section 9 of [OIDC]". PAR already derives the actual
+        // method from the verification witnesses and refuses anything else
+        // (`validate_fapi_client_auth_method`); this is the same gate for
+        // every endpoint that verifies a shared secret, so a secret row a
+        // FAPI client acquired before minting was blocked for FAPI profiles
+        // cannot authenticate it anywhere. Checked before the hash lookup so
+        // a dead secret is refused without ever being compared.
+        if client.is_fapi() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "rejected client_secret authentication for a FAPI 2.0 client"
+            );
+            return Err(ClientAuthError::FapiSecretRejected);
+        }
+
         // Secret is required - validate it
         let secret = credentials
             .client_secret
@@ -2013,6 +2037,57 @@ mod tests {
         assert!(
             verification.is_some(),
             "secret verification witness must be present for a secret-authenticated client"
+        );
+    }
+
+    /// A FAPI 2.0 client registered for `private_key_jwt` that still holds a
+    /// secret row (minted before secret minting was blocked for FAPI
+    /// profiles) must not be able to authenticate with it. FAPI 2.0 Security
+    /// Profile §5.3.2.1 item 6: the authorization server "shall authenticate
+    /// clients using one of the following methods: MTLS as specified in
+    /// Section 2 of [RFC8705], or private_key_jwt as specified in Section 9
+    /// of [OIDC]". Without this gate the secret was live at every
+    /// secret-verifying endpoint even though PAR refused it.
+    #[tokio::test]
+    async fn test_authenticate_client_rejects_secret_for_fapi_client() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "fapi-secret-auth@example.com").await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: crate::test_utils::TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                with_secret: true, // a pre-guard row that would otherwise verify
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(&state, &creds).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::FapiSecretRejected)),
+            "a FAPI client's secret must be refused, got {result:?}"
+        );
+        assert!(
+            matches!(
+                ClientAuthError::FapiSecretRejected.into_service_error(),
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidClient,
+                    ..
+                }
+            ),
+            "the refusal must surface as RFC 6749 invalid_client"
         );
     }
 
