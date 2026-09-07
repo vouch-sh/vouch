@@ -27,7 +27,7 @@ use vouch_common::fido2_types::{Challenge, CredentialId, UserHandle};
 use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse, protocol};
 
 use super::extractors::ValidJson;
-use super::session::AuthContext;
+use super::session::{AuthContext, session_cookie_max_age};
 use super::{ClientDataError, ClientDataProof};
 use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
@@ -985,6 +985,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -1099,7 +1100,10 @@ pub(crate) async fn complete_enrollment_after_identity(
     tracing::info!("Session created for user: {}", redact_email(&user.email));
     tracing::debug!("Setting session cookie and redirecting to {destination}");
 
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -1645,15 +1649,6 @@ pub(crate) async fn browser_register_complete(
         validated.aaguid.as_deref().unwrap_or("unknown")
     );
 
-    // Create a session for the browser so the user stays logged in
-    let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            Tr::new("enroll-error-invalid-session-hours").to_string(),
-        )
-    })?;
-
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let enroll_client_id = state.config().base_url.clone();
     let user_id_str = reg_state.user_id.to_string();
@@ -1695,6 +1690,7 @@ pub(crate) async fn browser_register_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },
@@ -1723,7 +1719,10 @@ pub(crate) async fn browser_register_complete(
     let token = session_result.token;
 
     // Return success template with session cookie
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
     let html = SuccessTemplate.render().map_err(|e| {
         tracing::error!("Template render error: {}", e);
         ServiceError::api(

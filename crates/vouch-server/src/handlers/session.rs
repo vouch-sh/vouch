@@ -657,6 +657,17 @@ pub(crate) async fn extract_org_admin(
 /// flow redirects from an external IdP (e.g. Google) → `/oauth/callback`
 /// → `/enroll/keys`. With `Strict`, the browser treats the entire redirect
 /// chain as cross-site and refuses to send the cookie on the final hop.
+/// Cookie `Max-Age` for a session cookie carrying a freshly minted access
+/// token, derived from the token's own `expires_in` so the cookie and the
+/// token it carries always expire together. Re-deriving the value from
+/// `session_hours` at the call site is the same drift the RFC 8693 exchange
+/// path had between its reported `expires_in` and the issued token; the
+/// minted lifetime is the single source of truth.
+#[must_use]
+pub(crate) fn session_cookie_max_age(expires_in: u64) -> i64 {
+    i64::try_from(expires_in).unwrap_or(i64::MAX)
+}
+
 #[must_use]
 pub(crate) fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
     Cookie::build((vouch_common::SESSION_COOKIE_NAME, token.to_owned()))

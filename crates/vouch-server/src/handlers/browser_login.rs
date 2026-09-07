@@ -27,7 +27,7 @@ use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
 use crate::handlers::extractors::ValidJson;
-use crate::handlers::session::{create_session_cookie, get_auth_context};
+use crate::handlers::session::{create_session_cookie, get_auth_context, session_cookie_max_age};
 use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
@@ -784,6 +784,7 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
+            max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.as_second()),
             },
@@ -830,8 +831,10 @@ pub(crate) async fn browser_login_complete(
     );
 
     // Create session cookie
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
 
     // Determine redirect URL
     let redirect_url = if let Some(pending_id) = auth_state.pending_auth {
