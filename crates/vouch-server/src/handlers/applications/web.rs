@@ -675,19 +675,13 @@ pub(crate) async fn delete_secret_form(
         .filter(|s| s.id != secret_id && s.is_valid(&now))
         .count();
 
-    // mTLS-FAPI clients cannot authenticate with a secret (minting is
-    // blocked and mTLS is their only client-auth path), so the last-secret
+    // FAPI clients cannot authenticate with a secret (minting is blocked for
+    // every FAPI profile, and `authenticate_client` refuses a secret from a
+    // FAPI client at every secret-verifying endpoint), so the last-secret
     // floor does not apply: pre-guard secret rows must remain deletable.
-    // private_key_jwt FAPI clients are NOT exempt — the FAPI auth-method
-    // gate is not yet enforced at the token endpoint, so their secret may
-    // still be live and the floor must keep protecting it.
-    let mtls_fapi = client.is_fapi()
-        && matches!(
-            client.token_endpoint_auth_method,
-            db::TokenEndpointAuthMethod::TlsClientAuth
-                | db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        );
-    if other_active == 0 && !mtls_fapi {
+    // The authoritative check is the same exemption inside
+    // `revoke_oauth_client_secret`'s transaction.
+    if other_active == 0 && !client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-secret-last-active"),

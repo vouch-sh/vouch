@@ -2987,9 +2987,9 @@ async fn test_delete_last_secret_allowed_for_fapi_client() {
 }
 
 // FAPI 2.0 Security Profile §5.3.2.1 item 6: the exemption is scoped to
-// mTLS FAPI clients; the
-// non-FAPI floor stays intact (see test_delete_last_secret_rejected above
-// for the sibling negative case at the handler level).
+// FAPI clients; the non-FAPI floor stays intact (see
+// test_delete_last_secret_rejected above for the sibling negative case at
+// the handler level).
 #[tokio::test]
 async fn test_delete_last_secret_still_rejected_for_non_fapi_client() {
     let (app, state) = test_app().await;
@@ -3016,13 +3016,12 @@ async fn test_delete_last_secret_still_rejected_for_non_fapi_client() {
     assert_eq!(json["code"], "last_secret");
 }
 
-// FAPI 2.0 Security Profile §5.3.2.1 item 6 requires mTLS or private_key_jwt
-// at the token endpoint, but that gate is currently enforced only at PAR —
-// a private_key_jwt FAPI client's stored secret can still authenticate at
-// /oauth/token. The delete-floor exemption is therefore mTLS-only: the last
-// secret of a private_key_jwt FAPI client is still protected.
+// FAPI 2.0 Security Profile §5.3.2.1 item 6 requires mTLS or private_key_jwt,
+// and `authenticate_client` now refuses a secret from any FAPI client, so a
+// private_key_jwt FAPI client's pre-guard secret row is just as dead as an
+// mTLS client's: the delete-floor exemption covers it too.
 #[tokio::test]
-async fn test_delete_last_secret_still_rejected_for_private_key_jwt_fapi_client() {
+async fn test_delete_last_secret_allowed_for_private_key_jwt_fapi_client() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "api-pkjwt-fapi-del-last@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -3045,7 +3044,7 @@ async fn test_delete_last_secret_still_rejected_for_private_key_jwt_fapi_client(
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
             fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
-            with_secret: true, // pre-guard row; may still be live at the token endpoint
+            with_secret: true, // pre-guard row; refused by authenticate_client
             ..Default::default()
         },
     )
@@ -3069,11 +3068,17 @@ async fn test_delete_last_secret_still_rejected_for_private_key_jwt_fapi_client(
     .await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "the floor must hold for a private_key_jwt FAPI client, body: {body}"
+        StatusCode::NO_CONTENT,
+        "a private_key_jwt FAPI client's last dead secret must be deletable, body: {body}"
     );
-    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
-    assert_eq!(json["code"], "last_secret");
+    let now = jiff::Timestamp::now();
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.iter().all(|s| !s.is_valid(&now)),
+        "the dead secret must be revoked, got {secrets:?}"
+    );
 }
 
 // ========================================================================
