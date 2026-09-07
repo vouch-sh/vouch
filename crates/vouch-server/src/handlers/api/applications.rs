@@ -407,16 +407,27 @@ pub(crate) async fn delete_application_api(
         ));
     }
 
-    db::delete_oauth_client(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete OAuth client: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
+    // Delete the client and revoke every session it minted (M2M and
+    // user-issued). Deleting an application is a stronger revocation intent
+    // than the /revoke endpoint, so it must revoke at least as much — without
+    // the session delete, access tokens minted for the deleted application
+    // keep validating at resource endpoints until `exp`. Fail closed: on
+    // error the caller must not see 204 while tokens may still validate.
+    db::delete_oauth_client_and_revoke_sessions(
+        &state.store,
+        &state.session_cache,
+        &app_id,
+        &client.client_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to delete OAuth client: {e}");
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            "Internal database error",
+        )
+    })?;
 
     tracing::info!("Deleted OAuth application: {}", client.client_id);
 

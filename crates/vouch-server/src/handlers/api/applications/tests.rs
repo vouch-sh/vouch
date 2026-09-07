@@ -1472,6 +1472,125 @@ async fn test_delete_application_requires_auth() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Deleting an application must revoke every access token it minted — both
+/// user-issued grants (session keyed by the resource owner's `user_id`,
+/// tagged with the issuing `client_id`) and M2M `client_credentials`
+/// sessions (keyed by `user_id == client_id`, RFC 9068 §2.2).
+///
+/// Regression for the sibling of the `revoke_tokens_api` bug: deletion is a
+/// stronger revocation intent than the "revoke all tokens" button, yet
+/// `delete_application_api` used to call the bare `delete_oauth_client`,
+/// leaving already-minted tokens validating at resource endpoints until
+/// `exp`. Without the fix the userinfo probe below stays 200 after the
+/// delete and this test fails.
+#[tokio::test]
+async fn test_delete_application_revokes_minted_sessions() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "delete-revokes@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let owner_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&owner_token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // A user-issued access token for this client (authorization_code shape:
+    // session keyed by the real user, tagged with the issuing client).
+    let user_access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // An M2M (client_credentials) session: user_id == client_id.
+    create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client.client_id,
+            email: &format!("{}@clients", client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // A sibling client owned by the same user, to prove deletion does not
+    // over-revoke another application's tokens.
+    let other_client = create_test_oauth_client(&state.store, &user.id).await;
+    let other_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&other_client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::OK,
+        "user-issued token should validate before the app is deleted"
+    );
+
+    // Delete the application.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The user-issued token must be dead.
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "user-issued access token must NOT validate after the app is deleted"
+    );
+    assert_eq!(
+        count_sessions_for_client(&state.store, &client.client_id).await,
+        0,
+        "user-issued sessions for the deleted client must be gone"
+    );
+    // The M2M session must be dead too.
+    assert_eq!(
+        count_sessions_for_user(&state.store, &client.client_id).await,
+        0,
+        "M2M sessions for the deleted client must be gone"
+    );
+
+    // No over-revocation: the sibling client's token still validates.
+    assert_eq!(
+        userinfo_status(&app, &other_token).await,
+        StatusCode::OK,
+        "deleting one application must not revoke another client's tokens"
+    );
+    // And the owner's own first-party session survives.
+    assert_eq!(
+        userinfo_status(&app, &owner_token).await,
+        StatusCode::OK,
+        "the owner's first-party session must survive the app delete"
+    );
+}
+
 // ========================================================================
 // POST /api/v1/applications/:id/revoke — Revoke Tokens
 // ========================================================================
