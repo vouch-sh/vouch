@@ -445,7 +445,7 @@ jobs:
       - name: Upload release artifacts
         # Pinned action handles draft creation and multi-glob asset upload;
         # kept intentionally over a hand-rolled gh release script step.
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: true
@@ -799,7 +799,7 @@ jobs:
       - name: Generate release notes
         # Pinned action handles GitHub auto-generated release notes plus the
         # custom body; kept intentionally over a hand-rolled gh release step.
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           draft: false
