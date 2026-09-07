@@ -738,7 +738,19 @@ pub(crate) async fn complete_enrollment_after_identity(
     // whitespace-bearing, or local-part-less value must not be persisted
     // verbatim by `enroll_user_with_org`, which only trims and lowercases.
     // This chokepoint covers both the OIDC and SAML callback paths.
-    if !crate::email::Email::is_valid_address(&identity.email) {
+    //
+    // Unlike SCIM — where `is_valid_address` defers the empty-domain case
+    // (`foo@`) to `create_scim_user`'s in-transaction org-ownership gate —
+    // enrollment has no downstream ownership check: `enroll_user_with_org`
+    // would call `get_or_create_org` with `domain: ""` and mint a phantom
+    // empty-domain organization whose first enrollee becomes org admin. So
+    // an empty derived domain is rejected here too (`identity.domain` is
+    // `Some("")` exactly when the email's domain part is empty; `None` —
+    // e.g. Google consumer accounts without an `hd` claim — stays allowed
+    // and never creates an org).
+    if !crate::email::Email::is_valid_address(&identity.email)
+        || identity.domain.as_deref() == Some("")
+    {
         tracing::warn!(
             email = %redact_email(&identity.email),
             "rejected IdP enrollment: upstream email is not a valid address"

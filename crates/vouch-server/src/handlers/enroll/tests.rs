@@ -1775,3 +1775,41 @@ async fn test_enrollment_accepts_well_formed_email() {
         "a valid email must proceed through enrollment"
     );
 }
+
+// The empty-domain shape (`foo@`) is deferred to an ownership gate on the
+// SCIM path, but enrollment has no such gate: without rejection here,
+// enroll_user_with_org would mint a phantom empty-domain organization via
+// get_or_create_org("") and the first enrollee would become its org admin.
+#[tokio::test]
+async fn test_enrollment_rejects_empty_domain_email() {
+    let state = test_app_state().await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-3", None).await;
+    let identity = IdentityResult {
+        email: "foo@".to_string(),
+        // What services/idp/oidc.rs derives for this email via domain_of.
+        domain: Some(String::new()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = crate::db::get_user_by_email(&state.store, "foo@")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "an empty-domain email must not be persisted"
+    );
+    let org = state
+        .store
+        .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "")
+        .await
+        .expect("db query ok");
+    assert!(
+        org.is_none(),
+        "no phantom empty-domain organization may be created"
+    );
+}
