@@ -337,6 +337,7 @@ login-error-missing-origin = Origin header required
 login-error-origin-mismatch = Request origin mismatch
 enroll-error-auth-complete-failed = Failed to complete authentication
 enroll-error-token-verify-failed = Failed to verify identity token
+enroll-error-invalid-email = The identity provider returned an invalid email address. Please contact your administrator.
 enroll-error-domain-not-allowed-title = Domain Not Allowed
 enroll-error-domain-not-allowed = Only users from the following domains can enroll: { $domains }. Your email ({ $email }) is not from an allowed domain.
 enroll-error-identity-conflict-title = Account Linking Blocked

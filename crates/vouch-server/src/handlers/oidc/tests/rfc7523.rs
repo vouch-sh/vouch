@@ -229,6 +229,176 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
     );
 }
 
+// ========================================================================
+// JWKS key-search short-circuit regression (find_matching_key)
+//
+// `find_matching_key` used to `return build_decoding_key_from_jwk(...)` on the
+// first selector-matching candidate, so an unbuildable key positioned before a
+// usable one in the JWKS aborted the search and returned `invalid_client` even
+// though a valid key existed later in the set. These tests exercise the full
+// token-endpoint path (client_auth.rs -> find_matching_key_with_refresh_client
+// -> find_matching_key) with a malformed key first, then the valid key.
+// ========================================================================
+
+/// Build a JWT client whose inline JWKS contains, in order, a metadata-complete
+/// but unbuildable EC key (missing `x`/`y`, same `kid`) and then the valid EC
+/// signing key. Reproduces the production-reachable scenario: `is_usable_for`
+/// does not check EC component presence, so the malformed key passes
+/// write-time validation and reaches the runtime matcher ahead of the valid
+/// key.
+async fn create_test_jwt_client_malformed_first(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, valid_jwk) = generate_es256_signing_key();
+    // Same kid as the valid key; metadata-complete but missing x/y -> unbuildable.
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "use": "sig",
+        "alg": "ES256",
+        "kid": "test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk, valid_jwk] });
+
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    (client, pkcs8_bytes)
+}
+
+/// Sign a JWT assertion with an ES256 key and a caller-supplied JWS header
+/// (so the test can carry or omit `kid` to exercise both `find_matching_key`
+/// branches).
+fn sign_jwt_assertion_with_header(
+    pkcs8_bytes: &[u8],
+    header: &serde_json::Value,
+    client_id: &str,
+    audience: &str,
+    jti: Option<&str>,
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + 60,
+        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
+    });
+    sign_jwt_assertion(pkcs8_bytes, header, &claims)
+}
+
+// RFC 7517 §4: the algorithm-fallback branch (no `kid` in the JWS header) must
+// also skip an unbuildable `kty`-matched key and continue to a later valid key
+// of the same `kty`. This branch is reached whenever a JWT assertion carries no
+// `kid`, so a single malformed key ahead of a valid one reproduces the bug
+// without any duplicate-`kid` precondition.
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_alg_fallback_skips_unbuildable() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jwt-malformed-nokid@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jwt_client_malformed_first(&state.store, &user.id).await;
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    // No kid in the header -> algorithm-fallback branch (kty = EC for ES256).
+    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT" });
+    let assertion = sign_jwt_assertion_with_header(
+        &pkcs8_bytes,
+        &header,
+        &client.client_id,
+        &token_endpoint,
+        None,
+    );
+
+    let body = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        code,
+        urlencoding::encode("https://example.com/callback"),
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private_key_jwt alg-fallback should skip the unbuildable first key and verify with the valid sibling: {resp_body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert!(response.get("access_token").is_some());
+}
+
+// RFC 7517 §4 (fail-closed): a JWKS containing ONLY an unbuildable key must
+// still fail client auth — the fix only adds the ability to find a usable key
+// later in the set; it never accepts a token that would not otherwise verify.
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_only_unbuildable_fails() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jwt-only-malformed@example.com").await;
+    let (_pkcs8_bytes, _valid_jwk) = generate_es256_signing_key();
+    // JWKS with only the malformed (missing x/y) EC key.
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": "test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Sign with a fresh key the server cannot verify — the point is that no
+    // usable key exists in the JWKS, so client auth must fail (fail-closed).
+    let (other_pkcs8, _other_jwk) = generate_es256_signing_key();
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &other_pkcs8, None);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a JWKS with only an unbuildable key must fail client auth (fail-closed): {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "only-unbuildable JWKS must map to invalid_client: {resp_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
     // RFC 7523 Section 3: JTI replay must be rejected at the handler level.

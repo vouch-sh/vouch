@@ -575,15 +575,31 @@ fn find_decoding_key(
 ) -> Result<jsonwebtoken::DecodingKey, anyhow::Error> {
     let expected_key_alg = jsonwebtoken::jwk::KeyAlgorithm::from(alg);
 
-    // Try matching by kid first
+    // Try matching by kid first. RFC 7517 Section 4.5 makes `kid` uniqueness a
+    // SHOULD, not a MUST, so a kid-matching entry that cannot be built (a key
+    // type this crate has no decoder for, or missing/invalid components) is
+    // skipped and the scan continues, exactly like the algorithm and
+    // last-resort searches below. The first build error is preserved so the
+    // all-candidates-fail case reports the same error a single-key set would.
     if let Some(kid) = kid {
+        let mut first_build_err = None;
         for jwk in &jwks.keys {
             if jwk.common.key_id.as_deref() == Some(kid) {
-                return jsonwebtoken::DecodingKey::from_jwk(jwk)
-                    .map_err(|e| anyhow::anyhow!("Failed to build key from JWK (kid={kid}): {e}"));
+                match jsonwebtoken::DecodingKey::from_jwk(jwk) {
+                    Ok(key) => return Ok(key),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping unusable JWK with kid '{kid}'");
+                        if first_build_err.is_none() {
+                            first_build_err = Some(anyhow::anyhow!(
+                                "Failed to build key from JWK (kid={kid}): {e}"
+                            ));
+                        }
+                    }
+                }
             }
         }
-        anyhow::bail!("No key with kid '{kid}' found in upstream JWKS");
+        return Err(first_build_err
+            .unwrap_or_else(|| anyhow::anyhow!("No key with kid '{kid}' found in upstream JWKS")));
     }
 
     // Fall back to matching by algorithm

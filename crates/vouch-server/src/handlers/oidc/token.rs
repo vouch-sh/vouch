@@ -1084,6 +1084,62 @@ impl<'a> ExchangeTokens<'a> {
     }
 }
 
+/// Resolve the effective audience for an RFC 8693 token-exchange request.
+///
+/// Enforces, in order:
+/// - RFC 8693 §2.1: `resource`, when present, must be an absolute URI without
+///   a fragment (syntax only; the raw string is preserved as the audience
+///   because `ResourceUri::parse` normalizes host-only URIs).
+/// - RFC 8707: when both `audience` and `resource` are present they must match.
+/// - RFC 8707: the resolved audience must be on the authenticated client's
+///   registered `resource_uris` allowlist — the same `is_valid_resource_uri`
+///   check enforced at the `/authorize` (handlers/oidc/authorize.rs) and `/par`
+///   (handlers/oidc/par.rs) front doors. Token exchange has no front door: it
+///   is reachable directly at `/oauth/token`, so the allowlist must be gated
+///   here, at the chokepoint for both the RFC 9068 access-token and OIDC
+///   ID-token issuance forks.
+///
+/// Returns `Ok(Some(aud))` for an allowed audience, `Ok(None)` when neither
+/// `audience` nor `resource` was supplied, or `Err` with an `invalid_target`
+/// [`ServiceError`] for the caller to render as an OAuth response.
+fn resolve_exchange_audience(
+    audience: Option<&str>,
+    resource: Option<&str>,
+    client: &crate::db::OAuthClient,
+) -> Result<Option<String>, ServiceError> {
+    if let Some(res) = resource
+        && crate::services::oidc::ResourceUri::parse(res).is_err()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "Invalid resource parameter: must be an absolute URI without a fragment",
+        ));
+    }
+
+    let effective = match (audience, resource) {
+        (Some(aud), Some(res)) if aud != res => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "resource and audience parameters must match when both are provided",
+            ));
+        }
+        (Some(aud), _) => Some(aud.to_string()),
+        (None, Some(res)) => Some(res.to_string()),
+        (None, None) => None,
+    };
+
+    if let Some(aud) = effective.as_deref()
+        && !client.is_valid_resource_uri(aud)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "The requested audience is not registered for this client",
+        ));
+    }
+
+    Ok(effective)
+}
+
 /// Handle token exchange grant (RFC 8693).
 ///
 /// RFC 8693 Section 2.1: The token exchange grant requires client
@@ -1167,37 +1223,17 @@ async fn handle_token_exchange_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    // RFC 8693 §2.1: "The value of the 'resource' parameter MUST be an
-    // absolute URI, as specified by Section 4.3 of [RFC3986], that MAY
-    // include a query component and MUST NOT include a fragment component."
-    // Validate only — the raw string stays the audience value below, because
-    // `ResourceUri::parse` normalizes (host-only URIs gain a trailing `/`)
-    // and the issued `aud` must equal what the client sent.
-    if let Some(res) = params.resource.as_deref()
-        && crate::services::oidc::ResourceUri::parse(res).is_err()
-    {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidTarget,
-            "Invalid resource parameter: must be an absolute URI without a fragment",
-        )
-        .into_oauth_response()
-        .into_response();
-    }
-
-    // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
-    // If both are present, they must match.
-    let effective_audience = match (params.audience.as_deref(), params.resource.as_deref()) {
-        (Some(aud), Some(res)) if aud != res => {
-            return ServiceError::oauth(
-                OAuthErrorCode::InvalidTarget,
-                "resource and audience parameters must match when both are provided",
-            )
-            .into_oauth_response()
-            .into_response();
-        }
-        (Some(aud), _) => Some(aud),
-        (None, Some(res)) => Some(res),
-        (None, None) => None,
+    // Resolve the effective audience. This call is the chokepoint that
+    // enforces the client's `resource_uris` allowlist (RFC 8707) on the
+    // token-exchange back door, which (unlike /authorize and /par) has no
+    // front door to gate it earlier.
+    let effective_audience = match resolve_exchange_audience(
+        params.audience.as_deref(),
+        params.resource.as_deref(),
+        &authenticated_client.client,
+    ) {
+        Ok(aud) => aud,
+        Err(e) => return e.into_oauth_response().into_response(),
     };
 
     let tokens = match ExchangeTokens::from_request(&params) {
@@ -1208,7 +1244,7 @@ async fn handle_token_exchange_grant(
     let exchange_params = TokenExchangeParams {
         subject: tokens.subject,
         actor: tokens.actor,
-        audience: effective_audience,
+        audience: effective_audience.as_deref(),
         scope: params.scope.as_deref(),
         requested_token_type: tokens.requested_token_type,
         client_id: &authenticated_client.client.client_id,
