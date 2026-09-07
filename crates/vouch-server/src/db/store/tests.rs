@@ -1030,6 +1030,165 @@ async fn tx_update_by_index_with_no_matches_issues_no_writes() {
 }
 
 // ========================================================================
+// transition — precondition-gated compare-and-update with retry.
+// ========================================================================
+
+#[tokio::test]
+async fn transition_applies_rejects_and_reports_not_found() {
+    let store = test_store().await;
+    let inserted = store
+        .insert(&TestDoc {
+            name: "gate".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+
+    // Precondition rejects: nothing is written, not even a version bump.
+    let outcome = store
+        .transition::<TestDoc, (), i32, _>(&inserted.id, |d| {
+            if d.value != 99 {
+                return Err(d.value);
+            }
+            d.value = 100;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Rejected(1)),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 1);
+    assert_eq!(
+        fetched.version, inserted.version,
+        "a rejected transition must not write"
+    );
+
+    // Precondition holds: the mutation commits and the version advances.
+    let outcome = store
+        .transition::<TestDoc, &'static str, (), _>(&inserted.id, |d| {
+            if d.value != 1 {
+                return Err(());
+            }
+            d.value = 2;
+            Ok("applied")
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Applied("applied")),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 2);
+    assert_eq!(fetched.version, inserted.version + 1);
+
+    // Unknown id.
+    let outcome = store
+        .transition::<TestDoc, (), (), _>("no-such-doc", |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Transition::NotFound), "got {outcome:?}");
+}
+
+/// A concurrent write that bumps the version but leaves the precondition
+/// satisfied costs a retry, not a failure — and the precondition is
+/// re-evaluated against the fresh row, so a concurrent write that does
+/// change what it looks at is rejected instead of overwritten.
+#[tokio::test]
+async fn transition_retries_over_benign_bump_and_rejects_real_change() {
+    let mut store = test_store().await;
+    let inserted = store
+        .insert(&TestDoc {
+            name: "bump".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    let writer = store.clone();
+    let target = inserted.id.clone();
+    store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let is_target = doc_id == target;
+        let target = target.clone();
+        Box::pin(async move {
+            if !is_target || attempt != 0 {
+                return;
+            }
+            // Benign: rename only. `value` — what the precondition gates on —
+            // is untouched, so the retried transition still applies.
+            let found = writer
+                .modify::<TestDoc, _>(&target, |d| d.name = "bumped".to_string())
+                .await
+                .unwrap();
+            assert!(found);
+        })
+    }));
+
+    let outcome = store
+        .transition::<TestDoc, (), (), _>(&inserted.id, |d| {
+            if d.value != 1 {
+                return Err(());
+            }
+            d.value = 2;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Applied(())),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 2);
+    assert_eq!(
+        fetched.data.name, "bumped",
+        "the concurrent write survives the retry"
+    );
+    assert_eq!(fetched.version, inserted.version + 2);
+
+    // Now a concurrent write that changes the gated field: the retry
+    // re-reads it and the precondition rejects instead of clobbering.
+    let writer = store.clone();
+    let target = inserted.id.clone();
+    store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let is_target = doc_id == target;
+        let target = target.clone();
+        Box::pin(async move {
+            if !is_target || attempt != 0 {
+                return;
+            }
+            let found = writer
+                .modify::<TestDoc, _>(&target, |d| d.value = 50)
+                .await
+                .unwrap();
+            assert!(found);
+        })
+    }));
+    let outcome = store
+        .transition::<TestDoc, (), i32, _>(&inserted.id, |d| {
+            if d.value != 2 {
+                return Err(d.value);
+            }
+            d.value = 3;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Rejected(50)),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.data.value, 50,
+        "the winner's write is never overwritten"
+    );
+}
+
 // update_by_index version guard.
 //
 // Every write `update_by_index` issues is guarded by the version read from

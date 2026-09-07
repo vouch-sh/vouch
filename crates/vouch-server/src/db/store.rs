@@ -338,6 +338,18 @@ fn index_value_condition<T: sea_query::IntoIden>(
 // DocumentStore
 // ============================================================================
 
+/// Outcome of [`DocumentStore::transition`].
+#[derive(Debug)]
+pub enum Transition<A, R> {
+    /// The precondition held on the row version that was written; the
+    /// mutation committed.
+    Applied(A),
+    /// The precondition rejected the current row; nothing was written.
+    Rejected(R),
+    /// No document with that id exists.
+    NotFound,
+}
+
 /// Core abstraction for the encrypted document store.
 ///
 /// Wraps a database pool and a crypto implementation. All serialization,
@@ -386,8 +398,9 @@ pub struct DocumentStore {
 pub(crate) type ModifyHookFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
 
-/// Test-only hook invoked inside [`DocumentStore::modify`] between the
-/// internal read and the compare-and-update, receiving `(doc_id, attempt)`.
+/// Test-only hook invoked inside [`DocumentStore::transition`] (and so
+/// [`DocumentStore::modify`]) between the internal read and the
+/// compare-and-update, receiving `(doc_id, attempt)`.
 ///
 /// Lets tests deterministically interleave a concurrent write into the OCC
 /// window (forcing a version-conflict retry) without relying on
@@ -994,7 +1007,7 @@ impl DocumentStore {
     /// On version conflict the document is re-read and the modifier is
     /// re-applied, up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)
     /// times.  Transient DSQL errors are handled by `compare_and_update`
-    /// internally.
+    /// internally. An unconditional [`Self::transition`].
     ///
     /// Returns `false` if the document does not exist.
     ///
@@ -1006,9 +1019,54 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T),
     {
+        match self
+            .transition::<T, (), std::convert::Infallible, _>(id, |data| {
+                modifier(data);
+                Ok(())
+            })
+            .await?
+        {
+            Transition::Applied(()) => Ok(true),
+            Transition::NotFound => Ok(false),
+            Transition::Rejected(never) => match never {},
+        }
+    }
+
+    /// Read a document, let `decide` check a precondition and mutate it, and
+    /// write it back under optimistic concurrency — re-reading and deciding
+    /// again on every version conflict, up to
+    /// [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES) times.
+    ///
+    /// This is the primitive for every single-use or state-machine document
+    /// (device-auth requests, OIDC states, authorization codes, PAR
+    /// requests): `decide` returns `Ok(a)` to commit the mutation it made or
+    /// `Err(r)` to leave the row untouched. Because the precondition is
+    /// re-evaluated against the freshly read row on each attempt, two
+    /// properties hold at once:
+    ///
+    /// - **exactly one winner** — of two concurrent callers, the loser's
+    ///   retry reads the winner's write and its precondition rejects it;
+    /// - **benign writers are invisible** — a concurrent write that bumps the
+    ///   version without changing what the precondition looks at (a
+    ///   device-code poll stamping `last_poll_at`, a cascade clearing an
+    ///   unrelated field) costs a retry, not a spurious failure.
+    ///
+    /// A single-shot `get` + `compare_and_update` that bails on `false`
+    /// conflates the two, which is how a valid device approval came to fail
+    /// whenever the CLI's poll landed inside its read-to-write window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a read or write fails, or if the version conflict
+    /// persists after retries.
+    pub async fn transition<T, A, R, F>(&self, id: &str, decide: F) -> Result<Transition<A, R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
         for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
             let Some(doc) = self.get::<T>(id).await? else {
-                return Ok(false);
+                return Ok(Transition::NotFound);
             };
             #[cfg(test)]
             if let Some(hook) = &self.modify_test_hook {
@@ -1016,12 +1074,19 @@ impl DocumentStore {
             }
             let version = doc.version;
             let mut data = doc.data;
-            modifier(&mut data);
+            let applied = match decide(&mut data) {
+                Ok(applied) => applied,
+                Err(rejected) => return Ok(Transition::Rejected(rejected)),
+            };
             if self.compare_and_update(id, version, &data).await? {
-                return Ok(true);
+                return Ok(Transition::Applied(applied));
             }
             if attempt < super::pool::MAX_DSQL_RETRIES {
-                tracing::debug!(doc_id = id, attempt, "version conflict in modify, retrying");
+                tracing::debug!(
+                    doc_id = id,
+                    attempt,
+                    "version conflict in transition, retrying"
+                );
                 tokio::time::sleep(super::pool::retry_backoff(attempt)).await;
             }
         }

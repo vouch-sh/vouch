@@ -1087,6 +1087,334 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     );
 }
 
+// ============================================================================
+// Poll-vs-transition OCC window.
+//
+// `update_device_auth_poll_time` rewrites the full row through
+// `compare_and_update`, bumping the OCC version even though it only changes
+// `last_poll_at`. When that bump lands inside a state transition's
+// read-to-CAS window, the transition's stale CAS loses. `authorize_device_auth`,
+// `deny_device_auth`, and `try_consume_device_auth` all run through
+// `DocumentStore::transition`, which re-reads, re-checks the precondition,
+// and re-CASes on that mismatch, so a valid approval or redemption no longer
+// spuriously fails. The `modify_test_hook` fires inside that window.
+// ============================================================================
+
+/// Deterministic proof that `authorize_device_auth` overcomes a poll-induced
+/// version bump. A device-code poll is injected into the read-to-CAS window
+/// on attempt 0 (forcing the stale CAS to lose), then the transition
+/// re-reads the bumped row and succeeds on attempt 1 — the same outcome the
+/// probabilistic poll-vs-authorize race must always produce now. The
+/// `Pending` precondition is re-checked on every attempt, so an authorize
+/// that re-reads a non-Pending row is still rejected (verified for two real
+/// concurrent authorizes by `test_authorize_device_auth_concurrent`).
+#[tokio::test]
+async fn test_authorize_retries_over_concurrent_poll_version_bump() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let id = create_device_auth_request(
+        &store,
+        "retry-poll-auth-hash",
+        "RETRY-AUTH",
+        None,
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "retry-poll@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "retry-poll@example.com",
+            name: "Key",
+            credential_id: b"cred-retry-poll",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    // The racing poll runs through a hookless clone so its own
+    // compare_and_update does not re-enter the hook.
+    let writer = store.clone();
+    let poll_id = id.clone();
+    let first_attempt_polls = Arc::new(AtomicU32::new(0));
+    let counted = first_attempt_polls.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let poll_id = poll_id.clone();
+        let counted = counted.clone();
+        let is_target = doc_id == poll_id;
+        Box::pin(async move {
+            if attempt != 0 || !is_target {
+                return;
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
+                .await
+                .expect("hook poll must not error");
+            assert!(allowed, "hook poll must clear the rate-limit gate");
+        })
+    }));
+
+    authorize_device_auth(
+        &hooked,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "retry-poll@example.com",
+            authenticator_id: &auth_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("authorize must succeed via retry after the poll bumped the version");
+
+    // The poll really happened, proving the CAS legitimately lost attempt 0.
+    assert_eq!(
+        first_attempt_polls.load(Ordering::SeqCst),
+        1,
+        "the hook must have run the racing poll exactly once on attempt 0"
+    );
+
+    // The retry landed the authorization with the caller's attribution and
+    // preserved the poll's sibling-field write.
+    let after = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get after")
+        .expect("device auth must exist");
+    let approval = match after.state {
+        DeviceAuthState::Authorized(approval) => Some(approval),
+        _ => None,
+    }
+    .expect("authorize must have transitioned the row to Authorized");
+    assert_eq!(approval.user_id, user_id);
+    assert_eq!(approval.authenticator_id, auth_id);
+    assert!(
+        after.last_poll_at.is_some(),
+        "the racing poll's last_poll_at must survive the retried authorize"
+    );
+
+    // End-to-end: the authorized device code is still redeemable.
+    let _claim = try_consume_device_auth(&store, "retry-poll-auth-hash")
+        .await
+        .expect("authorized device code must be consumable after the retried authorize");
+}
+
+/// Pins the bounded-retry guarantee: if a concurrent writer bumps the row's
+/// OCC version on *every* transition attempt (so every CAS loses), authorize
+/// must return `Err` after `MAX_DSQL_RETRIES + 1` attempts — not loop
+/// forever. The hook bypasses the poll rate limit by bumping the version
+/// through a direct `compare_and_update` (only `last_poll_at` changes, so
+/// the row stays `Pending`), which is the worst case the retry bound
+/// defends against.
+#[tokio::test]
+async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
+    use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let id =
+        create_device_auth_request(&store, "exhaust-auth-hash", "EXHAUST", None, expires_at, 5)
+            .await
+            .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "exhaust@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "exhaust@example.com",
+            name: "Key",
+            credential_id: b"cred-exhaust",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    let writer = store.clone();
+    let bump_id = id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+        let writer = writer.clone();
+        let bump_id = bump_id.clone();
+        let is_target = doc_id == bump_id;
+        Box::pin(async move {
+            if !is_target {
+                return;
+            }
+            // Unconditionally bump the version on every attempt (bypassing
+            // the poll rate limit) so the authorize CAS always loses.
+            let doc = writer
+                .get::<DeviceAuthRequestDoc>(&bump_id)
+                .await
+                .expect("hook get")
+                .expect("hook doc must exist");
+            let mut data = doc.data;
+            data.last_poll_at = Some(jiff::Timestamp::now());
+            let won = writer
+                .compare_and_update(&bump_id, doc.version, &data)
+                .await
+                .expect("hook cas must not error");
+            assert!(won, "hook must win the version bump on every attempt");
+        })
+    }));
+
+    let result = authorize_device_auth(
+        &hooked,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "exhaust@example.com",
+            authenticator_id: &auth_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await;
+
+    let err = result.expect_err("authorize must error after exhausting retries");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("concurrently modified after"),
+        "error must report retry exhaustion, got: {msg}"
+    );
+
+    // The row never left Pending despite the repeated CAS losses.
+    let after = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get after")
+        .expect("device auth must exist");
+    assert!(
+        matches!(after.state, DeviceAuthState::Pending),
+        "row must stay Pending after retry exhaustion, got {:?}",
+        after.state
+    );
+}
+
+/// The same poll-induced version bump inside `try_consume_device_auth`'s
+/// read-to-CAS window. Before the shared transition, a single-shot CAS loss
+/// surfaced as `AlreadyConsumed`, which the token handler treats as a
+/// device-code replay — revoking the sessions issued from that code and
+/// answering `invalid_grant` — for a code that was still redeemable.
+#[tokio::test]
+async fn test_consume_retries_over_concurrent_poll_version_bump() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::db::claim::ClaimError;
+
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "retry-poll-consume-hash";
+    let id =
+        create_device_auth_request(&store, device_code_hash, "RETRY-CONS", None, expires_at, 5)
+            .await
+            .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "retry-consume@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "retry-consume@example.com",
+            name: "Key",
+            credential_id: b"cred-retry-consume",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "retry-consume@example.com",
+            authenticator_id: &auth_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("authorize device auth");
+
+    let writer = store.clone();
+    let poll_id = id.clone();
+    let polls = Arc::new(AtomicU32::new(0));
+    let counted = polls.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let poll_id = poll_id.clone();
+        let counted = counted.clone();
+        let is_target = doc_id == poll_id;
+        Box::pin(async move {
+            if attempt != 0 || !is_target {
+                return;
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
+                .await
+                .expect("hook poll must not error");
+            assert!(allowed, "hook poll must clear the rate-limit gate");
+        })
+    }));
+
+    let (approval, _claim) = try_consume_device_auth(&hooked, device_code_hash)
+        .await
+        .expect("a redeemable code must be consumed despite the racing poll");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        1,
+        "the racing poll ran exactly once"
+    );
+    assert_eq!(approval.user_id, user_id);
+    assert_eq!(approval.authenticator_id, auth_id);
+
+    // Consumed exactly once: a second redemption is the real replay case.
+    let replay = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(replay, Err(ClaimError::AlreadyConsumed)),
+        "second consume must be rejected, got {replay:?}"
+    );
+    let after = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get after")
+        .expect("device auth must exist");
+    assert!(
+        matches!(after.state, DeviceAuthState::Consumed { .. }),
+        "row must be Consumed, got {:?}",
+        after.state
+    );
+    assert!(
+        after.last_poll_at.is_some(),
+        "the racing poll's last_poll_at must survive the retried consume"
+    );
+}
+
 /// A `Consumed` device-auth row must survive the authenticator-deletion
 /// cascade with its `Consumed` status and `user_id` attribution intact —
 /// `handlers::device::revoke_sessions_for_device_replay` keys its post-hoc

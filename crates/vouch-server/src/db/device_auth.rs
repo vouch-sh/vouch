@@ -4,7 +4,7 @@
 use super::claim::ClaimError;
 use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
 use crate::assurance::HardwareVerification;
 use crate::crypto::webauthn_verify::AuthTime;
 use anyhow::{Result, bail};
@@ -267,11 +267,16 @@ pub struct AuthorizeDeviceAuthParams<'a> {
 
 /// Authorize a device auth request.
 ///
-/// Uses `compare_and_update` (OCC) so two concurrent authorization
-/// attempts cannot both succeed under PostgreSQL READ COMMITTED — the
-/// loser sees a version mismatch and is reported as a conflict. The
-/// blind `tx.update` it replaced would have let both writers commit,
-/// each clobbering the other's user attribution.
+/// A [`DocumentStore::transition`] gated on `status == Pending`, so two
+/// concurrent authorization attempts cannot both succeed under PostgreSQL
+/// READ COMMITTED (the loser re-reads `Authorized` and is rejected), while a
+/// concurrent device-code poll ([`update_device_auth_poll_time`]) — which
+/// bumps the row's version without leaving `Pending` — only costs a retry.
+/// A single-shot `compare_and_update` that bailed on any version mismatch
+/// failed a valid approval (WebAuthn ceremony already verified, row still
+/// `Pending`) whenever the CLI's poll landed inside its read-to-write
+/// window, surfacing as a 500 the user could only clear by re-running the
+/// browser ceremony.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     params: AuthorizeDeviceAuthParams<'_>,
@@ -288,50 +293,49 @@ pub async fn authorize_device_auth(
         bail!("authorize_device_auth called with empty id");
     }
 
-    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    let Some(doc) = doc else {
-        bail!(
-            "authorize_device_auth: no device auth request \
-             found with id '{}'",
-            id
-        );
-    };
-
-    if doc.data.status != DeviceAuthStatus::Pending {
-        bail!(
+    let hw = HardwareVerification::from(verification);
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, (), DeviceAuthStatus, _>(id, |data| {
+            if data.status != DeviceAuthStatus::Pending {
+                return Err(data.status);
+            }
+            data.status = DeviceAuthStatus::Authorized;
+            data.user_id = Some(user_id.to_string());
+            data.user_email = Some(user_email.to_string());
+            data.authenticator_id = Some(authenticator_id.to_string());
+            data.hardware_verified = hw.hardware_verified();
+            data.auth_time = hw.auth_time();
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "authorize_device_auth: device auth request '{id}' was \
+                 concurrently modified after retries: {e}"
+            )
+        })?;
+    match outcome {
+        Transition::Applied(()) => Ok(()),
+        Transition::Rejected(status) => bail!(
             "authorize_device_auth: device auth request '{}' \
              already has status '{:?}'",
             id,
-            doc.data.status
-        );
-    }
-
-    let version = doc.version;
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Authorized;
-    data.user_id = Some(user_id.to_string());
-    data.user_email = Some(user_email.to_string());
-    data.authenticator_id = Some(authenticator_id.to_string());
-    let verification = HardwareVerification::from(verification);
-    data.hardware_verified = verification.hardware_verified();
-    data.auth_time = verification.auth_time();
-    let won = store.compare_and_update(id, version, &data).await?;
-    if !won {
-        bail!(
-            "authorize_device_auth: device auth request '{}' was \
-             concurrently modified",
+            status
+        ),
+        Transition::NotFound => bail!(
+            "authorize_device_auth: no device auth request \
+             found with id '{}'",
             id
-        );
+        ),
     }
-
-    Ok(())
 }
 
 /// Deny a device auth request.
 ///
-/// Uses `compare_and_update` (OCC) for the same reason as
-/// [`authorize_device_auth`]: two concurrent denials (or a concurrent
-/// authorize + deny) cannot both win under READ COMMITTED.
+/// A [`DocumentStore::transition`] gated on `status == Pending`, for the
+/// same reason as [`authorize_device_auth`]: two concurrent denials (or a
+/// concurrent authorize + deny) cannot both win under READ COMMITTED, and a
+/// concurrent poll cannot spuriously fail a denial.
 ///
 /// Test-only: no production path denies explicitly — a request either gets
 /// approved, expires, or is voided when its approving authenticator is
@@ -342,37 +346,35 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         bail!("deny_device_auth called with empty id");
     }
 
-    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    let Some(doc) = doc else {
-        bail!(
-            "deny_device_auth: no device auth request \
-             found with id '{}'",
-            id
-        );
-    };
-
-    if doc.data.status != DeviceAuthStatus::Pending {
-        bail!(
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, (), DeviceAuthStatus, _>(id, |data| {
+            if data.status != DeviceAuthStatus::Pending {
+                return Err(data.status);
+            }
+            data.status = DeviceAuthStatus::Denied;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "deny_device_auth: device auth request '{id}' was \
+                 concurrently modified after retries: {e}"
+            )
+        })?;
+    match outcome {
+        Transition::Applied(()) => Ok(()),
+        Transition::Rejected(status) => bail!(
             "deny_device_auth: device auth request '{}' \
              already has status '{:?}'",
             id,
-            doc.data.status
-        );
-    }
-
-    let version = doc.version;
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Denied;
-    let won = store.compare_and_update(id, version, &data).await?;
-    if !won {
-        bail!(
-            "deny_device_auth: device auth request '{}' was \
-             concurrently modified",
+            status
+        ),
+        Transition::NotFound => bail!(
+            "deny_device_auth: no device auth request \
+             found with id '{}'",
             id
-        );
+        ),
     }
-
-    Ok(())
 }
 
 /// Witness that an authorized device code (RFC 8628 Section 3.5) was
@@ -398,11 +400,16 @@ pub struct DeviceCodeClaim {
 /// On success returns the [`StoredApproval`] read in the same atomic
 /// step plus a [`DeviceCodeClaim`] witness — proof that this caller won the
 /// optimistic-concurrency consume. Token issuance takes its user
-/// attribution from this approval, never from an earlier (raceable) read.
-/// All "lost" cases (not found, no redeemable approval, expired, or
-/// concurrent consumer won via version mismatch) map to
-/// [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable, each
-/// rejected as an invalid_grant.
+/// attribution from this approval, never from an earlier (raceable) read:
+/// the approval is taken from the exact row version the
+/// [`DocumentStore::transition`] committed against. All "lost" cases (not
+/// found, no redeemable approval, expired, or a concurrent consumer won —
+/// the retry re-reads its `Consumed` write and the precondition rejects it)
+/// map to [`ClaimError::AlreadyConsumed`] — deliberately
+/// indistinguishable, each rejected as an invalid_grant. A concurrent
+/// version bump that leaves the approval redeemable (a poll, a cascade
+/// clearing an unrelated field) costs a retry rather than a spurious
+/// `AlreadyConsumed`, which the handler would otherwise treat as a replay.
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
@@ -417,26 +424,32 @@ pub async fn try_consume_device_auth(
         return Err(ClaimError::AlreadyConsumed);
     };
 
-    let DeviceAuthState::Authorized(approval) = state_from_stored(&doc.data) else {
-        return Err(ClaimError::AlreadyConsumed);
-    };
-    if doc.data.expires_at <= now {
+    // Pre-check on the indexed read so the common "not redeemable" cases
+    // never open a transition; the precondition below re-checks the same
+    // thing on the row version actually written.
+    if !matches!(state_from_stored(&doc.data), DeviceAuthState::Authorized(_))
+        || doc.data.expires_at <= now
+    {
         return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Atomic transition: compare_and_update returns false on version mismatch
-    // (a concurrent caller wrote a newer version first).
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Consumed;
-    data.consumed_at = Some(now);
-    let won = store
-        .compare_and_update(&doc.id, doc.version, &data)
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, StoredApproval, (), _>(&doc.id, |data| {
+            let DeviceAuthState::Authorized(approval) = state_from_stored(data) else {
+                return Err(());
+            };
+            if data.expires_at <= now {
+                return Err(());
+            }
+            data.status = DeviceAuthStatus::Consumed;
+            data.consumed_at = Some(now);
+            Ok(approval)
+        })
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
-    if won {
-        Ok((approval, DeviceCodeClaim { _private: () }))
-    } else {
-        Err(ClaimError::AlreadyConsumed)
+    match outcome {
+        Transition::Applied(approval) => Ok((approval, DeviceCodeClaim { _private: () })),
+        Transition::Rejected(()) | Transition::NotFound => Err(ClaimError::AlreadyConsumed),
     }
 }
 
