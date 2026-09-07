@@ -1674,7 +1674,7 @@ mod tests {
         let now_after = jiff::Timestamp::now().as_second();
 
         // Read the committed JTI back by its deterministic document ID.
-        let id = crate::db::dpop_jti_id_for_test(&validated.jti);
+        let id = crate::db::dpop::deterministic_dpop_jti_id(&validated.jti);
         let doc = store
             .get::<crate::db::documents::dpop::DpopJtiDoc>(&id)
             .await

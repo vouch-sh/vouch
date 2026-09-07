@@ -24,7 +24,7 @@ mod credentials;
 mod device_auth;
 pub(crate) mod document_type;
 pub(crate) mod documents;
-mod dpop;
+pub(crate) mod dpop;
 pub(crate) mod dsql;
 mod enrollment;
 mod github;
@@ -166,10 +166,6 @@ pub use dpop::{
     DpopJtiClaim, check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
     generate_dpop_nonce, validate_and_consume_dpop_nonce,
 };
-// Test-only access to the deterministic DPoP JTI document ID, so integration
-// tests can read back a committed JTI and assert on its retention window.
-#[cfg(test)]
-pub(crate) use dpop::dpop_jti_id_for_test;
 
 // Re-export credentials types and functions
 pub use credentials::{

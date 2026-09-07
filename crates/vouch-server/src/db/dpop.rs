@@ -18,7 +18,7 @@ const MAX_JTI_LENGTH: usize = 256;
 /// DPoP JTIs are globally unique (RFC 9449 Section 11.1), unlike JWT
 /// assertion JTIs which are scoped per-client. The domain separator
 /// `"dpop_jti\0"` prevents cross-type ID collisions.
-fn deterministic_dpop_jti_id(jti: &str) -> String {
+pub(crate) fn deterministic_dpop_jti_id(jti: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
 
     let mut ctx = digest::Context::new(&SHA256);
@@ -174,13 +174,4 @@ pub async fn delete_expired_dpop_nonces(store: &DocumentStore, _now: &str) -> Re
 /// Delete expired JTIs. Returns count deleted.
 pub async fn delete_expired_dpop_jtis(store: &DocumentStore, _now: &str) -> Result<u64> {
     store.delete_expired(DpopJtiDoc::DOC_TYPE).await
-}
-
-/// Test-only access to the deterministic JTI document ID, so integration tests
-/// can read back a `DpopJtiDoc` committed by [`check_and_store_dpop_jti`] and
-/// assert on its `expires_at` (e.g. that JTI retention covers the full
-/// skew-extended proof-validity window — RFC 9449 §4.3 step 11).
-#[cfg(test)]
-pub(crate) fn dpop_jti_id_for_test(jti: &str) -> String {
-    deterministic_dpop_jti_id(jti)
 }
