@@ -2,6 +2,8 @@
 //! RFC 8705 Section 3 — mTLS certificate-bound access tokens.
 
 use super::helpers::*;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::DeviceApproval;
 
 // ========================================================================
 // RFC 8705 Section 3 — mTLS Token Binding Tests
@@ -820,5 +822,424 @@ async fn test_rfc8705_id_token_carries_the_same_binding_as_the_access_token() {
     assert!(
         id_claims["cnf"]["jkt"].is_null(),
         "no DPoP proof was presented, so there is no jkt to confirm"
+    );
+}
+
+// ========================================================================
+// RFC 8705 §2 — mTLS client authentication at the device token endpoint
+//
+// Parity coverage for the device authorization grant (RFC 8628). Until these
+// tests were added the device token handler was the sole grant that issued
+// `ClientAuthProof::NoAuth` for `tls_client_auth` / `self_signed_tls_client_auth`
+// clients and bound the access token to whatever cert the caller presented,
+// never matching it against the client's registered cert identity. The
+// authorization-code, client-credentials, refresh-token, and PAR grants all
+// route such clients through `authenticate_client_mtls`; the device flow now
+// does too. See `handlers/device.rs::device_token` (Authorized arm).
+// ========================================================================
+
+/// Create an approved device authorization bound to a registered `client_id`
+/// and return the plaintext `device_code` the client polls with. Mirrors the
+/// `setup_authorized_device` helper used by the RFC 8628 tests but pins the
+/// `client_id` so the device token handler resolves a registered OAuth client
+/// and enforces its `token_endpoint_auth_method`. `label` distinguishes
+/// concurrent device authorizations within one test.
+async fn setup_authorized_device_for_client(
+    state: &std::sync::Arc<crate::AppState>,
+    user: &crate::db::User,
+    authenticator_id: &str,
+    client_id: &str,
+    label: &str,
+) -> String {
+    let device_code = format!("mtls_dev_{label}");
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    let id = crate::db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(&device_code),
+        &format!("MT{label}"),
+        Some(client_id),
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create device authorization request");
+    crate::db::authorize_device_auth(
+        &state.store,
+        crate::db::AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user.id,
+            user_email: &user.email,
+            authenticator_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("approve device authorization");
+    device_code
+}
+
+/// POST `/oauth/token` with the device_code grant and an injected mTLS cert.
+async fn poll_device_token_with_cert(
+    app: &axum::Router,
+    device_code: &str,
+    cert_der: Option<Vec<u8>>,
+) -> (StatusCode, String) {
+    http_post_form_with_cert(
+        app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}"
+        ),
+        &[],
+        cert_der,
+    )
+    .await
+}
+
+/// RFC 8705 §2.1 + §3 + RFC 8628: a `tls_client_auth` client with
+/// `tls_client_certificate_bound_access_tokens = true` redeems an
+/// approved device code presenting its **registered** certificate (matching
+/// subject DN). The token endpoint must issue a cert-bound access token for
+/// the victim user with `cnf.x5t#S256` equal to the registered cert's
+/// thumbprint. This is the legitimate flow the fix must not break.
+#[tokio::test]
+async fn test_rfc8705_device_token_mtls_succeeds_with_registered_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-mtls-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("device-mtls-ok");
+    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+        .expect("parse generated cert");
+    let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
+    let thumbprint = cert_thumbprint(&cert_der);
+
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "ok").await;
+
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered mTLS client redeeming an approved device code must receive 200: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = json["access_token"].as_str().expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(user.id.as_str()),
+        "token subject must be the approving (victim) user: {body}"
+    );
+    assert_eq!(
+        claims["client_id"].as_str(),
+        Some(client_id.as_str()),
+        "token client_id must be the registered mTLS client: {body}"
+    );
+    assert_eq!(
+        claims["cnf"]["x5t#S256"].as_str(),
+        Some(thumbprint.as_str()),
+        "cnf.x5t#S256 must be the registered cert's thumbprint: {body}"
+    );
+}
+
+/// RFC 8705 §2.1 + RFC 8628: a `tls_client_auth` client redeems an approved
+/// device code presenting a certificate whose subject DN does **not** match
+/// the client's registered `tls_client_auth_subject_dn`. Mirrors
+/// `test_rfc8705_token_mtls_invalid_client_when_cert_mismatch` (auth-code
+/// side): the token endpoint must reject with `401 invalid_client` — the
+/// parity gap the device flow previously left open. The device code must
+/// NOT be consumed by the failed authentication, so the legitimate holder
+/// of the registered cert can still redeem it.
+#[tokio::test]
+async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-mtls-wrong@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Client registered against cert A's subject DN.
+    let cert_a_der = make_test_cert_der("device-registered");
+    let parsed_a =
+        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn_a,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "mismatch").await;
+
+    // Attacker presents cert B — a different self-signed cert.
+    let cert_b_der = make_test_cert_der("device-imposter");
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_b_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "cert subject mismatch at the device token endpoint must return 401: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client",
+        "mismatched cert must be rejected as invalid_client: {body}"
+    );
+
+    // The failed mTLS client authentication must not have consumed the
+    // single-use device code — the legitimate holder of the registered cert
+    // can still redeem it (the gate runs before `try_consume_device_auth`).
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_a_der)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device code must survive a failed mTLS auth so the legitimate client can retry: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        json.get("access_token").is_some(),
+        "the legitimate retry must issue an access token: {body}"
+    );
+}
+
+/// RFC 8705 §2.1 + RFC 8628: a `tls_client_auth` client redeems an approved
+/// device code over the mTLS port without presenting any client certificate.
+/// The token endpoint must reject with `401 invalid_client` ("mTLS client
+/// certificate required") and must not consume the device code.
+#[tokio::test]
+async fn test_rfc8705_device_token_mtls_invalid_client_when_no_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-mtls-nocert@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("device-nocert-registered");
+    let parsed =
+        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let subject_dn = parsed.subject_dn.expect("subject DN");
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "nocert").await;
+
+    // No client certificate presented.
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, None).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "missing cert for an mTLS-client-auth client must return 401: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client",
+        "missing cert must be rejected as invalid_client: {body}"
+    );
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("mTLS client certificate required")),
+        "error_description must explain the missing cert: {body}"
+    );
+
+    // The device code must survive so the legitimate client can retry with
+    // its registered cert.
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device code must survive a missing-cert rejection: {body}"
+    );
+}
+
+/// Create an OAuth client authenticated via `self_signed_tls_client_auth`
+/// (RFC 8705 §2.2.2) whose access tokens are cert-bound, with the certificate
+/// pinned inline via the JWKS `x5c` member. Returns the `client_id`.
+async fn create_self_signed_mtls_client_with_cert_binding(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+    cert_der: &[u8],
+) -> String {
+    use base64::Engine;
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(cert_der);
+    let jwks = serde_json::json!({
+        "keys": [{ "kty": "EC", "crv": "P-256", "x5c": [x5c_b64] }]
+    });
+    create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            name: "Test self-signed mTLS Token Client".to_string(),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
+            jwks: TestJwks::Custom(jwks),
+            tls_client_certificate_bound_access_tokens: true,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .client_id
+}
+
+/// RFC 8705 §2.2.2 + §3 + RFC 8628: a `self_signed_tls_client_auth` client
+/// whose JWKS `x5c` pins cert A redeems an approved device code presenting
+/// cert A (its thumbprint matches an x5c entry). The token endpoint must
+/// issue a cert-bound access token with `cnf.x5t#S256` equal to cert A's
+/// thumbprint. Both mTLS-client-auth variants share the device token code
+/// path; this is the self-signed half of the legitimate-flow guard.
+#[tokio::test]
+async fn test_rfc8705_device_token_self_signed_mtls_succeeds_with_registered_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-ssmtls-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("device-ssmtls-ok");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let client_id =
+        create_self_signed_mtls_client_with_cert_binding(&state.store, &user.id, &cert_der).await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "ssok").await;
+
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "self-signed mTLS client with a matching x5c must receive 200: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = json["access_token"].as_str().expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(user.id.as_str()),
+        "token subject must be the approving user: {body}"
+    );
+    assert_eq!(
+        claims["cnf"]["x5t#S256"].as_str(),
+        Some(thumbprint.as_str()),
+        "cnf.x5t#S256 must be the registered cert's thumbprint: {body}"
+    );
+}
+
+/// RFC 8705 §2.2.2 + RFC 8628: a `self_signed_tls_client_auth` client whose
+/// JWKS `x5c` pins cert A redeems an approved device code presenting cert B,
+/// whose thumbprint matches no `x5c` entry. The token endpoint must reject
+/// with `401 invalid_client` — the auth-code grant rejects this exact setup
+/// via `verify_self_signed_tls_client_auth`; the device flow now does too.
+/// The device code must survive so the legitimate holder of cert A can retry.
+#[tokio::test]
+async fn test_rfc8705_device_token_self_signed_mtls_invalid_client_when_cert_mismatch() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-ssmtls-wrong@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_a_der = make_test_cert_der("device-ssmtls-registered");
+    let client_id =
+        create_self_signed_mtls_client_with_cert_binding(&state.store, &user.id, &cert_a_der).await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "ssmismatch").await;
+
+    // Attacker presents cert B — not in the client's JWKS x5c.
+    let cert_b_der = make_test_cert_der("device-ssmtls-imposter");
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_b_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "self-signed cert absent from JWKS x5c must return 401: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client",
+        "unregistered self-signed cert must be rejected as invalid_client: {body}"
+    );
+
+    // The device code must survive the failed auth for the legitimate retry.
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_a_der)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device code must survive a failed self-signed mTLS auth: {body}"
+    );
+}
+
+/// Regression guard: the mTLS client-authentication gate is scoped to
+/// `tls_client_auth` / `self_signed_tls_client_auth` clients only. A
+/// `client_secret_basic` client that separately opted into
+/// `tls_client_certificate_bound_access_tokens` (a sender-constraint-only
+/// profile with no registered cert identity — RFC 8705 §3 binds to whatever
+/// cert is presented, by design, the same as the auth-code grant's
+/// `extract_mtls_thumbprint`) must still redeem a device code and receive a
+/// cert-bound token. An over-broad gate that called
+/// `authenticate_client_mtls` unconditionally would break this profile;
+/// this test pins that it does not.
+#[tokio::test]
+async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding_succeeds() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-csb-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("device-csb-cert");
+    let thumbprint = cert_thumbprint(&cert_der);
+
+    // client_secret_basic + tls_client_certificate_bound_access_tokens: the
+    // sender-constraint-only profile the bug report scopes out.
+    let client_id = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Device secret-basic cert-bound client".to_string(),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::ClientSecretBasic),
+            tls_client_certificate_bound_access_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .client_id;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "csb").await;
+
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_secret_basic + cert-bound client must still redeem a device code: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = json["access_token"].as_str().expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["cnf"]["x5t#S256"].as_str(),
+        Some(thumbprint.as_str()),
+        "the presented cert must still be bound for the sender-constraint-only profile: {body}"
     );
 }

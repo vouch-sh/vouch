@@ -24,6 +24,25 @@ use crate::db::{self, store::DocumentStore};
 /// Nonce validity in seconds (5 minutes).
 const NONCE_VALIDITY_SECONDS: i64 = 300;
 
+/// Forward clock-skew tolerance for a DPoP proof's `iat` (RFC 9449 §4.3),
+/// in seconds.
+///
+/// [`validate_dpop_claims`] accepts a proof while `now - iat` falls in
+/// `[-PROOF_SKEW_SECONDS, max_age]`, so the freshness window extends
+/// `PROOF_SKEW_SECONDS` past `max_age` when a client clock runs ahead of the
+/// server. RFC 9449 §4.3 step 11 says the server "SHOULD retain the `jti`
+/// value for at least the length of time the DPoP proof JWT would be
+/// considered valid", so the replay record must outlive that whole window.
+///
+/// [`validate_dpop_common`] therefore commits the JTI for
+/// `config_max_age + PROOF_SKEW_SECONDS`. Retaining for only `config_max_age`
+/// would let the background cleanup delete the row while the proof is still
+/// fresh, reopening a replay window at the resource endpoint — where a nonce
+/// is optional and the JTI row is the sole replay defense. Sharing this
+/// constant between the freshness check and the JTI retention keeps the two
+/// durations from drifting apart.
+pub(crate) const PROOF_SKEW_SECONDS: i64 = 60;
+
 /// Supported DPoP signing algorithms (asymmetric only per RFC 9449).
 ///
 /// See [`JwsAlgorithm::FAPI_ALLOWED`] for the FAPI 2.0 citation excluding RS256.
@@ -342,7 +361,12 @@ pub fn validate_dpop_claims(
     // Not too old, and not more than 60 seconds into the future — RFC 9449
     // permits limited clock skew. Same bounds check the key-deletion step-up
     // gate uses (there with no skew); `now` was stamped once at the entry point.
-    if !crate::services::RecencyWindow::with_skew(max_age_seconds, 60).accepts_at(now, claims.iat) {
+    // `PROOF_SKEW_SECONDS` is the same constant `validate_dpop_common` adds to
+    // `max_age_seconds` for JTI retention, so the replay record outlives the
+    // freshness window (RFC 9449 §4.3 step 11).
+    if !crate::services::RecencyWindow::with_skew(max_age_seconds, PROOF_SKEW_SECONDS)
+        .accepts_at(now, claims.iat)
+    {
         return Err(DpopError::Expired);
     }
 
@@ -493,7 +517,18 @@ async fn validate_dpop_common(
     // The returned `DpopJtiClaim` is moved into the `ValidatedDpopProof`
     // below, so the "this JTI was committed by this request" guarantee is
     // carried by the returned value for as long as it lives.
-    let jti_claim = match db::check_and_store_dpop_jti(store, &claims.jti, config_max_age).await {
+    //
+    // RFC 9449 §4.3 step 11: retain the JTI for at least as long as the proof
+    // is considered valid. `validate_dpop_claims` accepts an `iat` up to
+    // `PROOF_SKEW_SECONDS` into the future, so a proof committed at `now`
+    // stays fresh until `now + config_max_age + PROOF_SKEW_SECONDS`. Retaining
+    // for only `config_max_age` let the cleanup task delete the row inside
+    // that window, reopening a replay gap at the resource endpoint (where a
+    // nonce is optional and the JTI is the sole replay defense). `saturating_add`
+    // defers the impossible-but-huge case to `check_and_store_dpop_jti`'s own
+    // overflow check (`ClaimError::Database`) rather than panicking.
+    let jti_retention = config_max_age.saturating_add(PROOF_SKEW_SECONDS);
+    let jti_claim = match db::check_and_store_dpop_jti(store, &claims.jti, jti_retention).await {
         Ok(claim) => claim,
         Err(db::claim::ClaimError::AlreadyConsumed) => return Err(DpopError::ReplayDetected),
         Err(db::claim::ClaimError::InvalidInput(msg)) => return Err(DpopError::InvalidFormat(msg)),
@@ -1338,5 +1373,348 @@ mod tests {
             "x5t_s256 must be populated from x5t#S256 JSON key"
         );
         assert!(cnf.jkt.is_none(), "jkt must be None when absent from JSON");
+    }
+
+    // ========================================================================
+    // RFC 9449 §4.3 step 11 — JTI retention vs. the resource-endpoint replay
+    // window (integration guard for `validate_dpop_common`).
+    //
+    // `validate_dpop_common` must commit the JTI for `config_max_age +
+    // PROOF_SKEW_SECONDS`, not `config_max_age` alone, or the cleanup task can
+    // delete the row while the proof is still fresh, reopening a replay gap
+    // at the resource endpoint (where a nonce is optional and the JTI is the
+    // sole replay defense). This test exercises the real call site
+    // (`validate_dpop_at_resource`) with a signed proof, then reads the
+    // committed JTI back from the store and asserts its `expires_at` covers
+    // the full skew-extended freshness window. It fails if the call site ever
+    // reverts to passing `config_max_age` (the gap reopens).
+    // ========================================================================
+
+    /// Build an in-memory `DocumentStore` with migrations applied.
+    ///
+    /// Mirrors `db/tests.rs::test_db` but returns only the store, so the
+    /// integration test stays self-contained (no `test-utils` feature
+    /// dependency) and compiles under plain `cargo test -p vouch-server`.
+    async fn resource_test_store() -> crate::db::store::DocumentStore {
+        use std::sync::Arc;
+
+        use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+        use crate::db::{Pool, pool::PoolConfig};
+
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
+            .await
+            .expect("test db");
+        if let crate::db::Pool::Sqlite(p) = &pool {
+            sqlx::migrate!("./migrations/sqlite")
+                .run(p)
+                .await
+                .expect("migrate");
+        }
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
+        crate::db::store::DocumentStore::new(pool, crypto)
+    }
+
+    // ========================================================================
+    // RFC 9449 §4.3 step 11 — JTI retention vs. the proof-validity window
+    // (deterministic, no signatures).
+    //
+    // These two tests live in the `services` layer (not `db/tests/jti_replay.rs`)
+    // because they reason about the *relationship* between two things the
+    // `services` layer owns (`RecencyWindow`/`PROOF_SKEW_SECONDS` freshness)
+    // and one thing the `db` layer owns (`check_and_store_dpop_jti` /
+    // `delete_expired_dpop_jtis` retention + cleanup). The `db` layer may not
+    // import `services`, so the cross-layer invariant is anchored here, where
+    // both sides are in scope. They use negative/positive `validity_seconds`
+    // to advance the row's `expires_at` deterministically — no real time, no
+    // signatures — and assert the freshness check through `RecencyWindow` at
+    // the moments that matter.
+    // ========================================================================
+
+    /// With the fix's retention (`config_max_age + PROOF_SKEW_SECONDS`), the
+    /// JTI row survives the whole skew-extended freshness window: cleanup is
+    /// a no-op while the proof is fresh, replay is blocked, and only one
+    /// second past `max_age + skew` (proof stale) is cleanup allowed to
+    /// retire the row.
+    #[tokio::test]
+    async fn test_dpop_jti_retention_covers_skew_extended_freshness_window() {
+        use crate::db::claim::ClaimError;
+        use crate::db::{check_and_store_dpop_jti, delete_expired_dpop_jtis};
+        use crate::services::RecencyWindow;
+
+        let store = resource_test_store().await;
+
+        let config_max_age: i64 = 300;
+        let skew: i64 = PROOF_SKEW_SECONDS;
+        // Retention that `validate_dpop_common` commits after the fix.
+        let fixed_retention = config_max_age.saturating_add(skew);
+
+        let t0: i64 = 1_700_000_000;
+        // Worst-case forward-skewed proof: client clock `skew` seconds ahead.
+        let edge_iat = t0 + skew;
+
+        // --- Within the proof-validity window: the JTI row must guard. ---
+        // Simulate "config_max_age + 30 seconds have elapsed since T0". The
+        // proof is still fresh (now < T0 + skew + max_age) and the JTI still
+        // has `skew - 30 = 30s` of life. `validity_seconds = fixed_retention
+        // - elapsed = 30`, so `expires_at` lands 30s in the future (not
+        // expired yet) without depending on real time.
+        let elapsed_within = config_max_age + 30;
+        let validity_within = fixed_retention.saturating_sub(elapsed_within);
+        let _claim = check_and_store_dpop_jti(&store, "retention-within-window", validity_within)
+            .await
+            .expect("first use commits the JTI");
+
+        // Cleanup of not-yet-expired rows is a no-op — the row survives the
+        // whole freshness window.
+        let deleted = delete_expired_dpop_jtis(&store, "")
+            .await
+            .expect("delete_expired should not error");
+        assert_eq!(
+            deleted, 0,
+            "JTI within its max_age + skew retention window must not be cleaned up"
+        );
+
+        // Replay is still blocked while the proof is fresh.
+        let blocked =
+            check_and_store_dpop_jti(&store, "retention-within-window", fixed_retention).await;
+        assert!(
+            matches!(blocked, Err(ClaimError::AlreadyConsumed)),
+            "JTI retained for max_age + skew must block replay until the proof is stale: got {blocked:?}"
+        );
+
+        // The freshness check would still accept the forward-skewed proof at
+        // this replay moment.
+        let replay_now = t0 + elapsed_within;
+        assert!(
+            RecencyWindow::with_skew(config_max_age, skew).accepts_at(replay_now, edge_iat),
+            "proof iat = T0+skew must still be fresh at T0 + max_age + 30"
+        );
+
+        // --- One second past the window: cleanup may finally retire the JTI,
+        //     and the proof is no longer fresh. ---
+        let elapsed_past = config_max_age + skew + 1;
+        let validity_past = fixed_retention.saturating_sub(elapsed_past);
+        let _claim = check_and_store_dpop_jti(&store, "retention-past-window", validity_past)
+            .await
+            .expect("first use commits the JTI");
+
+        let deleted = delete_expired_dpop_jtis(&store, "")
+            .await
+            .expect("delete_expired should not error");
+        assert!(
+            deleted >= 1,
+            "an expired JTI (past max_age + skew) is safe to clean up, deleted = {deleted}"
+        );
+
+        let after_validity = t0 + elapsed_past;
+        assert!(
+            !RecencyWindow::with_skew(config_max_age, skew).accepts_at(after_validity, edge_iat),
+            "proof must be stale one second past max_age + skew"
+        );
+    }
+
+    /// Regression guard for the pre-fix gap (RFC 9449 §4.3 SHOULD violation).
+    /// Retaining for `config_max_age` only — the pre-fix value — leaves a
+    /// gap where the JTI row is gone while a forward-skewed proof is still
+    /// fresh. This test pins that gap so a future change reverting
+    /// `validate_dpop_common` to `config_max_age` is caught: it mirrors the
+    /// bug-report reproduction, and the `accepts_at` check shows the proof
+    /// is still fresh at the moment the replay insert succeeds after
+    /// cleanup. The fix (`max_age + PROOF_SKEW_SECONDS`) closes the gap.
+    #[tokio::test]
+    async fn test_dpop_jti_old_retention_leaves_replay_gap_after_cleanup() {
+        use crate::db::claim::ClaimError;
+        use crate::db::{check_and_store_dpop_jti, delete_expired_dpop_jtis};
+        use crate::services::RecencyWindow;
+
+        let store = resource_test_store().await;
+
+        let config_max_age: i64 = 300;
+        let skew: i64 = PROOF_SKEW_SECONDS;
+
+        let t0: i64 = 1_700_000_000;
+        let edge_iat = t0 + skew;
+
+        // Commit the JTI as the original request would, retaining for the OLD
+        // `config_max_age` only. A negative validity puts `expires_at` in the
+        // past — simulating that `config_max_age` seconds have elapsed since
+        // T0, without depending on real time.
+        let _claim = check_and_store_dpop_jti(&store, "old-retention-gap", -config_max_age)
+            .await
+            .expect("first use commits the JTI");
+
+        // Even an expired-but-present row still blocks replay (PRIMARY KEY
+        // collision); only cleanup removes it.
+        let blocked = check_and_store_dpop_jti(&store, "old-retention-gap", config_max_age).await;
+        assert!(
+            matches!(blocked, Err(ClaimError::AlreadyConsumed)),
+            "expired-but-present JTI row must still block replay until cleanup: got {blocked:?}"
+        );
+
+        // Cleanup physically removes the expired row.
+        let deleted = delete_expired_dpop_jtis(&store, "")
+            .await
+            .expect("delete_expired should not error");
+        assert!(
+            deleted >= 1,
+            "cleanup removes the expired JTI row, deleted = {deleted}"
+        );
+
+        // After cleanup the SAME jti is accepted again — the gap. With the
+        // OLD retention this replay insert succeeds while the forward-skewed
+        // proof is still fresh (asserted below). `validate_dpop_common` MUST
+        // NOT pass `config_max_age` here; the fix passes `config_max_age +
+        // skew`.
+        let replayed = check_and_store_dpop_jti(&store, "old-retention-gap", config_max_age).await;
+        assert!(
+            replayed.is_ok(),
+            "with the old max_age-only retention, cleanup reopens the replay gap: got {replayed:?}"
+        );
+
+        // The proof is still fresh at this moment, so without the JTI row the
+        // replay would also pass the freshness check — this is the gap the
+        // fix closes by retaining for `max_age + skew`.
+        let replay_now = t0 + config_max_age + 30;
+        assert!(
+            RecencyWindow::with_skew(config_max_age, skew).accepts_at(replay_now, edge_iat),
+            "proof iat = T0+skew must still be fresh at T0 + max_age + 30 (within max_age + skew)"
+        );
+
+        // Anchor the edge: one second past max_age + skew must be rejected.
+        let after_validity = t0 + config_max_age + skew + 1;
+        assert!(
+            !RecencyWindow::with_skew(config_max_age, skew).accepts_at(after_validity, edge_iat),
+            "proof must be stale one second past max_age + skew"
+        );
+    }
+
+    /// Generate an EC P-256 key pair and its public JWK for a DPoP proof.
+    fn resource_test_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::Value) {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .expect("generate DPoP key");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+            .expect("parse DPoP key");
+        let pub_bytes = key_pair.public_key().as_ref();
+        let x = URL_SAFE_NO_PAD.encode(pub_bytes.get(1..33).expect("x coordinate"));
+        let y = URL_SAFE_NO_PAD.encode(pub_bytes.get(33..65).expect("y coordinate"));
+        let jwk = serde_json::json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y });
+        (key_pair, jwk)
+    }
+
+    /// Build and sign a DPoP proof JWT (RFC 9449 §4.2) for a resource
+    /// request, binding `ath` to `access_token`. The `jti` is returned via
+    /// the [`ValidatedDpopProof`] from `validate_dpop_at_resource`, so this
+    /// helper does not need to expose it.
+    fn resource_test_dpop_proof(
+        key: &aws_lc_rs::signature::EcdsaKeyPair,
+        jwk: &serde_json::Value,
+        method: &str,
+        uri: &str,
+        access_token: &str,
+    ) -> String {
+        use aws_lc_rs::digest::SHA256;
+        use aws_lc_rs::rand::SystemRandom;
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": jwk });
+        let header_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
+
+        let ath =
+            URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&SHA256, access_token.as_bytes()));
+        let claims = serde_json::json!({
+            "jti": uuid::Uuid::now_v7().to_string(),
+            "htm": method,
+            "htu": uri,
+            "iat": jiff::Timestamp::now().as_second(),
+            "ath": ath,
+        });
+        let claims_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let rng = SystemRandom::new();
+        let sig = key
+            .sign(&rng, signing_input.as_bytes())
+            .expect("sign DPoP proof");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+        format!("{signing_input}.{sig_b64}")
+    }
+
+    /// `validate_dpop_at_resource` must commit the JTI for `config_max_age +
+    /// PROOF_SKEW_SECONDS` (RFC 9449 §4.3 step 11), so the cleanup task cannot
+    /// delete the row while the skew-extended proof is still fresh. Reading
+    /// the stored `expires_at` back pins the call site: revert it to
+    /// `config_max_age` and the lower-bound assertion fails (the row would
+    /// expire ~60s too early).
+    #[tokio::test]
+    async fn test_dpop_at_resource_jti_retention_covers_skew_window() {
+        const CONFIG_MAX_AGE: i64 = 300;
+        let skew: i64 = PROOF_SKEW_SECONDS;
+
+        let store = resource_test_store().await;
+        let (key, jwk) = resource_test_key_pair();
+        let access_token = "dpop-bound-access-token";
+        let method = "GET";
+        let uri = "https://example.com/api/v1/applications";
+
+        let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token);
+
+        let now_before = jiff::Timestamp::now().as_second();
+        let validated =
+            validate_dpop_at_resource(access_token, &proof, method, uri, &store, CONFIG_MAX_AGE)
+                .await
+                .expect("resource proof validates");
+        let now_after = jiff::Timestamp::now().as_second();
+
+        // Read the committed JTI back by its deterministic document ID.
+        let id = crate::db::dpop_jti_id_for_test(&validated.jti);
+        let doc = store
+            .get::<crate::db::documents::dpop::DpopJtiDoc>(&id)
+            .await
+            .expect("read back JTI")
+            .expect("validate_dpop_at_resource must commit the JTI");
+
+        let expires_at = doc.data.expires_at.as_second();
+
+        // Lower bound: with the fix, `expires_at = now_call + max_age + skew`
+        // where `now_call >= now_before`, so `expires_at >= now_before +
+        // max_age + skew`. Without the fix (`now_call + max_age`) this fails
+        // by ~`skew` seconds — the gap the fix closes.
+        let lower = now_before
+            .saturating_add(CONFIG_MAX_AGE)
+            .saturating_add(skew);
+        assert!(
+            expires_at >= lower,
+            "JTI retention must cover the skew-extended freshness window: \
+             expires_at={expires_at}, expected >= {lower} (now_before={now_before}, \
+             max_age={CONFIG_MAX_AGE}, skew={skew})"
+        );
+
+        // Sanity upper bound: `now_call <= now_after`, so `expires_at <=
+        // now_after + max_age + skew`.
+        let upper = now_after
+            .saturating_add(CONFIG_MAX_AGE)
+            .saturating_add(skew);
+        assert!(
+            expires_at <= upper,
+            "JTI retention sanity upper bound exceeded: expires_at={expires_at}, \
+             expected <= {upper} (now_after={now_after}, max_age={CONFIG_MAX_AGE}, skew={skew})"
+        );
+
+        // Replay of the same proof must be rejected while the row is present.
+        let replay =
+            validate_dpop_at_resource(access_token, &proof, method, uri, &store, CONFIG_MAX_AGE)
+                .await;
+        assert!(
+            matches!(replay, Err(DpopError::ReplayDetected)),
+            "an immediate replay of the same DPoP proof must be rejected: got {replay:?}"
+        );
     }
 }

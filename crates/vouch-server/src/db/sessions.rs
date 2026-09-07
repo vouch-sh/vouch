@@ -31,6 +31,10 @@ pub struct Session {
     pub hardware_aaguid: Option<String>,
     /// Organization domain (`hd` claim) at session creation time (snapshot).
     pub org_domain: Option<String>,
+    /// OAuth `client_id` that requested this token. `None` for sessions
+    /// issued before the field was backfilled. Used by `revoke_tokens_api`
+    /// to delete every access token an application minted.
+    pub client_id: Option<String>,
     /// Hash of the single-use grant code (authorization code or device code)
     /// that this session was issued from. `None` for grants with no such
     /// code. Used by replay detection (RFC 6749 §10.5) to revoke only the
@@ -52,6 +56,7 @@ impl From<Document<SessionDoc>> for Session {
             authorization_details: doc.data.authorization_details,
             hardware_aaguid: doc.data.hardware_aaguid,
             org_domain: doc.data.org_domain,
+            client_id: doc.data.client_id,
             source_code_hash: doc.data.source_code_hash,
         }
     }
@@ -72,6 +77,13 @@ pub struct CreateSessionParams<'a> {
     pub authorization_details: Option<&'a serde_json::Value>,
     pub hardware_aaguid: Option<&'a str>,
     pub org_domain: Option<&'a str>,
+    /// OAuth `client_id` that requested this token (the RFC 9068 `client_id`
+    /// claim). Indexed so `revoke_tokens_api` can delete every access token
+    /// an application minted — not only the M2M (`client_credentials`)
+    /// sessions, which are keyed by `user_id == client_id` and handled by
+    /// `delete_sessions_for_user`. `None` only for low-level test fixtures
+    /// that bypass `create_oauth_access_token`.
+    pub client_id: Option<&'a str>,
     /// Hash of the single-use grant code that sourced this session. `None`
     /// for grants with no single-use code; `Some` for the authorization-code
     /// and device-code grants so replay detection can target this session.
@@ -93,6 +105,7 @@ pub async fn create_session(
         authorization_details: params.authorization_details.cloned(),
         hardware_aaguid: params.hardware_aaguid.map(String::from),
         org_domain: params.org_domain.map(String::from),
+        client_id: params.client_id.map(String::from),
         source_code_hash: params.source_code_hash.map(String::from),
     };
     let result = store.insert(&doc).await?;
@@ -194,6 +207,33 @@ pub async fn delete_sessions_for_code_replay(
 pub async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
     store
         .delete_by_index::<SessionDoc>("user_id", user_id)
+        .await
+}
+
+/// Delete all sessions issued for a given OAuth client (by `client_id`).
+///
+/// Used by `revoke_tokens_api` to invalidate every access token an
+/// application minted — `authorization_code`, `device_code`, RFC 8693
+/// `token_exchange`, FIDO2, and `client_credentials` — keyed by the issuing
+/// client. User-issued grants persist sessions under the *real resource
+/// owner's* `user_id` (not the client's), so
+/// [`delete_sessions_for_user`](&delete_sessions_for_user) with the client's
+/// id only reaches the `client_credentials` (M2M) sessions. This closes that
+/// gap by indexing on `client_id`, the value
+/// [`create_oauth_access_token`](crate::services::auth::create_oauth_access_token)
+/// stamps into every session it writes.
+///
+/// Pre-migration sessions issued before the `client_id` index existed
+/// deserialize `client_id` to `None` and so are not matched; they remain
+/// valid until their `exp`. The caller MUST also call
+/// [`SessionCache::invalidate_for_client`] to drop any cached entries for
+/// the same client, since a DB delete alone does not evict the cache.
+pub async fn delete_sessions_for_oauth_client(
+    store: &DocumentStore,
+    client_id: &str,
+) -> Result<u64> {
+    store
+        .delete_by_index::<SessionDoc>("client_id", client_id)
         .await
 }
 
@@ -312,6 +352,27 @@ impl SessionCache {
         });
     }
 
+    /// Invalidate cached sessions issued for a given OAuth client.
+    ///
+    /// Companion to [`delete_sessions_for_oauth_client`]: a DB delete alone
+    /// does not evict cached `Hit` entries, so a just-revoked token would keep
+    /// validating from the cache until the TTL elapsed. Sessions whose
+    /// `client_id` is `None` (pre-migration rows) are retained — they are not
+    /// reachable by client-scoped revocation and would otherwise be dropped
+    /// indiscriminately.
+    pub fn invalidate_for_client(&self, client_id: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.retain(|_, entry| {
+            let Some(session) = entry.value.as_ref() else {
+                return true;
+            };
+            session.client_id.as_deref() != Some(client_id)
+        });
+    }
+
     fn get(&self, key: &str) -> CacheLookup {
         let Ok(mut map) = self.entries.lock() else {
             return CacheLookup::Miss;
@@ -412,6 +473,7 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
             source_code_hash: None,
         })
     }
@@ -542,6 +604,103 @@ mod tests {
         assert!(
             matches!(cache.get("hash-user"), CacheLookup::Miss),
             "revoked session must not be cached after invalidate_for_user"
+        );
+    }
+
+    /// `invalidate_for_client` evicts every cached session issued for the
+    /// given OAuth client, leaving other clients' sessions and sessions with
+    /// no `client_id` (pre-migration rows) intact.
+    #[test]
+    fn invalidate_for_client_evicts_only_that_client() {
+        fn session_for(token_hash: &str, client_id: Option<&str>) -> Arc<Session> {
+            Arc::new(Session {
+                id: "sess-1".to_string(),
+                user_id: "user-1".to_string(),
+                user_email: "test@example.com".to_string(),
+                token_hash: token_hash.to_string(),
+                authenticator_id: None,
+                expires_at: Timestamp::now(),
+                created_at: Timestamp::now(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: client_id.map(str::to_string),
+                source_code_hash: None,
+            })
+        }
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-target".to_string(),
+            Some(session_for("hash-target", Some("client-A"))),
+            generation,
+        );
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-other".to_string(),
+            Some(session_for("hash-other", Some("client-B"))),
+            generation,
+        );
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-legacy".to_string(),
+            Some(session_for("hash-legacy", None)),
+            generation,
+        );
+
+        cache.invalidate_for_client("client-A");
+
+        assert!(
+            matches!(cache.get("hash-target"), CacheLookup::Miss),
+            "revoked client's session must be evicted"
+        );
+        assert!(
+            matches!(cache.get("hash-other"), CacheLookup::Hit(_)),
+            "other client's session must survive"
+        );
+        assert!(
+            matches!(cache.get("hash-legacy"), CacheLookup::Hit(_)),
+            "pre-migration session (no client_id) must survive"
+        );
+    }
+
+    /// Same TOCTOU regression case for client-scoped invalidation: an
+    /// in-flight DB fetch that started before the revoke must not re-cache
+    /// the now-revoked session.
+    #[test]
+    fn insert_after_invalidate_for_client_is_rejected() {
+        fn session_for_client(token_hash: &str, client_id: &str) -> Arc<Session> {
+            Arc::new(Session {
+                id: "sess-1".to_string(),
+                user_id: "user-1".to_string(),
+                user_email: "test@example.com".to_string(),
+                token_hash: token_hash.to_string(),
+                authenticator_id: None,
+                expires_at: Timestamp::now(),
+                created_at: Timestamp::now(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: Some(client_id.to_string()),
+                source_code_hash: None,
+            })
+        }
+        let cache = SessionCache::new(100, 30);
+        let gen_before = cache.generation();
+
+        cache.invalidate_for_client("client-A");
+
+        cache.insert_if_valid(
+            "hash-client".to_string(),
+            Some(session_for_client("hash-client", "client-A")),
+            gen_before,
+        );
+
+        assert!(
+            matches!(cache.get("hash-client"), CacheLookup::Miss),
+            "revoked session must not be cached after invalidate_for_client"
         );
     }
 
