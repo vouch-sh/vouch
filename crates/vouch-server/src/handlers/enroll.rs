@@ -751,6 +751,26 @@ pub(crate) async fn complete_enrollment_after_identity(
         .into_response();
     }
 
+    // The shape check above deliberately lets an empty domain (`foo@`)
+    // through because SCIM's create path has a downstream domain-ownership
+    // gate that rejects it with a specific error. Enrollment has no such
+    // always-on gate: its only domain check is the optional
+    // `allowed_domains` allowlist below, which is unset by default. Reject
+    // the empty domain here so open-enrollment mode cannot persist a user
+    // with `email = "foo@"` and a synthetic organization with `domain = ""`.
+    if crate::email::Email::domain_of(&identity.email).is_none_or(|d| d.is_empty()) {
+        tracing::warn!(
+            email = %redact_email(&identity.email),
+            "rejected IdP enrollment: upstream email has an empty domain"
+        );
+        return ErrorTemplate {
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-invalid-email").to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
