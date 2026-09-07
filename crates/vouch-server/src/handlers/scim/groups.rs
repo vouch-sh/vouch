@@ -232,6 +232,20 @@ pub(crate) async fn create_group(
         Err(e) => return create_scim_group_error_response(e),
     };
 
+    // Audit log — the group row is committed, so its audit row is written
+    // before the fallible member adds below: a rejected member must not
+    // leave a created group with no `create` event.
+    db::record_scim_audit(
+        &state.audit,
+        "create",
+        "Group",
+        &db_group.id,
+        Some(&auth.token_id),
+        Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
+        auth.org_domain.as_deref(),
+    )
+    .await;
+
     // Add members if provided
     if let Some(members) = &group.members {
         for member in members {
@@ -243,18 +257,6 @@ pub(crate) async fn create_group(
             }
         }
     }
-
-    // Audit log
-    db::record_scim_audit(
-        &state.audit,
-        "create",
-        "Group",
-        &db_group.id,
-        Some(&auth.token_id),
-        Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
-        auth.org_domain.as_deref(),
-    )
-    .await;
 
     let base_url = &state.config().base_url;
     let Ok(members) =
@@ -452,6 +454,31 @@ async fn apply_member_op(
 /// Modifies a Group resource using SCIM PATCH operations (add, replace,
 /// remove) applied against [`GROUP_ATTRIBUTES`], plus member management
 /// via the `members` path.
+/// Audit a group PATCH that failed after `applied` member operations had
+/// already committed. Membership changes are applied one at a time, so an
+/// error part-way through leaves real state behind; the audit row must
+/// reflect it even though the request fails. No-op when nothing committed.
+async fn record_partial_group_update(
+    state: &AppState,
+    auth: &super::ScimAuth,
+    group_id: &str,
+    applied: usize,
+) {
+    if applied == 0 {
+        return;
+    }
+    db::record_scim_audit(
+        &state.audit,
+        "update",
+        "Group",
+        group_id,
+        Some(&auth.token_id),
+        Some(&serde_json::json!({"partial": true, "memberOpsApplied": applied}).to_string()),
+        auth.org_domain.as_deref(),
+    )
+    .await;
+}
+
 pub(crate) async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -522,10 +549,17 @@ pub(crate) async fn patch_group(
         }
     }
 
+    // Member operations commit one at a time, so a failure part-way leaves
+    // the earlier ones applied. Every error exit past the first applied
+    // operation audits what committed before returning, so a membership
+    // change never lands without an `update` event.
+    let mut applied_member_ops = 0usize;
     for (path, op) in member_ops {
         if let Err(response) = apply_member_op(&state.store, &id, &auth.org_id, path, op).await {
+            record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
             return response;
         }
+        applied_member_ops = applied_member_ops.saturating_add(1);
     }
 
     // Update group in database
@@ -541,6 +575,7 @@ pub(crate) async fn patch_group(
         {
             Ok(true) => {}
             Ok(false) => {
+                record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
                 return (
                     StatusCode::NOT_FOUND,
                     Json(ScimError::new(404, "Group not found")),
@@ -548,6 +583,7 @@ pub(crate) async fn patch_group(
                     .into_response();
             }
             Err(e) => {
+                record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
                 if let Some(resp) = super::invalid_index_value_response(&e) {
                     return resp.into_response();
                 }

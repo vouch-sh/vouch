@@ -319,9 +319,24 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
+    // Validate authorization_details if provided (RFC 9396). Pure request
+    // validation, so it runs before the counter commit below: a malformed
+    // parameter is rejected with nothing durable changed and nothing that
+    // needs an audit row.
+    let validated_ad = params
+        .authorization_details
+        .map(AuthorizationDetails::parse)
+        .transpose()?;
+
+    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
+
     // Update counter in database
     // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
+    //
+    // From here on every exit records an audit event (`LoginFailed` from
+    // the posture gate, `LoginSuccess` otherwise): the counter update is
+    // committed, and a verified ceremony must never vanish from AuthEvents.
     db::update_authenticator_counter(
         &state.store,
         &authenticator.id,
@@ -333,14 +348,6 @@ pub(crate) async fn exchange_fido2_assertion(
     // Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip;
     let client_user_agent = params.client_info.user_agent.clone();
-
-    // Validate authorization_details if provided (RFC 9396)
-    let validated_ad = params
-        .authorization_details
-        .map(AuthorizationDetails::parse)
-        .transpose()?;
-
-    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
 
     // Evaluate device posture policies (if org has active policies).
     // The login audit event is written AFTER this gate: a policy-denied

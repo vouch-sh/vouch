@@ -719,6 +719,52 @@ pub(crate) async fn revoke_tokens_api(
             )
         })?;
 
+    // The secrets are revoked, which is durable whether or not the session
+    // sweeps below succeed. Audit exactly what committed: the event is
+    // written after the sweeps either way, with `details` naming a partial
+    // outcome, so a failed sweep cannot leave revoked secrets with no
+    // `TokenRevoked` event while the caller is told to retry.
+    let sessions_revoked = revoke_client_sessions(&state, &client).await;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::TokenRevoked,
+            user_id: Some(&token.sub),
+            ip_address: None,
+            user_agent: None,
+            details: Some(if sessions_revoked.is_ok() {
+                "All tokens revoked"
+            } else {
+                "Client secrets revoked; session revocation failed, retry required"
+            }),
+            org_domain: db::RecordedOrgDomain::Unresolved,
+        },
+    )
+    .await;
+    sessions_revoked?;
+
+    tracing::info!(
+        "Revoked all tokens for OAuth application: {}",
+        client.client_id
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Terminate every live session issued to or for an OAuth client, after its
+/// secrets have been revoked.
+///
+/// Fails closed: if either sweep fails, the caller must not report
+/// revocation success. Secrets are already revoked, but unexpired access
+/// tokens could still validate via DB-backed session lookup, so the caller
+/// must be told the revocation was incomplete (and retry) rather than see a
+/// 204.
+async fn revoke_client_sessions(
+    state: &AppState,
+    client: &db::OAuthClient,
+) -> Result<(), ServiceError> {
     // Terminate live M2M (client_credentials) sessions.
     //
     // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
@@ -727,12 +773,6 @@ pub(crate) async fn revoke_tokens_api(
     // secrets is not enough on its own: the session cache may still serve
     // unexpired tokens until their TTL elapses. Deleting those sessions and
     // invalidating the cache is what closes the M2M half of revocation.
-    //
-    // Fail closed: if session deletion fails, do not report revocation
-    // success. Secrets are already revoked, but unexpired M2M access tokens
-    // could still validate via DB-backed session lookup, so the caller must
-    // be told the revocation was incomplete (and retry) rather than see a
-    // 204 + TokenRevoked.
     db::delete_sessions_for_user(&state.store, &client.client_id)
         .await
         .map_err(|e| {
@@ -764,9 +804,6 @@ pub(crate) async fn revoke_tokens_api(
     // deserialize `client_id` to `None` and so are not matched; they remain
     // valid until their `exp` (bounded by `session_hours`). New tokens minted
     // after this change are revocable on demand.
-    //
-    // Fail closed, as above: a failure here means some user-issued tokens for
-    // this client may still validate, so do not report revocation success.
     db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
         .await
         .map_err(|e| {
@@ -781,29 +818,7 @@ pub(crate) async fn revoke_tokens_api(
             )
         })?;
     state.session_cache.invalidate_for_client(&client.client_id);
-
-    // Log the event
-    db::record_oauth_event(
-        &state.audit,
-        &state.store,
-        &db::RecordOAuthEventParams {
-            oauth_client_id: &app_id,
-            event_type: OAuthEventType::TokenRevoked,
-            user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
-            details: Some("All tokens revoked"),
-            org_domain: db::RecordedOrgDomain::Unresolved,
-        },
-    )
-    .await;
-
-    tracing::info!(
-        "Revoked all tokens for OAuth application: {}",
-        client.client_id
-    );
-
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 #[cfg(test)]
