@@ -149,6 +149,31 @@ fn find_decoding_key_rejects_jwks_without_a_usable_key() {
     assert!(find_decoding_key(&jwks_of(vec![]), None, Algorithm::RS256).is_err());
 }
 
+/// RFC 7517 Section 4.5 makes `kid` uniqueness a SHOULD, not a MUST, so an
+/// unusable entry carrying the wanted `kid` must not mask a usable key with
+/// the same `kid` later in the set (e.g. during a post-quantum dual-key
+/// rollout at the upstream IdP).
+// OIDC Core §10.1: kid selects the key that verifies the ID Token.
+#[test]
+fn find_decoding_key_kid_match_skips_unusable_duplicate() {
+    let jwks = jwks_of(vec![unusable_jwk("dup"), rsa_jwk("dup")]);
+    assert!(find_decoding_key(&jwks, Some("dup"), Algorithm::RS256).is_ok());
+}
+
+// OIDC Core §10.1: when every kid-matching key is unusable, the build error
+// is reported (not the generic missing-kid message), preserving single-key
+// diagnostics.
+#[test]
+fn find_decoding_key_kid_match_reports_build_error_when_all_unusable() {
+    let jwks = jwks_of(vec![unusable_jwk("dup")]);
+    let err = find_decoding_key(&jwks, Some("dup"), Algorithm::RS256)
+        .expect_err("an unusable kid-matched key must not resolve");
+    assert!(
+        err.to_string().contains("Failed to build key from JWK"),
+        "expected the preserved build error, got: {err}"
+    );
+}
+
 // ── Test helpers for verify_id_token ────────────────────────────────────
 
 /// Build an `OidcProvider` that points all endpoints at the given mock server.

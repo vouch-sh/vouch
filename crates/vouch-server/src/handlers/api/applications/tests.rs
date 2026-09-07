@@ -2458,3 +2458,154 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
         "absent access_scope must preserve existing value"
     );
 }
+
+// ========================================================================
+// Deactivated-user gate — delete/secret/revoke handlers
+// ========================================================================
+//
+// `AuthenticatedToken` validates the token only, so each state-changing
+// handler must reject a deactivated account itself (via
+// `load_active_owned_client`). Fixture: deactivate WITHOUT deleting the
+// session — the exact deactivated-with-live-session state the
+// `test_create_application_rejects_deactivated_user` sibling above uses.
+
+/// Create an app-owning user with a live session, then deactivate the user
+/// while leaving the session row intact. Returns `(app_id, bearer_token)`.
+async fn setup_deactivated_owner_with_app(
+    state: &crate::AppState,
+    email: &str,
+) -> (String, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+    (client.app_id, token)
+}
+
+fn assert_deactivated_rejection(status: StatusCode, body: &str) {
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated user must be rejected; got body: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+#[tokio::test]
+async fn test_delete_application_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-del-app@example.com").await;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}"),
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    // The application must survive the rejected deletion.
+    let survivor = crate::db::get_oauth_client_by_id(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .expect("application must still exist");
+    assert!(survivor.user_id.is_some());
+}
+
+#[tokio::test]
+async fn test_add_secret_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-add-secret@example.com").await;
+
+    let before = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .len();
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let after = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .len();
+    assert_eq!(after, before, "deactivated user must not mint a secret");
+}
+
+#[tokio::test]
+async fn test_delete_secret_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-del-secret@example.com").await;
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    let secret_id = &secrets.first().expect("fixture secret").id;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let now = jiff::Timestamp::now();
+    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    assert!(
+        survivors
+            .iter()
+            .any(|s| s.id == *secret_id && s.is_valid(&now)),
+        "the secret must survive the rejected revocation"
+    );
+}
+
+#[tokio::test]
+async fn test_revoke_tokens_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-revoke@example.com").await;
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/revoke"),
+        r#"{}"#,
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let now = jiff::Timestamp::now();
+    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    assert!(
+        survivors.iter().any(|s| s.is_valid(&now)),
+        "secrets must survive the rejected revoke-all"
+    );
+}

@@ -220,12 +220,17 @@ pub(crate) async fn create_user(
         user.user_name.clone()
     };
 
-    // Shape check only — domain ownership is validated inside
-    // `create_scim_user`'s transaction (reading the org doc and
-    // version-bumping it via `compare_and_update`), which closes the TOCTOU
-    // race with a concurrent `remove_additional_domain` that a standalone
-    // pre-check here could not.
-    if crate::email::Email::domain_of(&email).is_none() {
+    // Shape check (local part + domain suffix) — domain ownership is
+    // validated inside `create_scim_user`'s transaction (reading the org
+    // doc and version-bumping it via `compare_and_update`), which closes the
+    // TOCTOU race with a concurrent `remove_additional_domain` that a
+    // standalone pre-check here could not. `Email::is_valid_address`
+    // inspects the local part too, so a `userName` that merely contains
+    // `@` but is not an email (empty/whitespace/display-name-wrapped local
+    // part) is rejected here; a NUL in the local part is still left to the
+    // store's `validate_index_entry` guard, and an empty domain (`foo@`)
+    // to the in-transaction ownership check.
+    if !crate::email::Email::is_valid_address(&email) {
         tracing::warn!(
             org_id = %auth.org_id,
             "rejected SCIM user creation: userName is not an email address"

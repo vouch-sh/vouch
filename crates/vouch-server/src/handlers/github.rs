@@ -552,6 +552,17 @@ async fn handle_oauth_callback(
         Err(resp) => return resp,
     };
 
+    // Refuse a deactivated account. extract_session_from_cookie serves a
+    // per-process SessionCache HIT without a DB lookup, so on a peer instance
+    // whose cache was not invalidated by another instance's revoke_user_access,
+    // the CSRF gate alone cannot witness deactivation. The cookie extraction
+    // skips the active check, so this mutating flow carries its own guard —
+    // mirroring github_link_start and handle_installation_callback.
+    let _user = match load_active_user(state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
+    };
+
     let config = state.config();
     let service = github_service(state, &config);
 
@@ -1239,6 +1250,141 @@ mod tests {
         assert!(
             !body.contains("Sign In Required"),
             "CSRF gate should pass when session matches, got: {body}"
+        );
+    }
+
+    // ========================================================================
+    // Deactivation guard tests (issue: stale per-process SessionCache)
+    //
+    // On a multi-instance deployment, a user deactivated on one instance can
+    // still hit a peer whose per-process SessionCache holds a stale (not-yet-
+    // TTL-expired) entry for the victim's token_hash. extract_session_from_cookie
+    // returns that cache HIT without a DB lookup, so the CSRF gate alone cannot
+    // witness the deactivation. Every mutating GitHub session flow therefore
+    // re-validates the account via `load_active_user`. These tests pin that guard
+    // on both callbacks.
+    //
+    // The scenario is modelled by seeding the cache via a first lookup, then
+    // applying the production deactivation DB effects directly — deleting the
+    // session rows, revoking credentials, and flipping `active=false` — WITHOUT
+    // calling `session_cache.invalidate_for_user`, exactly what a peer observes
+    // when another instance ran revoke_user_access.
+    // ========================================================================
+
+    /// The OAuth link callback must reject a deactivated user whose session is
+    /// still served from the per-process SessionCache (peer-instance scenario).
+    ///
+    /// Regression for the missing `load_active_user` guard: before the fix the
+    /// callback fell through to `link_user_account`, which on the unconfigured
+    /// test app surfaced `GitHubError::NotConfigured` ("Not Available" /
+    /// "GitHub integration is not configured on this server"); with the guard
+    /// in place it must surface `GitHubError::UserNotFound` instead and never
+    /// reach the link handler.
+    #[tokio::test]
+    async fn test_callback_oauth_rejects_deactivated_user_via_stale_cache() {
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "victim@example.com", "example.com").await;
+
+        // Seed the per-process SessionCache the way a prior request to this
+        // peer would: a first lookup hits the DB and inserts the session.
+        let seeded = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &session_hash)
+            .await
+            .expect("seed lookup succeeds");
+        assert!(seeded.is_some(), "session row must exist before seeding");
+
+        // Simulate a deactivation that ran on a DIFFERENT instance: apply the
+        // production DB effects without invalidating this process's cache.
+        crate::db::delete_sessions_for_user(&state.store, &user_id)
+            .await
+            .expect("delete sessions");
+        crate::db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+            .await
+            .expect("revoke credentials");
+        crate::db::update_user_active_status(&state.store, &user_id, false)
+            .await
+            .expect("deactivate user");
+
+        // Mint a link state token bound to the now-deleted session's binding.
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Link,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let uri = format!(
+            "/github/callback?code=victim_code&state={}",
+            urlencoding::encode(&encoded)
+        );
+        let cookie = cookie_header(&session_token);
+
+        let (status, body) = http_get(&app, &uri, &[("Cookie", &cookie)]).await;
+
+        // The CSRF gate passes on the stale cache hit; the active-user guard
+        // must then reject before link_user_account runs.
+        assert_eq!(status, StatusCode::OK, "Error page should return 200");
+        assert!(
+            body.contains("User not found"),
+            "Expected UserNotFound error page, got: {body}"
+        );
+        assert!(
+            !body.contains("Not Available")
+                && !body.contains("GitHub integration is not configured on this server"),
+            "Callback must not reach link_user_account / NotConfigured path, got: {body}"
+        );
+    }
+
+    /// Negative control: the installation callback already guards with
+    /// `load_active_user`, so the same stale-cache scenario is rejected there.
+    /// Pins the symmetric behaviour the OAuth callback was missing and confirms
+    /// the harness really exercises a stale-cache HIT (otherwise this test
+    /// would pass for the wrong reason — a CSRF / SessionRequired rejection).
+    #[tokio::test]
+    async fn test_callback_install_rejects_deactivated_user_via_stale_cache() {
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "victim@example.com", "example.com").await;
+
+        let seeded = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &session_hash)
+            .await
+            .expect("seed lookup succeeds");
+        assert!(seeded.is_some(), "session row must exist before seeding");
+
+        crate::db::delete_sessions_for_user(&state.store, &user_id)
+            .await
+            .expect("delete sessions");
+        crate::db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+            .await
+            .expect("revoke credentials");
+        crate::db::update_user_active_status(&state.store, &user_id, false)
+            .await
+            .expect("deactivate user");
+
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let uri = format!(
+            "/github/callback?installation_id=42&state={}",
+            urlencoding::encode(&encoded)
+        );
+        let cookie = cookie_header(&session_token);
+
+        let (status, body) = http_get(&app, &uri, &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK, "Error page should return 200");
+        assert!(
+            body.contains("User not found"),
+            "Expected UserNotFound error page, got: {body}"
         );
     }
 
