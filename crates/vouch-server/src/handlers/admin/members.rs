@@ -304,46 +304,59 @@ pub(crate) async fn revoke_member_credentials(
         ));
     }
 
-    // Delete all authenticators (cascades to sessions)
+    // Revoke sessions, SSH certificates, and the GitHub refresh token BEFORE
+    // deleting the authenticators. The authenticators are the member's only
+    // path to re-enroll; revoking access first means a partial failure of the
+    // non-atomic `revoke_user_access` leaves the member with their login
+    // path intact (recoverable by an admin retry) rather than locked out
+    // while long-lived credentials stay live. This mirrors the ordering
+    // `deactivate_member` uses via `revoke_then_persist` (#1116).
     let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
 
     let key_count = authenticators.len();
-    // One transaction for the whole set: revoking a member's credentials must
-    // not be able to land half-applied and leave them some working keys. The
-    // transaction is wrapped in `with_dsql_retry!` so that an OCC conflict —
-    // including a `delete_authenticator` cascade that loses a race against a
-    // concurrent `try_consume_device_auth` on the device-auth row, which the
-    // per-row version guard surfaces as a serialization abort at commit on
-    // Aurora DSQL — retries the whole cascade against fresh state instead of
-    // surfacing as a hard admin-facing failure. `delete_key` and `delete_user`
-    // already wrap their cascades this way; this closes the same gap for the
-    // admin credential-revocation path.
-    crate::with_dsql_retry!(async {
-        let mut tx = state
-            .store
-            .begin()
-            .await
-            .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
-        for auth in &authenticators {
-            db::delete_authenticator(&mut tx, &auth.id)
-                .await
-                .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key revocation"))?;
-        Ok::<(), ServiceError>(())
-    })?;
 
-    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
-    // request fails.
-    crate::services::auth::revoke_user_access(
+    crate::services::auth::revoke_then_persist(
         &state,
         &target_id,
         "Credentials revoked by admin",
         &admin.id,
+        || async {
+            // One transaction for the whole set: revoking a member's
+            // credentials must not be able to land half-applied and leave
+            // them some working keys. This closure runs only if revocation
+            // succeeded, so a partial failure of `revoke_user_access`
+            // cannot leave the member locked out with live long-lived
+            // credentials.
+            //
+            // The transaction is wrapped in `with_dsql_retry!` so that an
+            // OCC conflict — including a `delete_authenticator` cascade that
+            // loses a race against a concurrent `try_consume_device_auth` on
+            // the device-auth row, which the per-row version guard surfaces
+            // as a serialization abort at commit on Aurora DSQL — retries the
+            // cascade against fresh state instead of surfacing as a hard
+            // admin-facing failure. `delete_key` and `delete_user` already
+            // wrap their cascades this way.
+            crate::with_dsql_retry!(async {
+                let mut tx = state.store.begin().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to start transaction")
+                })?;
+                for auth in &authenticators {
+                    db::delete_authenticator(&mut tx, &auth.id)
+                        .await
+                        .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+                }
+                tx.commit().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to commit key revocation")
+                })?;
+                Ok::<(), ServiceError>(())
+            })
+        },
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        crate::services::auth::DeactivationError::Revoke(err) => err,
+        crate::services::auth::DeactivationError::Persist(err) => err,
+    })?;
 
     let data = AdminMemberActionData {
         action: "revoke_credentials",

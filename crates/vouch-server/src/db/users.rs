@@ -340,16 +340,32 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // both manageable and discoverable in that admin's normal list.
         // Personal and public applications have no other legitimate owner
         // and are unlinked.
+        // The reassignment reads each matching `OAuthClientDoc` and writes it
+        // back with optimistic concurrency (`compare_and_update`) rather than
+        // a blind `update_by_index`: the client doc's version is the
+        // serialization point for all secret-set mutations, and concurrent
+        // CAS writers (`update_oauth_client`, `update_oauth_client_registration`)
+        // committing between our read and a blind
+        // `UPDATE ... version = version + 1` would be silently overwritten
+        // with the stale doc — a lost update on client configuration. A lost
+        // CAS here is surfaced as `OccConflict`, and the entry-point
+        // `with_dsql_retry!` re-runs the whole cascade from a fresh read.
         let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = match (d.access_scope, successor.as_deref()) {
+        let mut clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+        for client in &mut clients {
+            client.data.user_id = match (client.data.access_scope, successor.as_deref()) {
                 (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
                     Some(admin_id.to_string())
                 }
                 _ => None,
             };
-        })
-        .await?;
+            let won = tx
+                .compare_and_update::<OAuthClientDoc>(&client.id, client.version, &client.data)
+                .await?;
+            if !won {
+                return Err(DeleteUserError::OccConflict);
+            }
+        }
 
         // Serialize deletions within an organization on the org row.
         //
