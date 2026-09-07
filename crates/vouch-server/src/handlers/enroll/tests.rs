@@ -9,7 +9,7 @@
 use super::*;
 use crate::test_utils::{
     TestSessionSpec, create_test_authenticator, create_test_session_with, create_test_user,
-    http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
+    http_delete_full, http_get_full, http_post_json, test_app, test_app_state, test_config,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -1996,6 +1996,66 @@ async fn test_enrollment_rejects_empty_local_part_email() {
     assert!(
         user.is_none(),
         "an email with no local part must not be persisted"
+    );
+}
+
+// RFC 5322 §3.4.1: addr-spec requires a non-empty domain. The shape check
+// lets `foo@` through by design (SCIM's downstream ownership gate rejects
+// it), so enrollment needs its own gate: with `allowed_domains` unset (the
+// default, open-enrollment mode), nothing else rejects an empty domain
+// before `enroll_user_with_org` persists it.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_empty_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-3", None).await;
+    let identity = IdentityResult {
+        email: "foo@".to_string(),
+        domain: Some(String::new()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = crate::db::get_user_by_email(&state.store, "foo@")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "an empty-domain email must not be persisted in open-enrollment mode"
+    );
+}
+
+// RFC 5322 §3.4.1: a well-formed addr-spec passes in open-enrollment mode
+// too (the positive control pinning that the empty-domain gate does not
+// over-reject when `allowed_domains` is unset).
+#[tokio::test]
+async fn test_enrollment_open_mode_accepts_well_formed_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    let user = create_test_user(&state.store, "open-ok@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "good-email-state-2", None).await;
+    let identity = IdentityResult {
+        email: "open-ok@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a valid email must proceed through enrollment in open-enrollment mode"
     );
 }
 
