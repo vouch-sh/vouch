@@ -171,6 +171,22 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
     }
 }
 
+/// Canonicalize an RFC 4514 distinguished-name string for comparison.
+///
+/// Parses the string into a DER `RdnSequence` (via
+/// [`x509_cert::name::RdnSequence`]'s `FromStr`) and re-renders it,
+/// so both sides of a DN comparison reduce to the same rendering regardless
+/// of the spacing and attribute-name casing the input used. Returns `None`
+/// when the string is not a parseable RFC 4514 DN, in which case the caller
+/// falls back to exact string comparison.
+fn canonicalize_dn(dn: &str) -> Option<String> {
+    use std::str::FromStr as _;
+    let rdns = x509_cert::name::RdnSequence::from_str(dn).ok()?;
+    let der = der::Encode::to_der(&rdns).ok()?;
+    let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
+    Some(rdns.to_string())
+}
+
 /// Verify `tls_client_auth` — match certificate against registered
 /// subject DN or SAN fields (RFC 8705 Section 2.1.2).
 ///
@@ -185,7 +201,20 @@ pub(crate) fn verify_tls_client_auth(
 ) -> Result<(), MtlsError> {
     if let Some(expected) = expected_subject_dn {
         let found = cert.subject_dn.as_deref().unwrap_or("");
-        if found == expected {
+        // Compare DNs via a canonical form, not one specific rendering:
+        // `found` is whatever `Name::to_string` emitted at parse time, while
+        // the registered `tls_client_auth_subject_dn` is operator-supplied
+        // RFC 4514 text. Round-tripping both sides through the DER encoding
+        // (RFC 4514 string -> RdnSequence -> canonical string) makes the
+        // comparison insensitive to spacing and attribute-name case
+        // (`CN=a, O=b` vs `cn=a,o=b`). If either side does not parse as an
+        // RFC 4514 DN the comparison falls back to exact string equality,
+        // preserving the previous behavior (fail closed on mismatch).
+        let matches = match (canonicalize_dn(expected), canonicalize_dn(found)) {
+            (Some(e), Some(f)) => e == f,
+            _ => expected == found,
+        };
+        if matches {
             return Ok(());
         }
         return Err(MtlsError::SubjectMismatch {
@@ -195,7 +224,14 @@ pub(crate) fn verify_tls_client_auth(
     }
 
     if let Some(expected) = expected_san_dns {
-        if cert.san_dns.iter().any(|d| d == expected) {
+        // RFC 4343: DNS names compare case-insensitively (RFC 6125 §6.4.1
+        // for certificate identity matching), so `Client.Example.COM` in the
+        // SAN must match a registered `client.example.com`.
+        if cert
+            .san_dns
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(expected))
+        {
             return Ok(());
         }
         return Err(MtlsError::SubjectMismatch {
@@ -923,6 +959,104 @@ mod tests {
         assert!(
             matches!(result, Err(MtlsError::CertificateNotRegistered)),
             "empty keys array must return CertificateNotRegistered"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — SAN DNS case-insensitivity (RFC 4343 / RFC 6125)
+    // =========================================================================
+
+    // RFC 4343 (and RFC 6125 §6.4.1 for certificate identity matching): DNS
+    // names compare case-insensitively, so a SAN of `Client.Example.COM`
+    // must match a registered `client.example.com` and vice versa.
+    #[test]
+    fn test_verify_tls_client_auth_san_dns_case_insensitive() {
+        let cert_der = make_self_signed_cert_with_san(
+            "test-san-dns-case",
+            &["Client.Example.COM"],
+            &[],
+            &[],
+            &[],
+        );
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("client.example.com"), None, None, None)
+                .is_ok(),
+            "lowercase registered name must match mixed-case SAN"
+        );
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("CLIENT.EXAMPLE.COM"), None, None, None)
+                .is_ok(),
+            "uppercase registered name must match mixed-case SAN"
+        );
+    }
+
+    // RFC 6125 §6.4.1: case folding must not make distinct names match.
+    #[test]
+    fn test_verify_tls_client_auth_san_dns_case_fold_rejects_different_name() {
+        let cert_der = make_self_signed_cert_with_san(
+            "test-san-dns-neg",
+            &["Client.Example.COM"],
+            &[],
+            &[],
+            &[],
+        );
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, None, Some("other.example.com"), None, None, None)
+                .is_err(),
+            "a different DNS name must still mismatch"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — subject DN canonical comparison (RFC 4514)
+    // =========================================================================
+
+    // RFC 8705 §2.1.2 matches the certificate subject against the registered
+    // `tls_client_auth_subject_dn` expressed as an RFC 4514 string. The
+    // comparison must not depend on one specific rendering: spacing after
+    // commas and attribute-type casing vary between producers.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_rendering_insensitive() {
+        let cert_der = make_test_cert("dn-canon");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+
+        // The registered value uses lowercase attribute types; the parsed
+        // rendering uses `CN=`. Canonical comparison must equate them.
+        let lowercased_attr = rendered.replace("CN=", "cn=");
+        assert_ne!(rendered, lowercased_attr, "precondition: strings differ");
+        assert!(
+            verify_tls_client_auth(&cert, Some(&lowercased_attr), None, None, None, None).is_ok(),
+            "attribute-type case must not affect DN matching"
+        );
+    }
+
+    // RFC 4514: canonicalization must not make distinct DNs match.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_canonical_still_rejects_mismatch() {
+        let cert_der = make_test_cert("dn-canon-neg");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, Some("cn=different"), None, None, None, None).is_err(),
+            "a different DN must still mismatch after canonicalization"
+        );
+    }
+
+    // A registered value that is not a parseable RFC 4514 DN falls back to
+    // exact string comparison and (mismatching) fails closed.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_unparseable_expected_fails_closed() {
+        let cert_der = make_test_cert("dn-unparseable");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        assert!(
+            verify_tls_client_auth(&cert, Some("not a dn at all"), None, None, None, None).is_err(),
+            "an unparseable registered DN must not match"
         );
     }
 }
