@@ -154,6 +154,24 @@ pub async fn build_test_app_state<F>(
 where
     F: FnOnce(&mut DocumentStore),
 {
+    build_test_app_state_with_http_client(idps, configure_store, reqwest::Client::new()).await
+}
+
+/// Build an [`AppState`] for tests with a custom outbound HTTP client.
+///
+/// Used by tests that exercise server-side fetches of client-controlled URLs
+/// (e.g. an OIDC Core §6.2 `request_uri` HTTPS fetch) against an in-process TLS
+/// mock: the test injects a `reqwest::Client` that trusts the mock's
+/// self-signed certificate, while the rest of the state is built exactly as
+/// [`build_test_app_state`] builds it.
+pub async fn build_test_app_state_with_http_client<F>(
+    idps: Vec<crate::services::idp::ConfiguredIdp>,
+    configure_store: F,
+    http_client: reqwest::Client,
+) -> Arc<AppState>
+where
+    F: FnOnce(&mut DocumentStore),
+{
     let pool = test_db().await;
     let config = test_config();
 
@@ -190,7 +208,7 @@ where
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
-        http_client: reqwest::Client::new(),
+        http_client,
         session_cache: crate::db::SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
@@ -325,6 +343,21 @@ pub async fn test_app_with_idps(
     idps: Vec<crate::services::idp::ConfiguredIdp>,
 ) -> (Router, Arc<AppState>) {
     let state = test_app_state_with_idps(idps).await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create a test app (router + state) whose outbound [`AppState::http_client`]
+/// is the supplied one.
+///
+/// For tests that drive server-side HTTPS fetches of client-controlled URLs
+/// (e.g. an OIDC Core §6.2 `request_uri`) against an in-process TLS mock: pass
+/// a client built with `danger_accept_invalid_certs(true)` (or a custom CA) so
+/// the fetch reaches the handler's fetch-and-validate logic rather than
+/// failing at the TLS handshake.
+pub async fn test_app_with_http_client(http_client: reqwest::Client) -> (Router, Arc<AppState>) {
+    let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)

@@ -2100,3 +2100,381 @@ async fn test_rfc8693_actor_session_store_error_returns_internal() {
         "DB error must not be reported as invalid_grant: {body}"
     );
 }
+
+// ========================================================================
+// RFC 8707 resource_uris allowlist enforcement on token exchange.
+//
+// Token exchange is reachable directly at /oauth/token with no prior
+// /authorize or PAR "front door", so the authenticated client's registered
+// `resource_uris` allowlist must be enforced inside the handler, matching
+// the check that the front doors perform. These tests pin that behavior for
+// both the RFC 9068 access-token fork and the OIDC ID-token (WIF) fork.
+// ========================================================================
+
+/// Helper: build a confidential client restricted to a single registered
+/// audience.
+async fn make_restricted_client(
+    state: &std::sync::Arc<crate::AppState>,
+    user_id: &str,
+) -> TestOAuthClient {
+    create_test_client(
+        &state.store,
+        user_id,
+        TestClientSpec {
+            resource_uris: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_audience_access_token() {
+    // A client narrowed to `resource_uris: ["https://api.example.com"]` must
+    // NOT mint an RFC 9068 access token for an unregistered audience.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-at-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered audience must report invalid_target: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not registered for this client")),
+        "description must name the allowlist violation: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_audience_id_token() {
+    // The OIDC ID-token (Workload Identity Federation) fork must also reject
+    // an unregistered audience. These ID tokens are presented to external
+    // relying parties (Kubernetes API server, Vault, cloud WIF) that trust the
+    // issuer to enforce the per-client audience boundary.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-id-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint an ID token for an unregistered audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered audience must report invalid_target: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_resource() {
+    // The `resource` parameter (RFC 8707) is an alternate spelling of the
+    // audience; it must be gated by the same allowlist.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-res-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &resource=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered resource: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered resource must report invalid_target: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_matched_unregistered_audience_and_resource() {
+    // When `audience` and `resource` are both supplied and equal (so the
+    // self-consistency check passes) but the shared value is not on the
+    // allowlist, the allowlist check — not the consistency check — must
+    // still reject the request.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-match-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://victim.example.com\
+             &resource=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "matched-but-unregistered audience/resource must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "matched-but-unregistered values must report invalid_target: {body}"
+    );
+    // The allowlist message (not the "must match" consistency message) must win.
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not registered for this client")),
+        "description must name the allowlist violation, not the consistency check: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_allows_registered_audience_access_token() {
+    // Happy path: a restricted client requesting a *registered* audience on
+    // the access-token fork must succeed and the issued `aud` must equal the
+    // registered value. Gates against the fix over-rejecting valid requests.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-at-allow@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://api.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered audience must be accepted on the access-token fork: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://api.example.com",
+        "issued access token's aud must be the registered audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_allows_registered_audience_id_token() {
+    // Happy path: a restricted client requesting a *registered* audience on
+    // the ID-token (WIF) fork must succeed and the issued `aud` must equal
+    // the registered value.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-id-allow@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://api.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered audience must be accepted on the ID-token fork: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["aud"], "https://api.example.com",
+        "issued ID token's aud must be the registered audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_permissive_client_allows_arbitrary_audience() {
+    // A client with an empty `resource_uris` (the permissive default) must
+    // still be able to mint a token for any audience — `is_valid_resource_uri`
+    // short-circuits to `true` when the allowlist is empty. Guards against
+    // the fix accidentally rejecting the permissive default.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-permissive@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://arbitrary.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "permissive (empty resource_uris) client must accept arbitrary audience: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://arbitrary.example.com",
+        "permissive client's token aud must be the requested arbitrary audience"
+    );
+}

@@ -6,9 +6,9 @@ Detects handlers or services that deactivate, delete, or revoke user access with
 
 ### 1. Persist-before-revoke ordering (critical)
 
-Any path that calls `db::update_user_active_status(..., false)`, `db::delete_user`, or `db::update_scim_user` with a deactivation before calling `revoke_user_access` / `revoke_then_persist` is wrong. The correct helper in this codebase is `services::auth::revoke_then_persist`, which runs revocation atomically first and only persists `active=false` if revocation succeeds.
+Any path that calls `db::update_user_active_status(..., false)`, `db::delete_user`, `db::delete_authenticator` (the authenticator-deletion loop in `revoke_member_credentials`), or `db::update_scim_user` with a deactivation before calling `revoke_user_access` / `revoke_then_persist` is wrong. The correct helper in this codebase is `services::auth::revoke_then_persist`, which runs revocation atomically first and only persists the state change if revocation succeeds.
 
-**Smell**: `update_user_active_status(..., false)` or `update_scim_user` appears above, or is awaited before, `revoke_user_access` / `revoke_then_persist`.
+**Smell**: `update_user_active_status(..., false)`, `delete_authenticator`, or `update_scim_user` appears above, or is awaited before, `revoke_user_access` / `revoke_then_persist`.
 
 **Correct ordering**: `revoke_then_persist(&state, &user_id, reason, by, || persist_fn())`.
 
@@ -78,6 +78,18 @@ db::update_scim_user(&state.store, &id, &auth.org_id, ..., patched.active).await
 crate::services::auth::revoke_user_access(&state, &id, "...", "scim").await?;
 ```
 
+**Persist-before-revoke (admin revoke_member_credentials — pre-fix)**
+```rust
+// WRONG: the authenticator-deletion transaction commits first, then
+// revoke_user_access runs; a partial failure of the non-atomic
+// revoke_user_access locks the member out while long-lived SSH certs /
+// the GitHub refresh token stay live.
+let mut tx = state.store.begin().await?;
+for auth in &authenticators { db::delete_authenticator(&mut tx, &auth.id).await?; }
+tx.commit().await?;
+crate::services::auth::revoke_user_access(&state, &target_id, "...", &admin.id).await?;
+```
+
 **SSH revocation serial mismatch (pre-fix)**
 ```rust
 // WRONG: synthetic serial never matches a real 64-bit SSH cert serial
@@ -128,6 +140,39 @@ let updated = crate::services::auth::revoke_then_persist(
 .map_err(|e| match e {
     DeactivationError::Revoke(err) => err,
     DeactivationError::Persist(err) => ServiceError::from(err),
+})?;
+```
+
+**Credential-revocation ordering via `revoke_then_persist` (admin revoke_member_credentials)**
+
+`delete_authenticator` is a persisted state change that withdraws the member's login path: the same ordering invariant as `active=false` applies — revocation runs first, authenticator deletion is the `persist` closure, and only runs if revocation succeeded. This matches the helper's documented anti-pattern: persisting first and then failing `revoke_user_access` (which is non-atomic) leaves the member locked out while long-lived credentials stay live.
+```rust
+let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
+let key_count = authenticators.len();
+crate::services::auth::revoke_then_persist(
+    &state,
+    &target_id,
+    "Credentials revoked by admin",
+    &admin.id,
+    || async {
+        let mut tx = state.store.begin().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to start transaction")
+        })?;
+        for auth in &authenticators {
+            db::delete_authenticator(&mut tx, &auth.id)
+                .await
+                .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+        }
+        tx.commit().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to commit key revocation")
+        })?;
+        Ok::<(), ServiceError>(())
+    },
+)
+.await
+.map_err(|e| match e {
+    DeactivationError::Revoke(err) => err,
+    DeactivationError::Persist(err) => err,
 })?;
 ```
 
@@ -184,7 +229,7 @@ for cert in &issued {
 
 All files under `crates/vouch-server/src/` in these directories:
 
-- `handlers/admin/members.rs` — deactivate_member, remove_member
+- `handlers/admin/members.rs` — deactivate_member, remove_member, revoke_member_credentials
 - `handlers/scim/users.rs` — patch_user (deactivation branch), delete_user
 - `handlers/scim/mod.rs` — SCIM active-value parsing
 - `handlers/device.rs` — device_token (approved branch)

@@ -304,35 +304,49 @@ pub(crate) async fn revoke_member_credentials(
         ));
     }
 
-    // Delete all authenticators (cascades to sessions)
+    // Revoke sessions, SSH certificates, and the GitHub refresh token BEFORE
+    // deleting the authenticators. The authenticators are the member's only
+    // path to re-enroll; revoking access first means a partial failure of the
+    // non-atomic `revoke_user_access` leaves the member with their login
+    // path intact (recoverable by an admin retry) rather than locked out
+    // while long-lived credentials stay live. This mirrors the ordering
+    // `deactivate_member` uses via `revoke_then_persist` (#1116).
     let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
 
     let key_count = authenticators.len();
-    // One transaction for the whole set: revoking a member's credentials must
-    // not be able to land half-applied and leave them some working keys.
-    let mut tx = state
-        .store
-        .begin()
-        .await
-        .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
-    for auth in &authenticators {
-        db::delete_authenticator(&mut tx, &auth.id)
-            .await
-            .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
-    }
-    tx.commit()
-        .await
-        .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key revocation"))?;
 
-    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
-    // request fails.
-    crate::services::auth::revoke_user_access(
+    crate::services::auth::revoke_then_persist(
         &state,
         &target_id,
         "Credentials revoked by admin",
         &admin.id,
+        || async {
+            // One transaction for the whole set: revoking a member's
+            // credentials must not be able to land half-applied and leave
+            // them some working keys. This closure runs only if revocation
+            // succeeded, so a partial failure of `revoke_user_access`
+            // cannot leave the member locked out with live long-lived
+            // credentials.
+            let mut tx =
+                state.store.begin().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to start transaction")
+                })?;
+            for auth in &authenticators {
+                db::delete_authenticator(&mut tx, &auth.id)
+                    .await
+                    .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+            }
+            tx.commit().await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to commit key revocation")
+            })?;
+            Ok::<(), ServiceError>(())
+        },
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        crate::services::auth::DeactivationError::Revoke(err) => err,
+        crate::services::auth::DeactivationError::Persist(err) => err,
+    })?;
 
     let data = AdminMemberActionData {
         action: "revoke_credentials",
@@ -1199,6 +1213,130 @@ mod tests {
         assert_eq!(
             revoked[0].serial, issued_before[0].serial,
             "revoked serial must match the issued cert"
+        );
+    }
+
+    /// Ordering guarantee: `revoke_member_credentials` must run
+    /// `revoke_user_access` (sessions, SSH certs, GitHub refresh token) to
+    /// completion BEFORE the authenticator-deletion transaction runs. The
+    /// authenticators are the member's only path back to re-enroll; if the
+    /// irreversible auth-delete committed first and `revoke_user_access` then
+    /// failed partway, the member would be locked out while long-lived
+    /// credentials (e.g. SSH certs) stayed live for their full configured
+    /// lifetime. Routing the handler through `services::auth::revoke_then_persist`
+    /// — the same helper `deactivate_member` uses for the analogous invariant
+    /// (#1116) — guarantees the auth-deletion only runs as the persist closure,
+    /// after revocation already succeeded.
+    ///
+    /// This test witnesses ordering via the existing `modify_test_hook`
+    /// rather than injecting a failure path (no insert/commit fault seam
+    /// reaches `revoke_all_ssh_certificates_for_user`). The hook fires inside
+    /// `clear_user_github_refresh_token` — the LAST sub-step of
+    /// `revoke_user_access` — and records the member's authenticator count
+    /// and revoked SSH-cert count at that instant. With the fix this instant
+    /// precedes the auth-deletion transaction, so the authenticators must
+    /// still be present; on the pre-fix persist-before-revoke ordering the
+    /// auth-deletion had already committed by then and the count would be 0.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_revokes_access_before_deleting_authenticators() {
+        use std::sync::{Arc, Mutex};
+
+        // (authenticator_count, revoked_ssh_cert_count) snapshot taken at
+        // the moment `clear_user_github_refresh_token` runs.
+        let snapshot: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let snapshot_clone = Arc::clone(&snapshot);
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let snap = Arc::clone(&snapshot_clone);
+                Box::pin(async move {
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target {
+                        return;
+                    }
+                    // Sample the member's state at the moment the GitHub
+                    // refresh-token clear runs — the last sub-step of
+                    // `revoke_user_access`. With the fix this point
+                    // precedes the auth-deletion transaction.
+                    let auths = crate::db::get_authenticators_for_user(&writer, &doc_id)
+                        .await
+                        .expect("list auths");
+                    let revoked = crate::db::get_revoked_ssh_certificates(&writer)
+                        .await
+                        .expect("list revoked");
+                    *snap.lock().expect("snap lock") = Some((auths.len(), revoked.len()));
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // The member starts with one authenticator (so the auth-deletion
+        // has something to commit) and one issued SSH cert (so step 3a of
+        // `revoke_user_access` is non-trivial).
+        let _ = create_test_authenticator(&state.store, &member.id).await;
+        record_test_ssh_cert(&state, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed; got {status}: {body}"
+        );
+
+        let snap = snapshot
+            .lock()
+            .expect("snap lock")
+            .take()
+            .expect("modify hook fired for clear_user_github_refresh_token");
+        assert_eq!(
+            snap.0, 1,
+            "the member's authenticator must still be present at the moment \
+             `clear_user_github_refresh_token` (the last sub-step of \
+             `revoke_user_access`) runs — the auth-deletion transaction must \
+             only commit AFTER revocation succeeds"
+        );
+        assert_eq!(
+            snap.1, 1,
+            "the SSH cert must already be revoked when the GitHub refresh-token \
+             clear runs — `revoke_all_ssh_certificates_for_user` runs before \
+             `clear_user_github_refresh_token` within `revoke_user_access`"
+        );
+
+        // Post-condition: the auth-deletion (the persist closure) did land
+        // after revocation succeeded.
+        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "all member authenticators must be deleted after a successful revoke"
+        );
+
+        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked.len(),
+            1,
+            "SSH certificate must remain revoked after the request"
         );
     }
 

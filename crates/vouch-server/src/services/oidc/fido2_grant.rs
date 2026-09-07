@@ -386,8 +386,6 @@ pub(crate) async fn exchange_fido2_assertion(
     // Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
-    let now = jiff::Timestamp::now().as_second();
-
     // Org domain, read once at session creation for the federation claims.
     let org_domain = match user.org_id.as_deref() {
         Some(org_id) => {
@@ -417,8 +415,15 @@ pub(crate) async fn exchange_fido2_assertion(
             binding: params.binding,
             act: None,
             audience: None,
+            // The ceremony-receipt instant from `verify_login_assertion` —
+            // the `auth_time` any token resting on this ceremony must report
+            // (see `LoginAssertionResult::verified_at`). Stamping this
+            // handler's own clock instead would overstate freshness to the
+            // key-deletion step-up gate by the verification-to-issuance
+            // processing delay, and diverge from the browser-login and
+            // device-code flows, which both carry the ceremony instant.
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(now),
+                auth_time: Some(assertion_result.verified_at.as_second()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
