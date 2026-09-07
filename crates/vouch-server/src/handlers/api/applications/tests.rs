@@ -1472,6 +1472,125 @@ async fn test_delete_application_requires_auth() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Deleting an application must revoke every access token it minted — both
+/// user-issued grants (session keyed by the resource owner's `user_id`,
+/// tagged with the issuing `client_id`) and M2M `client_credentials`
+/// sessions (keyed by `user_id == client_id`, RFC 9068 §2.2).
+///
+/// Regression for the sibling of the `revoke_tokens_api` bug: deletion is a
+/// stronger revocation intent than the "revoke all tokens" button, yet
+/// `delete_application_api` used to call the bare `delete_oauth_client`,
+/// leaving already-minted tokens validating at resource endpoints until
+/// `exp`. Without the fix the userinfo probe below stays 200 after the
+/// delete and this test fails.
+#[tokio::test]
+async fn test_delete_application_revokes_minted_sessions() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "delete-revokes@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let owner_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&owner_token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // A user-issued access token for this client (authorization_code shape:
+    // session keyed by the real user, tagged with the issuing client).
+    let user_access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // An M2M (client_credentials) session: user_id == client_id.
+    create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client.client_id,
+            email: &format!("{}@clients", client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // A sibling client owned by the same user, to prove deletion does not
+    // over-revoke another application's tokens.
+    let other_client = create_test_oauth_client(&state.store, &user.id).await;
+    let other_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&other_client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::OK,
+        "user-issued token should validate before the app is deleted"
+    );
+
+    // Delete the application.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The user-issued token must be dead.
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "user-issued access token must NOT validate after the app is deleted"
+    );
+    assert_eq!(
+        count_sessions_for_client(&state.store, &client.client_id).await,
+        0,
+        "user-issued sessions for the deleted client must be gone"
+    );
+    // The M2M session must be dead too.
+    assert_eq!(
+        count_sessions_for_user(&state.store, &client.client_id).await,
+        0,
+        "M2M sessions for the deleted client must be gone"
+    );
+
+    // No over-revocation: the sibling client's token still validates.
+    assert_eq!(
+        userinfo_status(&app, &other_token).await,
+        StatusCode::OK,
+        "deleting one application must not revoke another client's tokens"
+    );
+    // And the owner's own first-party session survives.
+    assert_eq!(
+        userinfo_status(&app, &owner_token).await,
+        StatusCode::OK,
+        "the owner's first-party session must survive the app delete"
+    );
+}
+
 // ========================================================================
 // POST /api/v1/applications/:id/revoke — Revoke Tokens
 // ========================================================================
@@ -1589,6 +1708,177 @@ async fn test_revoke_tokens_clears_m2m_sessions() {
     // M2M sessions must be gone after revocation.
     let after = count_sessions_for_user(&state.store, &client.client_id).await;
     assert_eq!(after, 0, "M2M sessions must be deleted by revoke");
+}
+
+// ========================================================================
+// #539 (follow-up) — revoke_tokens also revokes user-issued access tokens
+// (authorization_code, device_code, RFC 8693 token_exchange, FIDO2).
+// These grants persist sessions under the *real resource owner's* user_id,
+// not the client's, so the M2M-only delete (user_id == client_id) misses
+// them. The client_id index on SessionDoc lets revoke_tokens_api reach
+// every token an application minted.
+// ========================================================================
+
+// Count SessionDoc rows indexed under a given client_id.
+async fn count_sessions_for_client(
+    store: &crate::db::store::DocumentStore,
+    client_id: &str,
+) -> i64 {
+    store
+        .count::<crate::db::documents::session::SessionDoc>("client_id", client_id)
+        .await
+        .expect("count must not error")
+}
+
+// Probe whether an access token still validates at the userinfo resource
+// endpoint. 200 means the session is live; 401 means it has been revoked.
+async fn userinfo_status(app: &axum::Router, token: &str) -> StatusCode {
+    let (status, _) = http_get(app, "/oauth/userinfo", &[("Authorization", &bearer(token))]).await;
+    status
+}
+
+/// A user-issued access token minted for the revoked client must stop
+/// validating after `revoke_tokens_api`, and its session row must be gone.
+///
+/// Regression for the bug where `revoke_tokens_api` only deleted
+/// `client_credentials` (M2M) sessions — keyed by `user_id == client_id` —
+/// and left every user-issued grant (`authorization_code`, `device_code`,
+/// RFC 8693 `token_exchange`, FIDO2) alive until `exp`. The fixture mints a
+/// real `OAuthAccessToken` session through `create_test_session_with` (which
+/// drives the production `create_oauth_access_token` path) with
+/// `user_id == real_user` and `client_id == the_oauth_client`, exactly the
+/// shape of a user-issued grant, then confirms the userinfo endpoint flips
+/// from 200 to 401 across the revoke call.
+#[tokio::test]
+async fn test_revoke_tokens_revokes_user_issued_access_tokens() {
+    let (app, state) = test_app().await;
+
+    // Owner user + their OAuth application.
+    let user = create_test_user(&state.store, "revoke-user@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let owner_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&owner_token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // A real user-issued access token for this client. The session row is
+    // keyed by the real user's user_id (per RFC 9068 for authorization_code,
+    // device_code, token_exchange, FIDO2) but tagged with the issuing client.
+    let user_access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The user-issued token validates before revoke.
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::OK,
+        "user access token should validate before revoke"
+    );
+    assert!(
+        count_sessions_for_client(&state.store, &client.client_id).await >= 1,
+        "client should have at least one user-issued session before revoke"
+    );
+
+    // Mint a second client owned by the same user, with its own user-issued
+    // token, to prove revoke is scoped to a single application and does not
+    // over-revoke sibling clients' tokens.
+    let other_client = create_test_oauth_client(&state.store, &user.id).await;
+    let other_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&other_client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        userinfo_status(&app, &other_token).await,
+        StatusCode::OK,
+        "other client's token should validate before revoke"
+    );
+
+    // Owner revokes all tokens for `client`. 204 + "All tokens revoked".
+    let (status, _) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/revoke", client.app_id),
+        "{}",
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The user-issued access token for the revoked client must now be dead.
+    assert_eq!(
+        userinfo_status(&app, &user_access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "user-issued access token must NOT validate after revoke_tokens_api"
+    );
+
+    // Its session row is gone, indexed by the issuing client.
+    assert_eq!(
+        count_sessions_for_client(&state.store, &client.client_id).await,
+        0,
+        "user-issued sessions for the revoked client must be deleted"
+    );
+
+    // M2M sessions for the revoked client are also gone (the M2M half still
+    // works alongside the new user-issued delete).
+    create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client.client_id,
+            email: &format!("{}@clients", client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Re-revoke to clear the M2M session just minted, confirming both halves
+    // of the delete coexist.
+    let (status, _) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/revoke", client.app_id),
+        "{}",
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        count_sessions_for_user(&state.store, &client.client_id).await,
+        0,
+        "M2M sessions must also be deleted by revoke"
+    );
+
+    // No over-revocation: the sibling client's token is still valid.
+    assert_eq!(
+        userinfo_status(&app, &other_token).await,
+        StatusCode::OK,
+        "revoking one client must not revoke another client's tokens"
+    );
+    assert!(
+        count_sessions_for_client(&state.store, &other_client.client_id).await >= 1,
+        "sibling client's sessions must survive revoking the other client"
+    );
 }
 
 // ========================================================================
@@ -2456,5 +2746,156 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
         json["access_scope"].as_str().unwrap(),
         "public",
         "absent access_scope must preserve existing value"
+    );
+}
+
+// ========================================================================
+// Deactivated-user gate — delete/secret/revoke handlers
+// ========================================================================
+//
+// `AuthenticatedToken` validates the token only, so each state-changing
+// handler must reject a deactivated account itself (via
+// `load_active_owned_client`). Fixture: deactivate WITHOUT deleting the
+// session — the exact deactivated-with-live-session state the
+// `test_create_application_rejects_deactivated_user` sibling above uses.
+
+/// Create an app-owning user with a live session, then deactivate the user
+/// while leaving the session row intact. Returns `(app_id, bearer_token)`.
+async fn setup_deactivated_owner_with_app(
+    state: &crate::AppState,
+    email: &str,
+) -> (String, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+    (client.app_id, token)
+}
+
+fn assert_deactivated_rejection(status: StatusCode, body: &str) {
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated user must be rejected; got body: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+#[tokio::test]
+async fn test_delete_application_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-del-app@example.com").await;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}"),
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    // The application must survive the rejected deletion.
+    let survivor = crate::db::get_oauth_client_by_id(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .expect("application must still exist");
+    assert!(survivor.user_id.is_some());
+}
+
+#[tokio::test]
+async fn test_add_secret_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-add-secret@example.com").await;
+
+    let before = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .len();
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let after = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read")
+        .len();
+    assert_eq!(after, before, "deactivated user must not mint a secret");
+}
+
+#[tokio::test]
+async fn test_delete_secret_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-del-secret@example.com").await;
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    let secret_id = &secrets.first().expect("fixture secret").id;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let now = jiff::Timestamp::now();
+    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    assert!(
+        survivors
+            .iter()
+            .any(|s| s.id == *secret_id && s.is_valid(&now)),
+        "the secret must survive the rejected revocation"
+    );
+}
+
+#[tokio::test]
+async fn test_revoke_tokens_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-revoke@example.com").await;
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/revoke"),
+        r#"{}"#,
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+
+    assert_deactivated_rejection(status, &body);
+    let now = jiff::Timestamp::now();
+    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db read");
+    assert!(
+        survivors.iter().any(|s| s.is_valid(&now)),
+        "secrets must survive the rejected revoke-all"
     );
 }

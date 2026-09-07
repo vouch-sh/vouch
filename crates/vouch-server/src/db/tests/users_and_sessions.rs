@@ -151,6 +151,7 @@ async fn test_session_lifecycle() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
             source_code_hash: None,
         },
     )
@@ -207,6 +208,7 @@ async fn test_session_expiry_boundary() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
             source_code_hash: None,
         },
     )
@@ -259,6 +261,7 @@ async fn create_oauth_session(
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
             source_code_hash,
         },
     )
@@ -596,4 +599,94 @@ async fn test_replay_revocation_first_delete_fails_is_empty_ok() {
             .is_some(),
         "no deletes committed, so hash-f2 must remain"
     );
+}
+
+/// `delete_sessions_for_oauth_client` deletes only sessions tagged with the
+/// given `client_id`, leaving other clients' sessions and pre-migration rows
+/// (whose `client_id` deserialized to `None`) intact. This is the db-level
+/// half of `revoke_tokens_api`'s user-issued-token revocation.
+#[tokio::test]
+async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "revoke-client@example.com", None)
+        .await
+        .expect("create user");
+
+    async fn mk(
+        store: &crate::db::store::DocumentStore,
+        user_id: &str,
+        client_id: Option<&str>,
+        hash: &str,
+    ) {
+        create_session(
+            store,
+            &CreateSessionParams {
+                user_id,
+                user_email: "revoke-client@example.com",
+                token_hash: hash,
+                authenticator_id: None,
+                expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id,
+                source_code_hash: None,
+            },
+        )
+        .await
+        .expect("create session");
+    }
+    // Two sessions for the primary client, one for a different client, and a
+    // pre-migration row (no `client_id` tag, as if issued before the index).
+    mk(&store, &user_id, Some("client-primary"), "hash-primary1").await;
+    mk(&store, &user_id, Some("client-primary"), "hash-primary2").await;
+    mk(&store, &user_id, Some("client-other"), "hash-other").await;
+    mk(&store, &user_id, None, "hash-legacy").await;
+
+    let deleted = delete_sessions_for_oauth_client(&store, "client-primary")
+        .await
+        .expect("delete for client-primary");
+    assert_eq!(
+        deleted, 2,
+        "exactly the two client-primary sessions should be deleted"
+    );
+
+    // The primary client's sessions are gone.
+    assert!(
+        get_session_by_token_hash(&store, "hash-primary1", jiff::Timestamp::now())
+            .await
+            .expect("lookup primary1")
+            .is_none(),
+        "client-primary session hash-primary1 must be deleted"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-primary2", jiff::Timestamp::now())
+            .await
+            .expect("lookup primary2")
+            .is_none(),
+        "client-primary session hash-primary2 must be deleted"
+    );
+
+    // Other clients and pre-migration rows survive.
+    assert!(
+        get_session_by_token_hash(&store, "hash-other", jiff::Timestamp::now())
+            .await
+            .expect("lookup other")
+            .is_some(),
+        "other client's session must survive revoking client-primary"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-legacy", jiff::Timestamp::now())
+            .await
+            .expect("lookup legacy")
+            .is_some(),
+        "pre-migration session (no client_id) must survive client-scoped revocation"
+    );
+
+    // A second call is a no-op (idempotent): nothing left to delete.
+    let deleted_again = delete_sessions_for_oauth_client(&store, "client-primary")
+        .await
+        .expect("delete for client-primary again");
+    assert_eq!(deleted_again, 0, "re-deleting an empty index is a no-op");
 }

@@ -980,6 +980,43 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
     })
 }
 
+/// Delete an OAuth client and revoke every access token it minted.
+///
+/// Deleting a client is a stronger revocation intent than the "revoke all
+/// tokens" endpoint, so it must revoke at least as much: [`delete_oauth_client`]
+/// alone removes the client row, its secrets, and its JWKS cache, but leaves
+/// every already-minted session validating at resource endpoints until `exp`.
+/// This chokepoint removes both session shapes before deleting the client:
+///
+/// * M2M (`client_credentials`) sessions, keyed by `user_id == client_id`
+///   (RFC 9068 §2.2), via
+///   [`delete_sessions_for_user`](super::sessions::delete_sessions_for_user);
+/// * user-issued sessions (`authorization_code`, `device_code`, RFC 8693
+///   `token_exchange`, FIDO2), keyed by the resource owner's `user_id` but
+///   tagged with the issuing client on the `client_id` index, via
+///   [`delete_sessions_for_oauth_client`](super::sessions::delete_sessions_for_oauth_client).
+///
+/// Ordering is fail-closed: sessions are deleted (and the cache invalidated)
+/// before the client row. If the client delete then fails, the caller sees the
+/// error and can retry, and no orphaned token keeps validating in the
+/// meantime. Pre-migration sessions with `client_id == None` are not matched
+/// by the client-scoped delete and remain valid until `exp`, matching
+/// `revoke_tokens_api`.
+///
+/// * `id` is the client's document id; `client_id` is its OAuth `client_id`.
+pub async fn delete_oauth_client_and_revoke_sessions(
+    store: &DocumentStore,
+    session_cache: &super::sessions::SessionCache,
+    id: &str,
+    client_id: &str,
+) -> Result<u64> {
+    super::sessions::delete_sessions_for_user(store, client_id).await?;
+    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
+    session_cache.invalidate_for_user(client_id);
+    session_cache.invalidate_for_client(client_id);
+    delete_oauth_client(store, id).await
+}
+
 /// Update last used timestamp for an OAuth client.
 ///
 /// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
@@ -1955,8 +1992,6 @@ pub async fn validate_oauth_client_credentials(
         return Ok(None);
     }
 
-    update_oauth_client_last_used(store, &client.id).await?;
-
     Ok(Some(client))
 }
 
@@ -2627,6 +2662,48 @@ mod tests {
             .expect("validate");
 
         assert!(result.is_none());
+    }
+
+    // `validate_oauth_client_credentials` must be pure credential validation:
+    // an observational `last_used_at` write that fails must NOT fail credential
+    // validation. The five sibling `last_used_at` callers (mTLS, public,
+    // private_key_jwt, two SCIM) keep the write separate and swallow it; before
+    // the fix the secret path bundled the write into this DB function with
+    // `.await?`, so a transient `last_used_at` UPDATE failure surfaced as
+    // `Err` — making a fully-authenticated secret-based confidential client get
+    // HTTP 500 / `server_error` while the other auth methods proceeded.
+    //
+    // `set_last_used_remaining_successes(0)` faults every
+    // `update_last_used_at` call with a non-retryable `Err` (it is not in
+    // `RETRYABLE_SQL_STATES`, so it escapes `with_dsql_retry!` immediately).
+    // Under the pre-fix code this test fails at `result.expect(...)`: the
+    // coupled `update_oauth_client_last_used(...).await?` propagated the
+    // faulty `Err` out of `validate_oauth_client_credentials`. Post-fix the
+    // function performs credential validation only — it never touches
+    // `update_last_used_at` — so the same fault is not even exercised and the
+    // call returns `Ok(Some(client))`.
+    #[tokio::test]
+    async fn test_validate_credentials_succeeds_when_last_used_update_fails() {
+        let mut store = test_store().await;
+        let (client, _secret, hash) = create_client_and_secret(&store).await;
+
+        // Fault every `update_last_used_at` write with a non-retryable `Err`.
+        store.set_last_used_remaining_successes(0);
+
+        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
+            .await
+            .expect("credential validation must not fail when the last_used_at write fails");
+        assert!(
+            result.is_some(),
+            "validated client must be returned even under an injected last_used_at fault"
+        );
+
+        // Control: with the fault cleared, validation still returns the client.
+        store.set_last_used_remaining_successes(u64::MAX);
+        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
+            .await
+            .expect("validate with fault cleared");
+        assert!(result.is_some());
     }
 
     #[tokio::test]
