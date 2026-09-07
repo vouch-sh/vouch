@@ -2655,8 +2655,9 @@ async fn setup_user_with_fapi_app_and_secret(
     (client.app_id, token)
 }
 
-// FAPI 2.0 Security Profile §5.3.1: confidential clients use asymmetric
-// auth, so a FAPI client's last (unusable) secret must be deletable.
+// FAPI 2.0 Security Profile §5.3.2.1 item 6: mTLS-FAPI clients authenticate
+// only via mutual TLS, so a FAPI client's last (unusable) secret must be
+// deletable.
 #[tokio::test]
 async fn test_delete_last_secret_allowed_for_fapi_client() {
     let (app, state) = test_app().await;
@@ -2695,7 +2696,8 @@ async fn test_delete_last_secret_allowed_for_fapi_client() {
     );
 }
 
-// FAPI 2.0 Security Profile §5.3.1: the exemption is FAPI-scoped; the
+// FAPI 2.0 Security Profile §5.3.2.1 item 6: the exemption is scoped to
+// mTLS FAPI clients; the
 // non-FAPI floor stays intact (see test_delete_last_secret_rejected above
 // for the sibling negative case at the handler level).
 #[tokio::test]
@@ -2720,6 +2722,66 @@ async fn test_delete_last_secret_still_rejected_for_non_fapi_client() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "last_secret");
+}
+
+// FAPI 2.0 Security Profile §5.3.2.1 item 6 requires mTLS or private_key_jwt
+// at the token endpoint, but that gate is currently enforced only at PAR —
+// a private_key_jwt FAPI client's stored secret can still authenticate at
+// /oauth/token. The delete-floor exemption is therefore mTLS-only: the last
+// secret of a private_key_jwt FAPI client is still protected.
+#[tokio::test]
+async fn test_delete_last_secret_still_rejected_for_private_key_jwt_fapi_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "api-pkjwt-fapi-del-last@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            dpop_bound_access_tokens: true,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: true, // pre-guard row; may still be live at the token endpoint
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let secret_id = json["secrets"][0]["id"].as_str().expect("secret id");
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the floor must hold for a private_key_jwt FAPI client, body: {body}"
+    );
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "last_secret");
 }

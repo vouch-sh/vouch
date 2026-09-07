@@ -1344,11 +1344,20 @@ pub async fn revoke_oauth_client_secret(
             .count();
 
         // Floor guard: at least one *other* active secret must remain.
-        // FAPI clients are exempt: secret minting is blocked for every FAPI
-        // profile, so a FAPI client never authenticates with a secret and any
+        // mTLS-FAPI clients are exempt: secret minting is blocked for every
+        // FAPI profile and mTLS is their only client-auth path, so any
         // remaining rows are dead weight from before the guard; the floor
         // would pin them forever instead of protecting a usable credential.
-        if other_active_count == 0 && client_doc.data.fapi_profile == FapiProfile::None {
+        // private_key_jwt FAPI clients are NOT exempt — the FAPI auth-method
+        // gate is enforced at PAR but not yet at the token endpoint, so
+        // their secret may still authenticate and the floor must hold.
+        let mtls_fapi = client_doc.data.fapi_profile != FapiProfile::None
+            && matches!(
+                client_doc.data.token_endpoint_auth_method,
+                TokenEndpointAuthMethod::TlsClientAuth
+                    | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+            );
+        if other_active_count == 0 && !mtls_fapi {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",

@@ -649,11 +649,21 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    // FAPI clients cannot authenticate with a secret at all (minting is
-    // blocked above), so any remaining secret rows are dead weight from
-    // before the FAPI guard; the last-secret floor would pin them forever.
-    // Only non-FAPI clients need the floor to avoid locking themselves out.
-    if other_active == 0 && !client.is_fapi() {
+    // mTLS-FAPI clients cannot authenticate with a secret (minting is
+    // blocked, and the mTLS handshake is their only client-auth path), so
+    // any remaining secret rows are dead weight from before the FAPI guard;
+    // the last-secret floor would pin them forever. The exemption is
+    // deliberately NOT extended to private_key_jwt FAPI clients: the FAPI
+    // auth-method gate is enforced at PAR but not yet at the token
+    // endpoint, so such a client's secret may still be live — the floor
+    // must keep protecting it until that gap is closed.
+    let mtls_fapi = client.is_fapi()
+        && matches!(
+            client.token_endpoint_auth_method,
+            db::TokenEndpointAuthMethod::TlsClientAuth
+                | db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        );
+    if other_active == 0 && !mtls_fapi {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",
