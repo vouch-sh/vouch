@@ -80,7 +80,8 @@ impl Email {
     /// domain must contain no NUL byte. This rejects the malformed `userName`
     /// values a mis-mapped provisioning source can produce — `a b@d`,
     /// `@d`, `Display Name <ada@d>` — that defeat [`Self::domain_of`]'s
-    /// suffix-only split, while leaving two cases to their existing gates:
+    /// suffix-only split, while leaving these cases to their existing
+    /// downstream gates:
     ///
     /// - an **empty domain** (`foo@`) returns `true` so the org-domain
     ///   ownership check inside `create_scim_user` rejects it with the
@@ -88,7 +89,15 @@ impl Email {
     /// - a **NUL in the local part** returns `true` so the store's
     ///   index-value guard ([`super::store`'s `validate_index_entry`][v])
     ///   rejects it, matching the contract pinned by
-    ///   `test_scim_create_user_rejects_nul_in_username_local_part`.
+    ///   `test_scim_create_user_rejects_nul_in_username_local_part`;
+    /// - **whitespace in the domain** (`foo@bar .com`) returns `true`: the
+    ///   whitespace rule inspects the local part only, so a domain-internal
+    ///   space (not a valid DNS domain) is left to each call site's domain
+    ///   gate — SCIM's in-transaction ownership check, and enrollment's
+    ///   domain-internal-whitespace gate in `complete_enrollment_after_identity`
+    ///   (the chokepoint whose comment names "whitespace-bearing" values) —
+    ///   matching the contract pinned by
+    ///   `is_valid_address_passes_whitespace_domain_to_downstream_gate`.
     ///
     /// Splits on the **last** `@` (same as [`Self::domain`]/[`Self::domain_of`])
     /// so a quoted local part that itself contains `@` is not mis-split.
@@ -247,6 +256,26 @@ mod tests {
         assert!(
             Email::is_valid_address("foo@"),
             "empty-domain case must fall through to the ownership gate"
+        );
+    }
+
+    #[test]
+    fn is_valid_address_passes_whitespace_domain_to_downstream_gate() {
+        // The whitespace rule inspects the local part only, so internal
+        // whitespace in the domain (`foo@bar .com` — a tab too) is NOT a
+        // shape defect this gate rejects. It is left to each call site's
+        // domain gate: SCIM's in-transaction ownership check, and
+        // enrollment's domain-internal-whitespace gate in
+        // `complete_enrollment_after_identity`. Pinning the contract here
+        // documents why that enrollment gate is required and guards against
+        // a future change to `is_valid_address` silently dropping it.
+        assert!(
+            Email::is_valid_address("foo@bar .com"),
+            "whitespace in the domain must pass the shape check to the downstream gate"
+        );
+        assert!(
+            Email::is_valid_address("foo@bar\t.com"),
+            "a tab in the domain must pass the shape check to the downstream gate"
         );
     }
 

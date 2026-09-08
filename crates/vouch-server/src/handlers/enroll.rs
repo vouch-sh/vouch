@@ -756,12 +756,24 @@ pub(crate) async fn complete_enrollment_after_identity(
     // gate that rejects it with a specific error. Enrollment has no such
     // always-on gate: its only domain check is the optional
     // `allowed_domains` allowlist below, which is unset by default. Reject
-    // the empty domain here so open-enrollment mode cannot persist a user
-    // with `email = "foo@"` and a synthetic organization with `domain = ""`.
-    if crate::email::Email::domain_of(&identity.email).is_none_or(|d| d.is_empty()) {
+    // an empty domain (`foo@`) here so open-enrollment mode cannot persist a
+    // user with `email = "foo@"` and a synthetic organization with
+    // `domain = ""`, and reject a whitespace-bearing domain (`foo@bar .com`)
+    // too: it is not a valid DNS domain, and `enroll_user_with_org`'s only
+    // normalization is `Email::new` (trim + ASCII-lowercase), which preserves
+    // the internal space — so it would otherwise persist verbatim as
+    // `User.email` and the synthetic `Organization.domain` (the chokepoint
+    // comment's "whitespace-bearing ... value must not be persisted
+    // verbatim" read, which `Email::is_valid_address`'s local-part-only
+    // whitespace rule does not enforce).
+    let domain = crate::email::Email::domain_of(&identity.email);
+    if domain
+        .as_deref()
+        .is_none_or(|d| d.is_empty() || d.chars().any(|c| c.is_whitespace()))
+    {
         tracing::warn!(
             email = %redact_email(&identity.email),
-            "rejected IdP enrollment: upstream email has an empty domain"
+            "rejected IdP enrollment: upstream email has an invalid domain"
         );
         return ErrorTemplate {
             title: Tr::new("error-heading").to_string(),
