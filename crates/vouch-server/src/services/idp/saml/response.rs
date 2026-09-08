@@ -720,5 +720,8 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 // Tests
 // ============================================================================
 
+// `pub(crate)` so the HTTP-level SAML ACS E2E test in
+// `handlers/enroll/tests.rs` can reuse the signed-response/test-provider
+// builders without duplicating ~160 lines of XML-signature + DER scaffolding.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

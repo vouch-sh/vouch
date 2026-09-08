@@ -825,7 +825,7 @@ fn audience_restriction_error_displays_correctly() {
 
 /// Build a real RSA key pair and a self-signed X.509 DER certificate.
 /// Reuses the same helpers from signature.rs tests.
-fn generate_test_key_and_cert() -> (aws_lc_rs::rsa::KeyPair, Vec<u8>) {
+pub(crate) fn generate_test_key_and_cert() -> (aws_lc_rs::rsa::KeyPair, Vec<u8>) {
     let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
     let cert_der = build_self_signed_der(&key_pair);
     (key_pair, cert_der)
@@ -923,7 +923,7 @@ fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
     clippy::too_many_arguments,
     reason = "test helper builds SAML response with all signed-element parameters"
 )]
-fn build_signed_saml_response(
+pub(crate) fn build_signed_saml_response(
     key_pair: &aws_lc_rs::rsa::KeyPair,
     email: &str,
     response_id: &str,
@@ -1165,7 +1165,7 @@ fn build_response_signed_saml_response(
 }
 
 /// Build a `SamlProvider` for the test IdP/SP configuration.
-fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
+pub(crate) fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
     use crate::services::idp::saml::IdpMetadata;
     super::super::SamlProvider {
         id: "corp-saml".to_string(),
@@ -1183,7 +1183,7 @@ fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
 }
 
 /// Returns (not_before, not_on_or_after) strings suitable for a currently-valid assertion.
-fn valid_time_window() -> (String, String) {
+pub(crate) fn valid_time_window() -> (String, String) {
     let now = Timestamp::now();
     let not_before = now
         .checked_sub(jiff::Span::new().minutes(5))
