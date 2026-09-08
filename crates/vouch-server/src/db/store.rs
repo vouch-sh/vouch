@@ -391,6 +391,15 @@ pub struct DocumentStore {
     /// [`Self::set_update_by_index_stale_once`].
     #[cfg(test)]
     update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Test-only fault-injection budget for [`DocumentStore::delete_by_index`]:
+    /// the next `n` `delete_by_index` calls succeed (each consuming one
+    /// unit), after which every subsequent `delete_by_index` returns a
+    /// non-retryable `Err` before opening its transaction. Mirrors the
+    /// existing [`Self::delete_remaining_successes`] test hook and is
+    /// compiled out of non-test builds, so production behavior is unchanged.
+    /// See [`Self::set_delete_by_index_remaining_successes`].
+    #[cfg(test)]
+    delete_by_index_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -440,6 +449,8 @@ impl DocumentStore {
             last_used_remaining_successes: None,
             #[cfg(test)]
             update_by_index_stale_once: None,
+            #[cfg(test)]
+            delete_by_index_remaining_successes: None,
         }
     }
 
@@ -553,6 +564,53 @@ impl DocumentStore {
             let Some(next) = current.checked_sub(1) else {
                 return Err(anyhow::anyhow!(
                     "injected last_used fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// [`DocumentStore::delete_by_index`] calls to `successes`, after which
+    /// every subsequent `delete_by_index` returns a non-retryable `Err` before
+    /// opening its transaction. The fault fires at the entry to
+    /// `delete_by_index`, so the exercised control-flow shape is "one
+    /// `delete_by_index` commits, a later `delete_by_index` fails before
+    /// committing" — exactly the shape
+    /// `delete_oauth_client_and_revoke_sessions` must handle to avoid leaving
+    /// a DB-deleted session cached as a stale `Hit` when its companion
+    /// `invalidate_for_user`/`invalidate_for_client` is skipped on the second
+    /// delete's `Err`. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_delete_by_index_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.delete_by_index_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `delete_by_index` success budget,
+    /// returning `Ok` while budget remains and a non-retryable `Err` once it
+    /// is exhausted. No-op (`Ok`) when
+    /// [`Self::set_delete_by_index_remaining_successes`] was not called (no
+    /// budget installed). The CAS loop avoids underflow if a budget is shared
+    /// via [`Clone`]. See [`Self::set_delete_by_index_remaining_successes`].
+    #[cfg(test)]
+    fn consume_delete_by_index_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.delete_by_index_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected delete_by_index fault: remaining-successes budget exhausted"
                 ));
             };
             if budget
@@ -1249,6 +1307,10 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_by_index<T: DocumentType>(&self, field: &str, value: &str) -> Result<u64> {
+        #[cfg(test)]
+        {
+            self.consume_delete_by_index_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let mut tx = self.begin().await?;
             let total = tx.delete_by_index::<T>(field, value).await?;

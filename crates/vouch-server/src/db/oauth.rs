@@ -996,12 +996,15 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
 ///   tagged with the issuing client on the `client_id` index, via
 ///   [`delete_sessions_for_oauth_client`](super::sessions::delete_sessions_for_oauth_client).
 ///
-/// Ordering is fail-closed: sessions are deleted (and the cache invalidated)
-/// before the client row. If the client delete then fails, the caller sees the
-/// error and can retry, and no orphaned token keeps validating in the
-/// meantime. Pre-migration sessions with `client_id == None` are not matched
-/// by the client-scoped delete and remain valid until `exp`, matching
-/// `revoke_tokens_api`.
+/// Ordering is fail-closed: each session delete is immediately followed by
+/// its companion cache invalidation, mirroring `revoke_tokens_api`, so the
+/// cache and the DB stay consistent after every committed delete. If the
+/// client-scoped delete (or the later client-row delete) then fails, the
+/// caller sees the error and can retry, and no orphaned token keeps
+/// validating in the meantime: the half the committed delete already removed
+/// is also evicted from the cache. Pre-migration sessions with
+/// `client_id == None` are not matched by the client-scoped delete and remain
+/// valid until `exp`, matching `revoke_tokens_api`.
 ///
 /// * `id` is the client's document id; `client_id` is its OAuth `client_id`.
 pub async fn delete_oauth_client_and_revoke_sessions(
@@ -1011,8 +1014,8 @@ pub async fn delete_oauth_client_and_revoke_sessions(
     client_id: &str,
 ) -> Result<u64> {
     super::sessions::delete_sessions_for_user(store, client_id).await?;
-    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
     session_cache.invalidate_for_user(client_id);
+    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
     session_cache.invalidate_for_client(client_id);
     delete_oauth_client(store, id).await
 }
