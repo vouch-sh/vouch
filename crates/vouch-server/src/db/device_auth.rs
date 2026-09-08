@@ -410,12 +410,18 @@ pub struct DeviceCodeClaim {
 /// version bump that leaves the approval redeemable (a poll, a cascade
 /// clearing an unrelated field) costs a retry rather than a spurious
 /// `AlreadyConsumed`, which the handler would otherwise treat as a replay.
+///
+/// The `transition` closure re-stamps `now = Timestamp::now()` on every
+/// retry attempt. `transition` re-reads and re-evaluates the closure
+/// against the fresh row on each OCC retry (backoff ~100/200/400 ms), so a
+/// single entry-time `now` would be stale on retry and could let an expired
+/// code be redeemed when a retry lands past `expires_at`. The per-attempt
+/// stamp is authoritative for both the `data.expires_at <= now` gate and
+/// the `consumed_at` audit record.
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
 ) -> std::result::Result<(StoredApproval, DeviceCodeClaim), ClaimError> {
-    let now = Timestamp::now();
-
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
         .await
@@ -425,10 +431,16 @@ pub async fn try_consume_device_auth(
     };
 
     // Pre-check on the indexed read so the common "not redeemable" cases
-    // never open a transition; the precondition below re-checks the same
-    // thing on the row version actually written.
+    // never open a transition. The `now` here is NOT authoritative — it is
+    // only the fast-path reject. The closure below re-stamps `now` per
+    // attempt, and that per-attempt stamp is the only gate that counts: a
+    // retry that lands after `expires_at` must reject even if this entry
+    // check ran before expiry. Do NOT "simplify" the closure's
+    // `Timestamp::now()` back out by reusing `now0` — that reintroduces the
+    // stale-now bug (an expired code redeemed on OCC retry).
+    let now0 = Timestamp::now();
     if !matches!(state_from_stored(&doc.data), DeviceAuthState::Authorized(_))
-        || doc.data.expires_at <= now
+        || doc.data.expires_at <= now0
     {
         return Err(ClaimError::AlreadyConsumed);
     }
@@ -438,6 +450,14 @@ pub async fn try_consume_device_auth(
             let DeviceAuthState::Authorized(approval) = state_from_stored(data) else {
                 return Err(());
             };
+            // Re-stamp `now` on every retry attempt so the expiry gate and
+            // the `consumed_at` audit stamp both reflect the wall-clock
+            // instant of the attempt that actually commits, not the instant
+            // captured at function entry. `transition` re-reads and re-runs
+            // this closure against the fresh row on every OCC retry, with
+            // backoff ~100ms/200ms/400ms — a single entry-time `now` would
+            // be stale on retry and could let an expired code be redeemed.
+            let now = Timestamp::now();
             if data.expires_at <= now {
                 return Err(());
             }
