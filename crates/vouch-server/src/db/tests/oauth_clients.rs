@@ -817,3 +817,245 @@ async fn a_requested_uri_with_a_fragment_is_never_matched() {
     let client = client_with_redirect_uris(&["https://app.example/cb"]).await;
     assert!(!client.is_valid_redirect_uri("https://app.example/cb#x"));
 }
+
+// ===========================================================================
+// Concurrent client_credentials mint during application deletion
+// ===========================================================================
+//
+// Bug report (delete OAuth app leaves a surviving client_credentials access
+// token): `delete_oauth_client_and_revoke_sessions` previously swept the
+// client's sessions and *then* deleted the client row, without first
+// revoking the client's secrets. During the window between the session-sweep
+// commits and `delete_oauth_client`'s secret hard-delete, a concurrent
+// `POST /oauth/token` (`grant_type=client_credentials`) request whose
+// `validate_oauth_client_credentials` already passed could still mint an
+// access token whose `SessionDoc` was out of scope of both sweeps. The fix
+// adds a `revoke_all_oauth_client_secrets` step *before* the session sweeps,
+// mirroring `revoke_tokens_api`, so any *new* validation reads a revoked
+// secret and returns `None`, closing the issuance commit for new validations
+// at the moment the secret-revoke commits.
+//
+// The two tests below pin the two halves of that contract: the
+// issuance-blocking precondition `revoke_all_oauth_client_secrets` provides,
+// and the ordering inside `delete_oauth_client_and_revoke_sessions` (the
+// revoke must run *before* the session sweeps; a `#[cfg(test)]` seam invoked
+// after the revoke commit lets the test inject a `validate_oauth_client_credentials`
+// call at that exact instant and assert it returns `None`).
+
+/// After `revoke_all_oauth_client_secrets` commits, every *new*
+/// `validate_oauth_client_credentials` call's auto-commit `find_one` reads the
+/// secret with `revoked_at == Some(...)`, so `is_valid` is false and the
+/// validator returns `None`. This is the issuance-blocking contract that the
+/// delete path's secret-revoke-first ordering relies on; without it, the
+/// revoke-secrets step would not block new validations and the concurrent-mint
+/// window during application deletion would re-open. The delete path shares
+/// this contract with `revoke_tokens_api` (which has relied on it since #539).
+#[tokio::test]
+async fn test_revoke_all_oauth_client_secrets_blocks_subsequent_credential_validation() {
+    let (store, _audit) = test_db().await;
+    let app = create_test_client(
+        &store,
+        "revoke-blocks-validation",
+        TestClientSpec::default(),
+    )
+    .await;
+
+    let secret_hash = crate::crypto::hash_token(&app.client_secret);
+
+    // Sanity: validate succeeds before revoke_all_oauth_client_secrets. If
+    // this fails, the test fixture did not seed a usable secret and the
+    // assertion below would pass vacuously.
+    let pre = validate_oauth_client_credentials(&store, &app.client_id, &secret_hash)
+        .await
+        .expect("validate before revoke must not error");
+    assert!(
+        pre.is_some(),
+        "secret must validate before revoke_all_oauth_client_secrets — \
+         fixture mis-seeded the secret"
+    );
+
+    // Revoke all secrets for the client (the durable issuance-blocking step).
+    let revoked_count = revoke_all_oauth_client_secrets(&store, &app.app_id)
+        .await
+        .expect("revoke_all_oauth_client_secrets");
+    assert_eq!(
+        revoked_count, 1,
+        "exactly one secret (minted by create_test_client) must be revoked"
+    );
+
+    // After the revoke commit, validation must fail (return None). This is
+    // what closes the concurrent-mint window the delete path's
+    // secret-revoke-first ordering exploits.
+    let post = validate_oauth_client_credentials(&store, &app.client_id, &secret_hash)
+        .await
+        .expect("validate after revoke must not error");
+    assert!(
+        post.is_none(),
+        "validate_oauth_client_credentials must return None after \
+         revoke_all_oauth_client_secrets commits — this is the issuance-blocking \
+         contract the delete path's secret-revoke-first ordering relies on"
+    );
+}
+
+/// Pins the ordering inside `delete_oauth_client_and_revoke_sessions`: the
+/// `revoke_all_oauth_client_secrets` step must commit *before* the session
+/// sweeps run. The `set_post_secret_revoke_test_hook` seam fires at the exact
+/// instant between the secret-revoke commit and the first session sweep, so a
+/// test-installed hook can inject the §2a interleaving's read-side
+/// (`validate_oauth_client_credentials`) at that instant and observe its
+/// outcome. With the fix in place the secret is already revoked, so the
+/// validation returns `None` (issuance blocked); without the secret-revoke
+/// step (or with it moved to after the sweeps) the secret would still be valid
+/// at this point and the validation would return `Some(client)`, re-opening
+/// the survival window.
+///
+/// The seam is `#[cfg(test)]`-only and compiled out of non-test builds, so the
+/// production ordering is unchanged. Driven on SQLite, which serializes
+/// writes via `busy_timeout`; the seam provides the deterministic
+/// inter-step interleaving the single-threaded suite cannot produce by
+/// task-scheduling races alone — the same rationale as
+/// `delete_user`'s `set_delete_test_hook`.
+#[tokio::test]
+async fn test_delete_oauth_client_revokes_secrets_before_sweeps_closes_concurrent_mint_window() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crate::db::documents::session::SessionDoc;
+
+    let (mut store, _audit) = test_db().await;
+    let app = create_test_client(&store, "delete-revoke-order", TestClientSpec::default()).await;
+    let app_id = app.app_id.clone();
+    let client_id = app.client_id.clone();
+    let secret_hash = crate::crypto::hash_token(&app.client_secret);
+
+    // Pre-existing M2M (`client_credentials`) session for this client, so the
+    // user_id sweep has something to delete. Mirrors the existing handler-tier
+    // regression tests' mint-before-delete fixtures.
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z"
+        .parse()
+        .expect("far-future expiry parses");
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &client_id,
+            user_email: &format!("{client_id}@clients"),
+            token_hash: "delete-revoke-order-m2m-existing",
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::M2MAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: Some(&client_id),
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("seed m2m session");
+
+    let fired = Arc::new(AtomicBool::new(false));
+    // The captured outcome of the hook's validate call:
+    // * `Some(Ok(None))` — validation blocked (secret revoked): the fix's invariant.
+    // * `Some(Ok(Some(_)))` — validation succeeded at the injection point
+    //   (issuance window still open): the fix regressed (secret revoke absent
+    //   or moved to after the sweeps).
+    // * `None` — the hook ran but did not record (test bug).
+    let outcome: Arc<Mutex<Option<anyhow::Result<Option<OAuthClient>>>>> =
+        Arc::new(Mutex::new(None));
+
+    let store_for_hook = store.clone();
+    let secret_hash_for_hook = secret_hash.clone();
+    let client_id_for_hook = client_id.clone();
+    let fired_for_hook = Arc::clone(&fired);
+    let outcome_for_hook = Arc::clone(&outcome);
+    store.set_post_secret_revoke_test_hook(Arc::new(move |_client_id: &str| {
+        let store = store_for_hook.clone();
+        let client_id = client_id_for_hook.clone();
+        let secret_hash = secret_hash_for_hook.clone();
+        let fired = Arc::clone(&fired_for_hook);
+        let outcome = Arc::clone(&outcome_for_hook);
+        Box::pin(async move {
+            fired.store(true, Ordering::SeqCst);
+            // Concurrent client_credentials mint attempt — the read-side of the
+            // §2a interleaving: `validate_oauth_client_credentials` running at
+            // the precise instant between `revoke_all_oauth_client_secrets`'s
+            // commit and the first session sweep's commit.
+            let r = validate_oauth_client_credentials(&store, &client_id, &secret_hash).await;
+            *outcome.lock().expect("outcome lock") = Some(r);
+        })
+    }));
+
+    let cache = SessionCache::new(100, 30);
+    delete_oauth_client_and_revoke_sessions(&store, &cache, &app_id, &client_id)
+        .await
+        .expect("delete_oauth_client_and_revoke_sessions");
+
+    // The seam fired — the secret-revoke step ran before the session sweeps.
+    // Combined with the outcome assertion below, this pins the secret-revoke-
+    // first ordering: the seam is invoked only by the fixed function, and only
+    // after `revoke_all_oauth_client_secrets` commits.
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the post-secret-revoke test seam must fire — \
+         delete_oauth_client_and_revoke_sessions must call revoke_all_oauth_client_secrets \
+         before the session sweeps and then invoke the seam"
+    );
+
+    // The injection's validate returned None — issuance was blocked at the
+    // secret level. Without the secret-revoke-first step (or with it moved to
+    // after the sweeps), validate would read a still-valid secret at this
+    // point and return `Some(client)`, re-opening the survival window.
+    let captured = outcome
+        .lock()
+        .expect("outcome lock")
+        .take()
+        .expect("hook must record outcome");
+    let captured_client =
+        captured.expect("validate_oauth_client_credentials must not error at the seam");
+    assert!(
+        captured_client.is_none(),
+        "validate_oauth_client_credentials at the post-secret-revoke seam must return None \
+         — the delete path's secret-revoke-first ordering regressed (secrets not revoked \
+         before the session sweeps, or revoked after); got: {captured_client:?}"
+    );
+
+    // No surviving sessions for the deleted client — the existing
+    // mint-before-delete regression coverage must hold under the new ordering.
+    assert_eq!(
+        store
+            .count::<SessionDoc>("user_id", &client_id)
+            .await
+            .expect("count user_id"),
+        0,
+        "M2M (user_id == client_id) sessions must be gone"
+    );
+    assert_eq!(
+        store
+            .count::<SessionDoc>("client_id", &client_id)
+            .await
+            .expect("count client_id"),
+        0,
+        "user-issued (client_id index) sessions must be gone"
+    );
+
+    // The OAuth client and its secrets are hard-deleted (existing
+    // functionality preserved — delete_oauth_client's hard-delete of secrets is
+    // unaffected by the prior secret-revoke commit).
+    assert!(
+        get_oauth_client_by_id(&store, &app_id)
+            .await
+            .expect("get_oauth_client_by_id")
+            .is_none(),
+        "OAuthClientDoc must be hard-deleted"
+    );
+    assert_eq!(
+        get_oauth_client_secrets(&store, &app_id)
+            .await
+            .expect("get_oauth_client_secrets")
+            .len(),
+        0,
+        "OAuthClientSecretDocs must be hard-deleted"
+    );
+}

@@ -996,15 +996,42 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
 ///   tagged with the issuing client on the `client_id` index, via
 ///   [`delete_sessions_for_oauth_client`](super::sessions::delete_sessions_for_oauth_client).
 ///
-/// Ordering is fail-closed: each session delete is immediately followed by
-/// its companion cache invalidation, mirroring `revoke_tokens_api`, so the
-/// cache and the DB stay consistent after every committed delete. If the
-/// client-scoped delete (or the later client-row delete) then fails, the
-/// caller sees the error and can retry, and no orphaned token keeps
-/// validating in the meantime: the half the committed delete already removed
-/// is also evicted from the cache. Pre-migration sessions with
-/// `client_id == None` are not matched by the client-scoped delete and remain
-/// valid until `exp`, matching `revoke_tokens_api`.
+/// Ordering mirrors [`revoke_tokens_api`](crate::handlers::api::applications::revoke_tokens_api)
+/// to close the concurrent-issuance window as far as the storage layer allows:
+///
+/// 1. [`revoke_all_oauth_client_secrets`] sets `revoked_at` on every
+///    `OAuthClientSecretDoc` in its own committed transaction. After it
+///    commits, any *new* `validate_oauth_client_credentials` call's auto-commit
+///    `find_one` reads a revoked secret and returns `None`, closing the
+///    issuance commit for new validations. This must precede the session
+///    sweeps so a `client_credentials` request that has not yet validated the
+///    secret cannot begin validating after the sweeps have committed and
+///    insert a `SessionDoc` that escapes both sweeps.
+/// 2. The session sweeps kill already-minted tokens, each delete immediately
+///    followed by its companion cache invalidation so the cache and the DB
+///    stay consistent after every committed delete — a sweep failure then
+///    leaves no DB-deleted-but-cached token behind.
+/// 3. [`delete_oauth_client`] hard-deletes the secrets, JWKS cache, and the
+///    client row.
+///
+/// This narrows — but does not eliminate — the in-flight RFC 7009 race: an
+/// attacker request whose `validate_oauth_client_credentials` already returned
+/// `Ok(Some(client))` before step 1 commits still holds the in-memory
+/// `OAuthClient` and can run `create_oauth_access_token` → `create_session`. If
+/// that `store.insert` commits after step 2's second sweep commits, the
+/// session survives until `exp`. That residual window is shared with
+/// `revoke_tokens_api`; without the revoke-secrets step the delete path leaves
+/// the same residual *plus* a longer window in which new validations succeed.
+///
+/// On a partial failure after step 1 (secrets commit-revoked, then a session
+/// sweep errors), the client row still exists with every secret revoked, and
+/// already-minted access tokens still validate at the accepted-M2M surface
+/// until `exp`. The caller must surface this as a non-204 / retry-required
+/// outcome so the admin is not told the application is gone; the sweep and
+/// `delete_oauth_client` steps are idempotent on a missing row, so retry
+/// converges. Pre-migration sessions with `client_id == None` are not matched
+/// by the client-scoped delete and remain valid until `exp`, matching
+/// `revoke_tokens_api`.
 ///
 /// * `id` is the client's document id; `client_id` is its OAuth `client_id`.
 pub async fn delete_oauth_client_and_revoke_sessions(
@@ -1013,6 +1040,22 @@ pub async fn delete_oauth_client_and_revoke_sessions(
     id: &str,
     client_id: &str,
 ) -> Result<u64> {
+    // Block new issuance before the session sweeps. `revoke_all_oauth_client_secrets`
+    // sets `revoked_at` on every `OAuthClientSecretDoc` in its own committed
+    // transaction; after it commits, any new `validate_oauth_client_credentials`
+    // call reads a revoked secret and returns `None`. Without this step a
+    // concurrent `client_credentials` request can validate the still-valid
+    // secret, let the session sweeps commit, then insert a `SessionDoc` that
+    // escapes both sweeps and survives until `exp`.
+    revoke_all_oauth_client_secrets(store, id).await?;
+
+    // Test-only seam: let db tests deterministically interleave a concurrent
+    // `validate_oauth_client_credentials` + `store.insert(SessionDoc)` attempt
+    // into the window the secret-revoke just closed, exercising the
+    // concurrent-mint race the fix narrows. Compiled out of non-test builds.
+    #[cfg(test)]
+    store.run_post_secret_revoke_test_hook(client_id).await;
+
     super::sessions::delete_sessions_for_user(store, client_id).await?;
     session_cache.invalidate_for_user(client_id);
     super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;

@@ -364,6 +364,9 @@ pub struct DocumentStore {
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
+    /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
     /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
     /// next `n` `delete` calls succeed (each consuming one unit), after which
     /// every subsequent `delete` returns a non-retryable `Err` before opening
@@ -432,6 +435,26 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only hook invoked inside
+/// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
+/// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
+/// commits and *before* the session sweeps run, receiving the OAuth
+/// `client_id`.
+///
+/// Lets db tests deterministically interleave a concurrent
+/// [`validate_oauth_client_credentials`](crate::db::validate_oauth_client_credentials)
+/// call followed by a `store.insert(SessionDoc)` attempt into the window the
+/// fix closes: at that instant the secrets are already commit-revoked, so a
+/// *new* validation must read `revoked_at == Some(...)` and return `None`.
+/// Without the revoke-secrets-first ordering the same injection point sits
+/// before the secret revoke (or before `delete_oauth_client`'s hard-delete),
+/// so the validation succeeds and the inserted session escapes both sweeps.
+///
+/// Compiled out of non-test builds, so production pays nothing. The shape
+/// matches [`DeleteTestHook`].
+#[cfg(test)]
+pub(crate) type PostSecretRevokeTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -443,6 +466,8 @@ impl DocumentStore {
             modify_test_hook: None,
             #[cfg(test)]
             delete_test_hook: None,
+            #[cfg(test)]
+            post_secret_revoke_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
             #[cfg(test)]
@@ -485,6 +510,29 @@ impl DocumentStore {
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
+        }
+    }
+
+    /// Install a hook that runs inside
+    /// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
+    /// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
+    /// commits and before the session sweeps. Lets db tests deterministically
+    /// interleave a concurrent `validate_oauth_client_credentials` + session
+    /// insert into the issuance-window the secret-revoke closes, mirroring
+    /// the §2a interleaving in the bug report.
+    #[cfg(test)]
+    pub(crate) fn set_post_secret_revoke_test_hook(&mut self, hook: PostSecretRevokeTestHook) {
+        self.post_secret_revoke_test_hook = Some(hook);
+    }
+
+    /// Run the installed `post_secret_revoke_test_hook` for `client_id`, if
+    /// any. Invoked by `delete_oauth_client_and_revoke_sessions` after the
+    /// `revoke_all_oauth_client_secrets` commit and before the first session
+    /// sweep. No-op in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) async fn run_post_secret_revoke_test_hook(&self, client_id: &str) {
+        if let Some(hook) = &self.post_secret_revoke_test_hook {
+            hook(client_id).await;
         }
     }
 
