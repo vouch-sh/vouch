@@ -163,8 +163,9 @@ pub use jwks_cache::{
 
 // Re-export DPoP types and functions (RFC 9449)
 pub use dpop::{
-    DpopJtiClaim, check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
-    generate_dpop_nonce, validate_and_consume_dpop_nonce,
+    DpopJtiClaim, check_and_store_dpop_jti, check_and_store_dpop_jti_at_second,
+    delete_expired_dpop_jtis, delete_expired_dpop_nonces, generate_dpop_nonce,
+    validate_and_consume_dpop_nonce,
 };
 
 // Re-export credentials types and functions
