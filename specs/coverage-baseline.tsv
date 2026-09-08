@@ -2647,7 +2647,6 @@ rfc9421#6.4.1#af4dfdc9	MUST	MUST be one of the values "Request", "Response", or 
 rfc9421#6.4.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
 rfc9421#6.5.1#b52445d6	MUST	The name MUST be an ASCII string that conforms to the key ABNF rule defined in Section 3.1.2 of [STRUCTURED-FIELDS] and SHOULD NOT exceed 20 characters in lengt
 rfc9421#6.5.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
-rfc9449#11.1#98fa6e38	MUST	To limit this, servers MUST only accept DPoP proofs for a limited time after their creation (preferably only for a relatively brief period on the order of secon
 rfc9449#11.2#9b6c65b3	SHOULD NOT	Deployments that do not utilize the nonce mechanism SHOULD NOT issue long-lived DPoP constrained access tokens, preferring instead to use short-lived access tok
 rfc9449#11.3#39a4c7a6	MUST NOT	A server MUST NOT accept any DPoP proofs without the nonce claim when a DPoP nonce has been provided to the client.
 rfc9449#11.5#03c4af6f	MUST	Servers accepting signed DPoP proof JWTs MUST verify that the typ field is dpop+jwt in the headers of the JWTs to ensure that adversaries cannot use JWTs create
