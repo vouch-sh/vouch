@@ -311,11 +311,11 @@ pub(crate) async fn revoke_member_credentials(
     // path intact (recoverable by an admin retry) rather than locked out
     // while long-lived credentials stay live. This mirrors the ordering
     // `deactivate_member` uses via `revoke_then_persist` (#1116).
-    let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
-
-    let key_count = authenticators.len();
-
-    crate::services::auth::revoke_then_persist(
+    //
+    // `key_count` is computed from the in-transaction authenticator read below
+    // (not a pre-revocation snapshot), so the `AdminRevokeCredentials` audit
+    // `keys_revoked` reflects the set this request actually deleted.
+    let key_count = crate::services::auth::revoke_then_persist(
         &state,
         &target_id,
         "Credentials revoked by admin",
@@ -336,10 +336,29 @@ pub(crate) async fn revoke_member_credentials(
             // cascade is re-run against fresh state instead of surfacing to
             // the admin as a failed revocation. `delete_key` and
             // `delete_user` already wrap their cascades this way.
+            //
+            // The authenticator set is re-read on EVERY attempt against the
+            // live transaction (mirroring `delete_user`'s `tx.find_all`
+            // inside its own retry block, `db/users.rs`). Reading it once
+            // outside the loop — as the pre-#1234 code did — froze the
+            // snapshot across retries, so an authenticator whose
+            // `create_authenticator` insert committed during
+            // `revoke_user_access` (e.g. a member whose in-flight
+            // `register_complete` already passed the `AuthenticatedToken`
+            // extractor) never appeared in the loop and survived the
+            // revocation. Re-reading inside the retry picks up any such
+            // concurrent enrollment and deletes it with the rest.
+            use crate::db::documents::authenticator::AuthenticatorDoc;
             crate::with_dsql_retry!(async {
                 let mut tx = state.store.begin().await.map_err(|e| {
                     ServiceError::from_db_contention(e, "Failed to start transaction")
                 })?;
+                let authenticators = tx
+                    .find_all::<AuthenticatorDoc>("user_id", &target_id)
+                    .await
+                    .map_err(|e| {
+                        ServiceError::from_db_contention(e, "Failed to load authenticators")
+                    })?;
                 for auth in &authenticators {
                     db::delete_authenticator(&mut tx, &auth.id)
                         .await
@@ -348,7 +367,7 @@ pub(crate) async fn revoke_member_credentials(
                 tx.commit().await.map_err(|e| {
                     ServiceError::from_db_contention(e, "Failed to commit key revocation")
                 })?;
-                Ok::<(), ServiceError>(())
+                Ok::<usize, ServiceError>(authenticators.len())
             })
         },
     )
@@ -1347,6 +1366,381 @@ mod tests {
             revoked.len(),
             1,
             "SSH certificate must remain revoked after the request"
+        );
+    }
+
+    /// Regression: a concurrent FIDO2 enrollment that commits DURING
+    /// `revoke_user_access` (after the handler's authenticator snapshot was
+    /// taken) must NOT survive the revocation. Pre-fix, the persist closure
+    /// iterated a `Vec` captured before `revoke_user_access` even started, so
+    /// a key inserted into the window was never seen by the delete loop and
+    /// the member retained a working authenticator. Because
+    /// `revoke_member_credentials` deliberately leaves `active = true`, that
+    /// survivor let the member re-authenticate and mint a fresh session —
+    /// exactly what "revoke all credentials" is meant to prevent.
+    ///
+    /// This test deterministically reproduces the race with the existing
+    /// `modify_test_hook` seam: `clear_user_github_refresh_token` is the LAST
+    /// sub-step of `revoke_user_access` and calls `store.modify` on the user
+    /// doc, so the hook fires at an instant strictly after the handler
+    /// snapshot (taken before `revoke_user_access`) and strictly before the
+    /// persist closure's delete transaction — the same window the production
+    /// race exploits. The hook enrolls a second authenticator for the member
+    /// through a hookless store clone, committing it immediately. Post-fix,
+    /// the persist closure re-reads the authenticator set on the live
+    /// transaction and deletes the new key along with the rest; pre-fix, the
+    /// stale snapshot missed it.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_deletes_authenticator_enrolled_during_revocation() {
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+
+        // A controlled credential_id for the hook-enrolled authenticator so the
+        // post-request check can resolve it via the same credential-id path
+        // `browser_login_complete` uses (`get_authenticator_by_credential_id`).
+        let survivor_credential_id: Arc<Vec<u8>> = Arc::new(b"survivor-cred-via-hook".to_vec());
+        let cred_for_hook = Arc::clone(&survivor_credential_id);
+
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let cred = Arc::clone(&cred_for_hook);
+                Box::pin(async move {
+                    // `clear_user_github_refresh_token` runs `store.modify` on
+                    // the user doc, so doc_id == user_id. Guard on the target
+                    // member and the first attempt only — `modify` retries its
+                    // own CAS loss, so without the attempt guard the injection
+                    // would fire on every retry and over-insert.
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target || attempt != 0 {
+                        return;
+                    }
+                    // Simulate the member's in-flight `register_complete`
+                    // committing its `create_authenticator` insert during the
+                    // revocation window — AFTER the handler's snapshot and
+                    // BEFORE the persist closure's delete transaction. The
+                    // credential_id is the controlled one above so the
+                    // post-request check resolves it via the login path.
+                    let _ = crate::db::create_authenticator(
+                        &writer,
+                        &crate::db::CreateAuthenticatorParams {
+                            user_id: &doc_id,
+                            user_email: "test@example.com",
+                            name: "Hook-Enrolled Key",
+                            credential_id: cred.as_slice(),
+                            public_key: &[0u8; 32],
+                            aaguid: None,
+                            user_handle: Some(doc_id.as_bytes()),
+                            attestation_verified: false,
+                        },
+                    )
+                    .await
+                    .expect("hook create authenticator");
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // One authenticator present before the request — the one the
+        // pre-fix snapshot would have captured. The hook adds a second
+        // during `revoke_user_access`.
+        let _initial = create_test_authenticator(&state.store, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed; got {status}: {body}"
+        );
+
+        // The fix: the concurrently-enrolled authenticator must be deleted,
+        // not left live. Pre-fix this assertion fails — one survivor remains.
+        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "an authenticator enrolled during the revocation window must be \
+             revoked, not left live (survivors = {})",
+            remaining.len()
+        );
+
+        // The survivor's credential_id must NOT resolve via the login path
+        // (`get_authenticator_by_credential_id`, the resolver
+        // `browser_login_complete` uses at `db/authenticators.rs:120`). The fix
+        // deletes the survivor, so a fresh login attempt with this credential
+        // would find no authenticator — closing the re-authentication bypass.
+        let gone = crate::db::get_authenticator_by_credential_id(
+            &state.store,
+            survivor_credential_id.as_slice(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            gone.is_none(),
+            "the survivor's credential_id must not resolve after revocation — \
+             browser_login_complete would otherwise find a usable authenticator"
+        );
+
+        // The audit `keys_revoked` must reflect the set actually deleted
+        // (both keys), not the pre-revocation snapshot size (one). This is
+        // the completeness signal the pre-fix event lacked.
+        let event = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["admin_revoke_credentials".to_string()]),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            event.len(),
+            1,
+            "exactly one AdminRevokeCredentials event must be recorded"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&event[0].data).expect("audit data is JSON");
+        assert_eq!(
+            data["keys_revoked"].as_u64(),
+            Some(2),
+            "keys_revoked must count the authenticator enrolled during the \
+             revocation window (got {})",
+            data["keys_revoked"]
+        );
+
+        // The handler never flips `active` — that is by design (#1116), and it
+        // is exactly why a surviving authenticator is a security bypass rather
+        // than a no-op. Assert it here to pin the impact the fix closes.
+        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+            .await
+            .unwrap()
+            .expect("member still exists");
+        assert!(
+            updated.active,
+            "revoke_member_credentials must not deactivate the member; the \
+             survivor-bypass relies on `active` staying true"
+        );
+    }
+
+    /// Forced-retry variant: with a guarded `update_by_index` conflict
+    /// injected into the authenticator-deletion cascade, the persist
+    /// closure's `with_dsql_retry!` re-runs the whole block — and the fix's
+    /// in-transaction `find_all::<AuthenticatorDoc>` re-reads on every retry,
+    /// so a key the modify hook enrolled during `revoke_user_access` is still
+    /// deleted on the retried attempt. Pre-fix, the stale outer snapshot was
+    /// iterated on every retry, so under the same forced conflict the survivor
+    /// stayed (negative control verified separately — see the test plan).
+    ///
+    /// Why a single device-auth doc is enough: the buggy persist closure
+    /// iterates ONLY the pre-revocation snapshot (which contains just the
+    /// member's pre-existing authenticator — the hook enrolls the second one
+    /// later, during `revoke_user_access`). So in the buggy code the loop's
+    /// first (and only) `delete_authenticator` run hits the attached
+    /// device-auth doc → the stale-once seam bumps its version → the guarded
+    /// `update_by_index` fails with `VersionConflict` → `with_dsql_retry!`
+    /// retries → the snapshot is re-iterated → the snapshot authenticator is
+    /// deleted on retry, but the hook-enrolled authenticator was never in the
+    /// snapshot and survives. The fix re-reads on the live transaction inside
+    /// the retry block, so it sees and deletes both.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_re_reads_authenticators_on_persist_retry() {
+        use crate::crypto::webauthn_verify::AuthTime;
+        use crate::db::DeviceApproval;
+        use jiff::Timestamp;
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+        let survivor_credential_id: Arc<Vec<u8>> = Arc::new(b"retry-survivor-cred".to_vec());
+        let cred_for_hook = Arc::clone(&survivor_credential_id);
+
+        // Build state WITHOUT the router so the returned `Arc<AppState>` is
+        // uniquely held — `Arc::get_mut` below gives `&mut state.store` to set
+        // the in-transaction stale-once seam (the only test seam that forces
+        // the persist closure's `with_dsql_retry!` to retry). The modify hook
+        // for the concurrent enrollment is installed here.
+        let mut state = crate::test_utils::build_test_app_state(Vec::new(), move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let cred = Arc::clone(&cred_for_hook);
+                Box::pin(async move {
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target || attempt != 0 {
+                        return;
+                    }
+                    let _ = crate::db::create_authenticator(
+                        &writer,
+                        &crate::db::CreateAuthenticatorParams {
+                            user_id: &doc_id,
+                            user_email: "test@example.com",
+                            name: "Retry Hook Key",
+                            credential_id: cred.as_slice(),
+                            public_key: &[0u8; 32],
+                            aaguid: None,
+                            user_handle: Some(doc_id.as_bytes()),
+                            attestation_verified: false,
+                        },
+                    )
+                    .await
+                    .expect("hook create authenticator");
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // The pre-existing authenticator — the only one in the buggy
+        // pre-revocation snapshot.
+        let initial_auth = create_test_authenticator(&state.store, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        // A device-authorization request in `Authorized` state whose
+        // `authenticator_id` is the member's pre-existing authenticator.
+        // `delete_authenticator`'s guarded `update_by_index` detach will
+        // conflict when the stale-once seam bumps this doc's version
+        // mid-transaction, forcing `with_dsql_retry!` to retry the cascade.
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+        let da_id = crate::db::create_device_auth_request(
+            &state.store,
+            "retry-seam-hash",
+            "RETRY-UCODE",
+            None,
+            expires_at,
+            5,
+        )
+        .await
+        .unwrap();
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &da_id,
+                user_id: &member.id,
+                user_email: &member.email,
+                authenticator_id: &initial_auth,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Set the stale-once seam with the attached device-auth doc's id, on
+        // the same store the handler will use. Requires `&mut state.store`,
+        // so the Arc must be uniquely held (no router clone yet).
+        {
+            let s = Arc::get_mut(&mut state).expect("Arc<AppState> uniquely held pre-router");
+            s.store.set_update_by_index_stale_once(vec![da_id.clone()]);
+        }
+
+        // Now build the router (clones the Arc; the seam persists on the
+        // shared `store` field, and `store.begin()` propagates it into each
+        // transaction the handler opens).
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config)
+            .expect("Failed to build test app router");
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed even under a forced persist retry; \
+             got {status}: {body}"
+        );
+
+        // The fix re-reads authenticators on the live transaction inside
+        // `with_dsql_retry!`, so the hook-enrolled authenticator is deleted
+        // on the retried attempt — 0 survivors. Pre-fix this leaves 1.
+        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "under a forced OCC retry, the concurrently-enrolled authenticator \
+             must still be revoked, not left live (survivors = {})",
+            remaining.len()
+        );
+
+        // Login path can no longer resolve the survivor's credential — the
+        // re-read on retry deleted it.
+        let gone = crate::db::get_authenticator_by_credential_id(
+            &state.store,
+            survivor_credential_id.as_slice(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            gone.is_none(),
+            "under a forced retry, the survivor's credential_id must not resolve"
+        );
+
+        // Audit reflects the set actually deleted on the retried transaction
+        // (both keys), not the pre-revocation snapshot size (one).
+        let event = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["admin_revoke_credentials".to_string()]),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(event.len(), 1, "exactly one AdminRevokeCredentials event");
+        let data: serde_json::Value =
+            serde_json::from_str(&event[0].data).expect("audit data is JSON");
+        assert_eq!(
+            data["keys_revoked"].as_u64(),
+            Some(2),
+            "keys_revoked must reflect 2 deleted under retry (got {})",
+            data["keys_revoked"]
+        );
+
+        // The attached device-auth doc was detached by the retried cascade
+        // — the guarded `update_by_index` landed via `with_dsql_retry!`,
+        // transitioning the `Authorized` row to `Denied` (the detach sets
+        // `authenticator_id = None` and `Authorized → Denied`).
+        let da = crate::db::get_device_auth_by_id(&state.store, &da_id)
+            .await
+            .unwrap()
+            .expect("device-auth doc still exists (cascade detaches, never deletes)");
+        assert!(
+            matches!(da.state, crate::db::DeviceAuthState::Denied),
+            "the retried cascade must detach the device-auth approval (Authorized → Denied)"
+        );
+
+        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+            .await
+            .unwrap()
+            .expect("member still exists");
+        assert!(
+            updated.active,
+            "revoke_member_credentials must not deactivate the member; the \
+             survivor-bypass relies on `active` staying true"
         );
     }
 
