@@ -1415,6 +1415,164 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
     );
 }
 
+/// Regression: `try_consume_device_auth`'s `transition` closure must re-stamp
+/// `now = Timestamp::now()` on every retry attempt. `transition` re-reads and
+/// re-evaluates the closure against the fresh row on each OCC retry (backoff
+/// ~100/200/400 ms), so a single entry-time `now` is stale on retry: when a
+/// benign concurrent version bump (a poll) forces a retry that lands after
+/// `expires_at`, a stale `now` would make the `data.expires_at <= now`
+/// precondition pass against a row that is already expired in wall-clock —
+/// redeeming an expired code and back-dating `consumed_at` to before
+/// `expires_at`.
+///
+/// This test pins the FIXED behavior: the per-attempt re-stamp makes the
+/// retry reject an already-expired code with `ClaimError::AlreadyConsumed`,
+/// leaves the row `Authorized`, and never stamps `consumed_at`. On the buggy
+/// code (entry-time `now` reused on retry) this test fails — the expired code
+/// is consumed and `consumed_at` is back-dated before `expires_at`.
+#[tokio::test]
+async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
+    use crate::db::claim::ClaimError;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    let (store, _audit) = test_db().await;
+
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_millis(300))
+        .unwrap();
+    let device_code_hash = "stale-now-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "STALE-NOW", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "stale@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "stale@example.com",
+            name: "Key",
+            credential_id: b"cred-stale",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "stale@example.com",
+            authenticator_id: &auth_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("authorize device auth");
+
+    let writer = store.clone();
+    let poll_id = id.clone();
+    let polls = Arc::new(AtomicU32::new(0));
+    let counted = polls.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let poll_id = poll_id.clone();
+        let counted = counted.clone();
+        let is_target = doc_id == poll_id;
+        Box::pin(async move {
+            if attempt != 0 || !is_target {
+                return;
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
+                .await
+                .expect("hook poll must not error");
+            assert!(allowed, "hook poll must clear the rate-limit gate");
+        })
+    }));
+
+    // Sleep until ~50 ms before expiry: `now` is captured BEFORE expiry
+    // (pre-check passes), but the first retry backoff (~100 ms) lands AFTER
+    // expiry — the exact window the stale-now bug fires in.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let wall_before = jiff::Timestamp::now();
+    let result = try_consume_device_auth(&hooked, device_code_hash).await;
+    let wall_after = jiff::Timestamp::now();
+
+    assert!(wall_before < expires_at, "consume started before expiry");
+    assert!(wall_after > expires_at, "consume finished after expiry");
+    // The racing poll ran exactly once, so attempt 0's CAS legitimately lost
+    // and the closure re-ran on attempt 1 against the bumped row — i.e. the
+    // retry path was actually exercised.
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        1,
+        "the racing poll ran exactly once"
+    );
+    // FIXED behavior: the per-attempt re-stamp makes the retry reject the
+    // already-expired code. On the buggy code this would be `Ok(..)` (expired
+    // code redeemed).
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "expired code must NOT be redeemed — stale-now bug must not fire, got {result:?}"
+    );
+
+    // The row must remain `Authorized` with no `consumed_at`: nothing was
+    // written. On the buggy code the row would be `Consumed` and
+    // `consumed_at` would be back-dated before `expires_at`.
+    let after = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get after")
+        .expect("device auth must exist");
+    assert!(
+        matches!(after.state, DeviceAuthState::Authorized(..)),
+        "row must stay Authorized (not Consumed), got {:?}",
+        after.state
+    );
+    assert!(
+        after.consumed_at.is_none(),
+        "consumed_at must not be stamped on a rejected consume, got {:?}",
+        after.consumed_at
+    );
+    // The racing poll's `last_poll_at` survives the rejected consume.
+    assert!(
+        after.last_poll_at.is_some(),
+        "the racing poll's last_poll_at must survive the rejected consume"
+    );
+
+    // A later redemption (well past expiry, no hook) must also be rejected —
+    // confirming the row is still redeemable-shaped but the expiry gate now
+    // blocks it at the pre-check.
+    let replay = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(replay, Err(ClaimError::AlreadyConsumed)),
+        "post-expiry replay must be rejected, got {replay:?}"
+    );
+    let final_row = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get final")
+        .expect("device auth must still exist");
+    assert!(
+        matches!(final_row.state, DeviceAuthState::Authorized(..)),
+        "row must still be Authorized after post-expiry replay, got {:?}",
+        final_row.state
+    );
+    assert!(
+        final_row.consumed_at.is_none(),
+        "consumed_at must remain unset after post-expiry replay"
+    );
+}
+
 /// A `Consumed` device-auth row must survive the authenticator-deletion
 /// cascade with its `Consumed` status and `user_id` attribution intact —
 /// `handlers::device::revoke_sessions_for_device_replay` keys its post-hoc
