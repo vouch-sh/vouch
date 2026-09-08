@@ -88,11 +88,6 @@ impl Response {
         Self::error(id, NOT_AUTHENTICATED, "not authenticated")
     }
 
-    /// Create a "session expired" error response.
-    pub fn session_expired(id: u64) -> Self {
-        Self::error(id, SESSION_EXPIRED, "session expired")
-    }
-
     /// Create an "invalid params" error response.
     pub fn invalid_params(id: u64, detail: &str) -> Self {
         Self::error(id, INVALID_PARAMS, &format!("invalid params: {detail}"))

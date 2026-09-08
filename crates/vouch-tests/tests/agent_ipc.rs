@@ -11,7 +11,7 @@
 )]
 
 use vouch_agent::protocol::{
-    NOT_AUTHENTICATED, Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
+    NOT_AUTHENTICATED, Response, StoreSessionParams, StoreSshCredentialsParams,
 };
 use vouch_agent::state::{AgentState, Session, SessionInfo};
 
@@ -266,15 +266,6 @@ mod protocol_types {
         assert!(response.error.is_some());
         let error = response.error.as_ref().unwrap();
         assert_eq!(error.code, NOT_AUTHENTICATED);
-    }
-
-    /// JSON-RPC response session expired.
-    #[test]
-    fn test_response_session_expired() {
-        let response = Response::session_expired(1);
-        assert!(response.error.is_some());
-        let error = response.error.as_ref().unwrap();
-        assert_eq!(error.code, SESSION_EXPIRED);
     }
 
     /// JSON-RPC response method not found.
