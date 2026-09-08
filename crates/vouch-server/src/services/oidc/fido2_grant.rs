@@ -479,15 +479,3 @@ pub(crate) async fn exchange_fido2_assertion(
         authorization_details: validated_ad.as_ref().map(serde_json::Value::from),
     })
 }
-
-#[cfg(test)]
-mod tests {
-    // NOTE(mtls-threading): `Fido2AssertionParams::mtls_cert_thumbprint` is a
-    // plain `Option<&str>` threaded from the handler through to
-    // `create_oauth_access_token` as `CreateOAuthTokenParams::mtls_cert_thumbprint`.
-    // Unit-testing the threading in isolation would require a fully mocked AppState
-    // (database, signing key, WebAuthn instance, etc.). End-to-end coverage for
-    // RFC 8705 token binding through the FIDO2 grant should be added as an
-    // integration test in `crates/vouch-tests/` once the mTLS test infrastructure
-    // (client cert generation + mTLS test server) is available.
-}
