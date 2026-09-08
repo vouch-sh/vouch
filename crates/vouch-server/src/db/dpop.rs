@@ -132,10 +132,73 @@ impl DpopJtiClaim {
 /// [`ClaimError::AlreadyConsumed`]. Oversized or empty JTI is
 /// `ClaimError::InvalidInput` (client error → 401, not a 500 that would
 /// prompt retry).
+///
+/// **Clock injection.** This overload stamps `Timestamp::now()` internally,
+/// so callers that also validate a freshness claim against the wall clock
+/// get a *different* `now` (separated from this one by the `await` on the
+/// insert). That dual-stamp lets the freshness window's upper bound drift
+/// past the replay record's `expires_at`, reopening a replay gap (RFC 9449
+/// §4.3 step 11). Production callers that share a `now` with a freshness
+/// check MUST use [`check_and_store_dpop_jti_at_second`] instead, passing
+/// the single caller-stamped instant. This overload remains for tests and
+/// callers that do not also enforce a freshness window against the row.
 pub async fn check_and_store_dpop_jti(
     store: &DocumentStore,
     jti: &str,
     validity_seconds: i64,
+) -> std::result::Result<DpopJtiClaim, ClaimError> {
+    let now = Timestamp::now();
+    let expires_at = now
+        .checked_add(validity_seconds.seconds())
+        .map_err(|e| ClaimError::Database(format!("DPoP JTI expiry overflow: {e}")))?;
+    store_dpop_jti_with_expiry(store, jti, expires_at).await
+}
+
+/// Clock-injectable twin of [`check_and_store_dpop_jti`] that derives the
+/// row's `expires_at` from a caller-provided `now_second` (Unix seconds).
+///
+/// `expires_at = Timestamp::from_second(now_second) + validity_seconds`.
+/// Callers that also run a freshness check (e.g.
+/// `services::oidc::dpop::validate_dpop_common`) stamp a single `now` at
+/// their entry point and pass it here *and* to the freshness check, so the
+/// replay record and the freshness window share one reference instant —
+/// the dual-stamp `Δ` gap that `check_and_store_dpop_jti` would otherwise
+/// reintroduce cannot arise.
+///
+/// `now_second` is in **integer seconds** (the `as_second()` granularity
+/// the freshness check uses). Callers that need to cover the
+/// `as_second()` floor-truncation slack — the up-to-one-second window in
+/// which a replay whose wall-clock `as_second()` is still within the
+/// freshness window is accepted despite the sub-second fraction having
+/// elapsed — should pass `now.as_second() + 1` (pre-rounded up by the
+/// caller) rather than `now.as_second()`. That keeps the row alive until
+/// the first second at which the freshness check would reject the proof,
+/// fully satisfying RFC 9449 §4.3 step 11.
+///
+/// Returns the same [`DpopJtiClaim`] witness / error mapping as
+/// [`check_and_store_dpop_jti`].
+pub async fn check_and_store_dpop_jti_at_second(
+    store: &DocumentStore,
+    jti: &str,
+    now_second: i64,
+    validity_seconds: i64,
+) -> std::result::Result<DpopJtiClaim, ClaimError> {
+    let expires_at = Timestamp::from_second(now_second)
+        .and_then(|t| t.checked_add(validity_seconds.seconds()))
+        .map_err(|e| ClaimError::Database(format!("DPoP JTI expiry overflow: {e}")))?;
+    store_dpop_jti_with_expiry(store, jti, expires_at).await
+}
+
+/// Validate `jti` and atomically insert a row expiring at `expires_at`.
+///
+/// Shared body of [`check_and_store_dpop_jti`] and
+/// [`check_and_store_dpop_jti_at_second`]; the only difference between the
+/// two public overloads is how `expires_at` is computed (internal
+/// `Timestamp::now()` vs. a caller-provided integer-second instant).
+async fn store_dpop_jti_with_expiry(
+    store: &DocumentStore,
+    jti: &str,
+    expires_at: Timestamp,
 ) -> std::result::Result<DpopJtiClaim, ClaimError> {
     if jti.is_empty() {
         return Err(ClaimError::InvalidInput(
@@ -147,11 +210,6 @@ pub async fn check_and_store_dpop_jti(
             "DPoP JTI exceeds maximum length ({MAX_JTI_LENGTH})"
         )));
     }
-
-    let now = Timestamp::now();
-    let expires_at = now
-        .checked_add(validity_seconds.seconds())
-        .map_err(|e| ClaimError::Database(format!("DPoP JTI expiry overflow: {e}")))?;
 
     let id = deterministic_dpop_jti_id(jti);
     let doc = DpopJtiDoc {

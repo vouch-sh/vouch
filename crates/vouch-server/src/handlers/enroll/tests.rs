@@ -432,7 +432,447 @@ async fn test_oidc_callback_rejects_replayed_state() {
 
 // ── complete_enrollment_after_identity audit events ─────────────────
 
-/// Seed an OIDC state row and atomically consume it, yielding the
+// ── HTTP-level OIDC callback E2E (wiremock mock IdP) ──────────────────
+//
+// The shape-gate regression tests above exercise
+// `complete_enrollment_after_identity` directly with a hand-built
+// `IdentityResult`. The OIDC and SAML HTTP callbacks both funnel through
+// that same chokepoint, but the callback also performs the live token
+// exchange + ID-token verification + email-claim passthrough before
+// constructing the `IdentityResult`. This pair of HTTP-level tests drives
+// the real `/oauth/callback` route against an in-process wiremock OIDC IdP
+// that signs its own ID token, so the end-to-end behavior (a misconfigured
+// IdP asserting an email with a whitespace-bearing domain is rejected at
+// the chokepoint, and a well-formed email still proceeds) is verified
+// through the full stack — not just the chokepoint function.
+
+/// Build a `ConfiguredOidcProvider` whose endpoints point at `issuer`.
+fn mock_oidc_provider(issuer: &str) -> crate::services::idp::ConfiguredIdp {
+    use crate::services::idp::ConfiguredIdp;
+    use crate::services::idp::oidc::{ConfiguredOidcProvider, OidcProvider};
+    use secrecy::SecretString;
+    use url::Url;
+
+    ConfiguredIdp::Oidc(ConfiguredOidcProvider {
+        id: "mock-idp".to_string(),
+        client_id: "mock-client".to_string(),
+        client_secret: SecretString::from("mock-secret"),
+        provider: OidcProvider {
+            issuer: issuer.to_string(),
+            authorization_endpoint: Url::parse(&format!("{issuer}/authorize"))
+                .expect("parse authorize url"),
+            token_endpoint: Url::parse(&format!("{issuer}/token")).expect("parse token url"),
+            jwks_uri: Url::parse(&format!("{issuer}/jwks")).expect("parse jwks url"),
+        },
+    })
+}
+
+/// Mount JWKS + token endpoints on the mock server, and return the signing
+/// key (so the JWKS matches the signature on the ID token the token
+/// endpoint returns).
+async fn mount_mock_oidc_idp(
+    server: &wiremock::MockServer,
+    key: &crate::crypto::keys::OidcSigningKey,
+    id_token: String,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    // JWKS endpoint (mirrors the helper in services/idp/oidc/tests.rs).
+    let jwk = key.public_key_jwk().expect("public_key_jwk should succeed");
+    let jwks_json = serde_json::json!({ "keys": [crate::crypto::jwk::Jwk::Ec(jwk)] }).to_string();
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
+        .mount(server)
+        .await;
+
+    // Token endpoint: return the pre-signed ID token.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id_token": id_token,
+            "access_token": "fake-access-token",
+            "token_type": "Bearer",
+        })))
+        .mount(server)
+        .await;
+}
+
+/// Build the claims object for a non-Google IdP (no `hd` → domain derived
+/// from the email). The nonce must match the OIDC state row's nonce.
+fn id_token_claims(issuer: &str, client_id: &str, nonce: &str, email: &str) -> serde_json::Value {
+    serde_json::json!({
+        "iss": issuer,
+        "aud": client_id,
+        "sub": "mock-subject-1",
+        "exp": 9_999_999_999_i64,
+        "iat": 1_000_000_000_i64,
+        "email": email,
+        "email_verified": true,
+        "nonce": nonce,
+    })
+}
+
+#[tokio::test]
+async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
+    use crate::test_utils::{http_get, test_app_with_idps};
+
+    // In-process mock OIDC IdP that signs its own ID token. HTTP on
+    // localhost is allowed by the discovery/JWKS fetcher.
+    let server = wiremock::MockServer::start().await;
+    let issuer = server.uri();
+    let key = crate::crypto::keys::OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-ws-domain-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "foo@bar .com",
+        ))
+        .await
+        .expect("sign id token");
+    mount_mock_oidc_idp(&server, &key, id_token).await;
+
+    let (app, state) = test_app_with_idps(vec![mock_oidc_provider(&issuer)]).await;
+    // Open-enrollment mode (the default's positive control): no allowlist.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // Seed the OIDC state row the callback will consume. provider_id must
+    // match the mock IdP slug; nonce must match the ID token's.
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-ws-domain-state";
+    crate::db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    // Drive the real /oauth/callback route end-to-end.
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    // The chokepoint rejects the whitespace-bearing domain: the error
+    // template renders with 200 OK (not 303 SEE_OTHER), and neither the
+    // user nor the synthetic org is persisted.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "E2E: whitespace-domain email rejected at the OIDC callback chokepoint; got {status}: {body}"
+    );
+    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "E2E: a whitespace-domain email must not be persisted through the OIDC callback"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_callback_accepts_well_formed_email_e2e() {
+    use crate::test_utils::{http_get, test_app_with_idps};
+
+    let server = wiremock::MockServer::start().await;
+    let issuer = server.uri();
+    let key = crate::crypto::keys::OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-good-email-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "alice@example.com",
+        ))
+        .await
+        .expect("sign id token");
+    mount_mock_oidc_idp(&server, &key, id_token).await;
+
+    let (app, state) = test_app_with_idps(vec![mock_oidc_provider(&issuer)]).await;
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-good-email-state";
+    crate::db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    // Positive control: a well-formed email proceeds through the full
+    // OIDC callback to the 303 redirect (the gate does not over-reject).
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "E2E: a well-formed email must proceed through the OIDC callback; got {status}: {body}"
+    );
+    let user = crate::db::get_user_by_email(&state.store, "alice@example.com")
+        .await
+        .expect("db query ok")
+        .expect("E2E: well-formed email must be persisted");
+    assert_eq!(user.email, "alice@example.com");
+}
+
+#[tokio::test]
+async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
+    // SAML path E2E: the SAML ACS handler (`POST /saml/acs`) validates a
+    // signed SAML response, extracts the email from the NameID (verbatim)
+    // and the domain via `Email::domain_of`, then calls the SAME
+    // `complete_enrollment_after_identity` chokepoint the OIDC callback
+    // does. A NameID of `foo@bar .com` (whitespace inside the domain) must
+    // be rejected at that shared gate — confirming the SAML callback path
+    // inherits the fix without a separate SAML-side gate.
+    use crate::services::idp::saml::response::tests::{
+        build_signed_saml_response, generate_test_key_and_cert, test_provider, valid_time_window,
+    };
+    use crate::test_utils::{http_post_form, test_app_with_idps};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let saml_provider = test_provider(cert_der);
+    // test_provider uses sp_entity_id "https://vouch.example.com" and acs_url
+    // ".../saml/acs"; the test app's base_url is "https://test.example.com".
+    // The ACS handler validates Destination=acs_url and Audience=sp_entity_id
+    // against the provider, not the app's base_url, so reuse the provider's
+    // values for the signed response.
+    let acs_url = saml_provider.acs_url.clone();
+    let sp_entity_id = saml_provider.sp_entity_id.clone();
+    let issuer = saml_provider.idp_metadata.entity_id.clone();
+    let (not_before, not_on_or_after) = valid_time_window();
+    let request_id = "saml-ws-domain-request-1";
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "foo@bar .com",
+        "_resp-ws-1",
+        "_assert-ws-1",
+        request_id,
+        &acs_url,
+        &issuer,
+        &sp_entity_id,
+        &not_before,
+        &not_on_or_after,
+        Some(request_id),
+    );
+    let saml_response = B64.encode(xml.as_bytes());
+
+    let (app, state) = test_app_with_idps(vec![crate::services::idp::ConfiguredIdp::Saml(
+        saml_provider,
+    )])
+    .await;
+    // Open-enrollment mode (the default): no allowlist.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // Seed the state row the ACS handler will consume. The stored nonce
+    // is the AuthnRequest ID the validator checks InResponseTo against.
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let relay_state = "saml-ws-domain-relay";
+    crate::db::create_oidc_state(
+        &state.store,
+        relay_state,
+        None,
+        request_id,
+        "",
+        expires_at,
+        "corp-saml",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let form_body = format!(
+        "SAMLResponse={}&RelayState={relay_state}",
+        urlencode(&saml_response)
+    );
+    let (status, body) = http_post_form(&app, "/saml/acs", &form_body, &[]).await;
+
+    // The shared chokepoint rejects the whitespace-bearing domain: the
+    // error template renders with 200 OK (not 303), and no user is persisted.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "E2E SAML: whitespace-domain email rejected at the ACS chokepoint; got {status}: {body}"
+    );
+    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "E2E SAML: a whitespace-domain email must not be persisted through the ACS callback"
+    );
+}
+
+/// Percent-encode a string for `application/x-www-form-urlencoded` bodies.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_enrollment_allowed_domains_distinct_from_invalid_domain_gate() {
+    // the new invalid-domain gate and the `allowed_domains`
+    // allowlist gate remain distinct and correctly ordered. A
+    // well-formed email whose domain IS in the allowlist enrolls (303);
+    // a well-formed email whose domain is NOT in the allowlist renders
+    // the `enroll-error-domain-not-allowed` template (the allowlist
+    // gate), NOT the `enroll-error-invalid-email` template (the new
+    // domain-shape gate). A whitespace-bearing domain is rejected by
+    // the new gate even when the allowlist is set (the shape gate runs
+    // first).
+
+    let state = test_app_state().await;
+    {
+        let mut config = state.config().as_ref().clone();
+        // The default test_config sets allowed_domains = ["example.com"].
+        // Keep it (allowlist mode) for this test.
+        config.allowed_domains = Some(vec!["example.com".to_string()]);
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // (1) Well-formed email IN the allowlist → proceeds (303).
+    let (stored_in, claim_in) =
+        seed_and_consume_oidc_state(&state, "allowlist-in-state", None).await;
+    let identity_in = IdentityResult {
+        email: "bob@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_in,
+        identity_in,
+        claim_in,
+        ClientInfo::default(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "an in-allowlist well-formed email must enroll"
+    );
+
+    // (2) Well-formed email NOT in the allowlist → the allowlist gate
+    // renders the domain-not-allowed template (200), distinct from the
+    // invalid-domain template.
+    let (stored_out, claim_out) =
+        seed_and_consume_oidc_state(&state, "allowlist-out-state-2", None).await;
+    let identity_out = IdentityResult {
+        email: "carol@other.com".to_string(),
+        domain: Some("other.com".to_string()),
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_out,
+        identity_out,
+        claim_out,
+        ClientInfo::default(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "out-of-allowlist email renders the error page (200)"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+    assert!(
+        body.contains("Domain Not Allowed") || body.contains("not from an allowed domain"),
+        "out-of-allowlist must render the domain-not-allowed template, got: {body}"
+    );
+    assert!(
+        !body.contains("invalid email address"),
+        "out-of-allowlist must NOT render the invalid-email (shape-gate) template"
+    );
+
+    // (3) Whitespace-bearing domain with the allowlist set → the shape
+    // gate (which runs first) rejects it with the invalid-email template,
+    // NOT the allowlist template (confirming order: shape gate before
+    // allowlist gate).
+    let (stored_ws, claim_ws) =
+        seed_and_consume_oidc_state(&state, "allowlist-ws-state", None).await;
+    let identity_ws = IdentityResult {
+        email: "dave@bar .com".to_string(),
+        domain: Some("bar .com".to_string()),
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_ws,
+        identity_ws,
+        claim_ws,
+        ClientInfo::default(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "whitespace-domain email renders the error page (200) even with allowlist set"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+    assert!(
+        body.contains("invalid email address"),
+        "whitespace-domain with allowlist set must render the invalid-email (shape-gate) \
+         template, got: {body}"
+    );
+    assert!(
+        !body.contains("Domain Not Allowed"),
+        "whitespace-domain must NOT render the allowlist template (shape gate runs first)"
+    );
+}
+
 /// (state, claim) pair `complete_enrollment_after_identity` requires.
 async fn seed_and_consume_oidc_state(
     state: &AppState,
@@ -2260,6 +2700,89 @@ async fn test_enrollment_open_mode_rejects_empty_domain_email() {
     assert!(
         user.is_none(),
         "an empty-domain email must not be persisted in open-enrollment mode"
+    );
+}
+
+// RFC 5322 §3.4.1 / RFC 1035: a domain with internal whitespace (e.g.
+// `bar .com`) is not a valid DNS domain. `Email::is_valid_address` checks
+// whitespace only in the local part, so `foo@bar .com` passes the shape
+// gate; and the domain is non-empty, so the empty-domain gate would likewise
+// pass it. With `allowed_domains` unset (the default, open-enrollment mode),
+// nothing else rejects the malformed domain before `enroll_user_with_org`
+// persists it: `Email::new` only trims + ASCII-lowercases, preserving the
+// internal space as `User.email = "foo@bar .com"` and a synthetic
+// `Organization.domain = "bar .com"` (the chokepoint comment's
+// "whitespace-bearing ... value must not be persisted verbatim" read).
+// This regression test pins that the enrollment chokepoint rejects it.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_whitespace_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None; // open-enrollment mode (the default)
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "ws-domain-state", None).await;
+    // A non-Google IdP derives `identity.domain` from the email domain via
+    // `Email::domain_of`, which keeps the internal space (`Some("bar .com")`).
+    let email = "foo@bar .com".to_string();
+    let domain = crate::email::Email::domain_of(&email);
+    let identity = IdentityResult {
+        email,
+        domain,
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a whitespace-bearing domain email is rejected at the enrollment chokepoint"
+    );
+
+    // The rejection happens before `enroll_user_with_org`, so neither the
+    // user nor the synthetic organization is persisted.
+    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a whitespace-domain email must not be persisted as a user in open-enrollment mode"
+    );
+}
+
+// A tab inside the domain (`foo@bar\t.com`) is whitespace too: the gate's
+// `is_whitespace()` predicate must reject it, not just the ASCII space.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_tab_in_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None; // open-enrollment mode (the default)
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "ws-tab-domain-state", None).await;
+    let email = "foo@bar\t.com".to_string();
+    let domain = crate::email::Email::domain_of(&email);
+    let identity = IdentityResult {
+        email,
+        domain,
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a tab-bearing domain email is rejected at the enrollment chokepoint"
+    );
+
+    let user = crate::db::get_user_by_email(&state.store, "foo@bar\t.com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a tab-domain email must not be persisted as a user in open-enrollment mode"
     );
 }
 

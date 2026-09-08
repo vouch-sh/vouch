@@ -666,3 +666,305 @@ async fn test_delete_user_client_reassignment_writes_against_latest_version() {
         "non-user_id fields must be preserved by the reassignment"
     );
 }
+
+// ========================================================================
+// delete_oauth_client_and_revoke_sessions: cache/DB consistency on partial
+// failure (regression for the (A)-OK / (B)-Err arm)
+// ========================================================================
+
+/// Helper: create an OAuth access-token session with the given keying and a
+/// far-future expiry, so it is live for the duration of the test. Directly
+/// mirrors the `create_oauth_session` helper in `users_and_sessions.rs` but
+/// adds the `client_id` index, which the chokepoint's client-scoped delete
+/// matches on.
+async fn create_client_session(
+    store: &DocumentStore,
+    user_id: &str,
+    email: &str,
+    token_hash: &str,
+    client_id: Option<&str>,
+) {
+    create_session(
+        store,
+        &CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash,
+            authenticator_id: None,
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create session");
+}
+
+/// Regression test for the cache/DB desync in
+/// [`delete_oauth_client_and_revoke_sessions`].
+///
+/// The chokepoint used to run both `delete_by_index` calls (the
+/// `user_id`-indexed M2M delete, then the `client_id`-indexed user-issued
+/// delete) before either cache invalidation. If the second delete surfaced
+/// `Err`, the `?` skipped `invalidate_for_user`/`invalidate_for_client`, so
+/// the M2M rows the first delete already committed remained cached as `Hit`s
+/// — and `SessionCache::get` serves a `Hit` without re-reading the DB, so
+/// those tokens kept authenticating until the cache TTL elapsed.
+///
+/// `set_delete_by_index_remaining_successes(1)` faults the *second*
+/// `delete_by_index` (the client-scoped one) while letting the first
+/// (the `user_id`-scoped M2M delete) commit, exercising the (A)-OK / (B)-Err
+/// arm. With the fix, `invalidate_for_user` runs between the two deletes and
+/// evicts the committed-deleted M2M entry, so a subsequent cache lookup misses
+/// through to the DB and returns `None`. Under the bug both invalidations are
+/// skipped and the lookup returns `Some` from the stale `Hit`.
+#[tokio::test]
+async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
+    let (mut store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "partial-cache@example.com", None)
+        .await
+        .expect("create user");
+
+    let client = create_test_client(
+        &store,
+        &user_id,
+        TestClientSpec {
+            name: "Partial Cache App".to_string(),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // M2M (client_credentials) session: user_id == client_id (RFC 9068 §2.2),
+    // also tagged with client_id on its own index. This is the half step (A)
+    // commits and must be evicted from the cache before step (B) can fault.
+    create_client_session(
+        &store,
+        &client.client_id,
+        &format!("{}@clients", client.client_id),
+        "m2m-hash",
+        Some(&client.client_id),
+    )
+    .await;
+
+    // User-issued access-token session: keyed by the real resource owner's
+    // user_id, tagged with the issuing client_id. Step (B) would delete this
+    // but faults before committing, so it must survive in DB and cache.
+    create_client_session(
+        &store,
+        &user_id,
+        "partial-cache@example.com",
+        "user-hash",
+        Some(&client.client_id),
+    )
+    .await;
+
+    // Warm the session cache with `Hit`s for both tokens — the precondition
+    // the exploit requires: the attacker used the token against a resource
+    // endpoint within the cache TTL before the admin's delete.
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-hash")
+            .await
+            .expect("cache lookup m2m")
+            .is_some(),
+        "m2m token must start as a cache Hit"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-hash")
+            .await
+            .expect("cache lookup user")
+            .is_some(),
+        "user-issued token must start as a cache Hit"
+    );
+
+    // Fault the *second* `delete_by_index`: the `user_id`-scoped M2M delete
+    // (step A) consumes the single unit and commits; the client-scoped delete
+    // (step B) faults before opening its transaction.
+    store.set_delete_by_index_remaining_successes(1);
+
+    // The chokepoint must surface the (B)-failure as `Err` to the caller (so
+    // the admin sees a 500 and can retry) — the fix changes only *when* the
+    // cache is invalidated, not the error-propagation contract.
+    let result =
+        delete_oauth_client_and_revoke_sessions(&store, &cache, &client.app_id, &client.client_id)
+            .await;
+    assert!(
+        result.is_err(),
+        "chokepoint must surface the (B)-delete failure as Err: {result:?}"
+    );
+
+    // The client row is NOT deleted on this arm: step (E) only runs after
+    // both invalidations succeed, and step (B) faulted before it. Pinning this
+    // confirms the fix preserved the error-propagation contract (the admin
+    // sees the error and retries; the row is still there to retry against).
+    assert!(
+        get_oauth_client_by_id(&store, &client.app_id)
+            .await
+            .expect("lookup client")
+            .is_some(),
+        "the client row must survive when step (E) is unreachable"
+    );
+
+    // The committed-deleted M2M session is gone from the DB; the user-issued
+    // session whose delete faulted is still present.
+    let now = jiff::Timestamp::now();
+    assert!(
+        get_session_by_token_hash(&store, "m2m-hash", now)
+            .await
+            .expect("db lookup m2m")
+            .is_none(),
+        "the committed M2M delete must be gone from the DB"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "user-hash", now)
+            .await
+            .expect("db lookup user")
+            .is_some(),
+        "the session whose delete faulted must remain in the DB"
+    );
+
+    // The distinguishing assertion: a DB-deleted M2M session must NOT be
+    // served from a stale cache `Hit`. With the fix `invalidate_for_user`
+    // evicted it between the two deletes, so this lookup misses through to
+    // the DB and returns `None`. Under the bug both invalidations are skipped
+    // and the stale `Hit` keeps authenticating the revoked M2M token until
+    // the TTL.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-hash")
+            .await
+            .expect("cache re-lookup m2m")
+            .is_none(),
+        "a DB-deleted M2M session must not be served from a stale cache Hit \
+         after the chokepoint returned Err on the second delete"
+    );
+
+    // The user-issued session whose delete faulted stays cached — it is still
+    // a valid row, and `invalidate_for_user` correctly retained it (its
+    // `user_id` is the real user, not the client). `invalidate_for_client`
+    // never ran (step B faulted before it), which is consistent: the row is
+    // still in the DB, so serving it is correct, not a stale `Hit`.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-hash")
+            .await
+            .expect("cache re-lookup user")
+            .is_some(),
+        "the session whose delete faulted must remain a cache Hit (still in DB)"
+    );
+}
+
+/// The (A)-errors arm: when the *first* `delete_by_index` faults, no DB write
+/// committed and no invalidation is needed — both halves stay consistent
+/// (cache and DB untouched). Pins the contract that faulting step (A) evicts
+/// nothing and leaves both sessions live, so a retry of the whole chokepoint
+/// starts from a clean state.
+#[tokio::test]
+async fn test_delete_client_first_delete_failure_changes_nothing() {
+    let (mut store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "first-fail-client@example.com", None)
+        .await
+        .expect("create user");
+
+    let client = create_test_client(
+        &store,
+        &user_id,
+        TestClientSpec {
+            name: "First Fail App".to_string(),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    create_client_session(
+        &store,
+        &client.client_id,
+        &format!("{}@clients", client.client_id),
+        "m2m-f",
+        Some(&client.client_id),
+    )
+    .await;
+    create_client_session(
+        &store,
+        &user_id,
+        "first-fail-client@example.com",
+        "user-f",
+        Some(&client.client_id),
+    )
+    .await;
+
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-f")
+            .await
+            .expect("warm m2m")
+            .is_some()
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-f")
+            .await
+            .expect("warm user")
+            .is_some()
+    );
+
+    // Fault every `delete_by_index`: step (A) faults before committing, so
+    // neither delete runs and neither invalidation runs.
+    store.set_delete_by_index_remaining_successes(0);
+
+    let result =
+        delete_oauth_client_and_revoke_sessions(&store, &cache, &client.app_id, &client.client_id)
+            .await;
+    assert!(
+        result.is_err(),
+        "chokepoint must surface the (A)-delete failure as Err: {result:?}"
+    );
+
+    // Nothing committed: both sessions remain in the DB.
+    let now = jiff::Timestamp::now();
+    assert!(
+        get_session_by_token_hash(&store, "m2m-f", now)
+            .await
+            .expect("db m2m")
+            .is_some(),
+        "no delete committed, so the M2M session must remain"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "user-f", now)
+            .await
+            .expect("db user")
+            .is_some(),
+        "no delete committed, so the user-issued session must remain"
+    );
+
+    // No invalidation ran, so both stay cached — consistent with the DB, and
+    // a retry of the chokepoint starts from a clean state.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-f")
+            .await
+            .expect("cache m2m")
+            .is_some(),
+        "no invalidation ran, so the M2M session must stay cached (still valid)"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-f")
+            .await
+            .expect("cache user")
+            .is_some(),
+        "no invalidation ran, so the user-issued session must stay cached (still valid)"
+    );
+}

@@ -464,19 +464,20 @@ pub(crate) async fn exchange_token(
     // rather than defaulting to ScopeSet::all() to prevent scope escalation.
     let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
 
-    // Cap exchanged-token lifetime by subject token's remaining TTL
-    // (RFC 8693 Section 2.2).
-    let mut expires_in = state.config().session_hours.saturating_mul(3600);
-
-    if let Some(subject_exp) = subject_decoded.exp() {
-        let now = Timestamp::now().as_second();
-        let remaining = subject_exp.saturating_sub(now);
-        if remaining > 0
-            && let Ok(remaining_u64) = u64::try_from(remaining)
-        {
-            expires_in = expires_in.min(remaining_u64);
-        }
-    }
+    // Cap exchanged-token lifetime by subject token's remaining TTL. RFC 8693
+    // §2.2.1 defines `expires_in` as "The validity lifetime, in seconds, of
+    // the token issued by the authorization server." The spec does not
+    // mandate capping that by the subject token's TTL; bounding the issued
+    // token by the subject's remaining TTL is this server's design decision
+    // (mirrored by the ID-token branch). The cap is applied unconditionally —
+    // including when the subject's integer-second remaining TTL is 0 — so an
+    // exchanged access token never outlives its subject token (see
+    // [`cap_lifetime_by_subject_ttl`]).
+    let expires_in = cap_lifetime_by_subject_ttl(
+        state.config().session_hours.saturating_mul(3600),
+        subject_decoded.exp(),
+        Timestamp::now().as_second(),
+    );
 
     // RFC 9068: Audience is the explicit audience param (target resource server),
     // falling back to client_id if no audience specified.
@@ -864,6 +865,39 @@ fn calculate_granted_scope(
     }
 }
 
+/// Cap an exchanged access token's lifetime by the subject token's remaining
+/// TTL.
+///
+/// RFC 8693 §2.2.1 defines `expires_in` as "The validity lifetime, in
+/// seconds, of the token issued by the authorization server." The spec does
+/// not mandate capping that lifetime by the subject token's TTL; bounding the
+/// issued token by the subject's remaining TTL is this server's design
+/// decision. The cap binds unconditionally, including at the `remaining == 0`
+/// integer-second boundary where the subject token has reached its `exp`.
+///
+/// `session_secs` is the configured full session lifetime
+/// (`session_hours * 3600`). When the subject token exposes an `exp` claim,
+/// the returned lifetime is `min(session_secs, max(0, subject_exp - now))` —
+/// so a subject token that has reached its integer-second `exp`
+/// (`subject_exp == now`, i.e. zero remaining) caps the issued token to `0`
+/// seconds rather than the full `session_secs`. A subject token whose `exp`
+/// has already passed (negative remaining, only reachable when the JWT
+/// validation gate's leeway admits it) likewise caps to `0` via
+/// `saturating_sub` + `try_from(..).unwrap_or(0)`. When the subject token has
+/// no `exp` claim, the configured `session_secs` is returned unchanged.
+///
+/// `now` is taken as integer seconds because the subject JWT `exp` is an
+/// integer-second claim (RFC 7519 §4.1.4), so sub-second comparison would add
+/// no precision.
+fn cap_lifetime_by_subject_ttl(session_secs: u64, subject_exp: Option<i64>, now: i64) -> u64 {
+    let Some(subject_exp) = subject_exp else {
+        return session_secs;
+    };
+    let remaining = subject_exp.saturating_sub(now);
+    let remaining_u64 = u64::try_from(remaining).unwrap_or(0);
+    session_secs.min(remaining_u64)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -926,6 +960,78 @@ mod tests {
         // FIDO2 sessions with explicit scope request
         let result = calculate_granted_scope(Some("openid email"), None);
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
+    }
+
+    // ---- cap_lifetime_by_subject_ttl ----
+    //
+    // The default `session_hours` lifetime is 28800s (8h); the cap must bind
+    // at every reachable value of `subject_exp - now`, including the
+    // integer-second boundary where it is exactly 0.
+
+    #[test]
+    fn test_cap_lifetime_no_subject_exp_returns_full_session() {
+        // No `exp` claim (e.g. opaque/bare JWT subject) — no cap applies.
+        assert_eq!(cap_lifetime_by_subject_ttl(28_800, None, 1_000_000), 28_800);
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_far_future_returns_session_secs() {
+        // Subject outlives the configured session — cap is the session lifetime.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(5_000_000), 1_000_000),
+            28_800
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_shorter_than_session_caps_to_remaining() {
+        // Subject has 60s left — issued token is capped to ~60s, not 28800s.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_060), 1_000_000),
+            60
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_exp_equals_now_caps_to_zero() {
+        // The regression: `subject_exp == now` means zero integer-second
+        // remaining. The old `if remaining > 0` guard skipped the cap and
+        // minted the full 28800s; the fix must clamp to 0.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_000), 1_000_000),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_exp_in_past_caps_to_zero() {
+        // Defensive: a subject whose `exp` is already in the past (only
+        // reachable if the JWT validation gate's leeway admitted it) must also
+        // clamp to 0, never fall back to the full session lifetime.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(999_999), 1_000_000),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_remaining_one_second_caps_to_one() {
+        // Just above the boundary — 1s remaining yields a 1s token, proving
+        // the boundary fix does not over-clamp the positive-remaining path.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_001), 1_000_000),
+            1
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_small_session_secs_preserves_floor_when_subject_longer() {
+        // A tiny configured `session_secs` with a long-lived subject must
+        // return `session_secs`, not the subject's longer remaining.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(30, Some(5_000_000), 1_000_000),
+            30
+        );
     }
 
     /// Each [`TokenType`] must map to the matching `protocol` constant in both

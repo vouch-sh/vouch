@@ -1007,7 +1007,10 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
 ///    sweeps so a `client_credentials` request that has not yet validated the
 ///    secret cannot begin validating after the sweeps have committed and
 ///    insert a `SessionDoc` that escapes both sweeps.
-/// 2. The session sweeps (and cache invalidation) kill already-minted tokens.
+/// 2. The session sweeps kill already-minted tokens, each delete immediately
+///    followed by its companion cache invalidation so the cache and the DB
+///    stay consistent after every committed delete — a sweep failure then
+///    leaves no DB-deleted-but-cached token behind.
 /// 3. [`delete_oauth_client`] hard-deletes the secrets, JWKS cache, and the
 ///    client row.
 ///
@@ -1054,8 +1057,8 @@ pub async fn delete_oauth_client_and_revoke_sessions(
     store.run_post_secret_revoke_test_hook(client_id).await;
 
     super::sessions::delete_sessions_for_user(store, client_id).await?;
-    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
     session_cache.invalidate_for_user(client_id);
+    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
     session_cache.invalidate_for_client(client_id);
     delete_oauth_client(store, id).await
 }

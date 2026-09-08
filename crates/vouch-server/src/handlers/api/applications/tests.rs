@@ -1592,6 +1592,183 @@ async fn test_delete_application_revokes_minted_sessions() {
 }
 
 // ========================================================================
+// End-to-end: chokepoint partial failure must revoke the cached M2M token
+// (regression for the (A)-OK / (B)-Err arm through the real axum router)
+// ========================================================================
+
+/// Probe whether an access token still validates at `GET /v1/keys`. 200 means
+/// the session is live (the cache served a `Hit` or missed through to a live
+/// DB row); 401 means the session has been revoked (cache evicted and DB row
+/// gone). M2M (`client_credentials`) tokens with the default audience
+/// (`aud == client_id`) reach this handler: `enforce_audience_coverage`
+/// fast-paths that case, and `list_keys` does not call `load_active_user`, so
+/// an M2M token with `sub == client_id` and no user row returns 200 (empty key
+/// list) rather than 401.
+async fn v1_keys_status(app: &axum::Router, token: &str) -> StatusCode {
+    let (status, _) = http_get(app, "/v1/keys", &[("Authorization", &bearer(token))]).await;
+    status
+}
+
+/// End-to-end regression for the cache/DB desync on the chokepoint's
+/// (A)-OK / (B)-Err arm, driven through the real axum router — the exploit
+/// scenario from the bug report.
+///
+/// 1. The attacker's M2M (`client_credentials`) token warms `SessionCache` by
+///    hitting `GET /v1/keys` (200).
+/// 2. The admin deletes the OAuth application; the chokepoint's second
+///    `delete_by_index` (the `client_id`-indexed delete) faults, so the
+///    request returns 500.
+/// 3. The attacker's next `GET /v1/keys` within the cache TTL must NOT
+///    authenticate from a stale cache `Hit`: with the fix,
+///    `invalidate_for_user` ran between the two deletes and evicted the M2M
+///    entry, so the cache misses through to the DB (row gone) and returns 401.
+///    Under the bug both invalidations are skipped and this probe returns 200
+///    from the stale `Hit` until the TTL elapses.
+///
+/// `set_delete_by_index_remaining_successes(1)` faults exactly the chokepoint's
+/// second `delete_by_index` while letting the first commit. A sibling client's
+/// M2M token is also warmed and must keep validating — the chokepoint
+/// invalidates only the deleted client's entries, not another application's.
+#[tokio::test]
+async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        // Let exactly one top-level `delete_by_index` succeed (the M2M
+        // `user_id`-scoped delete, step A), then fault the client-scoped
+        // delete (step B). The setup helpers never call `delete_by_index`, so
+        // the budget is consumed only by the chokepoint's two
+        // `delete_sessions_for_*` calls during the DELETE below.
+        store.set_delete_by_index_remaining_successes(1);
+    })
+    .await;
+
+    // Owner + first-party session (the bearer the admin uses to call DELETE).
+    let user = create_test_user(&state.store, "partial-e2e@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let owner_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner_auth = bearer(&owner_token);
+
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Partial E2E App".to_string(),
+            // Register the shared test httpsig JWKS so the auto-signed
+            // `/v1/keys` probe's signature verifies against this client's
+            // keys (the httpsig resolver looks up the verification key by
+            // the Bearer token's `client_id` claim). Without this the
+            // M2M token's `/v1/keys` probe is rejected by the httpsig
+            // middleware before reaching the handler.
+            jwks: crate::test_utils::TestJwks::Shared,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Attacker's M2M (client_credentials) token: `user_id == client_id`
+    // (RFC 9068 §2.2), default audience `aud == client_id`. This is the token
+    // that warms the cache and must be revoked by the partial-failure arm.
+    let m2m_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client.client_id,
+            email: &format!("{}@clients", client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // A sibling client's M2M token, to prove the faulted delete does not
+    // over-revoke another application's tokens.
+    let other_client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Partial E2E Sibling".to_string(),
+            jwks: crate::test_utils::TestJwks::Shared,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let other_m2m_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &other_client.client_id,
+            email: &format!("{}@clients", other_client.client_id),
+            auth_id: Some(&auth_id),
+            client_id: Some(&other_client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Step 1: warm the session cache for both M2M tokens by hitting the
+    // resource endpoint, exactly as an attacker would before the admin's
+    // delete. 200 confirms the token authenticates and the cache now holds a
+    // `Hit` for its hash.
+    let (warm_status, warm_body) =
+        http_get(&app, "/v1/keys", &[("Authorization", &bearer(&m2m_token))]).await;
+    assert_eq!(
+        warm_status,
+        StatusCode::OK,
+        "attacker's M2M token must authenticate (and warm the cache) before the delete: {warm_body}"
+    );
+    assert_eq!(
+        v1_keys_status(&app, &other_m2m_token).await,
+        StatusCode::OK,
+        "sibling M2M token must authenticate (and warm the cache) before the delete"
+    );
+
+    // Step 2: admin deletes the application. The chokepoint's second
+    // `delete_by_index` faults, so the delete surfaces as 500 — the admin is
+    // told to retry, matching the error-propagation contract.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &owner_auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the (B)-delete failure must surface as 500, not 204"
+    );
+
+    // Step 3: the attacker's next probe within the cache TTL must NOT
+    // authenticate. With the fix, `invalidate_for_user` evicted the M2M entry
+    // between the two deletes, so the cache misses through to the DB (row
+    // gone) and returns 401. Under the bug both invalidations are skipped and
+    // this probe returns 200 from the stale `Hit` — the exploit.
+    assert_eq!(
+        v1_keys_status(&app, &m2m_token).await,
+        StatusCode::UNAUTHORIZED,
+        "the attacker's DB-revoked M2M token must not authenticate from a stale \
+         cache Hit within the TTL after the delete returned 500"
+    );
+
+    // No over-revocation: the sibling client's M2M token is untouched (its
+    // `user_id`/`client_id` are a different client), so it stays cached and
+    // keeps authenticating.
+    assert_eq!(
+        v1_keys_status(&app, &other_m2m_token).await,
+        StatusCode::OK,
+        "a sibling client's M2M token must keep validating after the faulted delete"
+    );
+}
+
+// ========================================================================
 // POST /api/v1/applications/:id/revoke — Revoke Tokens
 // ========================================================================
 
