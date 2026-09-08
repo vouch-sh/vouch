@@ -138,7 +138,7 @@ impl DpopJtiClaim {
 /// get a *different* `now` (separated from this one by the `await` on the
 /// insert). That dual-stamp lets the freshness window's upper bound drift
 /// past the replay record's `expires_at`, reopening a replay gap (RFC 9449
-/// §4.3 step 11). Production callers that share a `now` with a freshness
+/// §11.1). Production callers that share a `now` with a freshness
 /// check MUST use [`check_and_store_dpop_jti_at_second`] instead, passing
 /// the single caller-stamped instant. This overload remains for tests and
 /// callers that do not also enforce a freshness window against the row.
@@ -173,7 +173,7 @@ pub async fn check_and_store_dpop_jti(
 /// elapsed — should pass `now.as_second() + 1` (pre-rounded up by the
 /// caller) rather than `now.as_second()`. That keeps the row alive until
 /// the first second at which the freshness check would reject the proof,
-/// fully satisfying RFC 9449 §4.3 step 11.
+/// fully covering the RFC 9449 §11.1 acceptance window.
 ///
 /// Returns the same [`DpopJtiClaim`] witness / error mapping as
 /// [`check_and_store_dpop_jti`].

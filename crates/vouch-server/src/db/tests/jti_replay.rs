@@ -301,7 +301,7 @@ async fn test_delete_expired_dpop_jtis() {
 // of the existing row's `expires_at`, so an expired-but-present row still
 // blocks replay until `delete_expired` physically removes it. After cleanup
 // the same `jti` can be committed again. This is the DB half of the RFC 9449
-// §4.3 step 11 replay defense; the cross-layer invariant — that the retention
+// §11.1 replay defense; the cross-layer invariant — that the retention
 // `validate_dpop_common` passes covers the skew-extended proof-validity
 // window so cleanup never reopens a replay gap — lives in
 // `services/oidc/dpop.rs::tests` (the `services` layer can import both

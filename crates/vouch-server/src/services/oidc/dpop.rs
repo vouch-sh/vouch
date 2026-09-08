@@ -30,9 +30,13 @@ const NONCE_VALIDITY_SECONDS: i64 = 300;
 /// [`validate_dpop_claims`] accepts a proof while `now - iat` falls in
 /// `[-PROOF_SKEW_SECONDS, max_age]`, so the freshness window extends
 /// `PROOF_SKEW_SECONDS` past `max_age` when a client clock runs ahead of the
-/// server. RFC 9449 §4.3 step 11 says the server "SHOULD retain the `jti`
-/// value for at least the length of time the DPoP proof JWT would be
-/// considered valid", so the replay record must outlive that whole window.
+/// server. RFC 9449 §11.1: "In the context of the target URI, servers can
+/// store the jti value of each DPoP proof for the time window in which the
+/// respective DPoP proof JWT would be accepted". The strength is permissive
+/// ("can" — the spec mandates no retention duration); making the replay
+/// record outlive the whole acceptance window is this server's design
+/// choice so the single-use check holds for every instant a proof is
+/// accepted.
 ///
 /// [`validate_dpop_common`] therefore commits the JTI for
 /// `config_max_age + PROOF_SKEW_SECONDS`. Retaining for only `config_max_age`
@@ -321,7 +325,7 @@ pub struct DpopClaimsValidation<'a> {
     /// boundary checks). The freshness check and the JTI `expires_at` MUST
     /// share this single instant — restamping `now` between the two lets
     /// the freshness window's upper bound drift past the replay record's
-    /// `expires_at` and reopens a replay gap (RFC 9449 §4.3 step 11).
+    /// `expires_at` and reopens a replay gap (RFC 9449 §11.1).
     pub now: i64,
     pub expected_method: &'a str,
     pub accepted_uris: &'a [String],
@@ -372,7 +376,7 @@ pub fn validate_dpop_claims(
     // rounds the JTI's `expires_at` up to the next integer second
     // (`floor(now) + 1 + max_age + skew`), so the replay record outlives
     // every second at which this floor-truncated freshness check would
-    // still accept the proof (RFC 9449 §4.3 step 11).
+    // still accept the proof (RFC 9449 §11.1's acceptance window).
     if !crate::services::RecencyWindow::with_skew(max_age_seconds, PROOF_SKEW_SECONDS)
         .accepts_at(now, claims.iat)
     {
@@ -531,7 +535,7 @@ async fn validate_dpop_common(
     // bound could land Δ past the JTI's `expires_at`, and `as_second()`
     // floor-truncation added up to one more second of slack — together
     // reopening a residual `Δ + 1` replay window between JTI cleanup and
-    // proof staleness (RFC 9449 §4.3 step 11). Passing the same `now` into
+    // proof staleness (RFC 9449 §11.1). Passing the same `now` into
     // `check_and_store_dpop_jti_at_second` and `validate_dpop_claims`
     // eliminates the Δ; the `+1` round-up below covers the floor-slack.
     let now = Timestamp::now();
@@ -541,8 +545,10 @@ async fn validate_dpop_common(
     // below, so the "this JTI was committed by this request" guarantee is
     // carried by the returned value for as long as it lives.
     //
-    // RFC 9449 §4.3 step 11: retain the JTI for at least as long as the proof
-    // is considered valid. `validate_dpop_claims` accepts an `iat` up to
+    // RFC 9449 §11.1: servers "can store the jti value of each DPoP proof
+    // for the time window in which the respective DPoP proof JWT would be
+    // accepted" — this server retains the JTI for that whole window so the
+    // single-use check holds. `validate_dpop_claims` accepts an `iat` up to
     // `PROOF_SKEW_SECONDS` into the future and uses `now.as_second()`
     // (floor-truncated), so a forward-skewed proof with `iat =
     // floor(now) + skew` stays freshness-accepted until the first second
@@ -1420,7 +1426,7 @@ mod tests {
     }
 
     // ========================================================================
-    // RFC 9449 §4.3 step 11 — JTI retention vs. the resource-endpoint replay
+    // RFC 9449 §11.1 — JTI retention vs. the resource-endpoint replay
     // window (integration guard for `validate_dpop_common`).
     //
     // `validate_dpop_common` must commit the JTI for `config_max_age +
@@ -1459,7 +1465,7 @@ mod tests {
     }
 
     // ========================================================================
-    // RFC 9449 §4.3 step 11 — JTI retention vs. the proof-validity window
+    // RFC 9449 §11.1 — JTI retention vs. the proof-validity window
     // (deterministic, no signatures).
     //
     // These two tests live in the `services` layer (not `db/tests/jti_replay.rs`)
@@ -1693,7 +1699,7 @@ mod tests {
 
     /// `validate_dpop_at_resource` must commit the JTI such that the replay
     /// record outlives every second at which the freshness check would still
-    /// accept the proof (RFC 9449 §4.3 step 11). After the fix,
+    /// accept the proof (RFC 9449 §11.1). After the fix,
     /// `validate_dpop_common` stamps `now` once, rounds up to
     /// `floor(now) + 1`, and commits `expires_at = floor(now) + 1 +
     /// max_age + skew`. The freshness check (using `floor(now)`,
