@@ -16,7 +16,7 @@ proxy:
   hosts:
     - dev.vouch.sh
     - vouch.dev.vouch.sh
-  ssl: false
+  ssl: true
   app_port: 3000
   healthcheck:
     interval: 3
