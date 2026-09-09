@@ -24,8 +24,8 @@ pub use issuer::{
     release_subdomain, try_insert_org_signing_key,
 };
 pub use validation::{
-    DomainValidationError, RESERVED_SUBDOMAIN_LABELS, SubdomainLabelError,
-    eligible_subdomain_labels, ineligible_subdomain_candidates, normalize_domain, unicode_form,
+    Domain, DomainValidationError, RESERVED_SUBDOMAIN_LABELS, SubdomainLabelError,
+    eligible_subdomain_labels, ineligible_subdomain_candidates, unicode_form,
     validate_subdomain_label,
 };
 

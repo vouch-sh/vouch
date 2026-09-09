@@ -92,7 +92,7 @@ fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
 ///
 /// `row.domain` is interpolated directly into `/admin/domains/{domain}/...`
 /// action URLs in the template. That is safe without URL-encoding because
-/// every domain on the org has been through `normalize_domain`, which rejects
+/// every domain on the org has been through `Domain::parse`, which rejects
 /// anything outside `[a-z0-9.-]` — no `/`, `?`, `#`, `%`, or whitespace can
 /// reach the template.
 fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
@@ -306,7 +306,7 @@ pub(crate) async fn admin_verify_domain(
         org_id,
     } = admin;
 
-    let normalized = match db::normalize_domain(&domain) {
+    let normalized = match db::Domain::parse(&domain) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, domain = %domain, "domain normalization failed in verify");
@@ -317,7 +317,8 @@ pub(crate) async fn admin_verify_domain(
         }
     };
 
-    let token = match db::get_verification_token(&state.store, &org_id, &normalized).await? {
+    let token = match db::get_verification_token(&state.store, &org_id, normalized.as_str()).await?
+    {
         Some(t) => t,
         None => {
             return Ok(redirect_error(
@@ -327,7 +328,7 @@ pub(crate) async fn admin_verify_domain(
         }
     };
 
-    let txt_ok = match dns::verify_txt_record(&normalized, token.expose_secret()).await {
+    let txt_ok = match dns::verify_txt_record(normalized.as_str(), token.expose_secret()).await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -349,11 +350,11 @@ pub(crate) async fn admin_verify_domain(
         ));
     }
 
-    match db::mark_additional_domain_verified(&state.store, &org_id, &normalized).await {
+    match db::mark_additional_domain_verified(&state.store, &org_id, normalized.as_str()).await {
         Ok(()) => {
             let data = OrgDomainAdminData {
                 action: "verify_org_domain",
-                domain: &normalized,
+                domain: normalized.as_str(),
                 admin_user_id: &admin.id,
                 method: Some("dns_txt"),
             };
@@ -410,7 +411,7 @@ pub(crate) async fn admin_remove_domain(
         org_id,
     } = admin;
 
-    let normalized = match db::normalize_domain(&domain) {
+    let normalized = match db::Domain::parse(&domain) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, domain = %domain, "domain normalization failed in remove");
@@ -421,13 +422,13 @@ pub(crate) async fn admin_remove_domain(
         }
     };
 
-    match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
+    match db::remove_additional_domain(&state.store, &org_id, normalized.as_str()).await {
         Ok(Some(summary)) => {
             let revoked = summary.revoked_user_count;
             let errored = summary.revocation_errored;
             let data = OrgDomainRemovalData {
                 action: "remove_org_domain",
-                domain: &normalized,
+                domain: normalized.as_str(),
                 admin_user_id: &admin.id,
                 revoked_user_session_count: revoked,
                 revocation_errored: errored,

@@ -19,6 +19,7 @@
 
 use serde_json::json;
 use vouch_server::db::{enroll_user_with_org, get_user_by_email};
+use vouch_server::test_utils::test_domain;
 use vouch_tests::TestHarness;
 
 /// A user provisioned via the SCIM HTTP endpoint with a mixed-case email
@@ -70,7 +71,7 @@ async fn scim_provisioned_user_reused_by_oidc_enrollment_across_casing() {
         &harness.state.store,
         "ALICE@e2e-case.example.com",
         Some("Alice Smith"),
-        Some("e2e-case.example.com"),
+        Some(&test_domain("e2e-case.example.com")),
         None,
     )
     .await

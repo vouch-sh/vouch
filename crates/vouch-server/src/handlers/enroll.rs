@@ -5,7 +5,7 @@ use crate::AppState;
 use crate::assurance::HardwareVerification;
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
-use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::db::{self, AuthEventParams, AuthEventType, Domain};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use askama::Template;
@@ -755,22 +755,19 @@ pub(crate) async fn complete_enrollment_after_identity(
     // through because SCIM's create path has a downstream domain-ownership
     // gate that rejects it with a specific error. Enrollment has no such
     // always-on gate: its only domain check is the optional
-    // `allowed_domains` allowlist below, which is unset by default. Reject
-    // an empty domain (`foo@`) here so open-enrollment mode cannot persist a
-    // user with `email = "foo@"` and a synthetic organization with
-    // `domain = ""`, and reject a whitespace-bearing domain (`foo@bar .com`)
-    // too: it is not a valid DNS domain, and `enroll_user_with_org`'s only
-    // normalization is `Email::new` (trim + ASCII-lowercase), which preserves
-    // the internal space — so it would otherwise persist verbatim as
-    // `User.email` and the synthetic `Organization.domain` (the chokepoint
-    // comment's "whitespace-bearing ... value must not be persisted
-    // verbatim" read, which `Email::is_valid_address`'s local-part-only
-    // whitespace rule does not enforce).
-    let domain = crate::email::Email::domain_of(&identity.email);
-    if domain
-        .as_deref()
-        .is_none_or(|d| d.is_empty() || d.chars().any(|c| c.is_whitespace()))
-    {
+    // `allowed_domains` allowlist below, which is unset by default. So the
+    // email's own domain is checked here — `foo@` and `foo@bar .com` are
+    // not addresses Vouch stores, and `enroll_user_with_org`'s only
+    // normalization is `Email::new` (trim + ASCII-lowercase), which would
+    // persist either verbatim as `User.email`.
+    //
+    // This gate is about the *email*. The organization domain is a separate
+    // value that the IdP layer has already parsed into an
+    // `identity.domain: Option<Domain>` — an unvalidated string cannot
+    // reach `enroll_user_with_org` below, so there is nothing left for a
+    // handler-side org-domain gate to check. The two diverge whenever a
+    // SAML IdP sets `domain_attribute` or an OIDC IdP asserts `hd`.
+    if crate::email::Email::domain_of(&identity.email).is_none_or(|d| Domain::parse(&d).is_err()) {
         tracing::warn!(
             email = %redact_email(&identity.email),
             "rejected IdP enrollment: upstream email has an invalid domain"
@@ -792,7 +789,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         .as_ref()
         .filter(|d| !d.is_empty())
     {
-        let email_domain = identity.domain.as_deref().unwrap_or("");
+        let email_domain = identity.domain.as_ref().map_or("", Domain::as_str);
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
@@ -816,7 +813,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         &state.store,
         &identity.email,
         None,
-        identity.domain.as_deref(),
+        identity.domain.as_ref(),
         identity.upstream.as_ref(),
     )
     .await

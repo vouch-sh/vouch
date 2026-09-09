@@ -25,7 +25,7 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::document_crypto::{HpkeDocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
-use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
+use crate::db::{CreateOAuthClientParams, Domain, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
 use crate::AppState;
@@ -886,6 +886,17 @@ pub async fn create_test_user(store: &DocumentStore, email: &str) -> crate::db::
         .expect("Test user not found after creation")
 }
 
+/// Parse a domain literal for a fixture.
+///
+/// Panics on a literal that is not a valid domain: a test that needs a
+/// malformed one belongs at the layer that parses the domain (the OIDC
+/// `hd` claim, the SAML `domain_attribute`, or the admin add-domain form),
+/// because nothing downstream of those can hold one.
+#[must_use]
+pub fn test_domain(domain: &str) -> Domain {
+    Domain::parse(domain).expect("test fixture domain must be valid")
+}
+
 /// Create a test organization in the database.
 pub async fn create_test_org(store: &DocumentStore, domain: &str) -> crate::db::Organization {
     crate::db::create_organization(store, domain, Some("Test Org"), None)
@@ -1374,7 +1385,7 @@ pub async fn create_test_org_token_with_scope(
                 org_id,
                 &crate::db::documents::organization::OrganizationDoc {
                     // ".example" alone is a reserved TLD (RESERVED_TLDS) and
-                    // is rejected by `normalize_domain`, which SCIM user
+                    // is rejected by `Domain::parse`, which SCIM user
                     // creation now runs the candidate email's domain
                     // through — use the RFC 2606 second-level reservation
                     // instead so per-org_id domains stay both valid and

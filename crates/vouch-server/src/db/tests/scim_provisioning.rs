@@ -233,7 +233,7 @@ async fn test_create_scim_user_rejects_whitespace_padded_domain() {
 /// A reserved-TLD primary domain (realistic for on-prem/AD-derived
 /// enrollment) still accepts provisioning against itself: the check is set
 /// membership against `verified_domains()`, not a re-run of
-/// `normalize_domain` shape validation.
+/// `Domain::parse` shape validation.
 #[tokio::test]
 async fn test_create_scim_user_accepts_reserved_tld_primary_domain() {
     let (store, _audit) = test_db().await;

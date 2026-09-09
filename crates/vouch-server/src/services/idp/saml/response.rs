@@ -20,6 +20,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use jiff::Timestamp;
 
 use super::{SamlProvider, c14n, signature::SignatureError};
+use crate::db::{Domain, DomainValidationError};
 
 // ============================================================================
 // SAML namespace constants
@@ -49,8 +50,12 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) struct SamlAssertion {
     /// Email address extracted from NameID or configured attribute.
     pub email: String,
-    /// Domain extracted from email or configured domain attribute.
-    pub domain: Option<String>,
+    /// The organization domain: the `domain_attribute` value when the
+    /// provider configures one, otherwise the email's own domain. Typed, so
+    /// a `domain_attribute` carrying something that is not a DNS domain
+    /// fails validation here rather than being persisted as an
+    /// `Organization.domain`.
+    pub domain: Option<Domain>,
     /// The `<saml:NameID>` text, when present. Paired with the IdP
     /// entity ID this is the stable upstream identity used for account
     /// matching (unless the format is transient — see `name_id_format`).
@@ -126,6 +131,10 @@ pub(crate) enum ResponseError {
     /// The email could not be extracted from the assertion.
     #[error("could not extract email from assertion")]
     NoEmail,
+    /// The assertion's domain — from the configured `domain_attribute` or
+    /// derived from the email — is not a valid DNS domain.
+    #[error("assertion domain is not a valid domain: {0}")]
+    InvalidDomain(#[from] DomainValidationError),
     /// Other structural or parsing errors.
     #[error("{0}")]
     Other(String),
@@ -314,7 +323,7 @@ pub(crate) fn validate_saml_response(
     let email = extract_email(assertion, provider.email_attribute.as_deref())?;
 
     // Step 11: Extract domain
-    let domain = extract_domain(assertion, provider.domain_attribute.as_deref(), &email);
+    let domain = extract_domain(assertion, provider.domain_attribute.as_deref(), &email)?;
 
     // Step 12: Extract the NameID and its Format for identity binding.
     let (name_id, name_id_format) = match extract_name_id(assertion) {
@@ -660,23 +669,23 @@ fn extract_name_id(assertion: roxmltree::Node<'_, '_>) -> Option<(String, Option
 
 /// Extract the domain from the assertion or derive it from the email.
 ///
-/// Normalizes the result to ASCII lowercase so org lookups match regardless
-/// of the case the IdP returned.
+/// `Domain::parse` normalizes to ASCII lowercase so org lookups match
+/// regardless of the case the IdP returned, and rejects a
+/// `domain_attribute` value that is not a DNS domain — the attribute is
+/// free-form IdP-controlled text, and whatever it holds is what enrollment
+/// persists as `Organization.domain`.
 fn extract_domain(
     assertion: roxmltree::Node<'_, '_>,
     domain_attribute: Option<&str>,
     email: &str,
-) -> Option<String> {
-    // Try configured domain attribute
-    if let Some(attr_name) = domain_attribute
-        && let Some(value) = find_saml_attribute(assertion, attr_name)
-    {
-        return Some(value.to_ascii_lowercase());
-    }
-
-    // Derive from email address (last-`@` split, matching the audit and
-    // org-domain layers)
-    crate::email::Email::domain_of(email)
+) -> Result<Option<Domain>, DomainValidationError> {
+    // Falls back to the email address (last-`@` split, matching the audit
+    // and org-domain layers) when no attribute is configured, or when the
+    // configured one is absent from this assertion.
+    let raw = domain_attribute
+        .and_then(|attr_name| find_saml_attribute(assertion, attr_name))
+        .or_else(|| crate::email::Email::domain_of(email));
+    raw.as_deref().map(Domain::parse).transpose()
 }
 
 /// Find the value of a SAML attribute by name.
