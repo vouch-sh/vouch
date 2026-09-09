@@ -758,15 +758,37 @@ pub(crate) async fn complete_enrollment_after_identity(
     // `allowed_domains` allowlist below, which is unset by default. Reject
     // an empty domain (`foo@`) here so open-enrollment mode cannot persist a
     // user with `email = "foo@"` and a synthetic organization with
-    // `domain = ""`, and reject a whitespace-bearing domain (`foo@bar .com`)
-    // too: it is not a valid DNS domain, and `enroll_user_with_org`'s only
-    // normalization is `Email::new` (trim + ASCII-lowercase), which preserves
-    // the internal space — so it would otherwise persist verbatim as
-    // `User.email` and the synthetic `Organization.domain` (the chokepoint
-    // comment's "whitespace-bearing ... value must not be persisted
-    // verbatim" read, which `Email::is_valid_address`'s local-part-only
-    // whitespace rule does not enforce).
-    let domain = crate::email::Email::domain_of(&identity.email);
+    // `domain = ""`, and reject a whitespace-bearing domain (`foo@bar .com`,
+    // or a divergent `identity.domain` like `"bar .com"`) too: it is not a
+    // valid DNS domain, and `enroll_user_with_org`'s only normalization is
+    // `Email::new` (trim + ASCII-lowercase), which preserves the internal
+    // space — so it would otherwise persist verbatim as `User.email` and the
+    // synthetic `Organization.domain` (the chokepoint comment's
+    // "whitespace-bearing ... value must not be persisted verbatim" read,
+    // which `Email::is_valid_address`'s local-part-only whitespace rule does
+    // not enforce).
+    //
+    // The gate must inspect the domain that is actually persisted:
+    // `enroll_user_with_org` below is handed `identity.domain`, and that is
+    // what becomes the synthetic `Organization.domain` / `UserDoc.org_domain`.
+    // `identity.domain` diverges from the email's domain when a SAML IdP is
+    // configured with `domain_attribute` (or an OIDC IdP exposes an `hd`
+    // claim), so deriving the checked domain from
+    // `Email::domain_of(&identity.email)` would let a whitespace-bearing
+    // `identity.domain` slip past while a clean email keeps the gate happy —
+    // the verbatim persistence this gate exists to prevent. Validate
+    // `identity.domain` directly when present — it is always a bare domain
+    // (e.g. `"example.com"`, never an email), so it must not be run through
+    // `Email::domain_of`, which splits on `@` and returns `None` for a bare
+    // domain (breaking every convergent-domain happy path). Fall back to the
+    // email-derived domain only when `identity.domain` is `None` (e.g.
+    // Google consumer logins with no `hd` claim), matching the allowlist
+    // gate below, which also keys off `identity.domain`.
+    let domain = identity
+        .domain
+        .as_deref()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .or_else(|| crate::email::Email::domain_of(&identity.email));
     if domain
         .as_deref()
         .is_none_or(|d| d.is_empty() || d.chars().any(|c| c.is_whitespace()))

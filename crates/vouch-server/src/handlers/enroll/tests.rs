@@ -2837,3 +2837,198 @@ async fn test_enrollment_accepts_well_formed_email() {
         "a valid email must proceed through enrollment"
     );
 }
+
+// =========================================================================
+// Regression: the domain shape gate must inspect `identity.domain` (the
+// value actually persisted as `Organization.domain` / `UserDoc.org_domain`),
+// not `Email::domain_of(&identity.email)`. When a SAML IdP is configured with
+// `domain_attribute` (or an OIDC IdP exposes an `hd` claim), `identity.domain`
+// diverges from the email's domain. A whitespace-bearing divergent
+// `identity.domain` (e.g. `"bar .com"`) paired with a clean email
+// (`alice@example.com`) previously slipped past a gate that read the email
+// domain and was persisted verbatim — the exact verbatim persistence the
+// chokepoint comment (enroll.rs:754-786) states the gate exists to prevent.
+// The bug is reachable only in open-enrollment mode (`allowed_domains` unset
+// / empty): the subsequent allowlist gate keys off `identity.domain` and
+// rejects the mismatched value, so it scopes the defect to open-enrollment.
+// =========================================================================
+
+// Regression: a clean email paired with a divergent whitespace-bearing
+// `identity.domain` (as a SAML `domain_attribute` would produce) must be
+// rejected at the enrollment chokepoint in open-enrollment mode, and neither
+// the user nor a synthetic organization with `domain = "bar .com"` may be
+// persisted. Before the fix the gate derived the checked domain from the
+// email, so the clean email kept it happy and the whitespace-bearing
+// `identity.domain` was persisted verbatim as `Organization.domain`.
+//
+// `identity.domain` is the canonical domain for enrollment decisions (the
+// allowlist gate at enroll.rs:789-808 keys off it directly); the shape gate
+// now reads the same source.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_whitespace_in_divergent_identity_domain() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None; // open-enrollment mode
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "divergent-ws-domain-state", None).await;
+    // A clean email (passes the shape check on its own) paired with a
+    // whitespace-bearing divergent `identity.domain`, which is what
+    // `complete_enrollment_after_identity` hands to `enroll_user_with_org`
+    // and persists as the synthetic `Organization.domain`.
+    let identity = IdentityResult {
+        email: "alice@example.com".to_string(),
+        domain: Some("bar .com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a whitespace-bearing divergent identity.domain is rejected at the enrollment chokepoint"
+    );
+
+    // The rejection happens before `enroll_user_with_org`, so neither the
+    // user nor the synthetic organization is persisted.
+    let user = crate::db::get_user_by_email(&state.store, "alice@example.com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a whitespace-bearing divergent identity.domain must not enroll a user in open-enrollment mode"
+    );
+}
+
+// Positive control (divergent happy path): a clean divergent
+// `identity.domain` (as a SAML `domain_attribute` produces after
+// `extract_domain`'s `to_ascii_lowercase` — see
+// `domain_from_configured_attribute_is_lowercased` in
+// services::idp::saml::response::tests) paired with a clean email must
+// still ENROLL in open-enrollment mode, and the synthetic `Organization.domain`
+// must equal the `identity.domain` value handed to `enroll_user_with_org`
+// (the chokepoint persists that value verbatim via `get_or_create_org`'s
+// `domain.to_string()`; the upstream IdP-parsing layers, not the chokepoint,
+// are responsible for lowercasing `identity.domain` before it arrives).
+//
+// This pins that the fix does not over-reject the legitimate SAML
+// `domain_attribute` feature: the gate inspects `identity.domain` directly
+// (not through `Email::domain_of`, which would `None`-out a bare domain and
+// both break this happy path and — per the convergent-domain
+// `test_enrollment_open_mode_accepts_well_formed_email` — over-reject every
+// convergent-domain login), so a clean bare domain still passes.
+#[tokio::test]
+async fn test_enrollment_open_mode_accepts_divergent_identity_domain() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    // Do NOT pre-create the user: a fresh enrollment (the normal IdP-login
+    // path) creates the user linked to the synthesized org. Pre-creating
+    // would leave `resolve_user` returning the existing user with its
+    // pre-existing `org_id`, hiding the synthesized-org linkage this test
+    // exists to pin.
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "divergent-good-domain-state", None).await;
+    let identity = IdentityResult {
+        email: "saml-div@example.com".to_string(),
+        // A bare domain (never an email), already lowercased as SAML's
+        // `extract_domain` would supply it. The gate must accept it.
+        domain: Some("corp.example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a clean divergent identity.domain must enroll in open-enrollment mode"
+    );
+
+    let enrolled = crate::db::get_user_by_email(&state.store, "saml-div@example.com")
+        .await
+        .expect("db query ok")
+        .expect("a clean divergent identity.domain must persist a user");
+    let org_id = enrolled
+        .org_id
+        .as_deref()
+        .expect("a clean divergent identity.domain must synthesize an org");
+    let org_domain = crate::db::get_organization_domain(&state.store, org_id)
+        .await
+        .expect("db query ok");
+    assert_eq!(
+        org_domain.as_deref(),
+        Some("corp.example.com"),
+        "the synthetic Organization.domain must equal the identity.domain value"
+    );
+}
+
+// Positive control (Google consumer fallback): when `identity.domain` is
+// `None` (Google consumer logins with no `hd` claim — see oidc.rs:525-529),
+// the gate falls back to `Email::domain_of(&identity.email)`. A clean email
+// must still enroll in open-enrollment mode (the fix must not over-reject
+// the `None` fallback branch), and a whitespace-bearing email domain must
+// still be rejected via the fallback (the fallback branch keeps the
+// whitespace/empty check that the convergent-domain regression suite
+// already pins for the `Some` branch).
+#[tokio::test]
+async fn test_enrollment_open_mode_none_domain_falls_back_to_email_and_gates() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+
+    // (1) Clean email, `domain: None` → proceeds (the fallback resolves a
+    // non-empty, whitespace-free domain from the email).
+    let user = create_test_user(&state.store, "google-consumer@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "none-domain-good-state", None).await;
+    let identity = IdentityResult {
+        email: "google-consumer@example.com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a clean email with identity.domain = None must enroll via the email-domain fallback"
+    );
+
+    // (2) Whitespace-bearing email domain, `domain: None` → the fallback
+    // resolves the email's whitespace-bearing domain, and the gate rejects
+    // it (the fallback branch still applies the whitespace check).
+    let (stored_ws, claim_ws) =
+        seed_and_consume_oidc_state(&state, "none-domain-ws-state", None).await;
+    let identity_ws = IdentityResult {
+        email: "foo@bar .com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_ws,
+        identity_ws,
+        claim_ws,
+        ClientInfo::default(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a whitespace-domain email with identity.domain = None is rejected via the email-domain fallback"
+    );
+    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a whitespace-domain email with identity.domain = None must not enroll via the fallback"
+    );
+}
