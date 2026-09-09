@@ -147,26 +147,39 @@ let updated = crate::services::auth::revoke_then_persist(
 
 `delete_authenticator` is a persisted state change that withdraws the member's login path: the same ordering invariant as `active=false` applies — revocation runs first, authenticator deletion is the `persist` closure, and only runs if revocation succeeded. This matches the helper's documented anti-pattern: persisting first and then failing `revoke_user_access` (which is non-atomic) leaves the member locked out while long-lived credentials stay live.
 ```rust
-let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
-let key_count = authenticators.len();
-crate::services::auth::revoke_then_persist(
+// `key_count` and the authenticator set are read INSIDE the persist closure
+// against the live transaction, not snapshotted outside `revoke_then_persist`.
+// A key whose `create_authenticator` commits during `revoke_user_access`
+// (e.g. an in-flight `register_complete`) would be missed by an outer
+// snapshot and survive the revocation — re-reading on every `with_dsql_retry!`
+// attempt picks it up and deletes it with the rest.
+let key_count = crate::services::auth::revoke_then_persist(
     &state,
     &target_id,
     "Credentials revoked by admin",
     &admin.id,
     || async {
-        let mut tx = state.store.begin().await.map_err(|e| {
-            ServiceError::from_db_contention(e, "Failed to start transaction")
-        })?;
-        for auth in &authenticators {
-            db::delete_authenticator(&mut tx, &auth.id)
+        use crate::db::documents::authenticator::AuthenticatorDoc;
+        crate::with_dsql_retry!(async {
+            let mut tx = state.store.begin().await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to start transaction")
+            })?;
+            let authenticators = tx
+                .find_all::<AuthenticatorDoc>("user_id", &target_id)
                 .await
-                .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
-        }
-        tx.commit().await.map_err(|e| {
-            ServiceError::from_db_contention(e, "Failed to commit key revocation")
-        })?;
-        Ok::<(), ServiceError>(())
+                .map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to load authenticators")
+                })?;
+            for auth in &authenticators {
+                db::delete_authenticator(&mut tx, &auth.id)
+                    .await
+                    .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+            }
+            tx.commit().await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to commit key revocation")
+            })?;
+            Ok::<usize, ServiceError>(authenticators.len())
+        })
     },
 )
 .await
