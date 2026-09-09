@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::test_utils::test_domain;
 
 // ========================================================================
 // Email case normalization across SCIM and OIDC enrollment
@@ -29,12 +30,12 @@ async fn test_enroll_finds_scim_user_with_different_email_casing() {
     use crate::db::{create_scim_user, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "case-example.com";
+    let domain = test_domain("case-example.com");
 
     // Org is required for SCIM token binding and is the one OIDC enrollment
     // will resolve to via the (lowercased) domain.
     let org_id = store
-        .insert(&test_org_doc(domain))
+        .insert(&test_org_doc(domain.as_str()))
         .await
         .expect("org insert")
         .id;
@@ -65,7 +66,7 @@ async fn test_enroll_finds_scim_user_with_different_email_casing() {
         &store,
         "ALICE@Case-Example.com",
         Some("Alice Smith"),
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
@@ -154,23 +155,35 @@ async fn test_enroll_twice_with_different_email_casing_reuses_user() {
     use crate::db::enroll_user_with_org;
 
     let (store, _audit) = test_db().await;
-    let domain = "twice.example";
+    let domain = test_domain("twice.example.com");
 
-    let first = enroll_user_with_org(&store, "Bob@Twice.Example", Some("Bob"), Some(domain), None)
-        .await
-        .expect("first enrollment");
+    let first = enroll_user_with_org(
+        &store,
+        "Bob@Twice.Example.com",
+        Some("Bob"),
+        Some(&domain),
+        None,
+    )
+    .await
+    .expect("first enrollment");
     assert!(first.is_org_admin, "first enrollee is admin");
 
-    let second = enroll_user_with_org(&store, "bob@twice.example", Some("Bob"), Some(domain), None)
-        .await
-        .expect("second enrollment");
+    let second = enroll_user_with_org(
+        &store,
+        "bob@twice.example.com",
+        Some("Bob"),
+        Some(&domain),
+        None,
+    )
+    .await
+    .expect("second enrollment");
 
     assert_eq!(
         first.id, second.id,
         "second enrollment with different casing must reuse the same user"
     );
     assert_eq!(
-        second.email, "bob@twice.example",
+        second.email, "bob@twice.example.com",
         "returned email must be normalized"
     );
     assert!(
@@ -211,8 +224,8 @@ async fn test_enroll_refuses_deactivated_account() {
     };
 
     let (store, _audit) = test_db().await;
-    let domain = "deactivated.example";
-    let issuer = "https://idp.deactivated.example";
+    let domain = test_domain("deactivated.example.com");
+    let issuer = "https://idp.deactivated.example.com.com";
     let login = UpstreamLogin {
         issuer: issuer.to_string(),
         durable_subject: Some("subject-1".to_string()),
@@ -220,9 +233,9 @@ async fn test_enroll_refuses_deactivated_account() {
 
     let enrolled = enroll_user_with_org(
         &store,
-        "gone@deactivated.example",
+        "gone@deactivated.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&login),
     )
     .await
@@ -234,9 +247,9 @@ async fn test_enroll_refuses_deactivated_account() {
 
     let result = enroll_user_with_org(
         &store,
-        "gone@deactivated.example",
+        "gone@deactivated.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&login),
     )
     .await;
@@ -244,7 +257,7 @@ async fn test_enroll_refuses_deactivated_account() {
     match result {
         Err(EnrollUserError::Deactivated { user_id, email }) => {
             assert_eq!(user_id, enrolled.id);
-            assert_eq!(email, "gone@deactivated.example");
+            assert_eq!(email, "gone@deactivated.example.com");
         }
         other => panic!("expected Deactivated refusal, got {other:?}"),
     }

@@ -32,7 +32,7 @@ const RESERVED_TLDS: &[&str] = &[
     "alt",
 ];
 
-/// Why a candidate domain failed [`normalize_domain`].
+/// Why a candidate domain failed [`Domain::parse`].
 ///
 /// The `Display` texts are log/diagnostic strings; the admin UI maps each
 /// variant to a localized Fluent message instead of rendering them directly.
@@ -73,61 +73,102 @@ pub enum DomainValidationError {
     ReservedTld(String),
 }
 
-/// Validate the syntactic shape of a domain name.
+/// A syntactically valid email domain in canonical form: trimmed and
+/// ASCII-lowercased.
 ///
-/// Returns the normalized lowercase form on success. Rejects empty input,
-/// non-ASCII characters, leading/trailing dots, double dots, labels longer
-/// than 63 characters, total length over 253 characters, labels with
-/// invalid characters or leading/trailing hyphens, IP-address literals, and
-/// reserved top-level labels (see [`RESERVED_TLDS`]).
-pub fn normalize_domain(input: &str) -> Result<String, DomainValidationError> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(DomainValidationError::Empty);
-    }
-    if !trimmed.is_ascii() {
-        return Err(DomainValidationError::NotAscii);
-    }
-    // Reject IP literals — these would point the resolver at a specific host
-    // and bypass any TLD-level allow/deny logic. Also covers bracketed IPv6.
-    let ip_candidate = trimmed.trim_start_matches('[').trim_end_matches(']');
-    if ip_candidate.parse::<std::net::IpAddr>().is_ok() {
-        return Err(DomainValidationError::IpAddress);
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.len() > 253 {
-        return Err(DomainValidationError::TooLong);
-    }
-    if !lower.contains('.') {
-        return Err(DomainValidationError::NoDot);
-    }
-    if lower.starts_with('.') || lower.ends_with('.') {
-        return Err(DomainValidationError::LeadingOrTrailingDot);
-    }
-    for label in lower.split('.') {
-        if label.is_empty() {
-            return Err(DomainValidationError::EmptyLabel);
+/// [`Domain::parse`] is the only constructor, so holding a `Domain` is proof
+/// the value passed the shape rules — a raw `String` cannot reach a write
+/// that takes one. Every path that persists an organization domain
+/// (enrollment's synthetic org, the admin add/verify domain flow) takes a
+/// `Domain`; the IdP layers parse at the point they read the value out of an
+/// ID token or SAML assertion.
+///
+/// Deliberately not `Serialize`/`Deserialize`: document fields stay `String`
+/// so rows written before this type existed — including the malformed ones
+/// it exists to prevent — still read back instead of failing the query.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Domain(String);
+
+impl Domain {
+    /// Validate the syntactic shape of a domain name.
+    ///
+    /// Rejects empty input, non-ASCII characters, leading/trailing dots,
+    /// double dots, labels longer than 63 characters, total length over 253
+    /// characters, labels with invalid characters or leading/trailing
+    /// hyphens, IP-address literals, and reserved top-level labels (see
+    /// [`RESERVED_TLDS`]).
+    ///
+    /// # Errors
+    /// Returns the [`DomainValidationError`] variant for the violated rule.
+    pub fn parse(input: &str) -> Result<Self, DomainValidationError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(DomainValidationError::Empty);
         }
-        if label.len() > 63 {
-            return Err(DomainValidationError::LabelTooLong);
+        if !trimmed.is_ascii() {
+            return Err(DomainValidationError::NotAscii);
         }
-        if label.starts_with('-') || label.ends_with('-') {
-            return Err(DomainValidationError::LabelHyphenEdge);
+        // Reject IP literals — these would point the resolver at a specific
+        // host and bypass any TLD-level allow/deny logic. Also covers
+        // bracketed IPv6.
+        let ip_candidate = trimmed.trim_start_matches('[').trim_end_matches(']');
+        if ip_candidate.parse::<std::net::IpAddr>().is_ok() {
+            return Err(DomainValidationError::IpAddress);
         }
-        if !label
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            return Err(DomainValidationError::LabelInvalidChar);
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.len() > 253 {
+            return Err(DomainValidationError::TooLong);
         }
+        if !lower.contains('.') {
+            return Err(DomainValidationError::NoDot);
+        }
+        if lower.starts_with('.') || lower.ends_with('.') {
+            return Err(DomainValidationError::LeadingOrTrailingDot);
+        }
+        for label in lower.split('.') {
+            if label.is_empty() {
+                return Err(DomainValidationError::EmptyLabel);
+            }
+            if label.len() > 63 {
+                return Err(DomainValidationError::LabelTooLong);
+            }
+            if label.starts_with('-') || label.ends_with('-') {
+                return Err(DomainValidationError::LabelHyphenEdge);
+            }
+            if !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(DomainValidationError::LabelInvalidChar);
+            }
+        }
+        // Reject reserved/internal top-level labels. Iterating the constant
+        // is a fixed-cost O(N) scan over a small list — clearer than a
+        // HashSet.
+        let tld = lower.rsplit('.').next().unwrap_or("");
+        if RESERVED_TLDS.contains(&tld) {
+            return Err(DomainValidationError::ReservedTld(tld.to_string()));
+        }
+        Ok(Self(lower))
     }
-    // Reject reserved/internal top-level labels. Iterating the constant is
-    // a fixed-cost O(N) scan over a small list — clearer than a HashSet.
-    let tld = lower.rsplit('.').next().unwrap_or("");
-    if RESERVED_TLDS.contains(&tld) {
-        return Err(DomainValidationError::ReservedTld(tld.to_string()));
+
+    /// The canonical domain as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
-    Ok(lower)
+
+    /// Consume into the canonical `String`.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Domain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Return the Unicode form of a domain that contains punycode labels, or
@@ -312,7 +353,7 @@ pub fn validate_subdomain_label(input: &str) -> Result<String, SubdomainLabelErr
 /// brand: `acme.evil.com` → apex `evil.com` → `evil-com`. Domains with no
 /// registrable apex per the Public Suffix List contribute nothing. Inputs
 /// are assumed already normalized (ASCII/punycode, lowercase) by
-/// [`normalize_domain`].
+/// [`Domain::parse`].
 ///
 /// [`eligible_subdomain_labels`] and [`ineligible_subdomain_candidates`]
 /// partition the labels by [`validate_subdomain_label`];
@@ -422,81 +463,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_domain_lowercases() {
-        assert_eq!(normalize_domain("Acme.Co.UK").unwrap(), "acme.co.uk");
-        assert_eq!(normalize_domain("  EXAMPLE.com  ").unwrap(), "example.com");
+    fn domain_parse_lowercases() {
+        assert_eq!(Domain::parse("Acme.Co.UK").unwrap().as_str(), "acme.co.uk");
+        assert_eq!(
+            Domain::parse("  EXAMPLE.com  ").unwrap().as_str(),
+            "example.com"
+        );
     }
 
     #[test]
-    fn normalize_domain_rejects_invalid() {
+    fn domain_parse_rejects_invalid() {
         assert!(matches!(
-            normalize_domain(""),
+            Domain::parse(""),
             Err(DomainValidationError::Empty)
         ));
         assert!(matches!(
-            normalize_domain("no-dot"),
+            Domain::parse("no-dot"),
             Err(DomainValidationError::NoDot)
         ));
         assert!(matches!(
-            normalize_domain(".leading.com"),
+            Domain::parse(".leading.com"),
             Err(DomainValidationError::LeadingOrTrailingDot)
         ));
         assert!(matches!(
-            normalize_domain("trailing.com."),
+            Domain::parse("trailing.com."),
             Err(DomainValidationError::LeadingOrTrailingDot)
         ));
         assert!(matches!(
-            normalize_domain("double..dots.com"),
+            Domain::parse("double..dots.com"),
             Err(DomainValidationError::EmptyLabel)
         ));
         assert!(matches!(
-            normalize_domain("-leading.com"),
+            Domain::parse("-leading.com"),
             Err(DomainValidationError::LabelHyphenEdge)
         ));
         assert!(matches!(
-            normalize_domain("trailing-.com"),
+            Domain::parse("trailing-.com"),
             Err(DomainValidationError::LabelHyphenEdge)
         ));
         assert!(matches!(
-            normalize_domain("under_score.com"),
+            Domain::parse("under_score.com"),
             Err(DomainValidationError::LabelInvalidChar)
         ));
         assert!(matches!(
-            normalize_domain("уникод.com"),
+            Domain::parse("уникод.com"),
             Err(DomainValidationError::NotAscii)
         ));
     }
 
     #[test]
-    fn normalize_domain_rejects_ip_literals() {
+    fn domain_parse_rejects_ip_literals() {
         assert!(matches!(
-            normalize_domain("127.0.0.1"),
+            Domain::parse("127.0.0.1"),
             Err(DomainValidationError::IpAddress)
         ));
         assert!(matches!(
-            normalize_domain("10.0.0.5"),
+            Domain::parse("10.0.0.5"),
             Err(DomainValidationError::IpAddress)
         ));
         assert!(matches!(
-            normalize_domain("169.254.169.254"),
+            Domain::parse("169.254.169.254"),
             Err(DomainValidationError::IpAddress)
         ));
         assert!(matches!(
-            normalize_domain("::1"),
+            Domain::parse("::1"),
             Err(DomainValidationError::IpAddress)
         ));
         assert!(matches!(
-            normalize_domain("[::1]"),
+            Domain::parse("[::1]"),
             Err(DomainValidationError::IpAddress)
         ));
         assert!(matches!(
-            normalize_domain("fe80::1"),
+            Domain::parse("fe80::1"),
             Err(DomainValidationError::IpAddress)
         ));
     }
 
     #[test]
-    fn normalize_domain_rejects_reserved_tlds() {
+    fn domain_parse_rejects_reserved_tlds() {
         for d in [
             "internal.corp.localhost",
             "metadata.google.internal",
@@ -511,21 +555,18 @@ mod tests {
             "ipfs.alt",
         ] {
             assert!(
-                matches!(
-                    normalize_domain(d),
-                    Err(DomainValidationError::ReservedTld(_))
-                ),
+                matches!(Domain::parse(d), Err(DomainValidationError::ReservedTld(_))),
                 "expected {d} to be rejected as reserved TLD"
             );
         }
     }
 
     #[test]
-    fn normalize_domain_accepts_public_domains() {
-        assert!(normalize_domain("acme.com").is_ok());
-        assert!(normalize_domain("foo.bar.example.co.uk").is_ok());
+    fn domain_parse_accepts_public_domains() {
+        assert!(Domain::parse("acme.com").is_ok());
+        assert!(Domain::parse("foo.bar.example.co.uk").is_ok());
         // xn-- punycode is allowed (homograph detection is out of scope).
-        assert!(normalize_domain("xn--acme-cua.com").is_ok());
+        assert!(Domain::parse("xn--acme-cua.com").is_ok());
     }
 
     #[test]

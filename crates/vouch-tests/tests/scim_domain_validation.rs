@@ -283,7 +283,7 @@ async fn domain_unverified_after_recheck_failures_email_is_rejected() {
 /// TLD, the shape realistic for an on-prem/AD-derived UPN like
 /// `alice@corp.internal` — can still provision against that domain. The
 /// ownership check is set membership against the org's stored domain, not
-/// a re-validation of the domain's shape (`normalize_domain` is the
+/// a re-validation of the domain's shape (`Domain::parse` is the
 /// gatekeeper for domains entering the system, not for this comparison).
 #[tokio::test]
 async fn reserved_tld_primary_domain_org_can_provision_own_domain() {

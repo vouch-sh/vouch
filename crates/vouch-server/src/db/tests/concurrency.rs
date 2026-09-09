@@ -10,6 +10,7 @@ use super::occ_modify::create_test_github_installation;
 use super::*;
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::DeviceApproval;
+use crate::test_utils::test_domain;
 
 // ========================================================================
 // Concurrent-replay regression coverage for single-use primitives:
@@ -482,22 +483,22 @@ async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
     use crate::db::enroll_user_with_org;
 
     let (store, _audit) = test_db().await;
-    let domain = "shared-domain.example";
+    let domain = test_domain("shared-domain.example.com");
 
     let alice = enroll_user_with_org(
         &store,
-        "alice@shared-domain.example",
+        "alice@shared-domain.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
     .expect("alice enrollment");
     let bob = enroll_user_with_org(
         &store,
-        "bob@shared-domain.example",
+        "bob@shared-domain.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
@@ -510,7 +511,7 @@ async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
     assert!(alice.org_id.is_some());
 
     let org_count = store
-        .count::<OrganizationDoc>("domain", domain)
+        .count::<OrganizationDoc>("domain", domain.as_str())
         .await
         .expect("count orgs by domain");
     assert_eq!(
@@ -531,20 +532,20 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     use crate::db::enroll_user_with_org;
 
     let (store, _audit) = test_db().await;
-    let domain = "orphaned-org.example";
+    let domain = test_domain("orphaned-org.example.com");
 
     // Seed an org row with no admin (e.g. previous enrollee crashed
     // mid-flow before Step 4 ran).
     store
-        .insert(&test_org_doc(domain))
+        .insert(&test_org_doc(domain.as_str()))
         .await
         .expect("seed org row");
 
     let user = enroll_user_with_org(
         &store,
-        "rescuer@orphaned-org.example",
+        "rescuer@orphaned-org.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
@@ -558,14 +559,17 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     // The promotion must be persisted on the user doc, not just reported in
     // the return value — authorization reads `UserDoc.is_org_admin`.
     let persisted = store
-        .find_one::<crate::db::documents::user::UserDoc>("email", "rescuer@orphaned-org.example")
+        .find_one::<crate::db::documents::user::UserDoc>(
+            "email",
+            "rescuer@orphaned-org.example.com",
+        )
         .await
         .expect("find enrolled user")
         .expect("enrolled user exists");
     assert!(persisted.data.is_org_admin);
 
     let org_count = store
-        .count::<OrganizationDoc>("domain", domain)
+        .count::<OrganizationDoc>("domain", domain.as_str())
         .await
         .expect("count orgs by domain");
     assert_eq!(
@@ -583,22 +587,33 @@ async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
     use crate::db::enroll_user_with_org;
 
     let (store, _audit) = test_db().await;
-    let domain_a = "org-a.example";
-    let domain_b = "org-b.example";
+    let domain_a = test_domain("org-a.example.com");
+    let domain_b = test_domain("org-b.example.com");
 
     // Alice belongs to org A, and is its admin.
-    let alice = enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_a), None)
-        .await
-        .expect("alice enrollment");
+    let alice = enroll_user_with_org(
+        &store,
+        "alice@org-a.example.com",
+        None,
+        Some(&domain_a),
+        None,
+    )
+    .await
+    .expect("alice enrollment");
     let org_a = alice.org_id.clone().expect("org a id");
     assert!(alice.is_org_admin, "alice is org A's first enrollee");
 
     // Alice now enrolls through org B's domain. Her user row keeps org A, so
     // she is not a member of B and must not take B's admin slot.
-    let alice_again =
-        enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_b), None)
-            .await
-            .expect("alice cross-org enrollment");
+    let alice_again = enroll_user_with_org(
+        &store,
+        "alice@org-a.example.com",
+        None,
+        Some(&domain_b),
+        None,
+    )
+    .await
+    .expect("alice cross-org enrollment");
     assert_eq!(
         alice_again.org_id,
         Some(org_a),
@@ -606,7 +621,7 @@ async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
     );
 
     let org_b_doc = store
-        .find_one::<OrganizationDoc>("domain", domain_b)
+        .find_one::<OrganizationDoc>("domain", domain_b.as_str())
         .await
         .expect("find org b")
         .expect("org b exists");
@@ -616,7 +631,7 @@ async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
     );
 
     // ...and org B's own first enrollee still gets promoted.
-    let bob = enroll_user_with_org(&store, "bob@org-b.example", None, Some(domain_b), None)
+    let bob = enroll_user_with_org(&store, "bob@org-b.example.com", None, Some(&domain_b), None)
         .await
         .expect("bob enrollment");
     assert!(
@@ -625,7 +640,7 @@ async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
     );
 
     let org_b_doc = store
-        .find_one::<OrganizationDoc>("domain", domain_b)
+        .find_one::<OrganizationDoc>("domain", domain_b.as_str())
         .await
         .expect("find org b")
         .expect("org b exists");
@@ -646,13 +661,13 @@ async fn test_enroll_second_user_after_winner_commit_is_not_admin() {
     use crate::db::enroll_user_with_org;
 
     let (store, _audit) = test_db().await;
-    let domain = "retry-loser.example";
+    let domain = test_domain("retry-loser.example.com");
 
     let winner = enroll_user_with_org(
         &store,
-        "winner@retry-loser.example",
+        "winner@retry-loser.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
@@ -677,9 +692,9 @@ async fn test_enroll_second_user_after_winner_commit_is_not_admin() {
 
     let loser = enroll_user_with_org(
         &store,
-        "loser@retry-loser.example",
+        "loser@retry-loser.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await

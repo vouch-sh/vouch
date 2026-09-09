@@ -13,6 +13,7 @@ use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, OrganizationDoc,
 };
 use crate::db::documents::user::UserDoc;
+use crate::test_utils::test_domain;
 use secrecy::SecretString;
 
 /// A `UserDoc` with `org_id` set but `org_domain` absent, as every doc
@@ -36,15 +37,21 @@ fn legacy_org_user_doc(email: &str, org_id: &str) -> UserDoc {
 #[tokio::test]
 async fn test_enroll_user_with_org_stores_org_domain() {
     let (store, _audit) = test_db().await;
-    let domain = "org-enroll.example";
+    let domain = test_domain("org-enroll.example.com");
 
-    let user = enroll_user_with_org(&store, &format!("alice@{domain}"), None, Some(domain), None)
-        .await
-        .expect("enrollment");
+    let user = enroll_user_with_org(
+        &store,
+        &format!("alice@{domain}"),
+        None,
+        Some(&domain),
+        None,
+    )
+    .await
+    .expect("enrollment");
 
     assert_eq!(
         user.org_domain.as_deref(),
-        Some(domain),
+        Some(domain.as_str()),
         "EnrolledUser must carry the domain it just wrote"
     );
 
@@ -55,7 +62,7 @@ async fn test_enroll_user_with_org_stores_org_domain() {
         .expect("user exists");
     assert_eq!(
         doc.data.org_domain.as_deref(),
-        Some(domain),
+        Some(domain.as_str()),
         "org_domain must be persisted on the doc, not just returned"
     );
 }
@@ -70,15 +77,15 @@ async fn test_enroll_via_verified_additional_domain_stores_primary_domain() {
 
     let org = store
         .insert(&OrganizationDoc {
-            domain: "primary.example".to_string(),
+            domain: "primary.example.com".to_string(),
             name: None,
             created_by_user_id: None,
             additional_domains: vec![AdditionalDomain {
-                domain: "added.example".to_string(),
+                domain: "added.example.com".to_string(),
                 verification_token: SecretString::from("txt-token"),
                 added_at: jiff::Timestamp::now(),
                 added_by_user_id: "admin".to_string(),
-                added_by_email: "admin@primary.example".to_string(),
+                added_by_email: "admin@primary.example.com".to_string(),
                 consecutive_failures: 0,
                 state: AdditionalDomainState::Verified {
                     verified_at: jiff::Timestamp::now(),
@@ -92,9 +99,9 @@ async fn test_enroll_via_verified_additional_domain_stores_primary_domain() {
 
     let user = enroll_user_with_org(
         &store,
-        "bob@added.example",
+        "bob@added.example.com",
         None,
-        Some("added.example"),
+        Some(&test_domain("added.example.com")),
         None,
     )
     .await
@@ -107,7 +114,7 @@ async fn test_enroll_via_verified_additional_domain_stores_primary_domain() {
     );
     assert_eq!(
         user.org_domain.as_deref(),
-        Some("primary.example"),
+        Some("primary.example.com"),
         "the doc must carry the org's primary domain, not the enrollment input"
     );
 }
@@ -116,7 +123,7 @@ async fn test_enroll_via_verified_additional_domain_stores_primary_domain() {
 async fn test_enroll_individual_user_has_no_org_domain() {
     let (store, _audit) = test_db().await;
 
-    let user = enroll_user_with_org(&store, "solo@personal.example", None, None, None)
+    let user = enroll_user_with_org(&store, "solo@personal.example.com", None, None, None)
         .await
         .expect("enrollment");
 

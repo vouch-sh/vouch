@@ -13,6 +13,8 @@ pub(crate) mod saml;
 pub(crate) use oidc::ConfiguredOidcProvider;
 pub(crate) use saml::SamlProvider;
 
+use crate::db::Domain;
+
 /// Known identity provider for UI branding.
 #[derive(Debug)]
 pub enum IdpBrand {
@@ -102,8 +104,18 @@ impl IdpBrand {
 pub(crate) struct IdentityResult {
     /// Verified email address.
     pub email: String,
-    /// Email domain (e.g., "acme.com").
-    pub domain: Option<String>,
+    /// The organization domain this login belongs to (e.g. "acme.com"):
+    /// the IdP-asserted domain when the provider supplies one (Google's
+    /// `hd` claim, a SAML `domain_attribute`), otherwise the email's own
+    /// domain. `None` only when the provider asserts no domain and is not
+    /// expected to (a Google consumer account), which enrolls the user
+    /// without an organization.
+    ///
+    /// Typed, so the value enrollment persists as `Organization.domain`
+    /// cannot be a string that never passed [`Domain::parse`].
+    /// The protocol layers parse it where they read it, and refuse the
+    /// login when the IdP asserts a domain that is not one.
+    pub domain: Option<Domain>,
     /// The upstream login's issuer, and its subject when the format the
     /// IdP used guarantees it is durable (see
     /// [`crate::db::UpstreamLogin`]). `None` only when there is no IdP

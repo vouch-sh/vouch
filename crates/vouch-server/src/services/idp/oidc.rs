@@ -9,6 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
+use crate::db::Domain;
 use crate::infra::egress::read_capped_json;
 
 /// Maximum size of an upstream IdP's OIDC discovery document (256 KB).
@@ -516,17 +517,33 @@ pub(crate) async fn verify_id_token(
     //   address. Personal Microsoft accounts cannot reach this point because
     //   `/common/` is rejected at discovery and `/organizations/` excludes MSA.
     //
-    // Normalize to ASCII lowercase so that org lookups match regardless of
-    // the case the IdP returned. Org domains are stored lowercase.
+    // `Domain::parse` normalizes to ASCII lowercase (org domains are stored
+    // lowercase, so lookups must match regardless of the case the IdP
+    // returned) and rejects anything that is not a DNS domain. Parsing here
+    // rather than at the enrollment chokepoint is what keeps the checked
+    // value and the persisted value the same one: the domain travels typed
+    // from here to `enroll_user_with_org`.
+    //
     // `Email::domain_of` splits on the last `@` — the same semantics the
     // audit and org-domain layers use — where `split('@').nth(1)` picked
     // the wrong "domain" for a quoted local part containing `@`.
     let is_google = is_google_host(&provider.issuer);
-    let domain = if is_google {
-        claims.hd.as_deref().map(str::to_ascii_lowercase)
+    let raw_domain = if is_google {
+        claims.hd.clone()
     } else {
         crate::email::Email::domain_of(&claims.email)
     };
+    let domain = raw_domain
+        .as_deref()
+        .map(Domain::parse)
+        .transpose()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "IdP asserted a domain that is not a valid DNS domain: {e}. The ID token's \
+                 {source} must carry a domain Vouch can use as an organization domain.",
+                source = if is_google { "'hd' claim" } else { "email" }
+            )
+        })?;
 
     // Bind to `claims.iss` (the validated token issuer), not
     // `provider.issuer`: for Entra `/organizations/` the configured issuer

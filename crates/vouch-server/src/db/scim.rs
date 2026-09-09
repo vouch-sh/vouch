@@ -743,7 +743,7 @@ pub async fn create_scim_user(
                 // `Email::domain` is already canonical (lowercase), matching
                 // the convention used by `OrganizationDoc::verified_domains`
                 // (additional domains are stored verbatim from
-                // `normalize_domain`, which lowercases; the primary domain is
+                // `Domain::parse`, which lowercases; the primary domain is
                 // lowercased by `get_or_create_org`).
                 let candidate_domain = email.domain().ok_or_else(|| {
                     CreateScimUserError::Other(anyhow::anyhow!(

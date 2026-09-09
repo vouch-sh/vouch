@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::test_utils::test_domain;
 
 // ========================================================================
 // Upstream identity binding: (issuer, subject) account matching
@@ -21,17 +22,17 @@ async fn test_enroll_identity_binding_wins_over_email() {
     use crate::db::{UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "bind-wins.example";
+    let domain = test_domain("bind-wins.example.com");
     let upstream = UpstreamLogin {
-        issuer: "https://idp.bind-wins.example".to_string(),
+        issuer: "https://idp.bind-wins.example.com.com".to_string(),
         durable_subject: Some("subject-1".to_string()),
     };
 
     let first = enroll_user_with_org(
         &store,
-        "old-address@bind-wins.example",
+        "old-address@bind-wins.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&upstream),
     )
     .await
@@ -44,9 +45,9 @@ async fn test_enroll_identity_binding_wins_over_email() {
     // Same upstream person, email changed at the IdP.
     let second = enroll_user_with_org(
         &store,
-        "new-address@bind-wins.example",
+        "new-address@bind-wins.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&upstream),
     )
     .await
@@ -57,7 +58,7 @@ async fn test_enroll_identity_binding_wins_over_email() {
         "(issuer, subject) must match the account"
     );
     assert_eq!(
-        second.email, "old-address@bind-wins.example",
+        second.email, "old-address@bind-wins.example.com",
         "the stored account email must not be rewritten from the assertion"
     );
 
@@ -82,14 +83,14 @@ async fn test_enroll_same_issuer_different_subject_refused() {
     use crate::db::{EnrollUserError, IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "reassigned.example";
-    let issuer = "https://idp.reassigned.example";
+    let domain = test_domain("reassigned.example.com");
+    let issuer = "https://idp.reassigned.example.com.com";
 
     let victim = enroll_user_with_org(
         &store,
-        "shared@reassigned.example",
+        "shared@reassigned.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: Some("victim-subject".to_string()),
@@ -101,9 +102,9 @@ async fn test_enroll_same_issuer_different_subject_refused() {
     // The address was reassigned upstream: same email, new subject.
     let result = enroll_user_with_org(
         &store,
-        "shared@reassigned.example",
+        "shared@reassigned.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: Some("attacker-subject".to_string()),
@@ -145,14 +146,14 @@ async fn test_enroll_non_durable_login_matches_email_without_binding() {
     use crate::db::{UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "non-durable.example";
-    let issuer = "https://idp.non-durable.example";
+    let domain = test_domain("non-durable.example.com");
+    let issuer = "https://idp.non-durable.example.com.com";
 
     let first = enroll_user_with_org(
         &store,
-        "alice@non-durable.example",
+        "alice@non-durable.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: None,
@@ -167,9 +168,9 @@ async fn test_enroll_non_durable_login_matches_email_without_binding() {
     // still create no binding.
     let second = enroll_user_with_org(
         &store,
-        "alice@non-durable.example",
+        "alice@non-durable.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: None,
@@ -203,14 +204,14 @@ async fn test_enroll_non_durable_login_refused_once_issuer_is_bound() {
     use crate::db::{EnrollUserError, IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "downgrade.example";
-    let issuer = "https://idp.downgrade.example";
+    let domain = test_domain("downgrade.example.com");
+    let issuer = "https://idp.downgrade.example.com.com";
 
     let victim = enroll_user_with_org(
         &store,
-        "shared@downgrade.example",
+        "shared@downgrade.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: Some("victim-subject".to_string()),
@@ -223,9 +224,9 @@ async fn test_enroll_non_durable_login_refused_once_issuer_is_bound() {
     // (e.g. the IdP sent a non-persistent NameID this time).
     let result = enroll_user_with_org(
         &store,
-        "shared@downgrade.example",
+        "shared@downgrade.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: None,
@@ -266,15 +267,15 @@ async fn test_enroll_non_durable_login_matches_email_when_bound_only_for_other_i
     use crate::db::{IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "other-issuer.example";
-    let bound_issuer = "https://idp-a.other-issuer.example";
-    let other_issuer = "https://idp-b.other-issuer.example";
+    let domain = test_domain("other-issuer.example.com");
+    let bound_issuer = "https://idp-a.other-issuer.example.com.com";
+    let other_issuer = "https://idp-b.other-issuer.example.com.com";
 
     let user = enroll_user_with_org(
         &store,
-        "alice@other-issuer.example",
+        "alice@other-issuer.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: bound_issuer.to_string(),
             durable_subject: Some("alice-subject-a".to_string()),
@@ -287,9 +288,9 @@ async fn test_enroll_non_durable_login_matches_email_when_bound_only_for_other_i
     // match on email — the account has no binding for issuer B.
     let second = enroll_user_with_org(
         &store,
-        "alice@other-issuer.example",
+        "alice@other-issuer.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&UpstreamLogin {
             issuer: other_issuer.to_string(),
             durable_subject: None,
@@ -324,28 +325,28 @@ async fn test_enroll_lazy_binds_legacy_account() {
     use crate::db::{IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
-    let domain = "legacy-bind.example";
+    let domain = test_domain("legacy-bind.example.com");
 
     // Legacy account: enrolled before identity binding existed.
     let legacy = enroll_user_with_org(
         &store,
-        "legacy@legacy-bind.example",
+        "legacy@legacy-bind.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         None,
     )
     .await
     .expect("legacy enrollment");
 
     let idp_a = UpstreamLogin {
-        issuer: "https://idp-a.legacy-bind.example".to_string(),
+        issuer: "https://idp-a.legacy-bind.example.com.com".to_string(),
         durable_subject: Some("legacy-subject-a".to_string()),
     };
     let bound = enroll_user_with_org(
         &store,
-        "legacy@legacy-bind.example",
+        "legacy@legacy-bind.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&idp_a),
     )
     .await
@@ -356,9 +357,9 @@ async fn test_enroll_lazy_binds_legacy_account() {
     // A later login resolves via the binding even with a changed email.
     let via_binding = enroll_user_with_org(
         &store,
-        "renamed@legacy-bind.example",
+        "renamed@legacy-bind.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&idp_a),
     )
     .await
@@ -368,14 +369,14 @@ async fn test_enroll_lazy_binds_legacy_account() {
 
     // A second issuer (org adds another IdP) binds alongside, no conflict.
     let idp_b = UpstreamLogin {
-        issuer: "https://idp-b.legacy-bind.example".to_string(),
+        issuer: "https://idp-b.legacy-bind.example.com.com".to_string(),
         durable_subject: Some("legacy-subject-b".to_string()),
     };
     let second = enroll_user_with_org(
         &store,
-        "legacy@legacy-bind.example",
+        "legacy@legacy-bind.example.com",
         None,
-        Some(domain),
+        Some(&domain),
         Some(&idp_b),
     )
     .await
@@ -427,7 +428,7 @@ async fn test_enroll_scim_user_binds_on_first_idp_login() {
     .expect("SCIM create");
 
     let upstream = UpstreamLogin {
-        issuer: "https://idp.example.com".to_string(),
+        issuer: "https://idp.example.com.com".to_string(),
         durable_subject: Some("scim-subject".to_string()),
     };
     // First IdP login for the SCIM-provisioned account, email in a

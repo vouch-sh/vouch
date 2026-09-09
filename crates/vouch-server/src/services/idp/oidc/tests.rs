@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::db::Domain;
 use jsonwebtoken::Algorithm;
 
 // ── Issuer host matching (#425) ────────────────────────────────────────
@@ -872,7 +873,10 @@ async fn verify_id_token_happy_path() {
         .unwrap();
 
     assert_eq!(result.email, "alice@example.com");
-    assert_eq!(result.domain, Some("example.com".to_string()));
+    assert_eq!(
+        result.domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
     let upstream = result.upstream.expect("upstream identity must be set");
     assert_eq!(upstream.issuer, issuer);
     assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
@@ -1115,9 +1119,81 @@ async fn verify_id_token_domain_from_hd_claim() {
         .unwrap();
 
     assert_eq!(
-        result.domain,
+        result.domain.map(|d| d.into_string()),
         Some("acme.com".to_string()),
         "Google Workspace domain should come from hd claim"
+    );
+}
+
+/// Regression (#1270): a Google Workspace `hd` claim that is not a DNS
+/// domain fails the login here. `hd` is the value enrollment persists as
+/// `Organization.domain`, and it diverges from the email's domain — so a
+/// gate further downstream that re-derived the domain from the email would
+/// never see this value at all.
+// OIDC Core §5.1: `hd` is an arbitrary string claim; the RP decides what it
+// will accept.
+#[tokio::test]
+async fn verify_id_token_rejects_malformed_hd_claim() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let google_issuer = "https://accounts.google.com";
+    let client_id = "test-client";
+    let nonce = "test-nonce";
+
+    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(google_issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    // A clean email paired with a whitespace-bearing hosted domain: the
+    // email alone would pass every shape rule Vouch applies to it.
+    claims["hd"] = serde_json::json!("bar .com");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let mut provider = make_test_provider(google_issuer);
+    provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+        .await
+        .expect_err("a malformed hd claim must fail verification");
+    assert!(
+        format!("{err:#}").contains("not a valid DNS domain"),
+        "error must name the domain as the cause, got: {err:#}"
+    );
+}
+
+/// A non-Google IdP derives the organization domain from the email, so an
+/// email whose domain is not a DNS domain fails the login for the same
+/// reason a malformed `hd` does.
+// OIDC Core §5.1: the domain falls back to the email claim.
+#[tokio::test]
+async fn verify_id_token_rejects_malformed_email_domain() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri(); // non-Google issuer
+    let client_id = "test-client";
+    let nonce = "test-nonce";
+
+    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["email"] = serde_json::json!("foo@bar .com");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+        .await
+        .expect_err("a malformed email domain must fail verification");
+    assert!(
+        format!("{err:#}").contains("not a valid DNS domain"),
+        "error must name the domain as the cause, got: {err:#}"
     );
 }
 
@@ -1149,7 +1225,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
 
     // Non-Google issuers fall back to email domain when hd is absent
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("example.com"),
         "non-Google issuer should fall back to email domain"
     );
@@ -1186,7 +1262,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
         .unwrap();
 
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("acme.com"),
         "uppercase hd claim must be normalized to lowercase",
     );
@@ -1220,7 +1296,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
         .unwrap();
 
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("corp.example.com"),
         "email-fallback domain must be normalized to lowercase",
     );

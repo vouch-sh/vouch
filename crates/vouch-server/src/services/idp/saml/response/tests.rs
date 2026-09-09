@@ -257,8 +257,11 @@ fn domain_extracted_from_email() {
     "##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, None, "user@example.com");
-    assert_eq!(domain, Some("example.com".to_string()));
+    let domain = extract_domain(assertion, None, "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
 }
 
 // SAML Core §2.7.3: the identity is parsed out of the named attribute.
@@ -273,8 +276,12 @@ fn domain_extracted_from_configured_attribute() {
 </saml:Assertion>"##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, Some("domain"), "user@example.com");
-    assert_eq!(domain, Some("custom.example.com".to_string()));
+    let domain =
+        extract_domain(assertion, Some("domain"), "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("custom.example.com".to_string())
+    );
 }
 
 /// Regression: mixed-case configured-attribute value must be lowercased
@@ -292,8 +299,12 @@ fn domain_from_configured_attribute_is_lowercased() {
 </saml:Assertion>"##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, Some("domain"), "user@example.com");
-    assert_eq!(domain, Some("corp.example.com".to_string()));
+    let domain =
+        extract_domain(assertion, Some("domain"), "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("corp.example.com".to_string())
+    );
 }
 
 /// Regression: when falling back to the email domain, the extracted
@@ -305,8 +316,66 @@ fn domain_from_email_fallback_is_lowercased() {
     "##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, None, "Alice@CORP.Example.COM");
-    assert_eq!(domain, Some("corp.example.com".to_string()));
+    let domain = extract_domain(assertion, None, "Alice@CORP.Example.COM").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("corp.example.com".to_string())
+    );
+}
+
+/// Regression (#1270): the configured `domain_attribute` is free-form
+/// IdP-controlled text, and whatever it holds is what enrollment persists
+/// as `Organization.domain` — so it is parsed here, not merely lowercased.
+/// A value with internal whitespace is not a DNS domain and fails the
+/// assertion rather than reaching the enrollment chokepoint, which cannot
+/// re-derive it from the email (the two diverge precisely when this
+/// attribute is configured).
+// SAML Core §2.7.3: an attribute value is arbitrary text; the SP decides
+// what it will accept.
+#[test]
+fn domain_from_configured_attribute_rejects_whitespace() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:AttributeStatement>
+<saml:Attribute Name="domain">
+  <saml:AttributeValue>bar .com</saml:AttributeValue>
+</saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = extract_domain(assertion, Some("domain"), "alice@example.com").unwrap_err();
+    assert!(
+        matches!(err, DomainValidationError::LabelInvalidChar),
+        "a whitespace-bearing domain attribute must not parse, got: {err}"
+    );
+}
+
+/// The enrollment domain is held to the same DNS rules as an
+/// admin-added one: whitespace was only the instance that surfaced first.
+/// An IdP asserting a reserved or internal top-level label (RFC 6761 /
+/// RFC 9476) does not enroll — such a name has no public ownership
+/// semantics, so it cannot identify an organization.
+// SAML Core §2.7.3: an attribute value is arbitrary text; the SP decides
+// what it will accept.
+#[test]
+fn domain_from_configured_attribute_rejects_reserved_tld() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:AttributeStatement>
+<saml:Attribute Name="domain">
+  <saml:AttributeValue>acme.internal</saml:AttributeValue>
+</saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = extract_domain(assertion, Some("domain"), "alice@example.com").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DomainValidationError::ReservedTld(ref tld) if tld == "internal"
+        ),
+        "a reserved top-level label must not parse, got: {err}"
+    );
 }
 
 // =========================================================================
@@ -1229,7 +1298,10 @@ fn validate_saml_response_rsa_signed_happy_path() {
     let assertion = result.expect("Expected Ok");
 
     assert_eq!(assertion.email, "alice@example.com");
-    assert_eq!(assertion.domain, Some("example.com".to_string()));
+    assert_eq!(
+        assertion.domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
     // NameID and its Format must be captured for identity binding.
     assert_eq!(assertion.name_id.as_deref(), Some("alice@example.com"));
     assert_eq!(
