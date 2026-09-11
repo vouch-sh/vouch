@@ -183,7 +183,8 @@ pub struct ValidatedDpopProof {
     pub(crate) jti: String,
     /// Credential source identifier from the DPoP proof (custom claim).
     pub(crate) source: Option<String>,
-    /// The replay guarantee itself: the witness [`db::check_and_store_dpop_jti`]
+    /// The replay guarantee itself: the witness
+    /// [`db::check_and_store_dpop_jti_at_second`]
     /// returns when its atomic insert wins. Holding it is what makes "this
     /// `jti` was committed by this request" a property of the value rather
     /// than a claim in prose.
@@ -1472,7 +1473,7 @@ mod tests {
     // These two tests live in the `services` layer (not `db/tests/jti_replay.rs`)
     // because they reason about the *relationship* between two things the
     // `services` layer owns (`RecencyWindow`/`PROOF_SKEW_SECONDS` freshness)
-    // and one thing the `db` layer owns (`check_and_store_dpop_jti` /
+    // and one thing the `db` layer owns (`check_and_store_dpop_jti_at_second` /
     // `delete_expired_dpop_jtis` retention + cleanup). The `db` layer may not
     // import `services`, so the cross-layer invariant is anchored here, where
     // both sides are in scope. They use negative/positive `validity_seconds`
@@ -1489,7 +1490,7 @@ mod tests {
     #[tokio::test]
     async fn test_dpop_jti_retention_covers_skew_extended_freshness_window() {
         use crate::db::claim::ClaimError;
-        use crate::db::{check_and_store_dpop_jti, delete_expired_dpop_jtis};
+        use crate::db::{check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis};
         use crate::services::RecencyWindow;
 
         let store = resource_test_store().await;
@@ -1511,9 +1512,14 @@ mod tests {
         // expired yet) without depending on real time.
         let elapsed_within = config_max_age + 30;
         let validity_within = fixed_retention.saturating_sub(elapsed_within);
-        let _claim = check_and_store_dpop_jti(&store, "retention-within-window", validity_within)
-            .await
-            .expect("first use commits the JTI");
+        let _claim = check_and_store_dpop_jti_at_second(
+            &store,
+            "retention-within-window",
+            jiff::Timestamp::now().as_second(),
+            validity_within,
+        )
+        .await
+        .expect("first use commits the JTI");
 
         // Cleanup of not-yet-expired rows is a no-op — the row survives the
         // whole freshness window.
@@ -1526,8 +1532,13 @@ mod tests {
         );
 
         // Replay is still blocked while the proof is fresh.
-        let blocked =
-            check_and_store_dpop_jti(&store, "retention-within-window", fixed_retention).await;
+        let blocked = check_and_store_dpop_jti_at_second(
+            &store,
+            "retention-within-window",
+            jiff::Timestamp::now().as_second(),
+            fixed_retention,
+        )
+        .await;
         assert!(
             matches!(blocked, Err(ClaimError::AlreadyConsumed)),
             "JTI retained for max_age + skew must block replay until the proof is stale: got {blocked:?}"
@@ -1545,9 +1556,14 @@ mod tests {
         //     and the proof is no longer fresh. ---
         let elapsed_past = config_max_age + skew + 1;
         let validity_past = fixed_retention.saturating_sub(elapsed_past);
-        let _claim = check_and_store_dpop_jti(&store, "retention-past-window", validity_past)
-            .await
-            .expect("first use commits the JTI");
+        let _claim = check_and_store_dpop_jti_at_second(
+            &store,
+            "retention-past-window",
+            jiff::Timestamp::now().as_second(),
+            validity_past,
+        )
+        .await
+        .expect("first use commits the JTI");
 
         let deleted = delete_expired_dpop_jtis(&store, "")
             .await
@@ -1575,7 +1591,7 @@ mod tests {
     #[tokio::test]
     async fn test_dpop_jti_old_retention_leaves_replay_gap_after_cleanup() {
         use crate::db::claim::ClaimError;
-        use crate::db::{check_and_store_dpop_jti, delete_expired_dpop_jtis};
+        use crate::db::{check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis};
         use crate::services::RecencyWindow;
 
         let store = resource_test_store().await;
@@ -1590,13 +1606,24 @@ mod tests {
         // `config_max_age` only. A negative validity puts `expires_at` in the
         // past — simulating that `config_max_age` seconds have elapsed since
         // T0, without depending on real time.
-        let _claim = check_and_store_dpop_jti(&store, "old-retention-gap", -config_max_age)
-            .await
-            .expect("first use commits the JTI");
+        let _claim = check_and_store_dpop_jti_at_second(
+            &store,
+            "old-retention-gap",
+            jiff::Timestamp::now().as_second(),
+            -config_max_age,
+        )
+        .await
+        .expect("first use commits the JTI");
 
         // Even an expired-but-present row still blocks replay (PRIMARY KEY
         // collision); only cleanup removes it.
-        let blocked = check_and_store_dpop_jti(&store, "old-retention-gap", config_max_age).await;
+        let blocked = check_and_store_dpop_jti_at_second(
+            &store,
+            "old-retention-gap",
+            jiff::Timestamp::now().as_second(),
+            config_max_age,
+        )
+        .await;
         assert!(
             matches!(blocked, Err(ClaimError::AlreadyConsumed)),
             "expired-but-present JTI row must still block replay until cleanup: got {blocked:?}"
@@ -1616,7 +1643,13 @@ mod tests {
         // proof is still fresh (asserted below). `validate_dpop_common` MUST
         // NOT pass `config_max_age` here; the fix passes `config_max_age +
         // skew`.
-        let replayed = check_and_store_dpop_jti(&store, "old-retention-gap", config_max_age).await;
+        let replayed = check_and_store_dpop_jti_at_second(
+            &store,
+            "old-retention-gap",
+            jiff::Timestamp::now().as_second(),
+            config_max_age,
+        )
+        .await;
         assert!(
             replayed.is_ok(),
             "with the old max_age-only retention, cleanup reopens the replay gap: got {replayed:?}"
