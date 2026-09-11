@@ -133,6 +133,7 @@ async fn test_session_lifecycle() {
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

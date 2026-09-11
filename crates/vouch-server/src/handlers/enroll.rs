@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
-use crate::crypto::webauthn_verify::AuthTime;
+use crate::crypto::webauthn_verify::{self, AuthTime};
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType, Domain};
 use crate::impl_template_response;
@@ -1529,6 +1529,29 @@ pub(crate) async fn browser_register_complete(
         &state.config().allowed_aaguids,
     )?;
 
+    // Extract the verified `authData.signCount` (WebAuthn L2 §7.1 step 23)
+    // so the credential's stored signature counter is initialized to it
+    // rather than a hardcoded `0`. `finish_passkey_registration` below
+    // yields a `Passkey` whose `webauthn-rs` 0.5.5 API does not surface the
+    // registration counter (the `cred` field is `pub(crate)`), so the
+    // server re-parses the same authData bytes the verifier consumes
+    // below. This performs no cryptographic work — only a CBOR+authData
+    // read of the 4-byte big-endian signCount at byte offset 33 — so a
+    // malformed attestation that fails here would also fail
+    // `finish_passkey_registration`; the extracted value is used only
+    // after that verification succeeds, in `create_authenticator` below.
+    let sign_count = webauthn_verify::extract_sign_count(req.attestation_object.as_bytes())
+        .map_err(|e| {
+            tracing::warn!("Failed to extract signCount from registration authData: {e}");
+            ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_attestation",
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
+            )
+        })?;
+
     // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
     let credential_id_bytes = req.credential_id.as_bytes().to_vec();
@@ -1605,6 +1628,11 @@ pub(crate) async fn browser_register_complete(
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
             attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23), re-parsed
+            // above from the same attestation object
+            // `finish_passkey_registration` verified.
+            counter: sign_count,
         },
     )
     .await?;

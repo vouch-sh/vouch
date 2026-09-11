@@ -395,6 +395,12 @@ pub(crate) async fn register_complete(
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
             attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23). `verified.counter`
+            // is the server-side parse of the same `authData` bytes
+            // `verify_registration` already verified above, so it is the
+            // trusted initial value — not the request body's counter field.
+            counter: verified.counter,
         },
     )
     .await?;

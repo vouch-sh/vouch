@@ -95,6 +95,7 @@ async fn register_mock_device_in_db(
             aaguid: None,
             user_handle: Some(&user_handle),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

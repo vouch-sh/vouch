@@ -1541,6 +1541,7 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
             aaguid: Some(aaguid),
             user_handle: Some(user.id.as_bytes()),
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
@@ -1608,6 +1609,7 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
             aaguid: Some(original_aaguid),
             user_handle: Some(user.id.as_bytes()),
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
