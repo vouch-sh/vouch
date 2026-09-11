@@ -187,7 +187,8 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "widgets.io")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "widgets.io")
             .await
             .unwrap()
             .expect("domain removed");
@@ -229,7 +230,8 @@ mod tests {
             .unwrap();
         claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "mail.acme.com")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "mail.acme.com")
             .await
             .unwrap()
             .expect("domain removed");
