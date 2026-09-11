@@ -59,7 +59,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-    uses: ./.github/workflows/reusable-build.yml
+    uses: $/.github/workflows/reusable-build.yml
     with:
       version: ${{ needs.version.outputs.version }}
     secrets:

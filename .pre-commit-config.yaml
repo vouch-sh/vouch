@@ -83,7 +83,12 @@ repos:
       # pre-existing findings block a commit only when that workflow is edited.
       - id: actionlint
         name: actionlint
-        entry: actionlint
+        # actionlint 1.7.12 does not recognise GitHub's `$/` self-repository
+        # `uses:` syntax (added 2026-07-30) and reports it as a malformed
+        # reusable-workflow reference. The pattern matches only `$/`-prefixed
+        # values, so a genuinely malformed reference still fails. Support is
+        # in rhysd/actionlint#732 — drop this flag once it ships.
+        entry: actionlint -ignore 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
 
