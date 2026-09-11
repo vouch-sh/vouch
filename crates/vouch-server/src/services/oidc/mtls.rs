@@ -179,9 +179,25 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// of the spacing and attribute-name casing the input used. Returns `None`
 /// when the string is not a parseable RFC 4514 DN, in which case the caller
 /// falls back to exact string comparison.
+///
+/// Whitespace immediately following an RDN-separator comma is stripped before
+/// parsing. `x509-cert` 0.2.5's `RdnSequence::from_str` splits RDNs on a bare
+/// `,` without trimming, so a leading space on the next attribute-type name
+/// (e.g. `CN=foo, O=Acme`) breaks the parse and the caller falls back to exact
+/// equality — which always rejects, since the cert-side `Name::to_string`
+/// rendering joins RDNs with a bare comma. Stripping comma-following
+/// whitespace makes the common `O=Acme, CN=foo` rendering (e.g. `openssl
+/// x509 -noout -subject`) canonicalize identically to `O=Acme,CN=foo`.
 fn canonicalize_dn(dn: &str) -> Option<String> {
     use std::str::FromStr as _;
-    let rdns = x509_cert::name::RdnSequence::from_str(dn).ok()?;
+    let normalized: String = dn.chars().fold(String::new(), |mut acc, c| {
+        if c.is_whitespace() && acc.ends_with(',') {
+            return acc;
+        }
+        acc.push(c);
+        acc
+    });
+    let rdns = x509_cert::name::RdnSequence::from_str(&normalized).ok()?;
     let der = der::Encode::to_der(&rdns).ok()?;
     let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
     Some(rdns.to_string())
@@ -636,6 +652,71 @@ mod tests {
     }
 
     // =========================================================================
+    // Multi-RDN subject certificate generator
+    // =========================================================================
+
+    /// Build an `RdnSequence` from a list of `(OID string, UTF-8 value)`
+    /// attribute pairs, in the order given (the order `RdnSequence`'s `Display`
+    /// renders in reverse).
+    ///
+    /// `make_test_cert` / `make_self_signed_cert_with_san` only build CN-only
+    /// subjects, so this helper is needed to exercise the multi-RDN path
+    /// through `canonicalize_dn` / `verify_tls_client_auth` (the path the
+    /// comma-space bug lives on).
+    fn make_rdn_sequence(rdns: &[(&str, &str)]) -> x509_cert::name::RdnSequence {
+        let mut sequence = Vec::new();
+        for (oid, val) in rdns {
+            let oid = der::oid::ObjectIdentifier::new_unwrap(oid);
+            let v = der::asn1::Utf8StringRef::new(val).expect("val");
+            let atv = x509_cert::attr::AttributeTypeAndValue {
+                oid,
+                value: der::asn1::Any::from(v),
+            };
+            let mut set = der::asn1::SetOfVec::new();
+            set.insert(atv).expect("insert RDN");
+            sequence.push(x509_cert::name::RelativeDistinguishedName(set));
+        }
+        x509_cert::name::RdnSequence(sequence)
+    }
+
+    /// Build a self-signed P-256 certificate with an arbitrary multi-RDN
+    /// subject and no SANs, for exercising the subject-DN comparison path
+    /// with DNs the CN-only generators cannot produce.
+    fn make_self_signed_cert_with_subject(subject: x509_cert::name::RdnSequence) -> Vec<u8> {
+        use der::Encode;
+        use p256::ecdsa::SigningKey;
+        use spki::EncodePublicKey;
+        use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+        use x509_cert::serial_number::SerialNumber;
+        use x509_cert::time::Validity;
+
+        let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let validity =
+            Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+        let serial = SerialNumber::new(&[1u8]).expect("serial");
+        let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
+        let spki =
+            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+        let builder = CertificateBuilder::new(
+            Profile::Leaf {
+                issuer: subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            serial,
+            validity,
+            subject,
+            spki,
+            &key,
+        )
+        .expect("cert builder");
+        let cert = builder
+            .build::<p256::ecdsa::DerSignature>()
+            .expect("build cert");
+        cert.to_der().expect("DER encode")
+    }
+
+    // =========================================================================
     // verify_tls_client_auth — SAN DNS
     // =========================================================================
 
@@ -1057,6 +1138,193 @@ mod tests {
         assert!(
             verify_tls_client_auth(&cert, Some("not a dn at all"), None, None, None, None).is_err(),
             "an unparseable registered DN must not match"
+        );
+    }
+
+    // =========================================================================
+    // canonicalize_dn — whitespace-after-comma tolerance (RFC 4514 spacing)
+    // =========================================================================
+
+    // The cert-side `Name::to_string` rendering joins RDNs with a bare comma,
+    // but operators commonly register DNs with a space after the comma (e.g.
+    // copied from `openssl x509 -noout -subject`, whose default `oneline`
+    // format uses `, `). `x509-cert` 0.2.5's `RdnSequence::from_str` splits on
+    // a bare `,` without trimming the next segment, so the un-normalized parse
+    // failed and `verify_tls_client_auth` fell back to exact equality — which
+    // always rejects because the two renderings differ by that one space.
+    // The fix strips whitespace immediately following a comma before parsing.
+
+    /// A DN with whitespace after a comma must canonicalize to the same string
+    /// as the bare-comma form. Multiple spaces and tabs after a comma are all
+    /// stripped so the common operator-facing renderings reduce to one form.
+    #[test]
+    fn test_canonicalize_dn_tolerates_whitespace_after_comma() {
+        let nospace = canonicalize_dn("O=Acme,CN=foo");
+        let single_space = canonicalize_dn("O=Acme, CN=foo");
+        let multi_space = canonicalize_dn("O=Acme,   CN=foo");
+        let tab = canonicalize_dn("O=Acme,\tCN=foo");
+
+        assert!(nospace.is_some(), "bare-comma DN must parse");
+        assert!(single_space.is_some(), "comma-space DN must parse");
+        assert!(multi_space.is_some(), "comma-multi-space DN must parse");
+        assert!(tab.is_some(), "comma-tab DN must parse");
+
+        let nospace = nospace.expect("checked Some above");
+        assert_eq!(
+            nospace,
+            single_space.expect("checked Some above"),
+            "single space after comma must not change canonical form"
+        );
+        assert_eq!(
+            nospace,
+            multi_space.expect("checked Some above"),
+            "multiple spaces after comma must not change canonical form"
+        );
+        assert_eq!(
+            nospace,
+            tab.expect("checked Some above"),
+            "tab after comma must not change canonical form"
+        );
+    }
+
+    /// Whitespace NOT following a comma must be preserved: it is part of the
+    /// attribute value (RFC 4514 treats unescaped internal whitespace as
+    /// significant), so the fix must not turn a different value into a match.
+    #[test]
+    fn test_canonicalize_dn_preserves_non_separator_whitespace() {
+        let with_value_space = canonicalize_dn("CN=foo bar,O=Acme").expect("value space");
+        let no_value_space = canonicalize_dn("CN=foobar,O=Acme").expect("no value space");
+        assert_ne!(
+            with_value_space, no_value_space,
+            "internal value whitespace is significant and must be preserved"
+        );
+        assert_eq!(
+            with_value_space, "CN=foo bar,O=Acme",
+            "value-internal space must round-trip unchanged"
+        );
+    }
+
+    /// Attribute-type names compare case-insensitively (`cn` vs `CN`),
+    /// but attribute-value case is significant (`Acme` vs `acme`).
+    #[test]
+    fn test_canonicalize_dn_attribute_type_case_insensitive_value_sensitive() {
+        let upper_types = canonicalize_dn("O=Acme,CN=foo").expect("upper types");
+        let lower_types = canonicalize_dn("o=Acme,cn=foo").expect("lower types");
+        assert_eq!(
+            upper_types, lower_types,
+            "attribute-type name case must not affect canonical form"
+        );
+
+        let lower_value = canonicalize_dn("O=acme,CN=foo").expect("lower value");
+        assert_ne!(
+            upper_types, lower_value,
+            "attribute-value case must remain significant after canonicalization"
+        );
+    }
+
+    /// Single-RDN DNs (no comma) are untouched by the comma-space fix and must
+    /// still canonicalize, including attribute-type case folding.
+    #[test]
+    fn test_canonicalize_dn_single_rdn_unchanged() {
+        assert_eq!(canonicalize_dn("CN=foo").expect("single RDN"), "CN=foo");
+        assert_eq!(
+            canonicalize_dn("cn=foo").expect("single RDN lower"),
+            "CN=foo",
+            "lowercase attribute type must canonicalize to the standard name"
+        );
+    }
+
+    /// Garbage that is not a valid RFC 4514 DN still returns `None` so the
+    /// caller falls back to exact string comparison and fails closed.
+    #[test]
+    fn test_canonicalize_dn_unparseable_returns_none() {
+        assert!(canonicalize_dn("").is_none(), "empty string is not a DN");
+        assert!(
+            canonicalize_dn("not a dn at all").is_none(),
+            "garbage without `=` is not a parseable DN"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — multi-RDN subject DN spacing (end-to-end)
+    // =========================================================================
+
+    // End-to-end regression for the comma-space bug: a multi-RDN cert (rendered
+    // by `Name::to_string` with bare commas) must authenticate against a
+    // registered `tls_client_auth_subject_dn` that differs only by whitespace
+    // after the comma. Before the fix this path returned `SubjectMismatch`.
+
+    /// A two-RDN certificate rendered as `O=Acme,CN=foo` must match the same
+    /// DN registered with a space after the comma (`O=Acme, CN=foo`), the
+    /// no-space form, and a lowercase-attribute-type form — all of which are
+    /// spacing/case variants the documented contract says are equivalent.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_multi_rdn_space_insensitive() {
+        // Internal order [CN=foo, O=Acme] renders (Display reverses) as
+        // "O=Acme,CN=foo" with a bare comma — the cert-side rendering.
+        let subject = make_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "Acme")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+
+        // Lock in the fixture rendering so a future change to `Display` fails
+        // this test loudly rather than silently weakening the assertions.
+        assert_eq!(
+            rendered, "O=Acme,CN=foo",
+            "fixture: cert renders bare-comma DN"
+        );
+
+        // Comma-space form (the OpenSSL default `oneline` rendering, minus the
+        // spaces around `=` an operator would naturally trim).
+        let spaced = "O=Acme, CN=foo";
+        assert_ne!(rendered, spaced, "precondition: strings differ by spacing");
+        assert!(
+            verify_tls_client_auth(&cert, Some(spaced), None, None, None, None).is_ok(),
+            "multi-RDN DN differing only by whitespace after the comma must authenticate"
+        );
+
+        // Bare-comma form still matches.
+        assert!(
+            verify_tls_client_auth(&cert, Some("O=Acme,CN=foo"), None, None, None, None).is_ok(),
+            "multi-RDN DN with bare commas must authenticate"
+        );
+
+        // Lowercase attribute-type names still match (value case preserved).
+        assert!(
+            verify_tls_client_auth(&cert, Some("o=Acme, cn=foo"), None, None, None, None).is_ok(),
+            "multi-RDN DN with lowercase attribute types must authenticate"
+        );
+    }
+
+    /// Canonicalization must not make distinct multi-RDN DNs match: a different
+    /// value, a different number of RDNs, and a different RDN ordering must
+    /// all still be rejected — including when the registered value uses the
+    // comma-space rendering the fix now tolerates.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_multi_rdn_still_rejects_mismatch() {
+        let subject = make_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "Acme")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // Different attribute value (CN=bar vs CN=foo), comma-space rendering.
+        assert!(
+            verify_tls_client_auth(&cert, Some("O=Acme, CN=bar"), None, None, None, None).is_err(),
+            "a multi-RDN DN with a different value must mismatch"
+        );
+        // Different organization value.
+        assert!(
+            verify_tls_client_auth(&cert, Some("O=Other, CN=foo"), None, None, None, None).is_err(),
+            "a multi-RDN DN with a different org value must mismatch"
+        );
+        // Fewer RDNs (single-RDN registration vs multi-RDN cert).
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN=foo"), None, None, None, None).is_err(),
+            "a single-RDN registration must not match a multi-RDN cert"
+        );
+        // Same RDNs in a different order — DN ordering is significant.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN=foo, O=Acme"), None, None, None, None).is_err(),
+            "a different RDN ordering must mismatch (DN ordering is significant)"
         );
     }
 }
