@@ -762,15 +762,78 @@ pub(crate) fn db_group_to_scim(
 }
 
 /// Parse members filter path like "members[value eq \"user-id\"]".
+///
+/// RFC 7643 §2.1 makes ABNF strings — including the `compareOp` token
+/// (`eq`) and the attribute name (`value`) — case-insensitive, so a
+/// path such as `members[value EQ "user-id"]` must be accepted.  We
+/// search for the `value eq "` needle in a lowercased copy of `path`
+/// and map the found offset back to the original string via char
+/// counting, mirroring `parse_scim_filter` (`db/scim.rs:988`).  The
+/// char-count remap avoids the byte-offset hazard of `to_lowercase()`
+/// for inputs that change byte length under special-casing rules
+/// (e.g. ß -> ss).  Slicing the value out of the original `path`
+/// preserves its case.
 fn parse_member_filter(path: &str) -> Option<String> {
-    // Simple parser for members[value eq "user-id"]
-    if let Some(start) = path.find("value eq \"") {
-        let start_idx = start.saturating_add(10);
-        if let Some(rest) = path.get(start_idx..)
-            && let Some(end) = rest.find('"')
-        {
-            return rest.get(..end).map(String::from);
-        }
+    let lower = path.to_lowercase();
+    let needle = "value eq \"";
+    let lower_end = lower.find(needle)?.saturating_add(needle.len());
+
+    let char_offset = lower.get(..lower_end)?.chars().count();
+    let orig_byte_pos = path.char_indices().nth(char_offset).map(|(i, _)| i)?;
+    let rest = path.get(orig_byte_pos..)?;
+
+    let end = rest.find('"')?;
+    rest.get(..end).map(String::from)
+}
+
+#[cfg(test)]
+mod parse_member_filter_tests {
+    use super::parse_member_filter;
+
+    #[test]
+    fn lowercase_eq_matches() {
+        assert_eq!(
+            parse_member_filter(r#"members[value eq "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
     }
-    None
+
+    #[test]
+    fn uppercase_eq_matches() {
+        // RFC 7643 §2.1: ABNF `compareOp` tokens are case-insensitive, so
+        // `EQ` must parse identically to `eq` — the regression this fixes.
+        assert_eq!(
+            parse_member_filter(r#"members[value EQ "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn uppercase_value_attribute_matches() {
+        // RFC 7644 §3.10: attribute names are case-insensitive.
+        assert_eq!(
+            parse_member_filter(r#"members[VALUE eq "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+        assert_eq!(
+            parse_member_filter(r#"members[Value EQ "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn preserves_value_case() {
+        // The extracted id is sliced from the original (non-lowercased)
+        // path, so its case is preserved verbatim.
+        assert_eq!(
+            parse_member_filter(r#"members[value EQ "AbCdEf"]"#),
+            Some("AbCdEf".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_members_path_returns_none() {
+        assert_eq!(parse_member_filter("members"), None);
+        assert_eq!(parse_member_filter("members[]"), None);
+    }
 }
