@@ -688,6 +688,7 @@ async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
         &not_before,
         &not_on_or_after,
         Some(request_id),
+        Some(&not_on_or_after),
     );
     let saml_response = B64.encode(xml.as_bytes());
 
