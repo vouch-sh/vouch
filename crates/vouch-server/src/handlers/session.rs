@@ -719,50 +719,40 @@ pub(crate) fn clear_session_cookie() -> Cookie<'static> {
 }
 
 /// Helper to extract auth context from cookie jar using OAuth tokens.
+///
+/// Routes through the strict [`extract_session_from_cookie`] path rather
+/// than re-implementing the decode + session-lookup pipeline, so the `cnf`
+/// sender-constraint is enforced: a DPoP- (`cnf.jkt`) or mTLS-bound
+/// (`cnf.x5t#S256`) access token presented via the session cookie is
+/// rejected the same way it is on the API path (RFC 9449 §9 / RFC 8705
+/// §3.6). Any rejection is masked to an unauthenticated context to
+/// preserve this helper's infallible return type.
 pub(crate) async fn get_resource_auth_context(
     state: &AppState,
     jar: &CookieJar,
     arrival: ArrivalTime,
 ) -> AuthContext {
-    // Try to extract token from cookie
-    let token = match jar.get(vouch_common::SESSION_COOKIE_NAME) {
-        Some(c) => c.value(),
-        None => return AuthContext::unauthenticated(),
-    };
-
-    // Decode using ES256 access token path only
-    let config = state.config();
-    let decoded =
-        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
-            Some(d) => d,
-            None => return AuthContext::unauthenticated(),
-        };
-
-    // Verify session exists in DB. This helper returns an infallible
-    // `AuthContext`, so a store failure can only be reported as
-    // unauthenticated — log it so an outage is distinguishable from a
-    // revoked session rather than surfacing as a silently logged-out UI.
-    let token_hash = hash_token(token);
-    match state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash, arrival)
-        .await
-    {
-        Ok(Some(_)) => {}
-        Ok(None) => return AuthContext::unauthenticated(),
+    let token = match extract_session_from_cookie(state, jar, arrival).await {
+        Ok(t) => t,
         Err(e) => {
-            tracing::error!(error = %e, "Session lookup failed; treating UI request as unauthenticated");
+            // Expected auth rejections (missing/invalid/revoked token, or a
+            // sender-constrained token presented via cookie) are silent
+            // unauthenticated outcomes. A store failure is an outage, not a
+            // logout — log it so it is distinguishable from a revoked session.
+            if !matches!(
+                e,
+                ServiceError::Api { .. } | ServiceError::ApiWithHeaders { .. }
+            ) {
+                tracing::error!(error = %e, "Session validation failed; treating UI request as unauthenticated");
+            }
             return AuthContext::unauthenticated();
         }
-    }
-
-    let user_id = decoded.sub().to_string();
-    let user_email = decoded.email().map(String::from);
+    };
 
     // Look up user to check active status, org membership, and admin status.
     // A deactivated or deleted user is an ordinary unauthenticated outcome;
     // only a store failure (`Internal`) is worth an error line.
-    let user = match load_active_user(state, &user_id).await {
+    let user = match load_active_user(state, &token.sub).await {
         Ok(user) => user,
         Err(e) => {
             if matches!(e, ServiceError::Internal(_)) {
@@ -771,14 +761,13 @@ pub(crate) async fn get_resource_auth_context(
             return AuthContext::unauthenticated();
         }
     };
-    let (has_org, is_org_admin) = (user.org_id.is_some(), user.is_org_admin);
 
     AuthContext {
         authenticated: true,
-        user_id: Some(user_id),
-        user_email,
-        has_org,
-        is_org_admin,
+        user_id: Some(token.sub),
+        user_email: token.email,
+        has_org: user.org_id.is_some(),
+        is_org_admin: user.is_org_admin,
     }
 }
 

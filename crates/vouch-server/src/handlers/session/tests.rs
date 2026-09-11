@@ -558,6 +558,50 @@ async fn test_dpop_non_use_nonce_error_omits_nonce_header() {
     );
 }
 
+/// Contract: the strict API path (`extract_session_from_cookie`) and the
+/// admin-UI path (`get_resource_auth_context`) must agree on a DPoP-bound
+/// cookie token — both must reject it. Before the fix the strict path
+/// returned `Err` ("Sender-constrained") while the UI path returned an
+/// authenticated `AuthContext`; this test pins the symmetry.
+#[tokio::test]
+async fn test_get_resource_auth_context_rejects_dpop_bound_cookie() {
+    use axum_extra::extract::cookie::CookieJar;
+
+    let (_app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ctx-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-dpop-jkt-thumbprint"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let jar = CookieJar::from_headers(&axum::http::HeaderMap::new());
+    let jar = jar.add(axum_extra::extract::cookie::Cookie::new(
+        vouch_common::SESSION_COOKIE_NAME,
+        token.to_string(),
+    ));
+
+    // Strict path: rejection.
+    let strict = super::extract_session_from_cookie(&state, &jar, test_arrival()).await;
+    assert!(strict.is_err(), "strict path must reject DPoP-bound cookie");
+
+    // UI path: unauthenticated context.
+    let auth = super::get_resource_auth_context(&state, &jar, test_arrival()).await;
+    assert!(
+        !auth.authenticated,
+        "UI path must treat DPoP-bound cookie as unauthenticated"
+    );
+    assert!(auth.user_id.is_none(), "no user_id on rejected cookie");
+    assert!(!auth.is_org_admin, "no admin flag on rejected cookie");
+}
+
 /// The session cookie's `Max-Age` is derived from the minted token's own
 /// `expires_in`, so a lifetime ceiling applied at issuance (the RFC 8693
 /// exchange path caps by the subject token's remaining TTL) reaches the

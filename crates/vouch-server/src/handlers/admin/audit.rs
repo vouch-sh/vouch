@@ -716,6 +716,75 @@ mod tests {
         );
     }
 
+    // ---- sender-constrained cookie tokens must be rejected on the admin UI ----
+    //
+    // `get_resource_auth_context` (used by the `AdminPage` extractor) must
+    // enforce the `cnf` sender-constraint the same way the strict API path
+    // (`extract_session_from_cookie` → `extract_resource_token`) does. A
+    // DPoP- or mTLS-bound access token presented via the `__Host-vouch_session`
+    // cookie must NOT authenticate the holder to an admin read page without
+    // proving possession of the bound key/cert (RFC 9449 §9 / RFC 8705 §3.6).
+
+    /// A DPoP-bound (`cnf.jkt`) access token placed in the session cookie
+    /// must be rejected by the admin UI rather than rendering the page.
+    #[tokio::test]
+    async fn test_audit_page_rejects_dpop_bound_cookie_token() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "dpop-ui.example").await;
+        let admin =
+            create_test_user_in_org(&state.store, "dpop-admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Dpop("fake-dpop-jkt-thumbprint"),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert!(
+            status == StatusCode::SEE_OTHER || status == StatusCode::TEMPORARY_REDIRECT,
+            "DPoP-bound token via cookie should be REJECTED by the admin UI; got {status} body={body}"
+        );
+    }
+
+    /// An mTLS-bound (`cnf.x5t#S256`) access token placed in the session
+    /// cookie must be rejected by the admin UI rather than rendering the page.
+    #[tokio::test]
+    async fn test_audit_page_rejects_mtls_bound_cookie_token() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "mtls-ui.example").await;
+        let admin =
+            create_test_user_in_org(&state.store, "mtls-admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Mtls(&crate::services::oidc::mtls::compute_cert_thumbprint(
+                    b"missing-cert-der",
+                )),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert!(
+            status == StatusCode::SEE_OTHER || status == StatusCode::TEMPORARY_REDIRECT,
+            "mTLS-bound token via cookie should be REJECTED by the admin UI; got {status} body={body}"
+        );
+    }
+
     // ---- resolve_target_email ----
 
     #[test]
