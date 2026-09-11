@@ -403,6 +403,18 @@ pub struct DocumentStore {
     /// See [`Self::set_delete_by_index_remaining_successes`].
     #[cfg(test)]
     delete_by_index_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only fault-injection budget for [`DocumentStore::find_all`]: the
+    /// next `n` `find_all` calls succeed (each consuming one unit), after
+    /// which every subsequent `find_all` returns a non-retryable `Err` before
+    /// issuing its query. Mirrors the existing
+    /// [`Self::delete_remaining_successes`] test hook and is compiled out of
+    /// non-test builds, so production behavior is unchanged. Read paths
+    /// (`find_all`, `find_one`, `find_by_id`, `find_paginated`) are not wrapped
+    /// in `with_dsql_retry!`, so a transient DB `Err` escapes immediately to
+    /// the caller — this seam reproduces that exact control-flow shape without
+    /// a real DB outage. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    find_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -476,6 +488,8 @@ impl DocumentStore {
             update_by_index_stale_once: None,
             #[cfg(test)]
             delete_by_index_remaining_successes: None,
+            #[cfg(test)]
+            find_remaining_successes: None,
         }
     }
 
@@ -659,6 +673,53 @@ impl DocumentStore {
             let Some(next) = current.checked_sub(1) else {
                 return Err(anyhow::anyhow!(
                     "injected delete_by_index fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// [`DocumentStore::find_all`] calls to `successes`, after which every
+    /// subsequent `find_all` returns a non-retryable `Err` before issuing its
+    /// query. The fault fires at the entry to `find_all`, so the exercised
+    /// control-flow shape is "the indexed read returns `Err`" — exactly the
+    /// shape a transient DB read failure (pool exhaustion, connection loss,
+    /// DSQL OCC abort, `SQLITE_BUSY`) presents to callers like
+    /// [`crate::db::get_authenticators_for_user`], which the IdP callback
+    /// reads session authenticator claims through. Read paths are not wrapped
+    /// in `with_dsql_retry!`, so this `Err` escapes to the caller with no
+    /// retry; the seam lets a regression test assert the caller fails closed
+    /// rather than silently degrading the session. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_find_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.find_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `find_all` success budget, returning
+    /// `Ok` while budget remains and a non-retryable `Err` once it is
+    /// exhausted. No-op (`Ok`) when [`Self::set_find_remaining_successes`] was
+    /// not called (no budget installed). The CAS loop avoids underflow if a
+    /// budget is shared via [`Clone`]. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    fn consume_find_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.find_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected find_all fault: remaining-successes budget exhausted"
                 ));
             };
             if budget
@@ -930,6 +991,10 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Vec<Document<T>>> {
+        #[cfg(test)]
+        {
+            self.consume_find_success_budget()?;
+        }
         let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
