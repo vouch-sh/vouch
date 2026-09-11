@@ -502,10 +502,12 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
 /// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
 /// way in both places instead of silently read as absent by a separate,
-/// more lenient parser. Two other JWKS consumers still parse leniently from
-/// raw `serde_json::Value` and are unaffected by this type: the mTLS `x5c`
-/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`) and
-/// the RFC 9421 signature key resolver (`infra/httpsig.rs`).
+/// more lenient parser. The RFC 9421 signature key resolver
+/// (`infra/httpsig.rs::OAuthClientKeyResolver`) also parses through this type
+/// (and selects via `JwkEntry::is_usable_for`), so it shares the same
+/// rejection semantics. One JWKS consumer still parses leniently from raw
+/// `serde_json::Value` and is unaffected by this type: the mTLS `x5c`
+/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JwkSet {
     /// The keys in the set.
