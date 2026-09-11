@@ -454,6 +454,53 @@ pub(crate) async fn delete_application_api(
         )
     })?;
 
+    // Record the `ClientDeleted` audit event, mirroring the RFC 7592 delete
+    // path (`services::oidc::registration::delete_client_configuration`). The
+    // less-destructive secret/token handlers on this same surface already
+    // record `SecretAdded`/`SecretRevoked`/`TokenRevoked`; the delete cascade
+    // is a strictly stronger revocation and must not be the one lifecycle
+    // event that leaves no durable record.
+    //
+    // The client document is already deleted above, so the `Unresolved`
+    // client-org fallback inside `record_oauth_event` (a lookup by
+    // `client.id`) would always miss. Pre-resolve org-domain attribution
+    // from the already-in-scope `client.user_id`/`client.org_id` instead,
+    // exactly as the RFC 7592 path does, then stamp it via `Known`.
+    let user_org_domain = if let Some(user_id) = client.user_id.as_deref()
+        && let Ok(Some(user)) = db::get_user_by_id(&state.store, user_id).await
+        && let Some(org_id) = user.org_id.as_deref()
+    {
+        match user.org_domain.clone() {
+            Some(domain) => Some(domain),
+            None => db::get_organization_domain(&state.store, org_id)
+                .await
+                .ok()
+                .flatten(),
+        }
+    } else {
+        None
+    };
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        user_org_domain.as_deref(),
+        client.org_id.as_deref(),
+    )
+    .await;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::ClientDeleted,
+            user_id: Some(&token.sub),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Application deleted via API"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+        },
+    )
+    .await;
+
     tracing::info!("Deleted OAuth application: {}", client.client_id);
 
     Ok(StatusCode::NO_CONTENT)

@@ -522,6 +522,52 @@ pub(crate) async fn delete_application_form(
         );
     }
 
+    // Record the `ClientDeleted` audit event, mirroring the RFC 7592 delete
+    // path and `delete_application_api`. The secret/token handlers on this
+    // same surface already record `SecretAdded`/`SecretRevoked`; the delete
+    // cascade is a strictly stronger revocation and must not be the one
+    // lifecycle event that leaves no durable record.
+    //
+    // The client document is already deleted above, so the `Unresolved`
+    // client-org fallback inside `record_oauth_event` (a lookup by
+    // `client.id`) would always miss. Pre-resolve org-domain attribution
+    // from the already-in-scope `client.user_id`/`client.org_id` instead,
+    // exactly as the RFC 7592 path does, then stamp it via `Known`.
+    let user_org_domain = if let Some(owner_id) = client.user_id.as_deref()
+        && let Ok(Some(user)) = db::get_user_by_id(&state.store, owner_id).await
+        && let Some(org_id) = user.org_id.as_deref()
+    {
+        match user.org_domain.clone() {
+            Some(domain) => Some(domain),
+            None => db::get_organization_domain(&state.store, org_id)
+                .await
+                .ok()
+                .flatten(),
+        }
+    } else {
+        None
+    };
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        user_org_domain.as_deref(),
+        client.org_id.as_deref(),
+    )
+    .await;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: db::OAuthEventType::ClientDeleted,
+            user_id: Some(user_id),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Application deleted via web UI"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+        },
+    )
+    .await;
+
     tracing::info!("Deleted OAuth application: {}", client.client_id);
 
     Redirect::to("/applications").into_response()
@@ -1429,6 +1475,121 @@ mod tests {
             secrets.len(),
             2,
             "the new secret row must be persisted alongside the seeded one: {secrets:?}"
+        );
+    }
+
+    // ========================================================================
+    // POST /applications/:id/delete — ClientDeleted audit event
+    // ========================================================================
+
+    /// `delete_application_form` must record a `ClientDeleted`
+    /// (`oauth_client_deleted`) audit event after the delete commits, mirroring
+    /// `delete_application_api` and the RFC 7592 delete path. Regression for the
+    /// audit-parity gap on the web-form surface.
+    #[tokio::test]
+    async fn test_web_delete_application_records_client_deleted_audit_event() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "web-audit-delete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/applications/{}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "delete should redirect");
+
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["oauth_client_deleted".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            events.len(),
+            1,
+            "web delete must write exactly one audit event; got {}",
+            events.len()
+        );
+    }
+
+    /// The web-form `ClientDeleted` event's org-domain attribution must fall
+    /// through to the client's own org when the owning user has no org.
+    /// Regression for the pre-resolution step (duplicated in the web handler):
+    /// the client doc is already deleted when the event is recorded, so a naive
+    /// client-org lookup would miss. Mirrors the RFC 7592 regression test.
+    #[tokio::test]
+    async fn test_web_delete_application_attributes_org_domain_for_org_owned_client() {
+        let (app, state) = test_app().await;
+
+        let org = create_test_org(&state.store, "web-org-owned-deleted.example").await;
+        let owner = create_test_user(&state.store, "solo-owner-web@personal.example").await;
+        let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &owner.id,
+                email: &owner.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_client(
+            &state.store,
+            &owner.id,
+            TestClientSpec {
+                org_id: Some(org.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/applications/{}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "delete should redirect");
+
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["oauth_client_deleted".to_string()]),
+                user_id: Some(owner.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+        let event = events.first().expect("delete must write one audit event");
+        assert_eq!(
+            event.email_domain.as_deref(),
+            Some("web-org-owned-deleted.example"),
+            "the client's own org must be attributed even though the owning user \
+             has no org and the client doc is already deleted by the time the \
+             event is recorded"
         );
     }
 }
