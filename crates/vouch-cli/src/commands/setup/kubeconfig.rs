@@ -129,7 +129,8 @@ pub(crate) fn default_kubeconfig_path() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+    let home =
+        vouch_common::paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     Ok(home.join(".kube").join("config"))
 }
 

@@ -41,7 +41,7 @@ pub(crate) struct AwsConfig {
 }
 
 impl AwsConfig {
-    /// Load AWS config from the default path (~/.aws/config).
+    /// Load AWS config from the path [`AwsConfig::default_path`] resolves.
     pub(crate) fn load() -> Result<Self> {
         let path = Self::default_path()?;
         Self::load_from(path)
@@ -263,10 +263,28 @@ impl AwsConfig {
         }
     }
 
-    /// Get the default AWS config path (~/.aws/config).
+    /// Get the AWS config path: `$AWS_CONFIG_FILE`, else `~/.aws/config`.
+    ///
+    /// `AWS_CONFIG_FILE` names the file itself. It is the only way to relocate
+    /// the config — the AWS CLI offers no equivalent command-line flag or
+    /// profile setting.
     pub(crate) fn default_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
-        Ok(home.join(".aws").join("config"))
+        let home = vouch_common::paths::home_dir();
+        let env_file = std::env::var_os("AWS_CONFIG_FILE").filter(|v| !v.is_empty());
+        Self::config_path_from(env_file.as_deref(), home.as_deref())
+            .context(tr!("err-could-not-determine-home-directory"))
+    }
+
+    /// [`AwsConfig::default_path`] over explicit inputs, so the override is
+    /// testable without mutating the process environment.
+    fn config_path_from(
+        env_file: Option<&std::ffi::OsStr>,
+        home: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        match env_file {
+            Some(explicit) => Some(PathBuf::from(explicit)),
+            None => Some(home?.join(".aws").join("config")),
+        }
     }
 }
 
@@ -1033,5 +1051,33 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert_eq!(config.next_vouch_profile_name(), "vouch-3");
+    }
+
+    // -- config_path_from --
+    //
+    // `AWS_CONFIG_FILE` names the file itself, and the AWS CLI documents it as
+    // the only way to relocate the config: "You can't specify this value in a
+    // named profile setting or by using a command line parameter."
+    // <https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html>
+
+    #[test]
+    fn aws_config_defaults_under_home() {
+        let home = std::path::Path::new("/home/alice");
+        let got = AwsConfig::config_path_from(None, Some(home));
+        assert_eq!(got, Some(home.join(".aws").join("config")));
+    }
+
+    #[test]
+    fn aws_config_env_is_the_file_itself() {
+        let got = AwsConfig::config_path_from(
+            Some(std::ffi::OsStr::new("/etc/aws/alt.ini")),
+            Some(std::path::Path::new("/home/alice")),
+        );
+        assert_eq!(got, Some(PathBuf::from("/etc/aws/alt.ini")));
+    }
+
+    #[test]
+    fn aws_config_needs_home_when_env_is_absent() {
+        assert_eq!(AwsConfig::config_path_from(None, None), None);
     }
 }

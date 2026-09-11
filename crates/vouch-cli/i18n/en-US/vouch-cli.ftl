@@ -1044,6 +1044,7 @@ setup-err-load-vouch-config = failed to load { -product } config
 setup-err-not-configured = not configured - run '{ -cmd } enroll' first
 setup-err-anthropic-not-enrolled = not configured — run '{ -cmd } enroll' first
 setup-err-no-home = could not determine home directory
+setup-err-no-appdata = could not determine the APPDATA directory
 
 ## server-url validation
 

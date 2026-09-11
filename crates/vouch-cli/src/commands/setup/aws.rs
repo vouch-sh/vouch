@@ -57,7 +57,7 @@ fn sanitize_profile_name(name: &str) -> String {
 /// Open (or create) `~/.aws/config` and ensure the `.aws` directory exists.
 fn load_or_create_aws_config() -> Result<AwsConfig> {
     let config_path = AwsConfig::default_path()?;
-    let aws_dir = dirs::home_dir()
+    let aws_dir = vouch_common::paths::home_dir()
         .context(tr!("err-could-not-determine-home-directory"))?
         .join(".aws");
     ensure_secure_dir(&aws_dir)?;

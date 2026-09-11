@@ -68,7 +68,7 @@ async fn try_load_from_disk(state: &Arc<AgentState>) -> Option<SshCredentials> {
     state.get_session().await?;
 
     // Check for default key and cert files on disk
-    let home = std::env::home_dir()?;
+    let home = vouch_common::paths::home_dir()?;
     let ssh_dir = home.join(".ssh");
     let key_path = ssh_dir.join(DEFAULT_KEY_NAME);
     let cert_path = ssh_dir.join(format!("{DEFAULT_KEY_NAME}-cert.pub"));

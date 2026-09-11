@@ -167,10 +167,34 @@ fn create_credential_helper_symlink(
     crate::utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
 }
 
-/// Configure ~/.docker/config.json with the credential helper.
+/// Path to the docker CLI's `config.json`.
+///
+/// `DOCKER_CONFIG` names the *directory* holding the file, not the file itself
+/// — the docker docs call it "the location of your client configuration files"
+/// and its default is the `~/.docker` directory.
+fn docker_config_path() -> Result<std::path::PathBuf> {
+    let home = vouch_common::paths::home_dir();
+    let env_dir = std::env::var_os("DOCKER_CONFIG").filter(|v| !v.is_empty());
+    docker_config_path_from(env_dir.as_deref(), home.as_deref())
+        .with_context(|| tr!("setup-err-no-home"))
+}
+
+/// [`docker_config_path`] over explicit inputs, so the directory-vs-file
+/// distinction is testable without mutating the process environment.
+fn docker_config_path_from(
+    env_dir: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let dir = match env_dir {
+        Some(explicit) => std::path::PathBuf::from(explicit),
+        None => home?.join(".docker"),
+    };
+    Some(dir.join("config.json"))
+}
+
+/// Configure the docker CLI's `config.json` with the credential helper.
 fn configure_docker_config(registries: &[String]) -> Result<()> {
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
-    let docker_config_path = home.join(".docker/config.json");
+    let docker_config_path = docker_config_path()?;
 
     // Load existing config or create new
     let mut config: DockerConfig = if docker_config_path.exists() {
@@ -273,8 +297,7 @@ pub(crate) struct DockerSetupStatus {
 
 /// Get registries configured to use vouch in Docker config.
 fn get_configured_registries() -> Result<Vec<String>> {
-    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
-    let docker_config_path = home.join(".docker/config.json");
+    let docker_config_path = docker_config_path()?;
 
     if !docker_config_path.exists() {
         return Ok(Vec::new());
@@ -291,4 +314,43 @@ fn get_configured_registries() -> Result<Vec<String>> {
         .collect();
 
     Ok(registries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    // `DOCKER_CONFIG` is the one override among the tools vouch configures that
+    // names a *directory*: the docker docs describe it as "the location of your
+    // client configuration files", defaulting to the `~/.docker` directory.
+    // <https://docs.docker.com/reference/cli/docker/>
+
+    #[test]
+    fn docker_config_defaults_under_home() {
+        let home = Path::new("/home/alice");
+        let got = docker_config_path_from(None, Some(home));
+        assert_eq!(got, Some(home.join(".docker").join("config.json")));
+    }
+
+    #[test]
+    fn docker_config_env_is_a_directory_not_a_file() {
+        let got = docker_config_path_from(Some(OsStr::new("/etc/docker-conf")), None);
+        assert_eq!(got, Some(PathBuf::from("/etc/docker-conf/config.json")));
+    }
+
+    #[test]
+    fn docker_config_env_wins_over_home() {
+        let got = docker_config_path_from(
+            Some(OsStr::new("/etc/docker-conf")),
+            Some(Path::new("/home/alice")),
+        );
+        assert_eq!(got, Some(PathBuf::from("/etc/docker-conf/config.json")));
+    }
+
+    #[test]
+    fn docker_config_needs_home_when_env_is_absent() {
+        assert_eq!(docker_config_path_from(None, None), None);
+    }
 }

@@ -47,7 +47,7 @@ impl IntegrationCheck for SsmIntegration {
     }
 
     fn check(&self) -> IntegrationState {
-        let home = match dirs::home_dir() {
+        let home = match vouch_common::paths::home_dir() {
             Some(h) => h,
             None => {
                 return IntegrationState::NotConfigured {
