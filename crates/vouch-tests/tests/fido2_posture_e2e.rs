@@ -538,7 +538,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
 /// `test_device_grant_auth_time_is_ceremony_instant_not_poll_instant`. The
 /// FIDO2 grant stamps `verified_at` inside `verify_assertion_inner` with no
 /// `for_test`-style injection seam, so the assertion is range-bound to the
-/// request window plus the `auth_time <= iat` ordering invariant, rather
+/// request window plus the `iat <= auth_time` ordering invariant, rather
 /// than pinned to an injected instant. It catches regressions where the
 /// claim is omitted, set to epoch, future-dated, or set outside the request
 /// window; pinning the exact ceremony instant requires the test-seam
@@ -557,11 +557,10 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
     let (challenge, state) = get_challenge(&harness).await;
 
     // Bracket the exchange with integer-second wall-clock captures.
-    // `auth_time` is stamped at ceremony receipt inside
-    // `verify_login_assertion`; `iat` is stamped strictly later inside
-    // `create_oauth_access_token` (after the org-domain fetch and JWT
-    // signing). Both therefore fall inside `[t_before, t_after]`, and
-    // `auth_time <= iat` must hold.
+    // `iat` is stamped from the request's ArrivalTime (captured at middleware
+    // before assertion verification); `auth_time` is stamped at ceremony
+    // receipt inside `verify_login_assertion`. Both therefore fall inside
+    // `[t_before, t_after]`, and `iat <= auth_time` must hold.
     let t_before = jiff::Timestamp::now().as_second();
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
         harness: &harness,
@@ -605,16 +604,16 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
          [{t_before}, {t_after}] — it should be the ceremony-receipt instant"
     );
 
-    // `iat` is stamped strictly later inside `create_oauth_access_token`,
-    // so `auth_time <= iat` must hold (the buggy pre-org-domain-fetch `now`
-    // also preceded `iat`; this invariant is necessary but not, by itself,
-    // sufficient to catch the mis-sourcing — see the test seam follow-up).
+    // `iat` is stamped from the request's `ArrivalTime` (captured at the
+    // outermost middleware layer, before assertion verification), so `iat <=
+    // auth_time` must hold — the ceremony-receipt instant cannot precede the
+    // request arrival that triggered it.
     let iat = claims["iat"]
         .as_i64()
         .expect("iat must be an integer Unix second");
     assert!(
-        auth_time <= iat,
-        "auth_time ({auth_time}) must not be later than iat ({iat})"
+        iat <= auth_time,
+        "iat ({iat}) must not be later than auth_time ({auth_time})"
     );
     assert!(
         t_before <= iat && iat <= t_after,
