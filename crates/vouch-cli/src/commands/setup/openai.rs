@@ -82,7 +82,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
     use vouch_cli::{tr, tr_args};
 
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     let codex_dir = home.join(".codex");
     let config_path = codex_dir.join("config.toml");
 

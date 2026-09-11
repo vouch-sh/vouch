@@ -15,19 +15,19 @@ use vouch_common::fs::{atomic_write, atomic_write_secure};
 
 /// Get the SSH config path (~/.ssh/config).
 pub(crate) fn ssh_config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("config"))
 }
 
 /// Get the known hosts path (~/.ssh/known_hosts).
 fn known_hosts_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("known_hosts"))
 }
 
 /// Get the CA public key path.
 fn ca_key_path(server: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     // Sanitize server URL for filename: strip scheme, replace non-alphanumeric with underscores,
     // and collapse multiple underscores. e.g. "https://us.vouch.sh" → "vouch_ca_us_vouch_sh.pub"
     let safe_host = server
@@ -54,7 +54,7 @@ fn ca_key_path(server: &str) -> Result<PathBuf> {
 
 /// Get the default SSH key path (~/.ssh/id_ed25519_vouch).
 fn default_key_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("id_ed25519_vouch"))
 }
 

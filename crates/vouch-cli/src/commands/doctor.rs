@@ -483,7 +483,7 @@ async fn check_session() -> CheckResult {
 
 /// Check SSH configuration for Vouch integration.
 fn check_ssh_config() -> CheckResult {
-    let home = match dirs::home_dir() {
+    let home = match vouch_common::paths::home_dir() {
         Some(h) => h,
         None => return CheckResult::fail("ssh", tr!("doctor-ssh-no-home")),
     };
@@ -551,7 +551,7 @@ fn check_ssm_config() -> CheckResult {
 
     let plugin_found = is_plugin_available();
 
-    let home = match dirs::home_dir() {
+    let home = match vouch_common::paths::home_dir() {
         Some(h) => h,
         None => return CheckResult::fail("ssm", tr!("doctor-ssm-no-home")),
     };

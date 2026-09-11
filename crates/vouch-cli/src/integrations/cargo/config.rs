@@ -199,7 +199,8 @@ impl CargoConfig {
         }
 
         // Default to ~/.cargo/config.toml
-        let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
+        let home = vouch_common::paths::home_dir()
+            .context(tr!("err-could-not-determine-home-directory"))?;
         Ok(home.join(".cargo").join("config.toml"))
     }
 

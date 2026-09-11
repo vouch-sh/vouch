@@ -15,9 +15,15 @@
 //! | data (keyring fallback key) | `XDG_DATA_HOME` → `~/.local/share` | `<base>/vouch/` |
 //! | cache (pid, agent log) | `XDG_CACHE_HOME` → `~/.cache` | `<base>/vouch/` |
 //! | runtime (sockets) | `XDG_RUNTIME_DIR` → cache fallback | `<base>/vouch/` |
+//! | helper binaries | `XDG_BIN_HOME` → `~/.local/bin` | `<base>/` |
 //!
 //! Per the spec, `XDG_*` values that are not absolute paths are ignored and the
 //! default is used instead.
+//!
+//! [`home_dir`] and the [`xdg_config_home`] / [`xdg_data_home`] bases are also
+//! exported. Those serve the inverse problem: locating the config of a tool
+//! vouch configures on the user's behalf (pip, uv, docker, aws), where the
+//! answer is whatever *that* tool documents, not vouch's layout.
 //!
 //! Earlier versions of vouch stored everything flat in `~/.vouch/`.
 //! [`migrate_legacy_layout`] relocates those files into the directories above
@@ -28,6 +34,17 @@ use std::path::{Path, PathBuf};
 
 /// Application sub-directory created under each XDG base directory.
 const APP_DIR: &str = "vouch";
+
+/// The user's home directory.
+///
+/// The one home-directory resolver for the workspace. `dirs::home_dir` reads
+/// `$HOME` and falls back to `getpwuid_r` on Unix; on Windows it asks for
+/// `FOLDERID_Profile` rather than trusting `%USERPROFILE%`. `std::env::home_dir`
+/// does neither, so callers must not reach for it.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
 
 /// Resolve an XDG base directory from an env value and home directory.
 ///
@@ -56,7 +73,7 @@ fn resolve_base(
 fn vouch_subdir(var: &str, default_components: &[&str]) -> Option<PathBuf> {
     let base = resolve_base(
         std::env::var_os(var),
-        dirs::home_dir().as_deref(),
+        home_dir().as_deref(),
         default_components,
     )?;
     Some(base.join(APP_DIR))
@@ -105,6 +122,54 @@ pub fn runtime_dir() -> Option<PathBuf> {
         }
     }
     cache_dir()
+}
+
+/// Directory for user-installed executables: `<XDG_BIN_HOME|~/.local/bin>`.
+///
+/// Holds the helper binaries vouch symlinks into place (`docker-credential-vouch`,
+/// `git-remote-codecommit`, `keyring`, `vouch-pnpm-tokenhelper`). Unlike the
+/// directories above there is no `vouch` sub-directory: the callers of these
+/// helpers find them by name on `PATH`.
+///
+/// `XDG_BIN_HOME` is a widely-implemented convention rather than part of the
+/// XDG Base Directory Specification, which defines only the four `*_HOME`
+/// variables above and `XDG_RUNTIME_DIR`. As with those, it is honored on every
+/// platform — `dirs::executable_dir()` yields `None` on macOS and Windows.
+#[must_use]
+pub fn executable_dir() -> Option<PathBuf> {
+    resolve_base(
+        std::env::var_os("XDG_BIN_HOME"),
+        home_dir().as_deref(),
+        &[".local", "bin"],
+    )
+}
+
+/// XDG config base directory: `<XDG_CONFIG_HOME|~/.config>`.
+///
+/// The base itself, with no `vouch` sub-directory — for locating the config of
+/// a *different* tool that resolves its own paths the XDG way (uv, and pip
+/// everywhere but macOS). Use [`config_dir`] for vouch's own config.
+#[must_use]
+pub fn xdg_config_home() -> Option<PathBuf> {
+    resolve_base(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        home_dir().as_deref(),
+        &[".config"],
+    )
+}
+
+/// XDG data base directory: `<XDG_DATA_HOME|~/.local/share>`.
+///
+/// The counterpart to [`xdg_config_home`]; see that function for when to reach
+/// for a base rather than [`data_dir`]. pip — alone among the tools vouch
+/// configures — looks under the *data* base on macOS.
+#[must_use]
+pub fn xdg_data_home() -> Option<PathBuf> {
+    resolve_base(
+        std::env::var_os("XDG_DATA_HOME"),
+        home_dir().as_deref(),
+        &[".local", "share"],
+    )
 }
 
 /// Path to the CLI configuration file (`<config>/vouch/config.json`).
@@ -296,7 +361,7 @@ pub fn migrate_legacy_layout() {
     reason = "runs from the CLI and agent entrypoints before tracing is initialized"
 )]
 fn migrate_legacy_vouch_dir() {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home_dir() else {
         return;
     };
     let legacy_dir = home.join(".vouch");
@@ -566,5 +631,31 @@ mod tests {
 
         assert!(prepare_private_dir(&path).is_err());
         Ok(())
+    }
+
+    // -- XDG base accessors --
+    //
+    // The accessors read the process environment, which tests must not mutate
+    // (`std::env::set_var` is unsafe under edition 2024 and racy in parallel
+    // tests). `resolve_base` above covers the env-vs-default logic; what is
+    // left to pin is the wiring — that each vouch directory is its XDG base
+    // plus `vouch`, whatever the base resolved to.
+
+    #[test]
+    fn config_dir_is_vouch_under_the_config_base() {
+        assert_eq!(config_dir(), xdg_config_home().map(|b| b.join(APP_DIR)));
+    }
+
+    #[test]
+    fn data_dir_is_vouch_under_the_data_base() {
+        assert_eq!(data_dir(), xdg_data_home().map(|b| b.join(APP_DIR)));
+    }
+
+    #[test]
+    fn executable_dir_resolves_wherever_home_does() {
+        // The reason this is not `dirs::executable_dir()`: that returns `None`
+        // on macOS and Windows, which would leave vouch with nowhere to install
+        // its helper binaries on two of three supported platforms.
+        assert_eq!(executable_dir().is_some(), home_dir().is_some());
     }
 }

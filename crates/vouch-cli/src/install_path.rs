@@ -63,7 +63,7 @@ fn stable_install_path(exe: PathBuf) -> PathBuf {
         {
             return via_path;
         }
-        let home = dirs::home_dir();
+        let home = vouch_common::paths::home_dir();
         for dir in stable_bin_dirs(home.as_deref()) {
             let candidate = dir.join(name);
             if points_to(&candidate, &target) {
@@ -129,6 +129,14 @@ fn stable_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(h.join(".nix-profile").join("bin"));
         dirs.push(h.join(".cargo").join("bin"));
         dirs.push(h.join(".local").join("bin"));
+    }
+    // `$XDG_BIN_HOME`, when it points somewhere other than the `~/.local/bin`
+    // already covered above. This is where vouch installs its own helpers, so a
+    // vouch symlinked there must resolve back to the running binary.
+    if let Some(bin) = vouch_common::paths::executable_dir()
+        && !dirs.contains(&bin)
+    {
+        dirs.push(bin);
     }
     dirs
 }
@@ -209,7 +217,7 @@ fn version_pin_hint(exe: &Path) -> Option<String> {
             stable = stable.display().to_string()
         ));
     }
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = vouch_common::paths::home_dir()
         && let Some(stable) = nix_profile_candidate(exe, &home)
     {
         return Some(tr_args!(

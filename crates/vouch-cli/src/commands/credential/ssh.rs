@@ -36,7 +36,8 @@ impl KeypairAction {
 
 /// Get the SSH directory path (~/.ssh).
 pub(crate) fn ssh_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
+    let home =
+        vouch_common::paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(home.join(".ssh"))
 }
 

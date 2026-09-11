@@ -44,13 +44,15 @@ pub(crate) fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Get the path for a vouch helper binary in `~/.local/bin/`.
+/// Get the install path for a vouch helper binary.
 ///
 /// All vouch helper symlinks (docker-credential-vouch, git-remote-codecommit,
-/// keyring, vouch-pnpm-tokenhelper) live in `~/.local/bin/`.
+/// keyring, vouch-pnpm-tokenhelper) live in the user's executable directory —
+/// `$XDG_BIN_HOME`, or `~/.local/bin` when that is unset.
 pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
-    Ok(home.join(".local").join("bin").join(name))
+    let bin_dir = vouch_common::paths::executable_dir()
+        .context(tr!("err-could-not-determine-home-directory"))?;
+    Ok(bin_dir.join(name))
 }
 
 /// Check if a path is a symlink pointing to a vouch binary.
@@ -224,10 +226,16 @@ mod tests {
     // -- vouch_helper_path --
 
     #[test]
-    fn test_vouch_helper_path_ends_with_name() -> anyhow::Result<()> {
+    fn test_vouch_helper_path_is_in_the_executable_dir() -> anyhow::Result<()> {
+        // Not `~/.local/bin` literally: `$XDG_BIN_HOME` moves it, and the test
+        // may not mutate the environment to rule that out.
         let path = vouch_helper_path("keyring")?;
-        let expected: PathBuf = [".local", "bin", "keyring"].iter().collect();
-        assert!(path.ends_with(&expected), "got: {}", path.display());
+        assert_eq!(
+            path.parent().map(Path::to_path_buf),
+            vouch_common::paths::executable_dir(),
+            "got: {}",
+            path.display()
+        );
         Ok(())
     }
 
