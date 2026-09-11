@@ -361,6 +361,9 @@ pub struct DocumentStore {
     /// See [`ModifyTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     modify_test_hook: Option<ModifyTestHook>,
+    /// See [`CompareAndUpdateTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    compare_and_update_test_hook: Option<CompareAndUpdateTestHook>,
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
@@ -420,6 +423,22 @@ pub(crate) type ModifyHookFuture =
 #[cfg(test)]
 pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
 
+/// Test-only hook invoked inside [`DocumentStore::compare_and_update`] right
+/// before the version-guarded `UPDATE` runs, receiving the `doc_id`.
+///
+/// Lets tests deterministically interleave a concurrent write (through a
+/// hookless store clone) that bumps the document's version, so the guarded
+/// `UPDATE` matches zero rows and `compare_and_update` returns `Ok(false)` —
+/// exactly what a real concurrent writer that won the version race looks like
+/// to the single-shot CAS — without relying on task-scheduling races. Unlike
+/// [`ModifyTestHook`], `compare_and_update` is single-shot (it does not loop on
+/// `Ok(false)`), so a one-shot hook is sufficient; tests that must fire exactly
+/// once guard with their own `AtomicBool`. Mirrors [`ModifyTestHook`] for the
+/// blind-CAS path used by the preconfigured-policy toggle (and other
+/// `compare_and_update` callers).
+#[cfg(test)]
+pub(crate) type CompareAndUpdateTestHook = Arc<dyn Fn(&str) -> ModifyHookFuture + Send + Sync>;
+
 /// Boxed future returned by a [`DeleteTestHook`].
 #[cfg(test)]
 pub(crate) type DeleteHookFuture =
@@ -465,6 +484,8 @@ impl DocumentStore {
             #[cfg(test)]
             modify_test_hook: None,
             #[cfg(test)]
+            compare_and_update_test_hook: None,
+            #[cfg(test)]
             delete_test_hook: None,
             #[cfg(test)]
             post_secret_revoke_test_hook: None,
@@ -493,6 +514,14 @@ impl DocumentStore {
     #[cfg(test)]
     pub(crate) fn set_modify_test_hook(&mut self, hook: ModifyTestHook) {
         self.modify_test_hook = Some(hook);
+    }
+
+    /// Install a hook that runs inside `compare_and_update` right before the
+    /// version-guarded `UPDATE` executes, so a hookless concurrent writer can
+    /// bump the document's version and force `Ok(false)`.
+    #[cfg(test)]
+    pub(crate) fn set_compare_and_update_test_hook(&mut self, hook: CompareAndUpdateTestHook) {
+        self.compare_and_update_test_hook = Some(hook);
     }
 
     /// Install a hook that runs inside `delete_user` after the transaction
@@ -1228,6 +1257,15 @@ impl DocumentStore {
             let encapped: Option<&str> = encrypted.encapped_key.as_deref();
             let expires_str = expires.map(|ts| ts.to_string());
             let expires_ref: Option<&str> = expires_str.as_deref();
+
+            // Test seam: let a hookless concurrent writer bump this row's
+            // version (or otherwise mutate it) before the guarded UPDATE
+            // runs, so the CAS observes a version mismatch and returns
+            // `Ok(false)`. No-op in non-test builds and when no hook is set.
+            #[cfg(test)]
+            if let Some(hook) = &self.compare_and_update_test_hook {
+                hook(id).await;
+            }
 
             let mut tx = self.pool.begin().await?;
 

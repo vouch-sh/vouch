@@ -64,6 +64,15 @@ pub(super) async fn get_posture_config(
 /// Set which preconfigured policy slugs are active for an org.
 ///
 /// Creates the config document if it doesn't exist, or updates it.
+///
+/// This is an unconditional full-replace: the caller is authoritative for the
+/// entire `active_slugs` list (it does *not* derive the list from a prior
+/// read). Use it for authoritative writes such as test setup. Callers that
+/// perform a read-modify-write — e.g. the toggle handler, which reads the
+/// current slugs, mutates one entry, and writes the list back — must use
+/// [`compare_and_set_preconfigured_active`] instead: this blind helper writes
+/// the full list with no version guard, so two concurrent toggles each derive
+/// from a stale read and the later write silently clobbers the earlier one.
 pub async fn set_preconfigured_active(
     store: &DocumentStore,
     org_id: &str,
@@ -88,6 +97,88 @@ pub async fn set_preconfigured_active(
         }
     }
 
+    Ok(())
+}
+
+/// The identity, version, and active slugs of an org's posture config document.
+///
+/// Returned by [`get_preconfigured_active_with_version`] for callers that need
+/// to perform an optimistic-concurrency update (e.g. the admin toggle handler,
+/// which reads the slugs, mutates one, and writes the list back guarded by the
+/// version captured here).
+#[derive(Debug, Clone)]
+pub struct ActivePreconfiguredConfig {
+    /// UUID v7 of the `PostureConfigDoc` row — the CAS target.
+    pub doc_id: String,
+    /// Optimistic-concurrency version at the time of the read.
+    pub version: i32,
+    /// Active preconfigured slugs at the time of the read.
+    pub active_slugs: Vec<String>,
+}
+
+/// Read the posture config for an org, returning the document id and version
+/// alongside the active slugs so callers can issue an OCC-protected write.
+///
+/// Returns `None` if no config document exists yet (no preconfigured policy has
+/// ever been activated for the org).
+pub async fn get_preconfigured_active_with_version(
+    store: &DocumentStore,
+    org_id: &str,
+) -> Result<Option<ActivePreconfiguredConfig>> {
+    match get_posture_config(store, org_id).await? {
+        Some(doc) => Ok(Some(ActivePreconfiguredConfig {
+            doc_id: doc.id,
+            version: doc.version,
+            active_slugs: doc.data.active_slugs,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Conditionally replace the active preconfigured slugs for an org, guarded by
+/// optimistic concurrency.
+///
+/// Like [`set_preconfigured_active`], this is a full-replace: the caller is
+/// authoritative for the entire `active_slugs` list and the stored value is
+/// overwritten outright (no merge). Unlike the blind helper, the write only
+/// commits when the document's version still equals `expected_version`, so a
+/// concurrent toggle cannot silently overwrite this one — it surfaces as
+/// `Ok(false)` and the caller re-reads and recomputes.
+///
+/// Returns `Ok(true)` if the update was applied; `Ok(false)` if a concurrent
+/// modification bumped the version first (or, equivalently, the row was
+/// removed). The handler turns the `false` into a `409 Conflict` so the admin
+/// re-reads the page and re-issues the toggle against the current state.
+pub async fn compare_and_set_preconfigured_active(
+    store: &DocumentStore,
+    doc_id: &str,
+    expected_version: i32,
+    org_id: &str,
+    active_slugs: Vec<String>,
+) -> Result<bool> {
+    let updated = PostureConfigDoc {
+        org_id: org_id.to_string(),
+        active_slugs,
+    };
+    store
+        .compare_and_update(doc_id, expected_version, &updated)
+        .await
+}
+
+/// Create the posture config document for an org (first activation).
+///
+/// Inserts a new `PostureConfigDoc` with `active_slugs` and returns. Use
+/// [`compare_and_set_preconfigured_active`] once a config already exists.
+pub async fn create_preconfigured_active(
+    store: &DocumentStore,
+    org_id: &str,
+    active_slugs: Vec<String>,
+) -> Result<()> {
+    let doc = PostureConfigDoc {
+        org_id: org_id.to_string(),
+        active_slugs,
+    };
+    store.insert(&doc).await?;
     Ok(())
 }
 
