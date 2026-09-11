@@ -6,6 +6,7 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 use super::*;
+use crate::test_utils::test_arrival;
 
 // =========================================================================
 // Timestamp parsing tests
@@ -448,8 +449,13 @@ fn invalid_base64_returns_decode_error() {
         domain_attribute: None,
     };
 
-    let err =
-        validate_saml_response("!!!not-valid-base64!!!", "_request_id", &provider).unwrap_err();
+    let err = validate_saml_response(
+        "!!!not-valid-base64!!!",
+        "_request_id",
+        &provider,
+        test_arrival(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ResponseError::DecodeFailed(_)),
         "Expected DecodeFailed for invalid base64, got: {err}"
@@ -478,7 +484,8 @@ fn invalid_xml_returns_xml_parse_error() {
     };
 
     let bad_xml = BASE64_STANDARD.encode("<unclosed");
-    let err = validate_saml_response(&bad_xml, "_request_id", &provider).unwrap_err();
+    let err =
+        validate_saml_response(&bad_xml, "_request_id", &provider, test_arrival()).unwrap_err();
     assert!(
         matches!(err, ResponseError::XmlParse(_)),
         "Expected XmlParse for invalid XML, got: {err}"
@@ -1294,7 +1301,7 @@ fn validate_saml_response_rsa_signed_happy_path() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request001", &provider);
+    let result = validate_saml_response(&base64_response, "_request001", &provider, test_arrival());
     let assertion = result.expect("Expected Ok");
 
     assert_eq!(assertion.email, "alice@example.com");
@@ -1444,8 +1451,9 @@ fn validate_saml_response_comment_injection_does_not_truncate_identity() {
     assert_ne!(xml, injected_xml, "Injection must actually change the XML");
 
     let base64_response = B64.encode(injected_xml.as_bytes());
-    let assertion = validate_saml_response(&base64_response, "_request003", &provider)
-        .expect("comment injection leaves the signature valid, so validation succeeds");
+    let assertion =
+        validate_saml_response(&base64_response, "_request003", &provider, test_arrival())
+            .expect("comment injection leaves the signature valid, so validation succeeds");
 
     assert_eq!(
         assertion.email, "attacker@example.com.evil.tld",
@@ -1489,7 +1497,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
     assert_ne!(xml, tampered_xml, "Tamper must actually change the XML");
 
     let base64_response = B64.encode(tampered_xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request002", &provider);
+    let result = validate_saml_response(&base64_response, "_request002", &provider, test_arrival());
 
     assert!(
         result.is_err(),
@@ -1642,7 +1650,8 @@ fn xsw_nested_assertion_rejected() {
     );
 
     let base64_response = B64.encode(xsw_xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_xsw", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_request_xsw", &provider, test_arrival());
 
     assert!(result.is_err(), "Expected Err for nested Assertion XSW");
     let err_msg = result.unwrap_err().to_string();
@@ -1675,7 +1684,7 @@ fn oversized_response_returns_decode_error() {
     // Create a payload that exceeds MAX_RESPONSE_BYTES when decoded
     let oversized = vec![b'A'; MAX_RESPONSE_BYTES + 1];
     let encoded = BASE64_STANDARD.encode(&oversized);
-    let err = validate_saml_response(&encoded, "_req", &provider).unwrap_err();
+    let err = validate_saml_response(&encoded, "_req", &provider, test_arrival()).unwrap_err();
     assert!(
         matches!(err, ResponseError::DecodeFailed(ref msg) if msg.contains("maximum size")),
         "Expected DecodeFailed for oversized response, got: {err}"
@@ -1890,7 +1899,8 @@ fn xsw_inresponseto_unsigned_response_missing_scd_irt_rejected() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -1927,7 +1937,12 @@ fn xsw_inresponseto_unsigned_response_with_matching_scd_irt_passes() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_2", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_2",
+        &provider,
+        test_arrival(),
+    );
     let assertion = result
         .expect("Expected Ok for assertion-only signed response with matching SCD.InResponseTo");
     assert_eq!(assertion.email, "alice@example.com");
@@ -1964,7 +1979,8 @@ fn xsw_inresponseto_scd_irt_mismatch_fails() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -2020,7 +2036,8 @@ fn xsw_inresponseto_attack_scenario_rejected() {
 
     let base64_response = B64.encode(attacked_xml.as_bytes());
     // Attacker submits with their own request ID as expected.
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -2061,7 +2078,7 @@ fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_req_irt_5", &provider);
+    let result = validate_saml_response(&base64_response, "_req_irt_5", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -2104,8 +2121,13 @@ fn response_signed_missing_scd_irt_is_still_rejected() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let err = validate_saml_response(&base64_response, "_request_irt_6", &provider)
-        .expect_err("a solicited response must carry SubjectConfirmationData.InResponseTo");
+    let err = validate_saml_response(
+        &base64_response,
+        "_request_irt_6",
+        &provider,
+        test_arrival(),
+    )
+    .expect_err("a solicited response must carry SubjectConfirmationData.InResponseTo");
     assert!(
         matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
         "Expected MissingSubjectConfirmationInResponseTo, got: {err}"
@@ -2139,7 +2161,12 @@ fn response_signed_with_scd_irt_passes() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_7", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_7",
+        &provider,
+        test_arrival(),
+    );
     let assertion = result.expect("Expected Ok for Response-signed with matching SCD.InResponseTo");
     assert_eq!(assertion.email, "alice@example.com");
 }
@@ -2172,7 +2199,12 @@ fn response_signed_scd_irt_mismatch_fails() {
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_8", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_8",
+        &provider,
+        test_arrival(),
+    );
 
     let err = result.unwrap_err();
     assert!(

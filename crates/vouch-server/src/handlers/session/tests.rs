@@ -163,6 +163,7 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
         "GET",
         "/api/v1/applications",
         Some(&cert),
+        test_arrival(),
     )
     .await;
 
@@ -217,6 +218,7 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
         "GET",
         "/api/v1/applications",
         Some(&cert_b),
+        test_arrival(),
     )
     .await;
 

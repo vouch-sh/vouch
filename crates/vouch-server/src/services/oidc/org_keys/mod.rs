@@ -209,6 +209,10 @@ async fn generate_key_material(alg: JwsAlgorithm) -> Result<KeyMaterial> {
 /// first use so relying-party caches are warm long before any rotate).
 /// Idempotent: the deterministic ID makes a concurrent creation or retry
 /// collide on the primary key rather than insert a duplicate.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps a newly created signing key"
+)]
 async fn ensure_key(
     store: &DocumentStore,
     org_id: &str,

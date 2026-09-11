@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::test_utils::test_arrival;
 use crate::test_utils::{
     TestSessionSpec, create_test_authenticator, create_test_session_with, create_test_user,
     http_delete_full, http_get_full, http_post_json, test_app, test_app_state, test_config,
@@ -791,6 +792,7 @@ async fn test_enrollment_allowed_domains_distinct_from_invalid_domain_gate() {
         identity_in,
         claim_in,
         ClientInfo::default(),
+        test_arrival(),
     )
     .await;
     assert_eq!(
@@ -815,6 +817,7 @@ async fn test_enrollment_allowed_domains_distinct_from_invalid_domain_gate() {
         identity_out,
         claim_out,
         ClientInfo::default(),
+        test_arrival(),
     )
     .await;
     assert_eq!(
@@ -855,6 +858,7 @@ async fn test_enrollment_allowed_domains_distinct_from_invalid_domain_gate() {
         identity_ws,
         claim_ws,
         ClientInfo::default(),
+        test_arrival(),
     )
     .await;
     assert_eq!(
@@ -941,8 +945,15 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        client_info,
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     let events = audit_events_for(&state, "login_success", &user.id).await;
@@ -1003,9 +1014,15 @@ async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     // A direct web sign-in (no CLI waiting) lands on the keys page; the
@@ -1140,9 +1157,15 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp
@@ -1224,9 +1247,15 @@ async fn test_identity_conflict_renders_error_and_audits() {
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     // Error page renders 200 OK, and crucially carries no session cookie.
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1282,9 +1311,15 @@ async fn test_non_durable_login_refused_once_issuer_is_bound() {
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
@@ -1319,9 +1354,15 @@ async fn test_lazy_bind_emits_identity_bound_event() {
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     let events = audit_events_for(&state, "identity_bound", &user.id).await;
@@ -1353,9 +1394,15 @@ async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_ne!(
         resp.status(),
@@ -1395,9 +1442,15 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
         domain: Some(test_domain("example.com")),
         upstream: None,
     };
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     // A fresh enrollee has no key to assert with: they must reach the keys
@@ -2638,9 +2691,15 @@ async fn test_enrollment_rejects_display_name_wrapped_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
     let user = crate::db::get_user_by_email(&state.store, "alice example <alice@example.com>")
@@ -2663,9 +2722,15 @@ async fn test_enrollment_rejects_empty_local_part_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
     let user = crate::db::get_user_by_email(&state.store, "@example.com")
@@ -2695,9 +2760,15 @@ async fn test_enrollment_open_mode_rejects_empty_domain_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
     let user = crate::db::get_user_by_email(&state.store, "foo@")
@@ -2736,9 +2807,15 @@ async fn test_enrollment_open_mode_rejects_whitespace_domain_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -2771,9 +2848,15 @@ async fn test_enrollment_open_mode_rejects_tab_in_domain_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::OK,
@@ -2807,9 +2890,15 @@ async fn test_enrollment_open_mode_accepts_well_formed_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::SEE_OTHER,
@@ -2831,9 +2920,15 @@ async fn test_enrollment_accepts_well_formed_email() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::SEE_OTHER,
@@ -2881,9 +2976,15 @@ async fn test_enrollment_open_mode_accepts_divergent_identity_domain() {
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::SEE_OTHER,
@@ -2927,9 +3028,15 @@ async fn test_enrollment_open_mode_gates_email_domain_without_asserted_domain() 
         domain: None,
         upstream: None,
     };
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::SEE_OTHER,
@@ -2950,6 +3057,7 @@ async fn test_enrollment_open_mode_gates_email_domain_without_asserted_domain() 
         identity_ws,
         claim_ws,
         ClientInfo::default(),
+        test_arrival(),
     )
     .await;
     assert_eq!(

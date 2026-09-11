@@ -14,6 +14,7 @@
 //!    verifies WebAuthn assertion, and issues an OAuth access token.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
@@ -217,6 +218,7 @@ pub(crate) async fn exchange_fido2_assertion(
     params: Fido2AssertionParams<'_>,
     client_auth: ClientAuthProof,
     sender_constraint: SenderConstraintProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<Fido2AssertionResult> {
     // Parse and check the assertion. This reads only the assertion parameter,
     // so it completes before the challenge state is consumed below.
@@ -363,6 +365,7 @@ pub(crate) async fn exchange_fido2_assertion(
             client_ip,
             &params.client.client.client_id,
             ad_value.as_ref(),
+            arrival,
         )
         .await
     {
@@ -440,6 +443,7 @@ pub(crate) async fn exchange_fido2_assertion(
             source_code_hash: None,
         },
         proof,
+        arrival,
     )
     .await?;
 

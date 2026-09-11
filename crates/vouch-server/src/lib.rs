@@ -4,6 +4,21 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
+// Request-path time comparisons take `arrival::ArrivalTime`, not their own
+// clock reading. `disallowed_methods` is configured in `.clippy.toml` and left
+// at `allow` workspace-wide; this is where it is switched on.
+#![warn(clippy::disallowed_methods)]
+// Test code stamps clocks freely: a test that needs an instant constructs one,
+// and the convention is about code serving a request. The non-test build of
+// this library still lints every production site.
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "tests construct their own instants; the lint targets request-serving code"
+    )
+)]
+
 // Prevent test-utils from being enabled in any release build of this
 // library. The feature exposes `test_utils` (helpers that bypass FIDO2
 // and construct `GrantProof::TestingOnly` / `TestCoseVerifier`) — none
@@ -13,6 +28,7 @@
 #[cfg(all(feature = "test-utils", not(debug_assertions)))]
 compile_error!("test-utils feature must not be enabled in release builds");
 
+pub mod arrival;
 pub mod assurance;
 pub(crate) mod attestation;
 pub mod config;

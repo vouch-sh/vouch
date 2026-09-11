@@ -9,6 +9,7 @@
 //! browser-facing endpoint. See `docs/src/admin/audit.md` for the full
 //! contract (cursor semantics, delivery guarantee, filters).
 
+use crate::arrival::ArrivalTime;
 use std::sync::Arc;
 
 use aws_lc_rs::digest::{self, SHA256};
@@ -141,6 +142,7 @@ async fn authenticate(
     jar: &CookieJar,
     method: &str,
     uri: &str,
+    arrival: ArrivalTime,
 ) -> Result<AuditApiAuth, ServiceError> {
     let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
@@ -213,7 +215,7 @@ async fn authenticate(
         ));
     }
 
-    let (user, org_id) = extract_org_admin(state, headers, jar, method, uri, None).await?;
+    let (user, org_id) = extract_org_admin(state, headers, jar, method, uri, None, arrival).await?;
     Ok(AuditApiAuth::OrgAdmin {
         org_id,
         user_id: user.id,
@@ -341,6 +343,7 @@ fn build_ndjson_body(
 
 /// GET /api/v1/org/audit-events
 pub(crate) async fn audit_events(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -348,7 +351,7 @@ pub(crate) async fn audit_events(
     jar: CookieJar,
     Query(query): Query<AuditEventsQuery>,
 ) -> Result<Response, ServiceError> {
-    let auth = authenticate(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let auth = authenticate(&state, &headers, &jar, method.as_str(), uri.path(), arrival).await?;
 
     let event_types = query
         .event_type
@@ -366,7 +369,8 @@ pub(crate) async fn audit_events(
         .map(|s| parse_timestamp_param("until", s))
         .transpose()?;
 
-    let lag_cutoff = Timestamp::now()
+    let lag_cutoff = arrival
+        .timestamp()
         .checked_sub(Span::new().seconds(LAG_WINDOW_SECONDS))
         .map_err(|e| {
             tracing::error!(error = %e, "failed to compute audit API lag window");

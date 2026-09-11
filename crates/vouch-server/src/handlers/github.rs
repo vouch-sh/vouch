@@ -9,6 +9,7 @@
 //! - POST /github/reconnect - Reconnect an existing GitHub installation
 //! - GET /github/success - Success page after connection
 
+use crate::arrival::ArrivalTime;
 use crate::error::ServiceError;
 use crate::handlers::session::{
     AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
@@ -158,6 +159,10 @@ impl GitHubStateToken {
         Self::new(org_id, user_id, session_binding, GitHubStateFlowType::Link)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "mints the GitHub state token's iat"
+    )]
     fn new(
         org_id: &str,
         user_id: &str,
@@ -331,6 +336,7 @@ pub(crate) async fn github_webhook(
 /// Also handles redirects from GitHub after app installation if the GitHub App's
 /// "Setup URL" points here instead of `/github/callback`.
 pub(crate) async fn github_connect_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubConnectParams>,
@@ -354,7 +360,7 @@ pub(crate) async fn github_connect_page(
     }
 
     // Extract session from cookie (browser UI)
-    let session = match extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -450,17 +456,18 @@ pub(crate) async fn github_connect_page(
 /// Both flows require an authenticated session cookie that matches the session
 /// which originally minted the state token (RFC 6819 §5.3.5 CSRF defense).
 pub(crate) async fn github_callback(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubCallbackParams>,
 ) -> Response {
     // Detect callback type by presence of `code` parameter
     if let Some(code) = &params.code {
-        return handle_oauth_callback(&state, &jar, code, params.state.as_deref()).await;
+        return handle_oauth_callback(&state, &jar, code, params.state.as_deref(), arrival).await;
     }
 
     // Otherwise, handle as installation callback
-    handle_installation_callback(&state, &jar, &params).await
+    handle_installation_callback(&state, &jar, &params, arrival).await
 }
 
 /// Validate the callback session against the state token.
@@ -481,8 +488,9 @@ async fn validate_callback_session(
     jar: &CookieJar,
     token: &GitHubStateToken,
     flow_label: &'static str,
+    arrival: ArrivalTime,
 ) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
-    let session = match extract_session_from_cookie(state, jar).await {
+    let session = match extract_session_from_cookie(state, jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
@@ -525,6 +533,7 @@ async fn handle_oauth_callback(
     jar: &CookieJar,
     code: &str,
     state_param: Option<&str>,
+    arrival: ArrivalTime,
 ) -> Response {
     // Verify state parameter
     let state_token = match state_param {
@@ -547,7 +556,7 @@ async fn handle_oauth_callback(
     }
 
     // CSRF defense: bind the callback to the cookie session.
-    let session = match validate_callback_session(state, jar, &token, "oauth_link").await {
+    let session = match validate_callback_session(state, jar, &token, "oauth_link", arrival).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -588,6 +597,7 @@ async fn handle_installation_callback(
     state: &Arc<AppState>,
     jar: &CookieJar,
     params: &GitHubCallbackParams,
+    arrival: ArrivalTime,
 ) -> Response {
     // Verify required parameters
     let installation_id = match params.installation_id {
@@ -616,7 +626,7 @@ async fn handle_installation_callback(
     }
 
     // CSRF defense: bind the callback to the cookie session.
-    let session = match validate_callback_session(state, jar, &token, "install").await {
+    let session = match validate_callback_session(state, jar, &token, "install", arrival).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -674,6 +684,7 @@ async fn handle_installation_callback(
 
 /// GET /github/link - Redirect user to GitHub OAuth to link their GitHub account.
 pub(crate) async fn github_link_start(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
@@ -686,7 +697,7 @@ pub(crate) async fn github_link_start(
     }
 
     // Extract session from cookie
-    let session = match extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -737,6 +748,7 @@ pub(crate) async fn github_link_start(
 /// This allows an org admin to link an existing GitHub installation (that they
 /// have access to via `/user/installations`) to their Vouch organization.
 pub(crate) async fn github_reconnect(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Form(form): Form<GitHubReconnectForm>,
@@ -750,7 +762,7 @@ pub(crate) async fn github_reconnect(
     }
 
     // Extract session from cookie
-    let session = match extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -797,11 +809,12 @@ pub(crate) async fn github_reconnect(
 
 /// GET /github/success - Show success page after GitHub connection.
 pub(crate) async fn github_success_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
-    let auth = get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     GitHubSuccessTemplate {
         org_name: state.config().get_org_display_name().to_string(),
@@ -1290,7 +1303,7 @@ mod tests {
         // peer would: a first lookup hits the DB and inserts the session.
         let seeded = state
             .session_cache
-            .get_session_by_token_hash(&state.store, &session_hash)
+            .get_session_by_token_hash(&state.store, &session_hash, test_arrival())
             .await
             .expect("seed lookup succeeds");
         assert!(seeded.is_some(), "session row must exist before seeding");
@@ -1351,7 +1364,7 @@ mod tests {
 
         let seeded = state
             .session_cache
-            .get_session_by_token_hash(&state.store, &session_hash)
+            .get_session_by_token_hash(&state.store, &session_hash, test_arrival())
             .await
             .expect("seed lookup succeeds");
         assert!(seeded.is_some(), "session row must exist before seeding");

@@ -2,6 +2,7 @@
 //! Authentication handlers for session management.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::ServiceError;
 use crate::services::auth::AccessTokenClaims;
@@ -13,7 +14,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::{SessionStatus, protocol};
 
@@ -25,6 +25,7 @@ use crate::db::ClientInfo;
 /// Accepts an OAuth access token (Bearer or DPoP scheme) and returns
 /// authenticated status, email, expiration, and device name.
 pub(crate) async fn status(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SessionStatus>, ServiceError> {
@@ -84,7 +85,7 @@ pub(crate) async fn status(
     let token_hash = hash_token(token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await?;
 
     if session.is_none() {
@@ -109,7 +110,7 @@ pub(crate) async fn status(
         None => None,
     };
 
-    Ok(Json(build_status(&access_claims, device_name)))
+    Ok(Json(build_status(&access_claims, device_name, arrival)))
 }
 
 /// Build the [`SessionStatus`] for the success path of [`status`].
@@ -121,8 +122,12 @@ pub(crate) async fn status(
 /// decision: it is `None` whenever `authenticated == false`. `device_name`
 /// carries no "if authenticated" qualifier in the contract and is returned
 /// unconditionally.
-fn build_status(access_claims: &AccessTokenClaims, device_name: Option<String>) -> SessionStatus {
-    let now = Timestamp::now().as_second();
+fn build_status(
+    access_claims: &AccessTokenClaims,
+    device_name: Option<String>,
+    arrival: ArrivalTime,
+) -> SessionStatus {
+    let now = arrival.as_second();
     let expires_in = if access_claims.exp > now {
         u64::try_from(access_claims.exp.saturating_sub(now)).ok()
     } else {
@@ -145,6 +150,7 @@ fn build_status(access_claims: &AccessTokenClaims, device_name: Option<String>) 
 /// Handle sign-out (clears session cookie).
 /// POST /logout
 pub(crate) async fn logout(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     jar: CookieJar,
@@ -159,7 +165,7 @@ pub(crate) async fn logout(
         // Look up session before deletion to capture user info for audit
         let session_info = match state
             .session_cache
-            .get_session_by_token_hash(&state.store, &token_hash)
+            .get_session_by_token_hash(&state.store, &token_hash, arrival)
             .await
         {
             Ok(info) => info,
@@ -218,6 +224,7 @@ pub(crate) async fn logout(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::arrival::ArrivalTime;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -342,11 +349,14 @@ mod tests {
         }
     }
 
+    /// A fixed instant, so a test about the `exp == now` edge compares against
+    /// exactly the second it constructed its claims from.
+    const FIXED: i64 = 1_800_000_000;
+
     #[test]
     fn build_status_email_is_none_at_exp_boundary() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = claims_with_exp(now, Some("user@example.com"));
-        let status = super::build_status(&claims, None);
+        let claims = claims_with_exp(FIXED, Some("user@example.com"));
+        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
         // `exp == now` is the sharp edge of the strict `exp > now` re-check:
         // jsonwebtoken accepts it, but the server's authoritative rule rejects
         // it, so `authenticated == false` and `email` must be `None`.
@@ -361,9 +371,8 @@ mod tests {
 
     #[test]
     fn build_status_email_is_some_when_authenticated() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = claims_with_exp(now.saturating_add(3600), Some("user@example.com"));
-        let status = super::build_status(&claims, None);
+        let claims = claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com"));
+        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
         assert!(status.authenticated);
         assert_eq!(status.email.as_deref(), Some("user@example.com"));
         assert!(status.expires_in_seconds.unwrap_or(0) > 0);
@@ -371,18 +380,18 @@ mod tests {
 
     #[test]
     fn build_status_device_name_returned_regardless_of_auth() {
-        let now = jiff::Timestamp::now().as_second();
-
         let live = super::build_status(
-            &claims_with_exp(now.saturating_add(3600), Some("user@example.com")),
+            &claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com")),
             Some("YubiKey 5C".to_string()),
+            ArrivalTime::for_test_second(FIXED),
         );
         assert!(live.authenticated);
         assert_eq!(live.device_name.as_deref(), Some("YubiKey 5C"));
 
         let expired = super::build_status(
-            &claims_with_exp(now.saturating_sub(3600), Some("user@example.com")),
+            &claims_with_exp(FIXED.saturating_sub(3600), Some("user@example.com")),
             Some("YubiKey 5C".to_string()),
+            ArrivalTime::for_test_second(FIXED),
         );
         // `device_name` is documented without an "if authenticated" qualifier,
         // so it is returned unconditionally — do not gate it on `authenticated`.

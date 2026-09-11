@@ -6,6 +6,7 @@
 //! - `POST /saml/acs` — Assertion Consumer Service: validates SAML responses and
 //!   completes the enrollment flow.
 
+use crate::arrival::ArrivalTime;
 use std::sync::Arc;
 
 use axum::{
@@ -71,6 +72,7 @@ pub(crate) async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// Receives the IdP's SAML Response, validates it, and completes the
 /// enrollment flow identically to `oidc_callback()`.
 pub(crate) async fn acs(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     Form(form): Form<SamlAcsForm>,
@@ -155,6 +157,7 @@ pub(crate) async fn acs(
         &form.saml_response,
         &stored_state.nonce,
         saml_provider,
+        arrival,
     ) {
         Ok(a) => a,
         Err(e) => {
@@ -195,6 +198,7 @@ pub(crate) async fn acs(
         identity,
         oidc_state_claim,
         client_info,
+        arrival,
     )
     .await
 }

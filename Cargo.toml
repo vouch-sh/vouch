@@ -20,6 +20,9 @@ unused_lifetimes = "warn"
 single_use_lifetimes = "warn"
 
 [workspace.lints.clippy]
+# Configured in `.clippy.toml`, enabled only in vouch-server's crate roots.
+disallowed_methods = "allow"
+
 # Panic-prevention lints
 # See: https://blog.reverberate.org/2025/02/03/no-panic-rust.html
 # See: https://github.com/trailofbits/claude-code-config/blob/main/claude-md-template.md#rust

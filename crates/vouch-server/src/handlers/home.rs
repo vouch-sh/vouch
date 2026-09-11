@@ -6,6 +6,7 @@
 //! If the user is already authenticated, it shows a "Manage Security Keys"
 //! button instead.
 
+use crate::arrival::ArrivalTime;
 use crate::handlers::session::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
@@ -63,10 +64,11 @@ impl_template_response!(HomeTemplate);
 /// Home page showing enrollment instructions.
 /// GET /
 pub(crate) async fn home_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let auth = get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     let has_downloads = state.config().cli_download_macos.is_some()
         || state.config().cli_download_linux.is_some()

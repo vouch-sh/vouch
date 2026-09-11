@@ -366,6 +366,10 @@ pub async fn build_protected_resource_metadata(
 ///   cache validation).
 ///
 /// The header's `typ` is [`SIGNED_METADATA_TYP`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the protected-resource metadata iat"
+)]
 async fn build_signed_metadata(
     state: &Arc<AppState>,
     metadata: &ProtectedResourceMetadata,

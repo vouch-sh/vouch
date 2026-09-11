@@ -313,6 +313,10 @@ impl OidcIdTokenClaimsBuilder {
     /// # Errors
     ///
     /// Returns an error if required fields (issuer, subject, audience) are missing.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "mints the ID token's iat and exp"
+    )]
     pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
         let now = jiff::Timestamp::now();
         let exp = now

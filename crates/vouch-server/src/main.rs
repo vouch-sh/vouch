@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch identity server.
 
+// See the matching attribute in `lib.rs`: request-path comparisons take
+// `vouch_server::arrival::ArrivalTime` rather than reading their own clock.
+#![warn(clippy::disallowed_methods)]
+
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]

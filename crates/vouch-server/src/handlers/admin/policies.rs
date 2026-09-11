@@ -2,6 +2,7 @@
 //! Device posture policies — browser UI handlers.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::documents::audit::{CustomPolicyAdminData, PreconfiguredPolicyToggleData};
 use crate::error::ServiceError;
@@ -176,6 +177,7 @@ pub(crate) async fn toggle_preconfigured_policy(
     headers: HeaderMap,
     jar: CookieJar,
     ValidPath(slug): ValidPath<String>,
+    arrival: ArrivalTime,
 ) -> Result<Response, ServiceError> {
     if !posture::is_valid_preconfigured_slug(&slug) {
         return Err(ServiceError::api(
@@ -185,8 +187,16 @@ pub(crate) async fn toggle_preconfigured_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     // Single read of active slugs — fixes TOCTOU from old handler
     let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
@@ -301,6 +311,7 @@ fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
 
 /// POST /admin/policies/custom — Create a new custom policy.
 pub(crate) async fn create_custom_policy(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -339,8 +350,16 @@ pub(crate) async fn create_custom_policy(
 
     // Authenticate before parsing: policy text is attacker-influenced
     // input, so only an authenticated org admin may reach the parser.
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
@@ -402,7 +421,12 @@ pub(crate) async fn create_custom_policy(
 }
 
 /// POST /admin/policies/custom/{id} — Update a custom policy.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn update_custom_policy(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -439,8 +463,16 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));

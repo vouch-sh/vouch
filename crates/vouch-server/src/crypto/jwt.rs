@@ -176,6 +176,10 @@ impl StateTokenSigner {
     }
 
     /// Decode and verify a state token JWT.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "KMS state-token validation happens below the layer ArrivalTime lives in"
+    )]
     pub async fn decode_state_token<T: DeserializeOwned>(
         &self,
         token: &str,

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session database operations.
 
+use crate::arrival::ArrivalTime;
+
 use super::document_type::{Document, DocumentType};
 use super::documents::session::SessionDoc;
 use super::store::DocumentStore;
@@ -300,10 +302,15 @@ impl SessionCache {
     }
 
     /// Get a cached session by token hash, or fetch from DB on miss.
+    ///
+    /// `arrival` is the instant the session's `expires_at` is judged against,
+    /// so a request that authenticates here and then makes a second
+    /// time-sensitive decision downstream measures both from one clock.
     pub async fn get_session_by_token_hash(
         &self,
         store: &DocumentStore,
         token_hash: &str,
+        arrival: ArrivalTime,
     ) -> Result<Option<Arc<Session>>> {
         // Test-only fault injection: the hash was registered via
         // [`Self::inject_fault`]; return a store-style `Err` so callers can
@@ -322,7 +329,7 @@ impl SessionCache {
         // Snapshot generation before the async DB fetch so we can
         // detect invalidations that occurred during the await.
         let gen_before = self.generation.load(Ordering::SeqCst);
-        let result = get_session_by_token_hash(store, token_hash, Timestamp::now())
+        let result = get_session_by_token_hash(store, token_hash, arrival.timestamp())
             .await?
             .map(Arc::new);
         self.insert_if_valid(token_hash.to_string(), result.clone(), gen_before);

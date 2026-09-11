@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::test_utils::test_arrival;
 
 // ========================================================================
 // Cascade Delete Tests
@@ -771,7 +772,7 @@ async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
     let cache = SessionCache::new(100, 30);
     assert!(
         cache
-            .get_session_by_token_hash(&store, "m2m-hash")
+            .get_session_by_token_hash(&store, "m2m-hash", test_arrival())
             .await
             .expect("cache lookup m2m")
             .is_some(),
@@ -779,7 +780,7 @@ async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
     );
     assert!(
         cache
-            .get_session_by_token_hash(&store, "user-hash")
+            .get_session_by_token_hash(&store, "user-hash", test_arrival())
             .await
             .expect("cache lookup user")
             .is_some(),
@@ -840,7 +841,7 @@ async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
     // the TTL.
     assert!(
         cache
-            .get_session_by_token_hash(&store, "m2m-hash")
+            .get_session_by_token_hash(&store, "m2m-hash", test_arrival())
             .await
             .expect("cache re-lookup m2m")
             .is_none(),
@@ -855,7 +856,7 @@ async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
     // still in the DB, so serving it is correct, not a stale `Hit`.
     assert!(
         cache
-            .get_session_by_token_hash(&store, "user-hash")
+            .get_session_by_token_hash(&store, "user-hash", test_arrival())
             .await
             .expect("cache re-lookup user")
             .is_some(),
@@ -907,14 +908,14 @@ async fn test_delete_client_first_delete_failure_changes_nothing() {
     let cache = SessionCache::new(100, 30);
     assert!(
         cache
-            .get_session_by_token_hash(&store, "m2m-f")
+            .get_session_by_token_hash(&store, "m2m-f", test_arrival())
             .await
             .expect("warm m2m")
             .is_some()
     );
     assert!(
         cache
-            .get_session_by_token_hash(&store, "user-f")
+            .get_session_by_token_hash(&store, "user-f", test_arrival())
             .await
             .expect("warm user")
             .is_some()
@@ -953,7 +954,7 @@ async fn test_delete_client_first_delete_failure_changes_nothing() {
     // a retry of the chokepoint starts from a clean state.
     assert!(
         cache
-            .get_session_by_token_hash(&store, "m2m-f")
+            .get_session_by_token_hash(&store, "m2m-f", test_arrival())
             .await
             .expect("cache m2m")
             .is_some(),
@@ -961,7 +962,7 @@ async fn test_delete_client_first_delete_failure_changes_nothing() {
     );
     assert!(
         cache
-            .get_session_by_token_hash(&store, "user-f")
+            .get_session_by_token_hash(&store, "user-f", test_arrival())
             .await
             .expect("cache user")
             .is_some(),

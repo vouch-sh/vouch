@@ -209,6 +209,10 @@ pub struct AuthTime(i64);
 impl AuthTime {
     /// Stamp the current instant. Private: every public path to an
     /// `AuthTime` runs through a completed ceremony.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the instant a ceremony completed, not a comparison"
+    )]
     fn stamp() -> Self {
         Self(jiff::Timestamp::now().as_second())
     }

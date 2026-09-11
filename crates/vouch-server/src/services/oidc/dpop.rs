@@ -12,10 +12,10 @@
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
+use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
@@ -318,11 +318,10 @@ fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), 
 /// since it is the one field every caller stamps identically.
 #[derive(Clone, Copy)]
 pub struct DpopClaimsValidation<'a> {
-    /// Current time (seconds since epoch), stamped once by the caller at the
-    /// entry point and shared with the JTI retention computation
-    /// (`Timestamp::now().as_second()` in production via
-    /// [`validate_dpop_common`]; a fixed value in tests for deterministic
-    /// boundary checks). The freshness check and the JTI `expires_at` MUST
+    /// Current time (seconds since epoch), shared with the JTI retention
+    /// computation — the request's [`ArrivalTime`] in production via
+    /// [`validate_dpop_common`], a fixed value in tests for deterministic
+    /// boundary checks. The freshness check and the JTI `expires_at` MUST
     /// share this single instant — restamping `now` between the two lets
     /// the freshness window's upper bound drift past the replay record's
     /// `expires_at` and reopens a replay gap (RFC 9449 §11.1).
@@ -514,6 +513,10 @@ impl NoncePolicy {
 }
 
 /// multi-instance consistency.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RFC 9449 proof validation inputs: proof, method, URIs, store, policy, clock"
+)]
 async fn validate_dpop_common(
     proof: &str,
     expected_method: &str,
@@ -522,23 +525,19 @@ async fn validate_dpop_common(
     config_max_age: i64,
     expected_ath: Option<&str>,
     nonce_policy: NoncePolicy,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
-    // Stamp `now` ONCE, before any `await`, so the JTI retention and the
-    // freshness check share the same reference instant. The two previously
-    // stamped `Timestamp::now()` independently — `check_and_store_dpop_jti`
-    // stamped it internally for `expires_at` (T1), then this function
-    // stamped it again for `validate_dpop_claims` (T2 = T1 + Δ, after the
-    // DB insert's `await`). Because T2 ≥ T1, the freshness window's upper
-    // bound could land Δ past the JTI's `expires_at`, and `as_second()`
-    // floor-truncation added up to one more second of slack — together
-    // reopening a residual `Δ + 1` replay window between JTI cleanup and
-    // proof staleness (RFC 9449 §11.1). Passing the same `now` into
-    // `check_and_store_dpop_jti_at_second` and `validate_dpop_claims`
-    // eliminates the Δ; the `+1` round-up below covers the floor-slack.
-    let now = Timestamp::now();
+    // The JTI retention window and the proof-freshness window are two halves
+    // of one single-use guarantee, so they must be measured from one instant.
+    // Read separately — with the DB insert's `await` between them — retention
+    // would be anchored earlier than freshness, and the JTI row could be
+    // retired while its proof was still accepted (RFC 9449 §11.1). The
+    // request's arrival stamp is that one instant; the `+1` round-up below
+    // covers the remaining `as_second()` floor-truncation.
+    let now = arrival.timestamp();
 
     // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY.
     // The returned `DpopJtiClaim` is moved into the `ValidatedDpopProof`
@@ -553,21 +552,17 @@ async fn validate_dpop_common(
     // (floor-truncated), so a forward-skewed proof with `iat =
     // floor(now) + skew` stays freshness-accepted until the first second
     // at which `floor(T_replay) > iat + max_age`, i.e. until `floor(now) +
-    // skew + max_age + 1`. Retaining for only `config_max_age` (the
-    // pre-03203125 value) let the cleanup task delete the row inside that
-    // window. Committing for `config_max_age + PROOF_SKEW_SECONDS` from a
-    // `now_second` that is `floor(now) + 1` (the round-up) makes
+    // skew + max_age + 1`. Committing for `config_max_age +
+    // PROOF_SKEW_SECONDS` from a `now_second` of `floor(now) + 1` makes
     // `expires_at = floor(now) + 1 + max_age + skew` — exactly the first
     // second at which the freshness check rejects the proof — so a cleanup
-    // tick can never retire the row while the proof is still fresh.
-    // Without the `+1`, `as_second()` floor-truncation would leave a
-    // `1 − frac(now)`-second gap (the floor-slack) even with a single
-    // `now`. `now_second` is `floor(now) + 1` — the round-up over that
-    // truncation. `saturating_add` is panic-free and can never saturate in
-    // practice: jiff's representable second range is far below `i64::MAX`,
-    // so this is always the true `+1`. (If it ever did saturate,
-    // `Timestamp::from_second` inside the DB helper would return `Err` and
-    // surface as `ClaimError::Database`, not a panic.)
+    // tick can never retire the row while the proof is still fresh. The `+1`
+    // is the round-up over `as_second()` floor-truncation; without it a
+    // `1 − frac(now)`-second gap remains even on a single clock.
+    // `saturating_add` is panic-free and cannot saturate in practice —
+    // jiff's representable second range is far below `i64::MAX` — and if it
+    // ever did, `Timestamp::from_second` inside the DB helper returns `Err`
+    // and surfaces as `ClaimError::Database` rather than a panic.
     let now_second = now.as_second().saturating_add(1);
     let jti_retention = config_max_age.saturating_add(PROOF_SKEW_SECONDS);
     let jti_claim =
@@ -593,10 +588,10 @@ async fn validate_dpop_common(
 
     // Validate claims (method, URI, timestamp, nonce inline, ath)
     // Pass None for expected_nonce to skip redundant self-comparison;
-    // database nonce validation happens below. `now.as_second()` is the
-    // SAME instant that produced `now_second` above — not a fresh
-    // `Timestamp::now()` — so the freshness check and the JTI retention
-    // cannot drift apart across the DB insert's `await`.
+    // database nonce validation happens below. `now.as_second()` is the same
+    // arrival instant that produced `now_second` above, so the freshness
+    // check and the JTI retention cannot drift apart across the insert's
+    // `await`.
     validate_dpop_claims(
         &claims,
         &DpopClaimsValidation {
@@ -655,6 +650,7 @@ pub async fn validate_dpop_proof(
     accepted_uris: &[String],
     store: &DocumentStore,
     config_max_age: i64,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
     validate_dpop_common(
         proof,
@@ -664,6 +660,7 @@ pub async fn validate_dpop_proof(
         config_max_age,
         None, // No access token hash for token endpoint
         NoncePolicy::Required,
+        arrival,
     )
     .await
 }
@@ -688,6 +685,7 @@ pub async fn validate_dpop_at_resource(
     uri: &str,
     store: &DocumentStore,
     config_max_age: i64,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
     let expected_ath = compute_access_token_hash(access_token);
     let accepted_uris = vec![uri.to_string()];
@@ -699,6 +697,7 @@ pub async fn validate_dpop_at_resource(
         config_max_age,
         Some(&expected_ath),
         NoncePolicy::Optional,
+        arrival,
     )
     .await
 }
@@ -720,6 +719,8 @@ mod rfc9449_vectors;
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::test_arrival;
+    use jiff::Timestamp;
 
     #[test]
     fn test_ec_jwk_thumbprint() {
@@ -1732,10 +1733,17 @@ mod tests {
         let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token);
 
         let now_before = jiff::Timestamp::now().as_second();
-        let validated =
-            validate_dpop_at_resource(access_token, &proof, method, uri, &store, CONFIG_MAX_AGE)
-                .await
-                .expect("resource proof validates");
+        let validated = validate_dpop_at_resource(
+            access_token,
+            &proof,
+            method,
+            uri,
+            &store,
+            CONFIG_MAX_AGE,
+            test_arrival(),
+        )
+        .await
+        .expect("resource proof validates");
         let now_after = jiff::Timestamp::now().as_second();
 
         // Read the committed JTI back by its deterministic document ID.
@@ -1781,9 +1789,16 @@ mod tests {
         );
 
         // Replay of the same proof must be rejected while the row is present.
-        let replay =
-            validate_dpop_at_resource(access_token, &proof, method, uri, &store, CONFIG_MAX_AGE)
-                .await;
+        let replay = validate_dpop_at_resource(
+            access_token,
+            &proof,
+            method,
+            uri,
+            &store,
+            CONFIG_MAX_AGE,
+            test_arrival(),
+        )
+        .await;
         assert!(
             matches!(replay, Err(DpopError::ReplayDetected)),
             "an immediate replay of the same DPoP proof must be rejected: got {replay:?}"

@@ -175,6 +175,10 @@ fn revoke_ready_at(demoted_at: Timestamp, session_hours: u64) -> Result<Timestam
 /// a missing Next key (rows created before rotation existed) by staging one,
 /// outside any transaction — safe because the staged insert is idempotent.
 /// The rotate transaction re-checks every gate authoritatively.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 async fn precheck_rotate_and_heal(state: &AppState, org_id: &str) -> Result<Option<RotateOutcome>> {
     let store = &state.store;
     let now = Timestamp::now();
@@ -353,6 +357,10 @@ async fn rotate_one_alg_in_tx(
 /// # Errors
 /// Returns an error if key generation or the transaction fails after the OCC
 /// retry budget is exhausted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn rotate_org_keys(
     state: &AppState,
     org_id: &str,
@@ -444,6 +452,10 @@ pub async fn rotate_org_keys(
 ///
 /// # Errors
 /// Returns an error if the reads, the transaction, or the gate math fail.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn revoke_org_previous_keys(
     state: &AppState,
     org_id: &str,
@@ -619,6 +631,10 @@ struct EmergencyKeyPair {
 /// # Errors
 /// Returns an error if key generation or the transaction fails after the OCC
 /// retry budget is exhausted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn emergency_rotate_org_keys(
     state: &AppState,
     org_id: &str,
@@ -728,6 +744,10 @@ pub(crate) struct OrgKeyPanel {
 /// # Errors
 /// Returns an error if the key list cannot be loaded or a stored key is
 /// missing its state timestamp.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub(crate) async fn org_key_panel(state: &AppState, org_id: &str) -> Result<OrgKeyPanel> {
     let now = Timestamp::now();
     let mut docs = db::list_org_signing_keys(&state.store, org_id).await?;

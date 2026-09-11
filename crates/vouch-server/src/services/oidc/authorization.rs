@@ -6,6 +6,7 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
 use crate::db::{
     AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode,
@@ -838,12 +839,13 @@ fn validate_param_length(name: &str, value: &str, max_len: usize) -> ServiceResu
 pub async fn check_session_for_authorization(
     state: &Arc<AppState>,
     session_token: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationSessionState> {
     let Some(token) = session_token else {
         return Ok(AuthorizationSessionState::NeedsAuth);
     };
 
-    match validate_session_token(state, token).await? {
+    match validate_session_token(state, token, arrival).await? {
         Some(validated) => {
             // Two separate facts, and the authorization flow needs both.
             //
@@ -901,6 +903,10 @@ pub async fn check_session_for_authorization(
 ///
 /// # Errors
 /// Returns `ServiceError` if encoding fails or database storage fails.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the authorization code's expiry"
+)]
 pub async fn issue_authorization_code(
     state: &Arc<AppState>,
     params: AuthorizationCodeParams<'_>,
@@ -984,6 +990,7 @@ pub async fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
     client_id: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationCode> {
     let auth_code = AuthorizationCode::decode(
         code,
@@ -999,8 +1006,9 @@ pub async fn decode_authorization_code(
         )
     })?;
 
-    // Check expiration
-    let now = Timestamp::now().as_second();
+    // Check expiration against the request's arrival, so this gate and the
+    // issued token's lifetime downstream are measured from one instant.
+    let now = arrival.as_second();
     if auth_code.exp < now {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,

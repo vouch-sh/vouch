@@ -14,6 +14,7 @@
 //! HTTPS with self-signed certs; the safeguards are operational discipline and
 //! the loud startup warnings.
 
+use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use std::sync::Arc;
 
@@ -76,7 +77,12 @@ impl std::fmt::Debug for CompleteLoginQuery {
 /// - `403` — HMAC validation failed
 /// - `404` — no pending authorization found for the given ID
 /// - `500` — internal error
+#[expect(
+    clippy::disallowed_methods,
+    reason = "records the synthetic ceremony instant for the conformance bypass"
+)]
 pub(crate) async fn complete_login(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
@@ -192,6 +198,7 @@ pub(crate) async fn complete_login(
             ),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     {

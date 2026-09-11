@@ -6,6 +6,7 @@ use super::client_auth::{
     extract_client_auth, extract_client_credentials, with_client_auth_challenge,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -383,6 +384,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 /// - `urn:ietf:params:oauth:grant-type:device_code` grant (RFC 8628 Section 3.4)
 /// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
 pub(crate) async fn token(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
@@ -478,10 +480,19 @@ pub(crate) async fn token(
 
     match grant {
         GrantParams::AuthorizationCode(params) => {
-            handle_authorization_code_grant(State(state), client_cert, headers, auth, params).await
+            handle_authorization_code_grant(
+                arrival,
+                State(state),
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
         GrantParams::ClientCredentials(params) => {
             handle_client_credentials_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -492,10 +503,19 @@ pub(crate) async fn token(
             .await
         }
         GrantParams::DeviceCode(params) => {
-            handle_device_code_grant(State(state), client_info, client_cert, headers, params).await
+            handle_device_code_grant(
+                arrival,
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                params,
+            )
+            .await
         }
         GrantParams::TokenExchange(params) => {
             handle_token_exchange_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -507,6 +527,7 @@ pub(crate) async fn token(
         }
         GrantParams::Fido2Assertion(params) => {
             handle_fido2_assertion_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -674,6 +695,7 @@ async fn resolve_non_jwt_auth(
 
 /// Handle authorization code grant.
 async fn handle_authorization_code_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
@@ -694,7 +716,9 @@ async fn handle_authorization_code_grant(
             client_id,
         } = client_auth
         {
-            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
+                .await
+            {
                 Ok((client, pending_jti, auth)) => (Some(client), Some(pending_jti), Some(auth)),
                 Err(e) => return e.into_service_error().into_oauth_response().into_response(),
             }
@@ -712,23 +736,30 @@ async fn handle_authorization_code_grant(
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
 
     // For non-JWT auth, resolve `(AuthenticatedClient, ClientAuthProof)`
     // directly. The handler runs ALL non-JWT authentication itself so
@@ -820,7 +851,14 @@ async fn handle_authorization_code_grant(
         authorization_details: params.authorization_details.as_deref(),
     };
 
-    match exchange_authorization_code(&state, exchange_params, client_auth, sender_constraint).await
+    match exchange_authorization_code(
+        &state,
+        exchange_params,
+        client_auth,
+        sender_constraint,
+        arrival,
+    )
+    .await
     {
         Ok(result) => {
             crate::infra::metrics::record_auth_event("authorization_code_success");
@@ -845,7 +883,12 @@ async fn handle_authorization_code_grant(
 ///
 /// Requires client authentication via `client_secret_basic` or `client_secret_post`.
 /// Issues an access token with `hardware_verified: false` and no ID token.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 6749 §4.4 client-credentials grant: authenticate, bind, issue"
+)]
 async fn handle_client_credentials_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
@@ -859,7 +902,7 @@ async fn handle_client_credentials_grant(
         Err(resp) => return resp,
     };
 
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth, arrival).await {
         Ok(result) => result,
         Err(resp) => return resp,
     }) else {
@@ -908,23 +951,30 @@ async fn handle_client_credentials_grant(
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
 
     // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
     // (DPoP or mTLS), same as every other grant a FAPI client can reach.
@@ -992,6 +1042,7 @@ async fn handle_client_credentials_grant(
         params.scope.as_deref(),
         TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         proof,
+        arrival,
     )
     .await
     {
@@ -1038,6 +1089,7 @@ async fn handle_client_credentials_grant(
 
 /// Handle device code grant.
 async fn handle_device_code_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
@@ -1050,6 +1102,7 @@ async fn handle_device_code_grant(
         client_cert,
         headers,
         &params.device_code,
+        arrival,
     )
     .await
     {
@@ -1154,6 +1207,7 @@ fn resolve_exchange_audience(
 /// authentication. The client_id in the authenticated credentials must
 /// match any client_id provided in the request body.
 async fn handle_token_exchange_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
@@ -1168,7 +1222,7 @@ async fn handle_token_exchange_grant(
     };
 
     // Authenticate client (required for token exchange)
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth, arrival).await {
         Ok(result) => result,
         Err(resp) => return resp,
     }) else {
@@ -1196,23 +1250,30 @@ async fn handle_token_exchange_grant(
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
     let mtls_verification =
@@ -1315,7 +1376,7 @@ async fn handle_token_exchange_grant(
         sender_constraint,
     };
 
-    match exchange_token(&state, exchange_params, proof).await {
+    match exchange_token(&state, exchange_params, proof, arrival).await {
         Ok(result) => token_success_response(TokenExchangeResponse {
             access_token: result.access_token,
             issued_token_type: result.issued_token_type,
@@ -1377,6 +1438,7 @@ impl ClientAuthFields for ClientAuthParams {
 /// Requires `private_key_jwt` client authentication and a FIDO2 assertion
 /// in the `assertion` parameter. Optionally requires DPoP for FAPI clients.
 async fn handle_fido2_assertion_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
@@ -1397,10 +1459,14 @@ async fn handle_fido2_assertion_grant(
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
-        } => match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-            Ok((client, pending_jti, auth)) => (client, pending_jti, auth),
-            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
-        },
+        } => {
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
+                .await
+            {
+                Ok((client, pending_jti, auth)) => (client, pending_jti, auth),
+                Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+            }
+        }
         _ => {
             return token_error_response(
                 OAuthErrorCode::InvalidClient,
@@ -1414,23 +1480,30 @@ async fn handle_fido2_assertion_grant(
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
 
     let has_mtls_cert = client_cert.0.is_some();
 
@@ -1482,6 +1555,7 @@ async fn handle_fido2_assertion_grant(
         exchange_params,
         client_auth,
         sender_constraint,
+        arrival,
     )
     .await
     {

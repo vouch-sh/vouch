@@ -11,6 +11,7 @@ use http::request::Parts;
 use serde::Deserialize;
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
@@ -349,7 +350,11 @@ impl FromRequestParts<Arc<AppState>> for SignedInSession {
         let jar = CookieJar::from_headers(&parts.headers);
         let sign_in = || axum::response::Redirect::to("/enroll/start").into_response();
 
-        let Ok(session) = crate::handlers::session::extract_session_from_cookie(state, &jar).await
+        let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        let Ok(session) =
+            crate::handlers::session::extract_session_from_cookie(state, &jar, arrival).await
         else {
             return Err(sign_in());
         };
@@ -401,7 +406,10 @@ impl FromRequestParts<Arc<AppState>> for AdminPage {
         use axum::response::{IntoResponse, Redirect};
 
         let jar = CookieJar::from_headers(&parts.headers);
-        let auth = get_resource_auth_context(state, &jar).await;
+        let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        let auth = get_resource_auth_context(state, &jar, arrival).await;
 
         if !auth.authenticated {
             return Err(Redirect::to("/enroll/start").into_response());
@@ -460,6 +468,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
             .await
             .unwrap_or_else(|infallible| match infallible {});
         let jar = CookieJar::from_headers(&parts.headers);
+        let arrival = ArrivalTime::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ServiceError::Internal("Request arrival time unavailable".to_string()))?;
         let (user, org_id) = extract_org_admin(
             state,
             &parts.headers,
@@ -467,6 +478,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
             parts.method.as_str(),
             uri.path(),
             client_cert.0.as_ref(),
+            arrival,
         )
         .await?;
         Ok(Self { user, org_id })

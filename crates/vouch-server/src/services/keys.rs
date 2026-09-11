@@ -5,6 +5,7 @@
 //! It is used by both the API key handlers (Bearer token auth) and the enrollment
 //! key handlers (cookie-based auth).
 
+use crate::arrival::ArrivalTime;
 use crate::assurance::ACR_AAL3;
 use crate::db::documents::authenticator::AuthenticatorDoc;
 use crate::db::documents::session::SessionDoc;
@@ -85,6 +86,7 @@ pub(crate) async fn consume_registration_state(
 /// [`KEY_DELETE_MAX_AGE_SECS`].
 pub(crate) fn require_recent_hardware_verification(
     token: &crate::services::auth::ValidatedResourceToken,
+    arrival: ArrivalTime,
 ) -> Result<(), ServiceError> {
     if !token.hardware_verified {
         tracing::warn!(
@@ -101,16 +103,20 @@ pub(crate) fn require_recent_hardware_verification(
 
     // A hardware-verified session always records when. Epoch is the
     // fail-closed reading for a token that somehow lacks it.
-    require_fresh_timestamp(token.auth_time.unwrap_or(0), KEY_DELETE_MAX_AGE_SECS)
+    require_fresh_timestamp(
+        token.auth_time.unwrap_or(0),
+        KEY_DELETE_MAX_AGE_SECS,
+        arrival.as_second(),
+    )
 }
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs`
 /// seconds of the server's current wall clock and not in the future.
 ///
-/// A step-up ceremony dated after now is impossible, so no clock skew is
-/// tolerated: both a too-old and a future-dated timestamp fail closed (issue
-/// #1144). The bounds check is the [`crate::services::RecencyWindow`] shared
-/// with the DPoP proof-age gate.
+/// A step-up ceremony dated after `now` is impossible, so no clock skew is
+/// tolerated: both a too-old and a future-dated timestamp fail closed. The
+/// bounds check is the [`crate::services::RecencyWindow`] shared with the DPoP
+/// proof-age gate, and `now` is the request's arrival instant.
 ///
 /// # Errors
 ///
@@ -119,8 +125,9 @@ pub(crate) fn require_recent_hardware_verification(
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
+    now: i64,
 ) -> Result<(), ServiceError> {
-    if crate::services::RecencyWindow::no_skew(max_age_secs).accepts(issued_at) {
+    if crate::services::RecencyWindow::no_skew(max_age_secs).accepts_at(now, issued_at) {
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
@@ -394,13 +401,13 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_passes_for_fresh() {
         let iat = make_iat(5); // 5 seconds old
-        assert!(require_fresh_timestamp(iat, 60).is_ok());
+        assert!(require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).is_ok());
     }
 
     #[test]
     fn test_require_fresh_timestamp_fails_for_stale() {
         let iat = make_iat(120); // 2 minutes old
-        let err = require_fresh_timestamp(iat, 60).unwrap_err();
+        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -417,13 +424,13 @@ mod tests {
     fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
         let iat = make_iat(60); // Exactly 60 seconds old
         // Session age == max_age is NOT > max_age, so it should pass
-        assert!(require_fresh_timestamp(iat, 60).is_ok());
+        assert!(require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).is_ok());
     }
 
     #[test]
     fn test_require_fresh_timestamp_one_second_over() {
         let iat = make_iat(61); // 61 seconds old (1 second over)
-        let err = require_fresh_timestamp(iat, 60).unwrap_err();
+        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).unwrap_err();
         assert!(
             matches!(err, ServiceError::StepUpRequired { .. }),
             "Expected StepUpRequired for timestamp 1 second over max_age"
@@ -516,7 +523,12 @@ mod tests {
     /// as freshly authenticated.
     #[test]
     fn test_require_fresh_timestamp_epoch_is_rejected() {
-        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        let err = require_fresh_timestamp(
+            0,
+            KEY_DELETE_MAX_AGE_SECS,
+            jiff::Timestamp::now().as_second(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -541,7 +553,12 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_future_is_rejected() {
         let future_iat = jiff::Timestamp::now().as_second() + 3600; // 1 h ahead
-        let err = require_fresh_timestamp(future_iat, KEY_DELETE_MAX_AGE_SECS).unwrap_err();
+        let err = require_fresh_timestamp(
+            future_iat,
+            KEY_DELETE_MAX_AGE_SECS,
+            jiff::Timestamp::now().as_second(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -560,6 +577,13 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_now_passes() {
         let now = jiff::Timestamp::now().as_second();
-        assert!(require_fresh_timestamp(now, KEY_DELETE_MAX_AGE_SECS).is_ok());
+        assert!(
+            require_fresh_timestamp(
+                now,
+                KEY_DELETE_MAX_AGE_SECS,
+                jiff::Timestamp::now().as_second()
+            )
+            .is_ok()
+        );
     }
 }

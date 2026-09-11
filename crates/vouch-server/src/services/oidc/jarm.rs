@@ -64,6 +64,10 @@ fn select_alg(_state: &AppState, client: &OAuthClient) -> &'static str {
 /// # Errors
 ///
 /// Returns an error if the signing key is unavailable or JWT signing fails.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the JARM response JWT's iat and exp"
+)]
 pub async fn build_jarm_success_jwt(
     state: &Arc<AppState>,
     client: &OAuthClient,
@@ -98,6 +102,10 @@ pub async fn build_jarm_success_jwt(
 /// # Errors
 ///
 /// Returns an error if the signing key is unavailable or JWT signing fails.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the JARM error JWT's iat and exp"
+)]
 pub async fn build_jarm_error_jwt(
     state: &Arc<AppState>,
     client: &OAuthClient,

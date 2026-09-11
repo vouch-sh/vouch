@@ -127,6 +127,7 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        test_arrival(),
     )
     .await
     .expect("issue token");

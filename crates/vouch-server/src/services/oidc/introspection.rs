@@ -6,6 +6,7 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
 use crate::db;
@@ -104,6 +105,10 @@ struct IntrospectionJwtClaims {
 /// - Token data inside `token_introspection` claim
 /// - For inactive tokens: `{"token_introspection": {"active": false}}`
 /// - No top-level `sub` or `exp` (RFC 9701 Section 5.4)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the introspection response JWT's iat"
+)]
 pub(crate) async fn sign_introspection_jwt(
     result: &IntrospectionResult,
     issuer: &str,
@@ -158,6 +163,7 @@ pub async fn introspect_token(
     token: &str,
     _token_type_hint: Option<&str>,
     caller_client_id: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<IntrospectionResult> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
@@ -172,7 +178,7 @@ pub async fn introspect_token(
     let token_hash = hash_token(token);
     let session = match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -356,6 +362,7 @@ pub async fn revoke_token(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::test_arrival;
 
     #[test]
     fn test_inactive_result() {
@@ -492,7 +499,7 @@ mod tests {
         // mirroring the DB-error token test in handlers/oidc/tests).
         state.db.close().await;
 
-        let result = introspect_token(&state, &token, None, None).await;
+        let result = introspect_token(&state, &token, None, None, test_arrival()).await;
         assert!(
             matches!(result, Err(ServiceError::Internal(_))),
             "store failure must surface as ServiceError::Internal, got: {result:?}"

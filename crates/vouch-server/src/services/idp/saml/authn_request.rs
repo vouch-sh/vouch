@@ -141,6 +141,10 @@ fn generate_request_id() -> Result<String, AuthnRequestError> {
 }
 
 /// Return the current UTC time formatted as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the AuthnRequest IssueInstant"
+)]
 fn current_utc_iso8601() -> String {
     use jiff::Timestamp;
     let now = Timestamp::now();

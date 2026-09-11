@@ -52,6 +52,24 @@ When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 
 
 **AppState** holds: `Pool` (db), `ArcSwap<ServerConfig>` (lock-free config reload), `Webauthn`, optional `SshCa`, optional `GitHubApp`, `DpopState`, and `OidcSigningKey`.
 
+**Request-scoped time** (`crates/vouch-server/src/arrival.rs`): `arrival_layer`
+is the outermost middleware in `build_app`; it stamps one `ArrivalTime` per
+request, and handlers take it as a `FromRequestParts` extractor and pass it
+down. Every time comparison that decides a request — JWT and Request Object
+temporal claims, DPoP freshness, session expiry, the RFC 8693 lifetime cap,
+OIDC `max_age`, SAML `Conditions`, policy history windows — reads that one
+instant, so two comparisons serving one decision cannot observe different
+clocks. `ArrivalTime` has no public constructor outside tests, so taking one is
+evidence the value came from the middleware.
+
+Ambient `Timestamp::now()` is still correct in four places, and a
+`disallowed_methods` entry in `.clippy.toml` (level raised to `warn` only in
+vouch-server's crate roots) forces each to say which it is via `#[expect]`:
+the arrival middleware itself; optimistic-concurrency retry closures, which
+need a fresh per-attempt reading rather than a stale captured one; `created_at`
+/ `expires_at` row stamping and artifact minting (id_token, JARM, auth-code and
+state-token expiries); and background tasks, which serve no request.
+
 **Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange, per-org issuer keys + operator rotation), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
 
 **Layer boundaries** (enforced by `crates/vouch-server/tests/arch_boundaries.rs`): the contract is direction-only. Handlers may call both services and db — calling db directly is legal and common; services may call db, infra primitives (ssrf, dns, metrics, csp), and crypto; db and infra may call only crypto; crypto imports no other layer. Lower layers never import upward. A type shared across layers lives in the lowest layer that consumes it, or in a crate-root shared module (`config.rs`, `geo.rs`, …). Deliberate deviations (e.g. `infra/router.rs` mounting handler routes) are listed with reasons in the test's `EXCEPTIONS` table; the stale-exception check means the list can only shrink.

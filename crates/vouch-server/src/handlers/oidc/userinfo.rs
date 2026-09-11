@@ -7,6 +7,7 @@
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::keys::OidcSigningKey;
 use crate::db::{self};
@@ -74,6 +75,7 @@ struct UserInfoForm {
 /// Enforces mTLS certificate binding per RFC 8705 Section 3.
 #[expect(clippy::too_many_lines, reason = "linear OIDC userinfo claim assembly")]
 pub(crate) async fn userinfo(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     method: Method,
     headers: HeaderMap,
@@ -155,6 +157,7 @@ pub(crate) async fn userinfo(
             &full_uri,
             &state.store,
             state.config().dpop_max_age_seconds,
+            arrival,
         )
         .await
         {
@@ -263,7 +266,7 @@ pub(crate) async fn userinfo(
     }
 
     // Validate the session token
-    let result = match validate_session_token(&state, &token).await {
+    let result = match validate_session_token(&state, &token, arrival).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return oauth_error(
@@ -321,6 +324,10 @@ pub(crate) async fn userinfo(
 ///
 /// Signs the userinfo claims with the algorithm registered by the client.
 /// Returns `application/jwt` with the signed JWT, or a 500 error on signing failure.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the signed userinfo JWT's iat and exp"
+)]
 async fn build_signed_userinfo_response(
     state: &AppState,
     client_id: &Option<String>,

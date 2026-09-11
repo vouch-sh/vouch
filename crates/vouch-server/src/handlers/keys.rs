@@ -101,6 +101,10 @@ impl RegistrationCompletion {
     /// # Errors
     ///
     /// Returns a 400 `ServiceError` if the state token fails to decode.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fallback expiry for a state token whose exp will not parse"
+    )]
     async fn validate(
         req: RegisterCompleteRequest,
         state: &AppState,
@@ -137,6 +141,10 @@ impl RegistrationCompletion {
 ///
 /// Key *deletion* is gated, because it is destructive and has no recovery
 /// argument — see `SteppedUpToken`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a registration state token's expiry"
+)]
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,

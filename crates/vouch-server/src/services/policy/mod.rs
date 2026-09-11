@@ -37,6 +37,7 @@ pub(crate) use preconfigured::{
 };
 pub(crate) use remediation::remediation_for_slug;
 
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use dogwood_language::{
@@ -543,6 +544,7 @@ async fn authorize_decision(
     request: DecisionRequest<'_>,
     active_slugs: &[String],
     active_custom: &[db::CustomPosturePolicy],
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let DecisionRequest {
         org_id,
@@ -589,7 +591,7 @@ async fn authorize_decision(
     // Orgs running only device-posture policies never read event history,
     // so they pay neither the audit query nor the replay.
     let history = if needs_history {
-        events::fetch_user_history(&state.audit, user_id)
+        events::fetch_user_history(&state.audit, user_id, arrival)
             .await
             .map_err(|msg| {
                 tracing::error!(org_id, "policy history fetch failed: {msg}");
@@ -611,7 +613,9 @@ async fn authorize_decision(
                 ServiceError::Internal("policy engine unavailable".to_string())
             })?;
 
-    let now = jiff::Timestamp::now().as_second();
+    // The same instant the history window was cut at, so a policy rule and the
+    // events it reasons about are judged on one clock.
+    let now = arrival.as_second();
     let decision = engine::evaluate(lowered, &set.refs, &history, org_id, now, |ts| {
         decision_event(&kind, user_id, org_id, ts)
     })
@@ -653,6 +657,10 @@ async fn authorize_decision(
 /// Returns `ServiceError::Internal` if the engine itself is unavailable
 /// (embedded schema broken, composed set fails to lower) — also
 /// fail-closed: no token is issued.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "policy decision inputs: subject, client, posture, clock"
+)]
 pub(crate) async fn evaluate_posture_policies(
     state: &crate::AppState,
     org_id: &str,
@@ -661,6 +669,7 @@ pub(crate) async fn evaluate_posture_policies(
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     authorization_details: Option<&serde_json::Value>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
         .await
@@ -726,6 +735,7 @@ pub(crate) async fn evaluate_posture_policies(
         },
         &active_slugs,
         &active_custom,
+        arrival,
     )
     .await
 }
@@ -740,6 +750,10 @@ pub(crate) async fn evaluate_posture_policies(
 ///
 /// Returns `AccessDenied` when an active exchange policy denies, or
 /// `Internal` when the engine is unavailable (fail-closed).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "policy decision inputs: subject, client, audience, clock"
+)]
 pub(crate) async fn evaluate_exchange_policies(
     state: &crate::AppState,
     org_id: &str,
@@ -748,6 +762,7 @@ pub(crate) async fn evaluate_exchange_policies(
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     audience: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
         .await
@@ -773,6 +788,7 @@ pub(crate) async fn evaluate_exchange_policies(
         },
         &active_slugs,
         &active_custom,
+        arrival,
     )
     .await
 }
@@ -827,6 +843,10 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 /// Fuzzing entry for the runtime evaluation path. Builds a trace from raw
 /// row shapes and decides against the full preconfigured policy set — the
 /// same `engine::evaluate` call the login and exchange paths make.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "fuzz harness fixture, not request-serving code"
+)]
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
     let Some(policy_schema) = schema::policy_schema() else {

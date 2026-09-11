@@ -16,6 +16,7 @@
 //! The handlers remain thin, focusing on HTTP concerns.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::{AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
@@ -734,6 +735,7 @@ pub(crate) async fn create_oauth_access_token(
     state: &AppState,
     params: CreateOAuthTokenParams<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<CreateSessionResult> {
     // Consume the witness. Its presence is the structural guarantee that the
     // caller has consumed the required replay primitives — once consumed
@@ -753,7 +755,12 @@ pub(crate) async fn create_oauth_access_token(
         "token issuance proof consumed"
     );
 
-    let now = Timestamp::now();
+    // The issued `exp` is measured from the request's arrival, the same
+    // instant any caller-supplied `max_lifetime_secs` was computed against.
+    // RFC 8693 exchange derives that ceiling from the subject token's
+    // remaining TTL; measuring it here from a second, later reading would
+    // let the exchanged token outlive its subject by the gap between the two.
+    let now = arrival.timestamp();
     // The lifetime in seconds is the configured `session_hours * 3600` unless
     // the caller supplied a ceiling (RFC 8693 token exchange caps the issued
     // token by the subject token's remaining TTL). The same value drives the

@@ -29,6 +29,7 @@ use crate::db::{CreateOAuthClientParams, Domain, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::config::{IdpConfig, OidcProviderConfig, ServerConfig};
 use crate::crypto::keys::OidcSigningKey;
 
@@ -123,6 +124,20 @@ pub fn test_config() -> ServerConfig {
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
     }
+}
+
+/// The arrival stamp for a test that drives a service function directly,
+/// standing in for the router middleware that would supply one.
+///
+/// Use [`crate::arrival::ArrivalTime::for_test`] with an explicit instant
+/// instead whenever the test is *about* a time boundary.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+#[must_use]
+pub fn test_arrival() -> ArrivalTime {
+    ArrivalTime::for_test(jiff::Timestamp::now())
 }
 
 /// Create a test AppState with in-memory database.
@@ -1082,6 +1097,10 @@ pub struct TestSessionSpec<'a> {
 }
 
 impl Default for TestSessionSpec<'_> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixtures construct their own instants"
+    )]
     fn default() -> Self {
         Self {
             user_id: "",
@@ -1174,6 +1193,7 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
             ),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        test_arrival(),
     )
     .await
     .expect("Failed to create test session");
@@ -1264,6 +1284,10 @@ async fn forge_auth_time(
 /// [`TestSessionSpec`] so a test that has already moved a `spec` into
 /// [`create_test_session_with`] to mint `base` can still call this helper
 /// without rebuilding or cloning the struct.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
 pub async fn forge_short_lived_access_token(
     state: &AppState,
     user_id: &str,
@@ -1825,6 +1849,10 @@ pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
 ///
 /// `jti: None` generates a fresh UUID so repeated calls do not trip replay
 /// protection; pass `Some(..)` to exercise replay handling deliberately.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
 #[must_use]
 pub fn build_client_assertion(
     client_id: &str,
