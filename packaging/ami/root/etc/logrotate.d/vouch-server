@@ -1,9 +1,0 @@
-/var/log/vouch-server/output.log
-{
-    size 10M
-    rotate 1
-    missingok
-    notifempty
-    copytruncate
-    compress
-}
