@@ -38,7 +38,9 @@ repos:
       - id: check-toml
       - id: detect-private-key
         # Verified test vectors, PEM-header marker strings, and doc examples —
-        # not real secrets (see first-run audit).
+        # not real secrets (see first-run audit). The last two hold the same
+        # throwaway self-signed P-256 key (CN `vouch-pq-tls-test`) used to stand
+        # up in-process TLS servers in tests.
         exclude: |
           (?x)^(
             crates/vouch-httpsig/tests/rfc9421_vectors\.rs|
@@ -48,6 +50,7 @@ repos:
             crates/vouch-server/src/crypto/keys\.rs|
             crates/vouch-server/src/crypto/pem\.rs|
             crates/vouch-server/src/infra/jwks\.rs|
+            crates/vouch-server/src/handlers/oidc/tests/rfc9101\.rs|
             crates/vouch-tests/tests/pq_tls\.rs
           )$
       - id: mixed-line-ending
