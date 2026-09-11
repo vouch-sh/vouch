@@ -1165,6 +1165,102 @@ async fn test_rfc7591_accepts_fapi_mtls_registration_with_rs256_alg_pinned_x5c_j
     );
 }
 
+/// RFC 7591 §3.2.1: "the authorization server MUST return all registered
+/// metadata about this client." A `tls_client_auth` registration carrying a
+/// certificate-subject DN must echo that DN in the 201 response, and the four
+/// unused RFC 8705 §2.1.2 parameters plus the cert-bound flag must be omitted.
+#[tokio::test]
+async fn test_rfc7591_registration_response_echoes_tls_client_auth_identity() {
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS Identity Echo Client",
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=mtls-echo.example.com"
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "tls_client_auth registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §2.1.2: the registered subject DN is echoed verbatim.
+    assert_eq!(
+        json["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=mtls-echo.example.com"),
+        "the registered subject DN must be echoed: {json}"
+    );
+    // The four unused RFC 8705 §2.1.2 parameters and the cert-bound flag are
+    // absent (None → omitted), and so is the unrelated DPoP flag.
+    for field in [
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+        "tls_client_certificate_bound_access_tokens",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            json.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {json}"
+        );
+    }
+}
+
+/// RFC 7591 §3.2.1 must-echo applies to `tls_client_certificate_bound_access_tokens`
+/// (RFC 8705 §3) too: a cert-bound `self_signed_tls_client_auth` registration
+/// must echo `tls_client_certificate_bound_access_tokens: true`, and the five
+/// unused RFC 8705 §2.1.2 parameters must be omitted.
+#[tokio::test]
+async fn test_rfc7591_registration_response_echoes_tls_certificate_bound_flag() {
+    let (app, _state) = test_app().await;
+
+    let cert_der = make_test_cert_der("rfc7591-cert-bound-echo");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Cert-Bound Echo Client",
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "tls_client_certificate_bound_access_tokens": true,
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [x5c_b64]}]
+        }
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "cert-bound mTLS registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §3: the certificate-bound flag is echoed as a JSON boolean.
+    assert_eq!(
+        json["tls_client_certificate_bound_access_tokens"], true,
+        "tls_client_certificate_bound_access_tokens must be echoed when set: {json}"
+    );
+    // The five RFC 8705 §2.1.2 parameters and the DPoP flag are absent.
+    for field in [
+        "tls_client_auth_subject_dn",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            json.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {json}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
     // RFC 7523 does not restrict client-assertion algorithms; non-FAPI
