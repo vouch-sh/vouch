@@ -219,6 +219,26 @@ impl OAuthClient {
             .as_deref()
             .is_some_and(|uris| uris.iter().any(|u| u == uri))
     }
+
+    /// Whether the client is registered (RFC 7591 §2 `grant_types`) for the
+    /// grant whose `grant_type` wire value is `grant`.
+    ///
+    /// Matches the enforcement pattern established by the `client_credentials`
+    /// grant handler: when `grant_types` is `None` the client is treated as
+    /// *not* authorized for any grant (returning `false`), so a manually-managed
+    /// client with no declared `grant_types` is rejected just like one that
+    /// declared `grant_types: ["authorization_code"]`. Callers pass the
+    /// [`crate::services::oidc::grant_type::OAuthGrantType::as_str`] wire value
+    /// so the comparison is against the same strings registration stores.
+    ///
+    /// RFC 6749 §5.2 `unauthorized_client`: "The authenticated client is not
+    /// authorized to use this authorization grant type."
+    #[must_use]
+    pub fn is_authorized_for_grant(&self, grant: &str) -> bool {
+        self.grant_types
+            .as_ref()
+            .is_some_and(|gts| gts.iter().any(|g| g == grant))
+    }
 }
 
 // ============================================================================
