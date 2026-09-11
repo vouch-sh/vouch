@@ -24,6 +24,7 @@
 //! - <https://openid.net/specs/openid-connect-rpinitiated-1_0.html>
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::ClientInfo;
 use crate::handlers::{clear_session_cookie, hash_token};
@@ -324,6 +325,7 @@ pub(crate) async fn logout(
 /// redirects to the validated `post_logout_redirect_uri` (with `state` echoed as
 /// a query parameter) or renders the local done page.
 pub(crate) async fn logout_post(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
@@ -342,7 +344,14 @@ pub(crate) async fn logout_post(
     // Clear the browser session first (DB deletion + cache invalidation + audit
     // event). The user asked to log out, so a later redirect-validation database
     // error must not prevent logout.
-    clear_user_session(&state, &jar, &headers, verified_client_id.as_deref()).await;
+    clear_user_session(
+        &state,
+        &jar,
+        &headers,
+        verified_client_id.as_deref(),
+        arrival,
+    )
+    .await;
 
     let clear_cookie = clear_session_cookie().to_string();
 
@@ -450,6 +459,7 @@ async fn clear_user_session(
     jar: &CookieJar,
     headers: &HeaderMap,
     rp_client_id: Option<&str>,
+    arrival: ArrivalTime,
 ) {
     let Some(token) = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
@@ -462,7 +472,7 @@ async fn clear_user_session(
 
     let session_info = match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
     {
         Ok(info) => info,

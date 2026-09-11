@@ -962,12 +962,29 @@ async fn test_rfc8693_access_token_exp_not_capped_by_subject_ttl() {
          `expires_in` value reported to the client ({reported_expires_in}s)"
     );
 
-    // (3) The `sessions` row's `expires_at` must match the issued token's
+    // (3) The issued token must not outlive its subject in absolute terms.
+    //     The cap and the mint read one instant — the request's arrival — so
+    //     `exp_issued = arrival + min(session, subject_exp - arrival)` is at
+    //     or before `subject_exp`. Read from two clocks, the mint's later
+    //     stamp pushed `exp_issued` past `subject_exp` by the gap between
+    //     them, which the lifetime checks above cannot see: both the issued
+    //     `iat` and `exp` shift together.
+    let subject_exp = decode_jwt_payload(&subject_token)["exp"]
+        .as_i64()
+        .expect("subject exp present");
+    assert!(
+        issued_exp <= subject_exp,
+        "issued token exp ({issued_exp}) must not be later than the subject \
+         token's exp ({subject_exp}); an exchanged token may never outlive \
+         the token it was derived from"
+    );
+
+    // (4) The `sessions` row's `expires_at` must match the issued token's
     //     `exp` claim — the two records must not disagree for the same token.
     let issued_hash = crate::crypto::hash_token(issued_token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &issued_hash)
+        .get_session_by_token_hash(&state.store, &issued_hash, test_arrival())
         .await
         .expect("session lookup")
         .expect("issued access token must be persisted as a session");
@@ -978,7 +995,7 @@ async fn test_rfc8693_access_token_exp_not_capped_by_subject_ttl() {
         session.expires_at.as_second()
     );
 
-    // (4) The `token_exchange` audit row's `expires_at` must agree with the
+    // (5) The `token_exchange` audit row's `expires_at` must agree with the
     //     issued token's actual `exp` — the audit row and the `sessions` row
     //     must record the same lifetime for one token. `issued_token_hash`
     //     is not indexed, so look the row up by the indexed subject_user_id
@@ -1496,7 +1513,7 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
     let hash = crate::crypto::hash_token(id_token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &hash)
+        .get_session_by_token_hash(&state.store, &hash, test_arrival())
         .await
         .expect("session lookup");
     assert!(
@@ -1749,7 +1766,7 @@ async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
     let hash = crate::crypto::hash_token(access_token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &hash)
+        .get_session_by_token_hash(&state.store, &hash, test_arrival())
         .await
         .expect("session lookup");
     assert!(

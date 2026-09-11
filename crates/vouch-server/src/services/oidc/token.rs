@@ -10,6 +10,7 @@ use super::authorization_details::AuthorizationDetails;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::{ACR_AAL3, AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, User};
@@ -313,9 +314,11 @@ pub(crate) async fn exchange_authorization_code(
     params: AuthCodeExchangeParams<'_>,
     client_auth: ClientAuthProof,
     sender_constraint: SenderConstraintProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
-    let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
+    let auth_code =
+        decode_authorization_code(state, params.code, params.client_id, arrival).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // This MUST happen before any other validation to ensure codes are always
@@ -392,6 +395,7 @@ pub(crate) async fn exchange_authorization_code(
             source_code_hash: Some(&code_hash),
         },
         proof,
+        arrival,
     )
     .await?;
     let access_token = session_result.token;
@@ -974,6 +978,7 @@ struct IdTokenParams<'a> {
 }
 
 /// Generate an OIDC ID token.
+#[expect(clippy::disallowed_methods, reason = "mints the ID token's exp")]
 async fn generate_id_token(
     state: &Arc<AppState>,
     params: IdTokenParams<'_>,
@@ -1215,6 +1220,7 @@ pub async fn validate_dpop_if_present(
     dpop_header: Option<&str>,
     method: &str,
     uri: &str,
+    arrival: ArrivalTime,
 ) -> Result<Option<ValidatedDpopProof>, DpopError> {
     let dpop_proof = match dpop_header {
         Some(proof) => proof,
@@ -1244,6 +1250,7 @@ pub async fn validate_dpop_if_present(
         &accepted_uris,
         &state.store,
         config.dpop_max_age_seconds,
+        arrival,
     )
     .await
     {
@@ -1303,6 +1310,7 @@ pub struct OidcValidatedSession {
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
@@ -1315,7 +1323,7 @@ pub async fn validate_session_token(
     let token_hash = hash_token(token);
     let session = match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {

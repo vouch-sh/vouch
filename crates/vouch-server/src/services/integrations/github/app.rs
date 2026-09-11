@@ -261,6 +261,10 @@ impl GitHubApp {
     ///
     /// RS256 signing is offloaded to a blocking thread to avoid starving
     /// the tokio runtime on 1-vCPU instances.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "mints the GitHub App JWT's iat and exp"
+    )]
     pub async fn generate_app_jwt(&self) -> Result<String> {
         let now = jiff::Timestamp::now();
         // GitHub recommends setting iat to 60 seconds in the past to account for clock drift

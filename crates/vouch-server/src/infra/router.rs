@@ -216,6 +216,10 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         request_id::request_span_middleware,
     ))
     .layer(request_id::set_request_id_layer())
+    // Outermost: every request-scoped time comparison downstream reads this
+    // one instant, so the stamp must be taken before any other layer can
+    // await. The last `.layer()` call is the outermost in tower/axum.
+    .layer(axum::middleware::from_fn(crate::arrival::arrival_layer))
     .with_state(state))
 }
 

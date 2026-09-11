@@ -2,6 +2,7 @@
 //! Credential issuance handlers (SSH certificates, AWS tokens, GitHub tokens, etc.).
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{
     self, AwsCredentialDetails, CredentialAuditEnvelope, GitHubCredentialDetails,
     SshCredentialDetails,
@@ -31,6 +32,10 @@ use crate::services::auth::ValidatedResourceToken;
 ///
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "records the issued certificate's expiry for revocation tracking"
+)]
 pub(crate) async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
@@ -228,6 +233,10 @@ pub(crate) struct SshKrlResponse {
 ///
 /// This endpoint does not require authentication to allow SSH servers
 /// to check revocation status without needing credentials.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reports when the KRL was generated"
+)]
 pub(crate) async fn get_ssh_krl(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SshKrlResponse>, ServiceError> {
@@ -258,6 +267,10 @@ pub(crate) async fn get_ssh_krl(
 /// GET /v1/credentials/ssh/krl/:serial
 ///
 /// Returns whether the certificate with the given serial is revoked.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reports when the revocation check ran"
+)]
 pub(crate) async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
@@ -464,6 +477,10 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reports the issued token's expiry to the caller"
+)]
 pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
@@ -610,6 +627,7 @@ pub(crate) async fn get_github_status(
     reason = "sequential GitHub installation token validation and issuance"
 )]
 pub(crate) async fn get_github_token(
+    arrival: ArrivalTime,
     client_info: ClientInfo,
     State(state): State<Arc<AppState>>,
     HardwareVerifiedToken(token): HardwareVerifiedToken,
@@ -756,9 +774,9 @@ pub(crate) async fn get_github_token(
             "Failed to parse token expires_at '{}': {e}",
             gh_token.expires_at
         );
-        Timestamp::now()
+        arrival.timestamp()
     });
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     let expires_in = expires_at
         .as_second()
         .saturating_sub(now.as_second())

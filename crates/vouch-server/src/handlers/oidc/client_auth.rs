@@ -5,6 +5,7 @@
 //! (RFC 6749 Section 3.2) and the PAR endpoint (RFC 9126 Section 2).
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::error::{OAuthErrorCode, OAuthErrorResponse};
 use crate::services::oidc::{
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
@@ -304,6 +305,7 @@ pub(crate) struct ClientAuthOutcome {
 pub(crate) async fn complete_client_auth(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
+    arrival: ArrivalTime,
 ) -> Result<Option<ClientAuthOutcome>, Response> {
     match auth {
         ExtractedClientAuth::Secret {
@@ -328,7 +330,9 @@ pub(crate) async fn complete_client_auth(
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
-        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
+        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref(), arrival)
+            .await
+        {
             Ok((client, pending_jti, jwt_auth)) => {
                 let cid = client.client.client_id.clone();
                 Ok(Some(ClientAuthOutcome {

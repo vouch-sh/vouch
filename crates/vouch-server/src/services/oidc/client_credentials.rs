@@ -9,6 +9,7 @@
 //! Per RFC 6749 Section 4.4.3, no refresh token is included in the response.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::db::{OAuthClient, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -47,6 +48,7 @@ pub(crate) async fn exchange_client_credentials(
     requested_scope: Option<&str>,
     binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<ClientCredentialsResult> {
     // Verify client has client_credentials in its registered grant_types
     let has_grant = client
@@ -90,6 +92,7 @@ pub(crate) async fn exchange_client_credentials(
             source_code_hash: None,
         },
         proof,
+        arrival,
     )
     .await?;
 
@@ -115,6 +118,7 @@ mod tests {
     use super::*;
     use crate::services::auth::{ClientAuthProof, GrantProof, SenderConstraintProof};
     use crate::services::oidc::OAuthScope;
+    use crate::test_utils::test_arrival;
     use secrecy::ExposeSecret;
 
     #[test]
@@ -200,6 +204,7 @@ mod tests {
                 ),
                 sender_constraint: SenderConstraintProof::no_registered_client(),
             },
+            test_arrival(),
         )
         .await
         .expect("exchange_client_credentials");

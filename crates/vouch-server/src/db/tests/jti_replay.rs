@@ -180,21 +180,37 @@ async fn test_dpop_jti_replay_prevention() {
     let (store, _audit) = test_db().await;
 
     // First use returns the witness
-    let _claim = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
-        .await
-        .expect("First use of a JTI should be accepted");
+    let _claim = check_and_store_dpop_jti_at_second(
+        &store,
+        "dpop-jti-1",
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await
+    .expect("First use of a JTI should be accepted");
 
     // Replay returns AlreadyConsumed
-    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600).await;
+    let replayed = check_and_store_dpop_jti_at_second(
+        &store,
+        "dpop-jti-1",
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await;
     assert!(
         matches!(replayed, Err(ClaimError::AlreadyConsumed)),
         "Replay of same JTI should be AlreadyConsumed, got: {replayed:?}"
     );
 
     // Different JTI succeeds
-    let _different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
-        .await
-        .expect("Different JTI should be accepted");
+    let _different = check_and_store_dpop_jti_at_second(
+        &store,
+        "dpop-jti-2",
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await
+    .expect("Different JTI should be accepted");
 }
 
 #[tokio::test]
@@ -202,7 +218,9 @@ async fn test_dpop_jti_empty() {
     use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
-    let result = check_and_store_dpop_jti(&store, "", 600).await;
+    let result =
+        check_and_store_dpop_jti_at_second(&store, "", jiff::Timestamp::now().as_second(), 600)
+            .await;
     assert!(
         matches!(result, Err(ClaimError::InvalidInput(_))),
         "Empty JTI must return InvalidInput, got: {result:?}"
@@ -215,7 +233,13 @@ async fn test_dpop_jti_too_long() {
     let (store, _audit) = test_db().await;
 
     let long_jti = "x".repeat(257);
-    let result = check_and_store_dpop_jti(&store, &long_jti, 600).await;
+    let result = check_and_store_dpop_jti_at_second(
+        &store,
+        &long_jti,
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await;
     assert!(
         matches!(result, Err(ClaimError::InvalidInput(_))),
         "JTI exceeding max length must return InvalidInput, got: {result:?}"
@@ -228,11 +252,22 @@ async fn test_dpop_jti_at_max_length() {
     let (store, _audit) = test_db().await;
 
     let max_jti = "d".repeat(256);
-    let _stored = check_and_store_dpop_jti(&store, &max_jti, 600)
-        .await
-        .expect("JTI at max length should be accepted");
+    let _stored = check_and_store_dpop_jti_at_second(
+        &store,
+        &max_jti,
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await
+    .expect("JTI at max length should be accepted");
 
-    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600).await;
+    let replayed = check_and_store_dpop_jti_at_second(
+        &store,
+        &max_jti,
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await;
     assert!(
         matches!(replayed, Err(ClaimError::AlreadyConsumed)),
         "Replay of max-length JTI should be AlreadyConsumed, got: {replayed:?}"
@@ -250,7 +285,13 @@ async fn test_dpop_jti_concurrent_insert_rejects_duplicates() {
     for _ in 0..num_tasks {
         let s = Arc::clone(&store);
         handles.push(tokio::spawn(async move {
-            check_and_store_dpop_jti(&s, "same-jti", 600).await
+            check_and_store_dpop_jti_at_second(
+                &s,
+                "same-jti",
+                jiff::Timestamp::now().as_second(),
+                600,
+            )
+            .await
         }));
     }
 
@@ -275,9 +316,14 @@ async fn test_delete_expired_dpop_jtis() {
     // Insert one with past expiry (validity_seconds=0 won't work since
     // it computes from now; instead insert directly with short validity
     // and rely on the fact that we can test cleanup.)
-    let _valid = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
-        .await
-        .expect("insert valid");
+    let _valid = check_and_store_dpop_jti_at_second(
+        &store,
+        "valid-dpop-jti",
+        jiff::Timestamp::now().as_second(),
+        3600,
+    )
+    .await
+    .expect("insert valid");
 
     // Cleanup should not delete the valid one
     let deleted = delete_expired_dpop_jtis(&store, "")
@@ -287,7 +333,13 @@ async fn test_delete_expired_dpop_jtis() {
 
     // The valid one should still block replay
     use crate::db::claim::ClaimError;
-    let result = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600).await;
+    let result = check_and_store_dpop_jti_at_second(
+        &store,
+        "valid-dpop-jti",
+        jiff::Timestamp::now().as_second(),
+        3600,
+    )
+    .await;
     assert!(
         matches!(result, Err(ClaimError::AlreadyConsumed)),
         "Valid JTI should still block replay, got: {result:?}"
@@ -319,12 +371,23 @@ async fn test_dpop_jti_replay_succeeds_after_cleanup() {
 
     // Commit with a negative validity → `expires_at` in the past, simulating
     // that the retention window has already elapsed.
-    let _claim = check_and_store_dpop_jti(&store, "replay-after-cleanup", -300)
-        .await
-        .expect("first use commits the JTI");
+    let _claim = check_and_store_dpop_jti_at_second(
+        &store,
+        "replay-after-cleanup",
+        jiff::Timestamp::now().as_second(),
+        -300,
+    )
+    .await
+    .expect("first use commits the JTI");
 
     // Expired-but-present row still blocks replay (PRIMARY KEY collision).
-    let blocked = check_and_store_dpop_jti(&store, "replay-after-cleanup", 600).await;
+    let blocked = check_and_store_dpop_jti_at_second(
+        &store,
+        "replay-after-cleanup",
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await;
     assert!(
         matches!(blocked, Err(ClaimError::AlreadyConsumed)),
         "expired-but-present JTI row must still block replay until cleanup: got {blocked:?}"
@@ -344,7 +407,13 @@ async fn test_dpop_jti_replay_succeeds_after_cleanup() {
     // once the row is gone, only the retention duration controls whether a
     // replay is possible. See `services/oidc/dpop.rs::tests` for the
     // call-site guard that the retention outlives the proof-validity window.
-    let replayed = check_and_store_dpop_jti(&store, "replay-after-cleanup", 600).await;
+    let replayed = check_and_store_dpop_jti_at_second(
+        &store,
+        "replay-after-cleanup",
+        jiff::Timestamp::now().as_second(),
+        600,
+    )
+    .await;
     assert!(
         replayed.is_ok(),
         "after cleanup the replay insert succeeds (DB primitive): got {replayed:?}"
@@ -353,7 +422,7 @@ async fn test_dpop_jti_replay_succeeds_after_cleanup() {
 
 // ------------------------------------------------------------------------
 // Sanity: a not-yet-expired JTI is NOT removed by cleanup and keeps
-// blocking replay. The retention passed to `check_and_store_dpop_jti`
+// blocking replay. The retention passed to `check_and_store_dpop_jti_at_second`
 // controls how long the row lives; cleanup only deletes rows whose
 // `expires_at < now`. This complements `test_dpop_jti_replay_succeeds_after_cleanup`
 // (the expired case) and `test_delete_expired_dpop_jtis` (the valid case),
@@ -368,9 +437,14 @@ async fn test_dpop_jti_within_retention_survives_cleanup_and_blocks_replay() {
 
     // A positive retention the fix's caller would pass (e.g. max_age + skew).
     let retention: i64 = 360;
-    let _claim = check_and_store_dpop_jti(&store, "within-retention", retention)
-        .await
-        .expect("first use commits the JTI");
+    let _claim = check_and_store_dpop_jti_at_second(
+        &store,
+        "within-retention",
+        jiff::Timestamp::now().as_second(),
+        retention,
+    )
+    .await
+    .expect("first use commits the JTI");
 
     // Cleanup of not-yet-expired rows is a no-op.
     let deleted = delete_expired_dpop_jtis(&store, "")
@@ -382,7 +456,13 @@ async fn test_dpop_jti_within_retention_survives_cleanup_and_blocks_replay() {
     );
 
     // Replay is still blocked while the row is present.
-    let blocked = check_and_store_dpop_jti(&store, "within-retention", retention).await;
+    let blocked = check_and_store_dpop_jti_at_second(
+        &store,
+        "within-retention",
+        jiff::Timestamp::now().as_second(),
+        retention,
+    )
+    .await;
     assert!(
         matches!(blocked, Err(ClaimError::AlreadyConsumed)),
         "JTI within its retention window must block replay: got {blocked:?}"

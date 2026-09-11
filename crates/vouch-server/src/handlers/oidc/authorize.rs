@@ -11,6 +11,7 @@ use super::{
     build_redirect_url_with_params,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::ACR_AAL3;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, User};
@@ -410,12 +411,13 @@ async fn check_session_and_authorize(
     jar: &CookieJar,
     reauth_policy: ReauthPolicy,
     par_to_consume: Option<db::ParRef<'_>>,
+    arrival: ArrivalTime,
 ) -> Response {
     let session_token = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    match check_session_for_authorization(state, session_token).await {
+    match check_session_for_authorization(state, session_token, arrival).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
             authenticator,
@@ -431,6 +433,7 @@ async fn check_session_and_authorize(
                 reauth_policy,
                 par_to_consume,
                 resolved.response_mode,
+                arrival,
             )
             .await
         }
@@ -506,18 +509,24 @@ async fn check_session_and_authorize(
 /// - RFC 9207: Includes `iss` parameter in response
 /// - RFC 9700: Follows OAuth 2.0 Security BCP
 pub(crate) async fn authorize(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     OAuthQuery(params): OAuthQuery<AuthorizeQuery>,
     jar: CookieJar,
 ) -> Response {
-    authorize_inner(state, params, jar).await
+    authorize_inner(state, params, jar, arrival).await
 }
 
 /// Shared authorization logic for both GET and POST.
-async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: CookieJar) -> Response {
+async fn authorize_inner(
+    state: Arc<AppState>,
+    params: AuthorizeQuery,
+    jar: CookieJar,
+    arrival: ArrivalTime,
+) -> Response {
     // Check if we're returning from login with a pending auth
     if let Some(pending_id) = &params.pending_auth {
-        return handle_pending_auth(&state, pending_id, &jar).await;
+        return handle_pending_auth(&state, pending_id, &jar, arrival).await;
     }
 
     // RFC 9101 + RFC 9126: Mutual exclusion — cannot provide both request and request_uri
@@ -540,7 +549,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             .into_response();
         }
 
-        return handle_jar_request(&state, request_jwt, &client_id, &params, jar).await;
+        return handle_jar_request(&state, request_jwt, &client_id, &params, jar, arrival).await;
     }
 
     // RFC 9126 / OIDC Core Section 6.2: If request_uri is present, dispatch by scheme.
@@ -576,13 +585,22 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                         .unwrap_or(ResponseMode::Query),
                 },
                 jar,
+                arrival,
             )
             .await;
         }
 
         if request_uri.starts_with("https://") {
             // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT.
-            return handle_request_uri_fetch(&state, request_uri, &client_id, &params, jar).await;
+            return handle_request_uri_fetch(
+                &state,
+                request_uri,
+                &client_id,
+                &params,
+                jar,
+                arrival,
+            )
+            .await;
         }
 
         // Neither a PAR URN nor an HTTPS URL.
@@ -594,7 +612,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     }
 
     // Normal direct authorization request.
-    handle_direct_request(&state, params, jar).await
+    handle_direct_request(&state, params, jar, arrival).await
 }
 
 /// POST /oauth/authorize
@@ -603,11 +621,12 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 /// Accepts `application/x-www-form-urlencoded` parameters and delegates
 /// to the same logic as the GET handler.
 pub(crate) async fn authorize_post(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     OAuthForm(params): OAuthForm<AuthorizeQuery>,
 ) -> Response {
-    authorize_inner(state, params, jar).await
+    authorize_inner(state, params, jar, arrival).await
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +642,7 @@ async fn handle_direct_request(
     state: &Arc<AppState>,
     params: AuthorizeQuery,
     jar: CookieJar,
+    arrival: ArrivalTime,
 ) -> Response {
     let client_id = params.client_id.clone().unwrap_or_default();
     if client_id.is_empty() {
@@ -696,6 +716,7 @@ async fn handle_direct_request(
         &jar,
         ReauthPolicy::OnDemand,
         None,
+        arrival,
     )
     .await
 }
@@ -711,6 +732,7 @@ async fn handle_jar_request(
     client_id: &str,
     query: &AuthorizeQuery,
     jar: CookieJar,
+    arrival: ArrivalTime,
 ) -> Response {
     // Phase A step 1: client lookup + active check (errors → page).
     let oauth_client = match lookup_and_check_active(state, client_id).await {
@@ -730,6 +752,7 @@ async fn handle_jar_request(
         request_jwt,
         &oauth_client,
         Some(&query_hints),
+        arrival,
     )
     .await
     {
@@ -810,6 +833,7 @@ async fn handle_jar_request(
         &jar,
         ReauthPolicy::OnDemand,
         None,
+        arrival,
     )
     .await
 }
@@ -901,6 +925,7 @@ async fn handle_par_request(
     state: &Arc<AppState>,
     ctx: ParRequestContext<'_>,
     jar: CookieJar,
+    arrival: ArrivalTime,
 ) -> Response {
     // FAPI 2.0 Section 5.3.2.2 Note 3: Look up the PAR without consuming it.
     let par = match lookup_par(state, ctx).await {
@@ -988,6 +1013,7 @@ async fn handle_par_request(
             client_id: ctx.client_id,
             mode: db::ParConsumptionMode::EnforceExpiry,
         }),
+        arrival,
     )
     .await
 }
@@ -1004,10 +1030,11 @@ async fn handle_request_uri_fetch(
     client_id: &str,
     query: &AuthorizeQuery,
     jar: CookieJar,
+    arrival: ArrivalTime,
 ) -> Response {
     // Phase A steps 1-6: lookup + FAPI + allowlist + fetch + validate + redirect_uri.
     let (resolved, request_params) =
-        match fetch_and_resolve_request_uri(state, request_uri, client_id, query).await {
+        match fetch_and_resolve_request_uri(state, request_uri, client_id, query, arrival).await {
             Ok(pair) => pair,
             Err(resp) => return resp,
         };
@@ -1048,6 +1075,7 @@ async fn handle_request_uri_fetch(
         &jar,
         ReauthPolicy::OnDemand,
         None,
+        arrival,
     )
     .await
 }
@@ -1068,6 +1096,7 @@ async fn fetch_and_resolve_request_uri(
     request_uri: &str,
     client_id: &str,
     query: &AuthorizeQuery,
+    arrival: ArrivalTime,
 ) -> Result<(ResolvedClient, AuthorizeRequestParams), Response> {
     // Step 1: client lookup + active check (errors → page).
     let oauth_client = lookup_and_check_active(state, client_id).await?;
@@ -1118,26 +1147,32 @@ async fn fetch_and_resolve_request_uri(
         response_type: query.response_type.as_deref(),
         scope: query.scope.as_deref(),
     };
-    let request_params =
-        match validate_request_object(state, &fetched_jwt, &oauth_client, Some(&query_hints)).await
-        {
-            Ok(params) => params,
-            Err(e) => {
-                let (error_code, description) = match &e {
-                    crate::error::ServiceError::OAuth { code, description } => {
-                        (code.as_str(), description.clone())
-                    }
-                    _ => ("invalid_request_object", e.to_string()),
-                };
-                return Err(AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message: Tr::new("authorize-denied-invalid-request-object-coded")
-                        .arg("code", error_code)
-                        .arg("detail", description),
+    let request_params = match validate_request_object(
+        state,
+        &fetched_jwt,
+        &oauth_client,
+        Some(&query_hints),
+        arrival,
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::error::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
                 }
-                .into_response());
+                _ => ("invalid_request_object", e.to_string()),
+            };
+            return Err(AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: Tr::new("authorize-denied-invalid-request-object-coded")
+                    .arg("code", error_code)
+                    .arg("detail", description),
             }
-        };
+            .into_response());
+        }
+    };
 
     // Step 6: extract redirect_uri and validate against registered URIs, then
     // apply the requested response_mode (see `with_requested_response_mode`).
@@ -1161,7 +1196,12 @@ async fn fetch_and_resolve_request_uri(
 ///
 /// Phase A: read pending → resolve client (lookup + active + redirect_uri re-validation).
 /// Phase C: session check → consume pending → max_age check + code issuance.
-async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
+async fn handle_pending_auth(
+    state: &Arc<AppState>,
+    pending_id: &str,
+    jar: &CookieJar,
+    arrival: ArrivalTime,
+) -> Response {
     // Read the pending auth without spending it. The single-use claim is
     // consumed only after the session gate passes: consuming first meant a
     // session this endpoint refuses — or one lost mid-flow — burned the id,
@@ -1221,7 +1261,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     let auth_code_lifetime: i64 =
         crate::services::oidc::fapi::auth_code_lifetime_seconds(&resolved.client);
 
-    match check_session_for_authorization(state, session_token).await {
+    match check_session_for_authorization(state, session_token, arrival).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
             authenticator,
@@ -1260,6 +1300,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 session_auth_time,
                 &authenticator,
                 auth_code_lifetime,
+                arrival,
             )
             .await
         }
@@ -1294,6 +1335,10 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
 // ---------------------------------------------------------------------------
 
 /// Complete the pending auth flow: check access, check max_age, issue code.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "linear pending-authorization completion: client, pending record, session facts, clock"
+)]
 async fn complete_pending_auth(
     state: &Arc<AppState>,
     resolved: &ResolvedClient,
@@ -1302,6 +1347,7 @@ async fn complete_pending_auth(
     session_auth_time: Option<i64>,
     authenticator: &Authenticator,
     auth_code_lifetime: i64,
+    arrival: ArrivalTime,
 ) -> Response {
     // Check client access for the authenticated user.
     if let Err(e) = check_client_access(&resolved.client, user) {
@@ -1348,10 +1394,7 @@ async fn complete_pending_auth(
         && let Some(session_auth_time) = session_auth_time
         && session_auth_time < pending.created_at.as_second()
     {
-        let age_secs = jiff::Timestamp::now()
-            .as_second()
-            .saturating_sub(session_auth_time)
-            .max(0);
+        let age_secs = arrival.as_second().saturating_sub(session_auth_time).max(0);
         let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
         let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
         // Reject only when the session age *exceeds* max_age (strict `>`).
@@ -1682,6 +1725,7 @@ async fn authorize_authenticated_user(
     reauth_policy: ReauthPolicy,
     par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
+    arrival: ArrivalTime,
 ) -> Response {
     // Step 1: Check client access.
     if let Err(e) = check_client_access(oauth_client, user) {
@@ -1727,7 +1771,7 @@ async fn authorize_authenticated_user(
                     let Some(auth_time) = session_auth_time else {
                         return true;
                     };
-                    let elapsed = jiff::Timestamp::now().duration_since(
+                    let elapsed = arrival.timestamp().duration_since(
                         jiff::Timestamp::from_second(auth_time).unwrap_or_default(),
                     );
                     let limit =

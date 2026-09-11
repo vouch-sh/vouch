@@ -11,6 +11,7 @@ use super::validate::{
     validate_jwt_assertion,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::claim::ClaimError;
 use crate::db::{self, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
 use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
@@ -175,6 +176,7 @@ pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
     client_id_hint: Option<&str>,
+    arrival: ArrivalTime,
 ) -> Result<(AuthenticatedClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
@@ -259,6 +261,7 @@ pub async fn authenticate_client_jwt(
         algorithm,
         &allowed_audiences,
         max_lifetime,
+        arrival.as_second(),
     )
     .map_err(|e| {
         tracing::debug!(

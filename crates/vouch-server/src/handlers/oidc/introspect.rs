@@ -6,6 +6,7 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
 use crate::handlers::extractors::OAuthForm;
@@ -154,6 +155,7 @@ impl ClientAuthFields for IntrospectRequest {
 /// Returns 200 OK regardless of whether the token was valid (security best practice).
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt` auth.
 pub(crate) async fn revoke(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     headers: HeaderMap,
@@ -166,7 +168,7 @@ pub(crate) async fn revoke(
         Err(response) => return response,
     };
 
-    let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth).await {
+    let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth, arrival).await {
         Ok(Some(a)) => (a.client_id, a.pending_jti),
         Ok(None) => {
             // No credentials provided → 401 with the shared challenge.
@@ -214,6 +216,7 @@ pub(crate) async fn revoke(
 /// credentials, or `private_key_jwt` (RFC 7523).
 /// Returns token metadata if valid, or `{"active": false}` if invalid or auth fails.
 pub(crate) async fn introspect(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<IntrospectRequest>,
@@ -225,17 +228,18 @@ pub(crate) async fn introspect(
         Err(response) => return response,
     };
 
-    let (authenticated_client, pending_jti) = match complete_client_auth(&state, auth).await {
-        Ok(Some(a)) => (a.client.client, a.pending_jti),
-        Ok(None) => {
-            // No credentials provided → 401 with the shared challenge.
-            return with_client_auth_challenge(
-                ClientAuthPresentation::of(&headers, &params),
-                StatusCode::UNAUTHORIZED.into_response(),
-            );
-        }
-        Err(response) => return response,
-    };
+    let (authenticated_client, pending_jti) =
+        match complete_client_auth(&state, auth, arrival).await {
+            Ok(Some(a)) => (a.client.client, a.pending_jti),
+            Ok(None) => {
+                // No credentials provided → 401 with the shared challenge.
+                return with_client_auth_challenge(
+                    ClientAuthPresentation::of(&headers, &params),
+                    StatusCode::UNAUTHORIZED.into_response(),
+                );
+            }
+            Err(response) => return response,
+        };
 
     let wants_jwt = authenticated_client
         .introspection_signed_response_alg
@@ -249,6 +253,7 @@ pub(crate) async fn introspect(
         params.token.expose_secret(),
         params.token_type_hint.as_deref(),
         Some(client_id.as_str()),
+        arrival,
     )
     .await
     {

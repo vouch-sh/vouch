@@ -20,6 +20,7 @@
 //! - Session binding to authenticator
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
@@ -140,11 +141,13 @@ impl BrowserAuthenticationState {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
             .decode_state_token(
                 token,
                 crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+                arrival.as_second(),
             )
             .await
     }
@@ -203,6 +206,7 @@ impl LoginCompletion {
     async fn validate(
         req: BrowserLoginCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
         let client_data = ClientDataProof::verify(
             &req.client_data_json,
@@ -231,13 +235,13 @@ impl LoginCompletion {
         })?;
 
         let auth_state =
-            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer)
+            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer, arrival)
                 .await
                 .map_err(|e| {
                     ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
                 })?;
 
-        let now = Timestamp::now().as_second();
+        let now = arrival.as_second();
         if now > auth_state.exp {
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
@@ -247,7 +251,7 @@ impl LoginCompletion {
         }
 
         let expires_at =
-            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
+            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -301,6 +305,7 @@ async fn pending_device_auth(
 }
 
 pub(crate) async fn login_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
     jar: CookieJar,
@@ -369,14 +374,15 @@ pub(crate) async fn login_page(
             let session_token = jar
                 .get(vouch_common::SESSION_COOKIE_NAME)
                 .map(|c| c.value());
-            let authorized = match check_session_for_authorization(&state, session_token).await {
-                Ok(AuthorizationSessionState::Authenticated { .. }) => true,
-                Ok(AuthorizationSessionState::NeedsAuth) => false,
-                Err(e) => {
-                    tracing::error!("Session check failed at /login; rendering the form: {e}");
-                    false
-                }
-            };
+            let authorized =
+                match check_session_for_authorization(&state, session_token, arrival).await {
+                    Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+                    Ok(AuthorizationSessionState::NeedsAuth) => false,
+                    Err(e) => {
+                        tracing::error!("Session check failed at /login; rendering the form: {e}");
+                        false
+                    }
+                };
             if authorized {
                 return axum::response::Redirect::to(&format!(
                     "/oauth/authorize?pending_auth={}",
@@ -384,7 +390,7 @@ pub(crate) async fn login_page(
                 ))
                 .into_response();
             }
-        } else if get_auth_context(&state, &jar).await.authenticated {
+        } else if get_auth_context(&state, &jar, arrival).await.authenticated {
             // Without a pending authorization a signed-in user has nothing to
             // do here — IdP sign-in is the whole bar for the browser UI, so a
             // bootstrap session goes home like any other.
@@ -451,7 +457,7 @@ pub(crate) async fn login_page(
     // Only the rendered form needs the header context, and building it costs
     // a session and a user lookup that the session gate above already did.
     // Reaching this point means the form is being shown.
-    let auth = get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     LoginTemplate {
         pending_auth: query.pending_auth,
@@ -471,6 +477,10 @@ pub(crate) async fn login_page(
 ///
 /// Generate a WebAuthn authentication challenge.
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a challenge state token's expiry"
+)]
 pub(crate) async fn browser_login_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BrowserLoginStartRequest>,
@@ -557,6 +567,7 @@ async fn log_login_failure(
 /// request as an argument, so a malformed request cannot invalidate the state
 /// token it carries and lock the user out of the flow.
 pub(crate) async fn browser_login_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     jar: CookieJar,
@@ -564,7 +575,7 @@ pub(crate) async fn browser_login_complete(
 ) -> Result<Response, ServiceError> {
     tracing::info!("Browser login complete (discoverable credential flow)");
 
-    let checked = LoginCompletion::validate(req, &state).await?;
+    let checked = LoginCompletion::validate(req, &state, arrival).await?;
 
     // Mark the authentication state JWT consumed before any side effects.
     // The returned `ChallengeStateClaim` witness is the structural proof
@@ -702,6 +713,7 @@ pub(crate) async fn browser_login_complete(
             pending_auth: auth_state.pending_auth,
             client_info,
         },
+        arrival,
     )
     .await
 }
@@ -735,13 +747,14 @@ struct LoginSessionParams<'a> {
 async fn finalize_login_session(
     state: &AppState,
     params: LoginSessionParams<'_>,
+    arrival: ArrivalTime,
 ) -> Result<Response, ServiceError> {
     let user_id = params.user.id.clone();
     let user_email = params.user.email.clone();
     let authenticator_id = params.authenticator.id.clone();
     let client_info = params.client_info.clone();
 
-    let result = finalize_login_session_inner(state, params).await;
+    let result = finalize_login_session_inner(state, params, arrival).await;
 
     if let Err(ref e) = result {
         // The assertion verified and the counter update may already have
@@ -765,6 +778,7 @@ async fn finalize_login_session(
 async fn finalize_login_session_inner(
     state: &AppState,
     params: LoginSessionParams<'_>,
+    arrival: ArrivalTime,
 ) -> Result<Response, ServiceError> {
     let LoginSessionParams {
         jar,
@@ -884,6 +898,7 @@ async fn finalize_login_session_inner(
             ),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     .map_err(|e| {
@@ -953,6 +968,7 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
+    use crate::test_utils::test_arrival;
 
     #[tokio::test]
     async fn test_browser_auth_state_encode_decode() {
@@ -967,7 +983,7 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let decoded = BrowserAuthenticationState::decode(&encoded, &signer)
+        let decoded = BrowserAuthenticationState::decode(&encoded, &signer, test_arrival())
             .await
             .expect("Failed to decode state");
 
@@ -1516,7 +1532,8 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let result = BrowserAuthenticationState::decode(&encoded, &wrong_signer).await;
+        let result =
+            BrowserAuthenticationState::decode(&encoded, &wrong_signer, test_arrival()).await;
 
         assert!(result.is_err());
     }
@@ -1834,6 +1851,7 @@ mod tests {
                 pending_auth: None,
                 client_info: ClientInfo::default(),
             },
+            test_arrival(),
         )
         .await
         .expect("happy path must succeed");
@@ -1921,6 +1939,7 @@ mod tests {
                 pending_auth: None,
                 client_info: ClientInfo::default(),
             },
+            test_arrival(),
         )
         .await;
         assert!(

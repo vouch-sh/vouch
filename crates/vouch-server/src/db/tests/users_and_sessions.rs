@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::test_utils::test_arrival;
 
 #[tokio::test]
 async fn test_upsert_and_get_user() {
@@ -456,7 +457,7 @@ async fn test_replay_revocation_partial_failure_still_invalidates_committed_dele
     let cache = SessionCache::new(100, 30);
     assert!(
         cache
-            .get_session_by_token_hash(&store, "hash-p1")
+            .get_session_by_token_hash(&store, "hash-p1", test_arrival())
             .await
             .expect("cache lookup p1")
             .is_some(),
@@ -464,7 +465,7 @@ async fn test_replay_revocation_partial_failure_still_invalidates_committed_dele
     );
     assert!(
         cache
-            .get_session_by_token_hash(&store, "hash-p2")
+            .get_session_by_token_hash(&store, "hash-p2", test_arrival())
             .await
             .expect("cache lookup p2")
             .is_some(),
@@ -525,7 +526,7 @@ async fn test_replay_revocation_partial_failure_still_invalidates_committed_dele
     // lookup would return `Some` from the stale `Hit` (the bug).
     assert!(
         cache
-            .get_session_by_token_hash(&store, committed_hash)
+            .get_session_by_token_hash(&store, committed_hash, test_arrival())
             .await
             .expect("cache re-lookup committed")
             .is_none(),
@@ -535,7 +536,7 @@ async fn test_replay_revocation_partial_failure_still_invalidates_committed_dele
     // The session whose delete failed stays cached — it is still a valid row.
     assert!(
         cache
-            .get_session_by_token_hash(&store, surviving_hash)
+            .get_session_by_token_hash(&store, surviving_hash, test_arrival())
             .await
             .expect("cache re-lookup surviving")
             .is_some(),

@@ -2,6 +2,7 @@
 //! Device Authorization Grant handlers (RFC 8628).
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, DeviceAuthState};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{
@@ -85,6 +86,7 @@ fn hash_device_code(code: &str) -> String {
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// [`protocol::CONTENT_TYPE_FORM_URLENCODED`] format.
+#[expect(clippy::disallowed_methods, reason = "mints the device code's expiry")]
 pub(crate) async fn device_code(
     State(state): State<Arc<AppState>>,
     OAuthForm(req): OAuthForm<DeviceCodeRequest>,
@@ -240,6 +242,7 @@ pub(crate) async fn device_token(
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     device_code: &str,
+    arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
     // Validate device_code format before hashing and DB lookup.
     // Generated codes are 32 random bytes base64url-encoded (43 chars).
@@ -265,7 +268,7 @@ pub(crate) async fn device_token(
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
 
     // Check if expired
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
 
     if now > request.expires_at {
         return Err(oauth_error(
@@ -322,31 +325,38 @@ pub(crate) async fn device_token(
             let dpop_header = headers
                 .get(protocol::HEADER_DPOP)
                 .and_then(|v| v.to_str().ok());
-            let dpop_proof =
-                match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-                    Ok(proof) => proof,
-                    Err(DpopError::UseNonce(nonce)) => {
-                        return Err(dpop_use_nonce_response(&nonce));
-                    }
-                    Err(e @ DpopError::Database(_)) => {
-                        return Err(oauth_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            OAuthError {
-                                error: OAuthErrorCode::ServerError.as_str().to_string(),
-                                error_description: Some(e.to_string()),
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(oauth_error(
-                            StatusCode::BAD_REQUEST,
-                            OAuthError {
-                                error: OAuthErrorCode::InvalidDpopProof.as_str().to_string(),
-                                error_description: Some(e.to_string()),
-                            },
-                        ));
-                    }
-                };
+            let dpop_proof = match validate_dpop_if_present(
+                &state,
+                dpop_header,
+                "POST",
+                "/oauth/token",
+                arrival,
+            )
+            .await
+            {
+                Ok(proof) => proof,
+                Err(DpopError::UseNonce(nonce)) => {
+                    return Err(dpop_use_nonce_response(&nonce));
+                }
+                Err(e @ DpopError::Database(_)) => {
+                    return Err(oauth_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        OAuthError {
+                            error: OAuthErrorCode::ServerError.as_str().to_string(),
+                            error_description: Some(e.to_string()),
+                        },
+                    ));
+                }
+                Err(e) => {
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        OAuthError {
+                            error: OAuthErrorCode::InvalidDpopProof.as_str().to_string(),
+                            error_description: Some(e.to_string()),
+                        },
+                    ));
+                }
+            };
             let has_mtls_cert = client_cert.0.is_some();
 
             // Look up the registered OAuth client to enforce FAPI 2.0
@@ -604,6 +614,7 @@ pub(crate) async fn device_token(
                     ),
                     sender_constraint,
                 },
+                arrival,
             )
             .await
             .map_err(|e| {

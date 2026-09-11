@@ -156,6 +156,10 @@ pub fn start_cleanup_task(
 }
 
 /// Run all cleanup tasks once.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "background task, serving no request"
+)]
 pub async fn run_cleanup(
     store: &DocumentStore,
     audit: &AuditStore,

@@ -7,6 +7,7 @@
 //! - SSH (per-user, CLI setup)
 //! - EKS (via AWS IAM and EKS Access Entries)
 
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::handlers::extractors::SignedInSession;
 use crate::handlers::session::{AuthContext, extract_session_from_cookie};
@@ -43,6 +44,7 @@ impl_template_response!(IntegrationsTemplate);
 
 /// GET /integrations - Show integrations page.
 pub(crate) async fn integrations_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     session: SignedInSession,
@@ -57,7 +59,7 @@ pub(crate) async fn integrations_page(
 
     // Fetch session + user once for org-scoped lookups
     let org_context = if auth.has_org {
-        match extract_session_from_cookie(&state, &jar).await {
+        match extract_session_from_cookie(&state, &jar, arrival).await {
             Ok(session) => match db::get_user_by_id(&state.store, &session.sub).await {
                 Ok(Some(user)) => user.org_id.clone().map(|org_id| (user, org_id)),
                 Ok(None) => {

@@ -2,6 +2,7 @@
 //! Session extraction and cookie management for HTTP handlers.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
 use crate::error::ServiceError;
@@ -86,6 +87,7 @@ async fn extract_resource_token(
     method: &str,
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
     // Track DPoP source claim (custom claim for MCP attribution)
     let mut dpop_source: Option<String> = None;
@@ -113,7 +115,7 @@ async fn extract_resource_token(
     let token_hash = hash_token(&token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await?
         .ok_or_else(|| {
             ServiceError::api(
@@ -143,6 +145,7 @@ async fn extract_resource_token(
                         &full_uri,
                         &state.store,
                         config.dpop_max_age_seconds,
+                        arrival,
                     )
                     .await
                     {
@@ -373,6 +376,7 @@ async fn extract_token_from_parts(
     let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
         .await
         .unwrap_or_else(|infallible| match infallible {});
+    let arrival = arrival_from_parts(parts, state).await?;
     let jar = CookieJar::from_headers(&parts.headers);
 
     extract_resource_token(
@@ -382,8 +386,21 @@ async fn extract_token_from_parts(
         parts.method.as_str(),
         uri.path(),
         client_cert.0.as_ref(),
+        arrival,
     )
     .await
+}
+
+/// Pull the request's arrival stamp inside an extractor, restating the
+/// missing-middleware failure as a `ServiceError` so it renders like every
+/// other extractor rejection on these routes.
+async fn arrival_from_parts(
+    parts: &mut http::request::Parts,
+    state: &Arc<AppState>,
+) -> Result<ArrivalTime, ServiceError> {
+    ArrivalTime::from_request_parts(parts, state)
+        .await
+        .map_err(|_| ServiceError::Internal("Request arrival time unavailable".to_string()))
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
@@ -429,6 +446,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
         let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
             .await
             .unwrap_or_else(|infallible| match infallible {});
+        let arrival = arrival_from_parts(parts, state).await?;
         let token = extract_resource_token(
             state,
             &parts.headers,
@@ -436,6 +454,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
             parts.method.as_str(),
             uri.path(),
             client_cert.0.as_ref(),
+            arrival,
         )
         .await?;
         Ok(Self(Some(token)))
@@ -474,7 +493,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let token = extract_token_from_parts(parts, state).await?;
-        key_svc::require_recent_hardware_verification(&token)?;
+        let arrival = arrival_from_parts(parts, state).await?;
+        key_svc::require_recent_hardware_verification(&token, arrival)?;
         Ok(Self(token))
     }
 }
@@ -508,12 +528,14 @@ pub(super) async fn resolve_token_email(
 pub(crate) async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
     // Use an empty header map — cookie path only.
     // DPoP validation is skipped for the Cookie auth scheme, so method and uri
-    // are not used and can be empty strings.
+    // are not used and can be empty strings. `arrival` still applies: the
+    // session's `expires_at` is judged against it.
     let empty_headers = axum::http::HeaderMap::new();
-    extract_resource_token(state, &empty_headers, jar, "", "", None).await
+    extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await
 }
 
 /// Authorization scheme detected from the request.
@@ -606,8 +628,10 @@ pub(crate) async fn extract_user_with_org(
     method: &str,
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
-    let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
+    let token =
+        extract_resource_token(state, headers, jar, method, uri, client_cert, arrival).await?;
     let user = load_active_user(state, &token.sub).await?;
 
     let org_id = user.org_id.clone().ok_or_else(|| {
@@ -635,9 +659,10 @@ pub(crate) async fn extract_org_admin(
     method: &str,
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
     let (user, org_id) =
-        extract_user_with_org(state, headers, jar, method, uri, client_cert).await?;
+        extract_user_with_org(state, headers, jar, method, uri, client_cert, arrival).await?;
 
     if !user.is_org_admin {
         return Err(ServiceError::api(
@@ -694,7 +719,11 @@ pub(crate) fn clear_session_cookie() -> Cookie<'static> {
 }
 
 /// Helper to extract auth context from cookie jar using OAuth tokens.
-pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+pub(crate) async fn get_resource_auth_context(
+    state: &AppState,
+    jar: &CookieJar,
+    arrival: ArrivalTime,
+) -> AuthContext {
     // Try to extract token from cookie
     let token = match jar.get(vouch_common::SESSION_COOKIE_NAME) {
         Some(c) => c.value(),
@@ -716,7 +745,7 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
     let token_hash = hash_token(token);
     match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
     {
         Ok(Some(_)) => {}
@@ -757,8 +786,12 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
 /// by templates and browser UI handlers.
 ///
 /// Both names refer to the same OAuth-token-based auth context extraction.
-pub(crate) async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
-    get_resource_auth_context(state, jar).await
+pub(crate) async fn get_auth_context(
+    state: &AppState,
+    jar: &CookieJar,
+    arrival: ArrivalTime,
+) -> AuthContext {
+    get_resource_auth_context(state, jar, arrival).await
 }
 
 #[cfg(test)]

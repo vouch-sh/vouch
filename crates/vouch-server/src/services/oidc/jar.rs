@@ -13,6 +13,7 @@
 //! - FAPI 2.0 parameter consistency: query params must match JWT values
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::{Jws, JwsError};
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -24,7 +25,6 @@ use crate::services::oidc::jwt_bearer::validate::{
 use crate::services::oidc::jwt_bearer::{
     find_matching_key_with_refresh_client, resolve_client_jwks,
 };
-use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -331,6 +331,7 @@ pub async fn validate_request_object(
     request_jwt: &str,
     client: &OAuthClient,
     query_params: Option<&QueryParamHints<'_>>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizeRequestParams> {
     // 1. Parse and validate the header (algorithm + typ)
     let (_typ, assertion_header) = parse_request_object_header(request_jwt)?;
@@ -465,12 +466,7 @@ pub async fn validate_request_object(
     // 5. Validate temporal claims
     // FAPI 2.0 clients use a tighter 10-second clock skew tolerance.
     let clock_skew = super::fapi::clock_skew_seconds(client);
-    validate_temporal_claims(
-        &claims,
-        clock_skew,
-        client.is_fapi(),
-        Timestamp::now().as_second(),
-    )?;
+    validate_temporal_claims(&claims, clock_skew, client.is_fapi(), arrival.as_second())?;
 
     // 6. Validate issuer — must match client_id
     if let Some(ref iss) = claims.iss
@@ -700,8 +696,10 @@ fn validate_temporal_claims(
 mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
+    use crate::test_utils::test_arrival;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jiff::Timestamp;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.
@@ -1419,7 +1417,8 @@ mod tests {
             "sanity: get_jwks_cache must error after dropping the documents table"
         );
 
-        let result = validate_request_object(&state, &request_jwt, &client, None).await;
+        let result =
+            validate_request_object(&state, &request_jwt, &client, None, test_arrival()).await;
         assert!(
             result.is_ok(),
             "inline-JWKS client must validate Request Object despite cache DB error: {result:?}"

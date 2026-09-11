@@ -5,6 +5,7 @@
 //! self-service application management portal.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, AccessScope, UpdateOAuthClientParams};
 use axum::{
     Form,
@@ -250,6 +251,7 @@ pub(crate) async fn create_application_form(
 /// Show application details.
 /// GET /applications/:id
 pub(crate) async fn detail_application_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     session: SignedInSession,
     Path(app_id): Path<String>,
@@ -286,7 +288,7 @@ pub(crate) async fn detail_application_page(
     };
 
     // Get secrets metadata
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .unwrap_or_default();
@@ -628,6 +630,7 @@ pub(crate) async fn add_secret_form(
 /// Delete (revoke) a secret.
 /// POST /applications/:id/secrets/:secret_id/delete
 pub(crate) async fn delete_secret_form(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     session: SignedInSession,
     Path((app_id, secret_id)): Path<(String, String)>,
@@ -666,7 +669,7 @@ pub(crate) async fn delete_secret_form(
         );
     }
 
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .unwrap_or_default();

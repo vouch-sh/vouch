@@ -12,6 +12,7 @@
 
 use super::preconfigured::BASE_ALLOW;
 use super::*;
+use crate::test_utils::test_arrival;
 use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
 
 fn sample_posture() -> DevicePosture {
@@ -1897,6 +1898,7 @@ async fn test_authorize_decision_records_custom_policy_name_in_audit() {
         },
         &[],
         &custom,
+        test_arrival(),
     )
     .await;
     assert!(result.is_err(), "minimal posture must be denied");
@@ -1943,6 +1945,7 @@ async fn test_authorize_decision_records_preconfigured_slug_in_audit() {
         },
         &slugs,
         &[],
+        test_arrival(),
     )
     .await;
     assert!(
@@ -1989,6 +1992,7 @@ when temporal {
         },
         &[],
         &custom,
+        test_arrival(),
     )
     .await;
     assert!(
@@ -2044,6 +2048,7 @@ async fn test_authorize_decision_multi_rule_custom_policy_name_in_audit() {
         },
         &[],
         &custom,
+        test_arrival(),
     )
     .await;
     assert!(result.is_err(), "firewall disabled must deny");

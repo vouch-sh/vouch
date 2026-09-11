@@ -14,30 +14,92 @@
 //! - `sqlite` (default): Uses SQLite for development and testing
 //! - `postgres`: Uses PostgreSQL/Aurora DSQL for production
 
+// The db layer stamps the timestamps it writes — `created_at`, `expires_at`,
+// `last_used_at` — and re-reads the clock inside optimistic-concurrency retry
+// closures, which need a fresh reading per attempt rather than a stale captured
+// one. Neither is a request-path comparison, so the modules doing it carry an
+// expectation for `disallowed_methods`. A comparison that decides a request
+// takes `crate::arrival::ArrivalTime` instead; see `arrival.rs`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 pub(crate) mod audit;
 mod authenticators;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod authorization_codes;
 mod challenge_states;
 pub(crate) mod claim;
 mod config;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod credentials;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod device_auth;
 pub(crate) mod document_type;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 pub(crate) mod documents;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 pub(crate) mod dpop;
 pub(crate) mod dsql;
 mod enrollment;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod github;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod jwks_cache;
 pub(crate) mod migrations;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod oauth;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod organizations;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 pub(crate) mod par;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod pending_oauth;
 pub(crate) mod pool;
 mod posture_policies;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 mod scim;
 mod sessions;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "db layer stamps row timestamps and re-reads the clock per OCC attempt"
+)]
 pub(crate) mod store;
 mod users;
 
@@ -163,9 +225,8 @@ pub use jwks_cache::{
 
 // Re-export DPoP types and functions (RFC 9449)
 pub use dpop::{
-    DpopJtiClaim, check_and_store_dpop_jti, check_and_store_dpop_jti_at_second,
-    delete_expired_dpop_jtis, delete_expired_dpop_nonces, generate_dpop_nonce,
-    validate_and_consume_dpop_nonce,
+    DpopJtiClaim, check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis,
+    delete_expired_dpop_nonces, generate_dpop_nonce, validate_and_consume_dpop_nonce,
 };
 
 // Re-export credentials types and functions

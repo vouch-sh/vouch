@@ -6,6 +6,7 @@ use super::client_auth::{
     with_client_auth_challenge,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
@@ -180,6 +181,7 @@ impl ClientAuthFields for ParRequest {
     reason = "single-pass FAPI 2.0 PAR validation per RFC 9126"
 )]
 pub(crate) async fn par(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
@@ -219,7 +221,7 @@ pub(crate) async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth, arrival).await {
         Ok(result) => result,
         Err(resp) => return resp,
     }) else {
@@ -313,37 +315,41 @@ pub(crate) async fn par(
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par").await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                [(
-                    axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
-                    nonce.to_string(),
-                )],
-                Json(OAuthErrorResponse {
-                    error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                    error_description: Some(
-                        "Authorization server requires nonce in DPoP proof".to_string(),
-                    ),
-                    error_uri: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return par_error_response(OAuthErrorCode::ServerError, presentation, &e.to_string());
-        }
-        Err(e) => {
-            return par_error_response(
-                OAuthErrorCode::InvalidDpopProof,
-                presentation,
-                &e.to_string(),
-            );
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(
+                        axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                        nonce.to_string(),
+                    )],
+                    Json(OAuthErrorResponse {
+                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
+                        error_description: Some(
+                            "Authorization server requires nonce in DPoP proof".to_string(),
+                        ),
+                        error_uri: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return par_error_response(
+                    OAuthErrorCode::ServerError,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+            Err(e) => {
+                return par_error_response(
+                    OAuthErrorCode::InvalidDpopProof,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+        };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
     // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
@@ -381,16 +387,21 @@ pub(crate) async fn par(
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
     let (validated, jar_response_mode) = if let Some(ref request_jwt) = params.request {
-        let request_params =
-            match validate_request_object(&state, request_jwt, &authenticated_client.client, None)
-                .await
-            {
-                Ok(params) => params,
-                Err(e) => {
-                    let (error_code, description) = service_error_codes(&e);
-                    return par_error_response(error_code, presentation, &description);
-                }
-            };
+        let request_params = match validate_request_object(
+            &state,
+            request_jwt,
+            &authenticated_client.client,
+            None,
+            arrival,
+        )
+        .await
+        {
+            Ok(params) => params,
+            Err(e) => {
+                let (error_code, description) = service_error_codes(&e);
+                return par_error_response(error_code, presentation, &description);
+            }
+        };
 
         // client_id from JWT must match the authenticated client
         if request_params.client_id != authenticated_client.client.client_id {

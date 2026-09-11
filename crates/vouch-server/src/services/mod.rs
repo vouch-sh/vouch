@@ -96,15 +96,12 @@ impl RecencyWindow {
         }
     }
 
-    /// Whether `issued_at` (Unix seconds) is within the window relative to the
-    /// current wall clock.
-    pub(crate) fn accepts(&self, issued_at: i64) -> bool {
-        self.accepts_at(jiff::Timestamp::now().as_second(), issued_at)
-    }
-
-    /// Whether `issued_at` is within the window relative to an explicit `now` —
-    /// for callers that have already stamped the time once (the DPoP validation
-    /// snapshots it at the request entry point) or for deterministic tests.
+    /// Whether `issued_at` is within the window relative to an explicit `now`.
+    ///
+    /// There is deliberately no ambient-clock overload: a window that reads
+    /// its own clock cannot be checked against the other time decisions in the
+    /// same request. Request-path callers pass
+    /// [`crate::arrival::ArrivalTime::as_second`]; tests pass a literal.
     pub(crate) fn accepts_at(&self, now: i64, issued_at: i64) -> bool {
         let age = now.saturating_sub(issued_at);
         // `age >= -clock_skew_secs`, written without negating so

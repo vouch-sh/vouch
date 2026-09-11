@@ -15,6 +15,7 @@
 //! - Clock skew tolerance is capped at 120 seconds
 //! - Replay prevention: callers must consume the state record after this returns Ok
 
+use crate::arrival::ArrivalTime;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use jiff::Timestamp;
@@ -174,6 +175,7 @@ pub(crate) fn validate_saml_response(
     base64_response: &str,
     expected_request_id: &str,
     provider: &SamlProvider,
+    arrival: ArrivalTime,
 ) -> Result<SamlAssertion, ResponseError> {
     // Step 1: Base64-decode
     let xml_bytes = BASE64_STANDARD
@@ -306,7 +308,7 @@ pub(crate) fn validate_saml_response(
     validate_audience_restriction(assertion, &provider.sp_entity_id)?;
 
     // Step 10: Validate time conditions (Core 2.5.1)
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     validate_conditions(assertion, now)?;
 
     // Step 11: Validate SubjectConfirmation Method is bearer (Core 2.4.1.2)

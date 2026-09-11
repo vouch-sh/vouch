@@ -2,6 +2,7 @@
 //! SCIM token management — browser UI handlers.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::CreateScimTokenParams;
 use crate::db::documents::audit::ScimTokenAdminData;
@@ -122,6 +123,7 @@ pub(crate) async fn admin_scim_tokens_page(
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
 pub(crate) async fn admin_create_scim_token(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -146,8 +148,16 @@ pub(crate) async fn admin_create_scim_token(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(form.expires_in_days)?);
@@ -219,7 +229,7 @@ pub(crate) async fn admin_create_scim_token(
         })
         .collect();
 
-    let auth = get_resource_auth_context(&state, &jar).await;
+    let auth = get_resource_auth_context(&state, &jar, arrival).await;
 
     Ok(AdminScimTokensTemplate {
         auth,

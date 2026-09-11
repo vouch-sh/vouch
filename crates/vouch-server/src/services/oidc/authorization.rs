@@ -6,6 +6,7 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
 use crate::db::{
     AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode,
@@ -596,9 +597,10 @@ impl AuthorizationCode {
         signer: &crate::crypto::jwt::StateTokenSigner,
         expected_issuer: &str,
         expected_client_id: &str,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         let claims: Self = signer
-            .decode_state_token(token, JwtType::AuthorizationCode)
+            .decode_state_token(token, JwtType::AuthorizationCode, arrival.as_second())
             .await?;
 
         // RFC 8725 §3.8: Validate issuer
@@ -838,12 +840,13 @@ fn validate_param_length(name: &str, value: &str, max_len: usize) -> ServiceResu
 pub async fn check_session_for_authorization(
     state: &Arc<AppState>,
     session_token: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationSessionState> {
     let Some(token) = session_token else {
         return Ok(AuthorizationSessionState::NeedsAuth);
     };
 
-    match validate_session_token(state, token).await? {
+    match validate_session_token(state, token, arrival).await? {
         Some(validated) => {
             // Two separate facts, and the authorization flow needs both.
             //
@@ -901,6 +904,10 @@ pub async fn check_session_for_authorization(
 ///
 /// # Errors
 /// Returns `ServiceError` if encoding fails or database storage fails.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the authorization code's expiry"
+)]
 pub async fn issue_authorization_code(
     state: &Arc<AppState>,
     params: AuthorizationCodeParams<'_>,
@@ -984,12 +991,14 @@ pub async fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
     client_id: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationCode> {
     let auth_code = AuthorizationCode::decode(
         code,
         &state.state_signer,
         &state.config().base_url,
         client_id,
+        arrival,
     )
     .await
     .map_err(|_| {
@@ -999,8 +1008,9 @@ pub async fn decode_authorization_code(
         )
     })?;
 
-    // Check expiration
-    let now = Timestamp::now().as_second();
+    // Check expiration against the request's arrival, so this gate and the
+    // issued token's lifetime downstream are measured from one instant.
+    let now = arrival.as_second();
     if auth_code.exp < now {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
@@ -1092,6 +1102,7 @@ mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::test_utils::test_arrival;
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -1271,9 +1282,15 @@ mod tests {
         let code = test_auth_code("https://example.com", "client-a");
 
         let token = code.encode(&signer).await.unwrap();
-        let decoded = AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a")
-            .await
-            .unwrap();
+        let decoded = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(decoded.iss, "https://example.com");
         assert_eq!(decoded.aud, "client-a");
@@ -1289,8 +1306,14 @@ mod tests {
         let code = test_auth_code("https://attacker.com", "client-a");
 
         let token = code.encode(&signer).await.unwrap();
-        let result =
-            AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a").await;
+        let result = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await;
 
         assert!(result.is_err(), "Wrong issuer must be rejected");
         let err = result.unwrap_err();
@@ -1316,6 +1339,7 @@ mod tests {
             &signer,
             "https://example.com",
             "client-b", // Different client_id
+            test_arrival(),
         )
         .await;
 
@@ -1344,8 +1368,14 @@ mod tests {
         let code = test_auth_code("https://example.com", "client-a");
 
         let token = code.encode(&signer_a).await.unwrap();
-        let result =
-            AuthorizationCode::decode(&token, &signer_b, "https://example.com", "client-a").await;
+        let result = AuthorizationCode::decode(
+            &token,
+            &signer_b,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await;
 
         assert!(result.is_err(), "Wrong secret must be rejected");
     }

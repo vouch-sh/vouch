@@ -3,6 +3,7 @@
 //! `DELETE /api/v1/org/scim-tokens/{id}`.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::CreateScimTokenParams;
 use crate::db::documents::audit::ScimTokenAdminData;
@@ -78,7 +79,12 @@ pub(crate) struct ListScimTokensResponse {
 
 /// Create a new SCIM token.
 /// POST /api/v1/org/scim-tokens
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn create_scim_token(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -113,6 +119,7 @@ pub(crate) async fn create_scim_token(
         method.as_str(),
         uri.path(),
         client_cert.0.as_ref(),
+        arrival,
     )
     .await?;
 

@@ -2,6 +2,7 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
@@ -226,9 +227,14 @@ impl BrowserRegistrationState {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .decode_state_token(
+                token,
+                crate::crypto::jwt::JwtType::BrowserRegistrationState,
+                arrival.as_second(),
+            )
             .await
     }
 }
@@ -284,6 +290,7 @@ impl RegistrationCompletion {
     async fn validate(
         req: BrowserRegisterCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
         let expected_origin = state.config().base_url.clone();
         let client_data = ClientDataProof::verify(
@@ -308,13 +315,15 @@ impl RegistrationCompletion {
             ServiceError::api(StatusCode::BAD_REQUEST, "invalid_client_data", message)
         })?;
 
-        let reg_state = BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
-            })?;
+        let reg_state =
+            BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer, arrival)
+                .await
+                .map_err(|e| {
+                    ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                })?;
 
-        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+        let expires_at =
+            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -355,6 +364,7 @@ pub(crate) async fn device_verify_page(
 /// Handle device code submission.
 /// POST /device
 pub(crate) async fn device_verify_submit(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     Form(form): Form<UserCodeForm>,
 ) -> Response {
@@ -392,7 +402,7 @@ pub(crate) async fn device_verify_submit(
     };
 
     // Check if expired
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     if now > request.expires_at {
         return DeviceVerifyTemplate {
             error: Some("This code has expired. Please request a new one.".to_string()),
@@ -524,6 +534,7 @@ pub(crate) async fn device_verify_submit(
     reason = "axum handler; OIDC callback orchestrates IdP exchange and enrollment"
 )]
 pub(crate) async fn oidc_callback(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     Query(params): Query<OidcCallbackParams>,
@@ -717,6 +728,7 @@ pub(crate) async fn oidc_callback(
         identity,
         oidc_state_claim,
         client_info,
+        arrival,
     )
     .await
 }
@@ -731,6 +743,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     identity: IdentityResult,
     oidc_state_claim: db::OidcStateClaim,
     client_info: ClientInfo,
+    arrival: ArrivalTime,
 ) -> Response {
     // Shape-check the upstream-supplied email before it becomes the primary
     // identifier (same `Email::is_valid_address` rule the SCIM create path
@@ -918,8 +931,11 @@ pub(crate) async fn complete_enrollment_after_identity(
         db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
 
-    // Create session for this user (using session cookie instead of enrollment cookie)
-    let now = Timestamp::now();
+    // Create session for this user (using session cookie instead of enrollment
+    // cookie). Measured from arrival, the same instant the access token minted
+    // below derives its `exp` from, so the cookie session and the token it
+    // carries cannot expire at different times.
+    let now = arrival.timestamp();
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let duration = Span::new().hours(session_hours);
     let expires = match now.checked_add(duration) {
@@ -1009,6 +1025,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             ),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     {
@@ -1149,13 +1166,14 @@ async fn load_keys_for_display(
 /// GET /enroll/keys
 /// Authentication is via session cookie (set by oidc_callback).
 pub(crate) async fn enroll_keys_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
     tracing::debug!("enroll_keys_page: checking for session cookie");
 
     // Get session from cookie
-    match extract_session_from_cookie(&state, &jar).await {
+    match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(token) => {
             let email = token.email.clone().unwrap_or_default();
             tracing::debug!(
@@ -1220,12 +1238,17 @@ pub(crate) async fn enroll_keys_page(
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
 /// Authentication is via session cookie (set by oidc_callback).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a registration state token's expiry"
+)]
 pub(crate) async fn browser_register_start(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
     // Get session from cookie
-    let token = extract_session_from_cookie(&state, &jar)
+    let token = extract_session_from_cookie(&state, &jar, arrival)
         .await
         .map_err(|_| {
             ServiceError::api(
@@ -1420,12 +1443,13 @@ pub(crate) async fn browser_register_start(
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
 )]
 pub(crate) async fn browser_register_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     client_info: ClientInfo,
     ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    let checked = RegistrationCompletion::validate(req, &state).await?;
+    let checked = RegistrationCompletion::validate(req, &state, arrival).await?;
 
     // Bind the caller to the state JWT's user_id. `browser_register_start`
     // minted the state from the session cookie's `sub`; completion must
@@ -1433,7 +1457,7 @@ pub(crate) async fn browser_register_complete(
     // caller is rejected here, *before* the single-use consume, so the
     // legitimate holder can still complete the enrollment with the same
     // state token.
-    let session = extract_session_from_cookie(&state, &jar).await?;
+    let session = extract_session_from_cookie(&state, &jar, arrival).await?;
     if session.sub != checked.reg_state.user_id.to_string() {
         tracing::warn!(
             caller_sub = %session.sub,
@@ -1675,6 +1699,7 @@ pub(crate) async fn browser_register_complete(
             ),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     .map_err(|e| {
@@ -1802,6 +1827,10 @@ pub(crate) struct DirectEnrollQuery {
 /// This initiates OIDC authentication directly from the browser,
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the enrollment audit record"
+)]
 pub(crate) async fn direct_enroll_start(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectEnrollQuery>,

@@ -26,6 +26,10 @@ pub(crate) async fn terms_page() -> Redirect {
 /// `Host` header — the header is attacker-controlled behind the L4
 /// passthrough listener. `Expires` rolls 30 days ahead of each request so
 /// a long-lived deployment can never serve a stale value.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the security.txt Expires field"
+)]
 pub(crate) async fn security_txt(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config.load();
     let now = jiff::Timestamp::now();

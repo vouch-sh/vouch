@@ -1,6 +1,20 @@
 # Clippy configuration for the vouch workspace.
 # See: https://doc.rust-lang.org/clippy/configuration.html
 
+# Request-path time comparisons in vouch-server read one instant per request
+# (`vouch_server::arrival::ArrivalTime`) rather than stamping their own clock,
+# so two comparisons serving one decision cannot observe different instants.
+#
+# The lint LEVEL is `allow` workspace-wide (see `[workspace.lints.clippy]` in
+# Cargo.toml) and raised to `warn` only in vouch-server's crate roots: the CLI
+# and agent have no request to anchor to. Within vouch-server, ambient stamping
+# is still right in four places, each carrying an `#[expect]` that names which:
+# the arrival middleware, OCC retry closures, db row stamping, and background
+# tasks.
+disallowed-methods = [
+    { path = "jiff::Timestamp::now", reason = "request-path comparisons take `crate::arrival::ArrivalTime`; see `arrival.rs` for the sanctioned ambient-stamping cases" },
+]
+
 # Allow breaking the exported API (we're pre-1.0)
 avoid-breaking-exported-api = false
 

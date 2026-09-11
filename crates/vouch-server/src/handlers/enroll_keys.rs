@@ -11,6 +11,7 @@
 //! handler, which is worse than the asymmetry.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
@@ -31,10 +32,11 @@ use super::session::{SteppedUpToken, extract_session_from_cookie};
 /// GET /enroll/keys/api
 /// Authentication is via session cookie.
 pub(crate) async fn list_keys(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
+    let token = extract_session_from_cookie(&state, &jar, arrival).await?;
 
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
@@ -58,12 +60,13 @@ pub(crate) struct RenameKeyForm {
 /// the list — surfacing any error via a flash message rather than returning a
 /// raw JSON error body. Authentication is via session cookie.
 pub(crate) async fn rename_key_form(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
     Form(form): Form<RenameKeyForm>,
 ) -> Response {
-    let token = match extract_session_from_cookie(&state, &jar).await {
+    let token = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(token) => token,
         Err(_) => return Redirect::to("/enroll/start").into_response(),
     };

@@ -71,6 +71,10 @@ pub(crate) fn generate_scim_token() -> Result<GeneratedScimToken, ServiceError> 
 /// Compute token expiration from a number of days.
 ///
 /// `jiff::Timestamp` only supports time-based units, so we convert days to hours.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a token expiry from an operator-supplied duration"
+)]
 pub(crate) fn compute_token_expiry(days: i64) -> Result<Timestamp, ServiceError> {
     let hours = days.checked_mul(24).ok_or_else(|| {
         ServiceError::api(

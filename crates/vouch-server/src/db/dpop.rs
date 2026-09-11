@@ -92,7 +92,8 @@ pub async fn validate_and_consume_dpop_nonce(
 
 /// Witness that a DPoP JTI (RFC 9449 §11.1) was atomically committed by
 /// this caller. Construction is private to this module — the only path
-/// to an instance is a successful return from [`check_and_store_dpop_jti`],
+/// to an instance is a successful return from
+/// [`check_and_store_dpop_jti_at_second`],
 /// whose atomic INSERT on the deterministic PRIMARY KEY guarantees that
 /// at most one concurrent caller's insert commits.
 ///
@@ -109,7 +110,7 @@ pub struct DpopJtiClaim {
 
 impl DpopJtiClaim {
     /// Test-only constructor. Production code must obtain a claim via
-    /// [`check_and_store_dpop_jti`].
+    /// [`check_and_store_dpop_jti_at_second`].
     ///
     /// Gated on `test-utils` as well as `test` because
     /// `ValidatedDpopProof::for_testing` needs it to build a witness for
@@ -133,37 +134,17 @@ impl DpopJtiClaim {
 /// `ClaimError::InvalidInput` (client error → 401, not a 500 that would
 /// prompt retry).
 ///
-/// **Clock injection.** This overload stamps `Timestamp::now()` internally,
-/// so callers that also validate a freshness claim against the wall clock
-/// get a *different* `now` (separated from this one by the `await` on the
-/// insert). That dual-stamp lets the freshness window's upper bound drift
-/// past the replay record's `expires_at`, reopening a replay gap (RFC 9449
-/// §11.1). Production callers that share a `now` with a freshness
-/// check MUST use [`check_and_store_dpop_jti_at_second`] instead, passing
-/// the single caller-stamped instant. This overload remains for tests and
-/// callers that do not also enforce a freshness window against the row.
-pub async fn check_and_store_dpop_jti(
-    store: &DocumentStore,
-    jti: &str,
-    validity_seconds: i64,
-) -> std::result::Result<DpopJtiClaim, ClaimError> {
-    let now = Timestamp::now();
-    let expires_at = now
-        .checked_add(validity_seconds.seconds())
-        .map_err(|e| ClaimError::Database(format!("DPoP JTI expiry overflow: {e}")))?;
-    store_dpop_jti_with_expiry(store, jti, expires_at).await
-}
-
-/// Clock-injectable twin of [`check_and_store_dpop_jti`] that derives the
-/// row's `expires_at` from a caller-provided `now_second` (Unix seconds).
+/// The row's `expires_at` is derived from the caller-provided `now_second`
+/// (Unix seconds): `expires_at = Timestamp::from_second(now_second) +
+/// validity_seconds`.
 ///
-/// `expires_at = Timestamp::from_second(now_second) + validity_seconds`.
 /// Callers that also run a freshness check (e.g.
-/// `services::oidc::dpop::validate_dpop_common`) stamp a single `now` at
-/// their entry point and pass it here *and* to the freshness check, so the
-/// replay record and the freshness window share one reference instant —
-/// the dual-stamp `Δ` gap that `check_and_store_dpop_jti` would otherwise
-/// reintroduce cannot arise.
+/// `services::oidc::dpop::validate_dpop_common`) pass the request's arrival
+/// instant here *and* to the freshness check, so the replay record and the
+/// freshness window share one reference instant. Reading a second clock for
+/// either one lets the freshness window's upper bound drift past the record's
+/// `expires_at`, reopening a replay gap (RFC 9449 §11.1) — which is why there
+/// is no ambient-clock overload.
 ///
 /// `now_second` is in **integer seconds** (the `as_second()` granularity
 /// the freshness check uses). Callers that need to cover the
@@ -174,9 +155,6 @@ pub async fn check_and_store_dpop_jti(
 /// caller) rather than `now.as_second()`. That keeps the row alive until
 /// the first second at which the freshness check would reject the proof,
 /// fully covering the RFC 9449 §11.1 acceptance window.
-///
-/// Returns the same [`DpopJtiClaim`] witness / error mapping as
-/// [`check_and_store_dpop_jti`].
 pub async fn check_and_store_dpop_jti_at_second(
     store: &DocumentStore,
     jti: &str,
@@ -191,10 +169,8 @@ pub async fn check_and_store_dpop_jti_at_second(
 
 /// Validate `jti` and atomically insert a row expiring at `expires_at`.
 ///
-/// Shared body of [`check_and_store_dpop_jti`] and
-/// [`check_and_store_dpop_jti_at_second`]; the only difference between the
-/// two public overloads is how `expires_at` is computed (internal
-/// `Timestamp::now()` vs. a caller-provided integer-second instant).
+/// The insert body behind [`check_and_store_dpop_jti_at_second`], kept
+/// separate so the expiry arithmetic and the storage step stay legible.
 async fn store_dpop_jti_with_expiry(
     store: &DocumentStore,
     jti: &str,

@@ -2,6 +2,7 @@
 //! Key management handlers for listing, renaming, removing, and registering security keys.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self};
 use crate::error::ServiceError;
 use crate::redact_email;
@@ -60,9 +61,14 @@ impl RegistrationState {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::RegistrationState)
+            .decode_state_token(
+                token,
+                crate::crypto::jwt::JwtType::RegistrationState,
+                arrival.as_second(),
+            )
             .await
     }
 }
@@ -104,14 +110,16 @@ impl RegistrationCompletion {
     async fn validate(
         req: RegisterCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
-        let reg_state = RegistrationState::decode(req.state.as_str(), &state.state_signer)
+        let reg_state = RegistrationState::decode(req.state.as_str(), &state.state_signer, arrival)
             .await
             .map_err(|e| {
                 ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
             })?;
 
-        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+        let expires_at =
+            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -137,6 +145,10 @@ impl RegistrationCompletion {
 ///
 /// Key *deletion* is gated, because it is destructive and has no recovery
 /// argument — see `SteppedUpToken`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a registration state token's expiry"
+)]
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
@@ -232,6 +244,7 @@ pub(crate) async fn register_start(
 /// with an attacker-controlled YubiKey and enroll a credential on a victim
 /// account by satisfying only the open RFC 7591 client-level signature gate.
 pub(crate) async fn register_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
     client_info: db::ClientInfo,
@@ -239,7 +252,7 @@ pub(crate) async fn register_complete(
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
-    let checked = RegistrationCompletion::validate(req, &state).await?;
+    let checked = RegistrationCompletion::validate(req, &state, arrival).await?;
 
     // Bind the caller to the state JWT's user_id. `register_start` minted
     // the state from `token.sub`; completion must assert the same principal
@@ -541,7 +554,7 @@ mod tests {
         };
 
         let token = state.encode(&signer).await.expect("encode");
-        let decoded = RegistrationState::decode(&token, &signer)
+        let decoded = RegistrationState::decode(&token, &signer, test_arrival())
             .await
             .expect("decode");
 
@@ -567,7 +580,7 @@ mod tests {
         };
 
         let token = state.encode(&signer_a).await.expect("encode");
-        let result = RegistrationState::decode(&token, &signer_b).await;
+        let result = RegistrationState::decode(&token, &signer_b, test_arrival()).await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -588,7 +601,11 @@ mod tests {
 
         // Try decoding with a different JwtType via the raw signer
         let result: Result<RegistrationState, _> = signer
-            .decode_state_token(&token, JwtType::BrowserRegistrationState)
+            .decode_state_token(
+                &token,
+                JwtType::BrowserRegistrationState,
+                test_arrival().as_second(),
+            )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");
     }

@@ -5,6 +5,7 @@
 //! - RFC 8693 - OAuth 2.0 Token Exchange
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
@@ -291,6 +292,7 @@ pub(crate) async fn exchange_token(
     state: &Arc<AppState>,
     params: TokenExchangeParams<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
     // path issues a clean OIDC claim set and does not carry the `act` claim,
@@ -324,7 +326,7 @@ pub(crate) async fn exchange_token(
     let subject_token_hash = hash_token(subject_token);
     let subject_session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &subject_token_hash)
+        .get_session_by_token_hash(&state.store, &subject_token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
@@ -366,6 +368,7 @@ pub(crate) async fn exchange_token(
             params.client_ip,
             params.client_id,
             params.audience,
+            arrival,
         )
         .await
         // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
@@ -406,7 +409,7 @@ pub(crate) async fn exchange_token(
         let actor_token_hash = hash_token(actor_token);
         let _actor_session = state
             .session_cache
-            .get_session_by_token_hash(&state.store, &actor_token_hash)
+            .get_session_by_token_hash(&state.store, &actor_token_hash, arrival)
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
@@ -473,10 +476,14 @@ pub(crate) async fn exchange_token(
     // including when the subject's integer-second remaining TTL is 0 — so an
     // exchanged access token never outlives its subject token (see
     // [`cap_lifetime_by_subject_ttl`]).
+    // The cap is measured from the request's arrival, and
+    // `create_oauth_access_token` stamps the issued `exp` from that same
+    // instant, so `exp_issued = arrival + min(session, subject_exp - arrival)`
+    // can never exceed `subject_exp`.
     let expires_in = cap_lifetime_by_subject_ttl(
         state.config().session_hours.saturating_mul(3600),
         subject_decoded.exp(),
-        Timestamp::now().as_second(),
+        arrival.as_second(),
     );
 
     // RFC 9068: Audience is the explicit audience param (target resource server),
@@ -525,6 +532,7 @@ pub(crate) async fn exchange_token(
                 org_domain: subject_session.org_domain.as_deref(),
                 client_id: params.client_id,
             },
+            arrival,
         )
         .await;
     }
@@ -604,6 +612,7 @@ pub(crate) async fn exchange_token(
             source_code_hash: subject_session.source_code_hash.as_deref(),
         },
         proof,
+        arrival,
     )
     .await?;
 
@@ -706,6 +715,7 @@ struct IdTokenContext<'a> {
 async fn issue_id_token(
     state: &Arc<AppState>,
     ctx: IdTokenContext<'_>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     let config = state.config();
 
@@ -748,7 +758,9 @@ async fn issue_id_token(
         .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;
 
     // Log the exchange for audit (best-effort — failures are non-fatal).
-    let now = Timestamp::now();
+    // The recorded `expires_at` describes the token just signed, whose `exp`
+    // the claims builder derived from the same arrival instant.
+    let now = arrival.timestamp();
     let issued_token_hash = hash_token(&id_token);
     let expires_at = i64::try_from(expires_in)
         .ok()

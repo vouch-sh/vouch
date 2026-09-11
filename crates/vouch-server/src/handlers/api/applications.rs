@@ -6,6 +6,7 @@
 //! the request/response types and validation rules both surfaces share.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
 use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
@@ -538,6 +539,7 @@ pub(crate) async fn add_secret_api(
 /// List secrets for an application (API).
 /// GET /api/v1/applications/:id/secrets
 pub(crate) async fn list_secrets_api(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
@@ -564,7 +566,7 @@ pub(crate) async fn list_secrets_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -595,6 +597,7 @@ pub(crate) async fn list_secrets_api(
 /// Delete (revoke) a secret (API).
 /// DELETE /api/v1/applications/:id/secrets/:secret_id
 pub(crate) async fn delete_secret_api(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
@@ -631,7 +634,7 @@ pub(crate) async fn delete_secret_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
