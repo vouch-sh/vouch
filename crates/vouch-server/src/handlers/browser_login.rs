@@ -141,11 +141,13 @@ impl BrowserAuthenticationState {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
             .decode_state_token(
                 token,
                 crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+                arrival.as_second(),
             )
             .await
     }
@@ -233,7 +235,7 @@ impl LoginCompletion {
         })?;
 
         let auth_state =
-            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer)
+            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer, arrival)
                 .await
                 .map_err(|e| {
                     ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
@@ -981,7 +983,7 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let decoded = BrowserAuthenticationState::decode(&encoded, &signer)
+        let decoded = BrowserAuthenticationState::decode(&encoded, &signer, test_arrival())
             .await
             .expect("Failed to decode state");
 
@@ -1530,7 +1532,8 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let result = BrowserAuthenticationState::decode(&encoded, &wrong_signer).await;
+        let result =
+            BrowserAuthenticationState::decode(&encoded, &wrong_signer, test_arrival()).await;
 
         assert!(result.is_err());
     }

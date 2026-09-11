@@ -120,7 +120,11 @@ impl AssertionGrant {
     /// includes a member outside its length bounds), a challenge state that
     /// fails to decode or carries an unrepresentable `exp`, or a user handle
     /// that is not a UUID.
-    async fn validate(assertion: &str, state: &Arc<AppState>) -> ServiceResult<Self> {
+    async fn validate(
+        assertion: &str,
+        state: &Arc<AppState>,
+        arrival: ArrivalTime,
+    ) -> ServiceResult<Self> {
         let assertion_bytes = URL_SAFE_NO_PAD.decode(assertion).map_err(|_| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
@@ -138,7 +142,11 @@ impl AssertionGrant {
 
         let challenge_state: Fido2ChallengeState = state
             .state_signer
-            .decode_state_token(payload.state.as_str(), JwtType::Fido2ChallengeState)
+            .decode_state_token(
+                payload.state.as_str(),
+                JwtType::Fido2ChallengeState,
+                arrival.as_second(),
+            )
             .await
             .map_err(|e| {
                 ServiceError::oauth(
@@ -222,7 +230,7 @@ pub(crate) async fn exchange_fido2_assertion(
 ) -> ServiceResult<Fido2AssertionResult> {
     // Parse and check the assertion. This reads only the assertion parameter,
     // so it completes before the challenge state is consumed below.
-    let grant = AssertionGrant::validate(params.assertion, state).await?;
+    let grant = AssertionGrant::validate(params.assertion, state, arrival).await?;
     let user_id = grant.user_id;
 
     // Mark challenge used + look up authenticator in parallel

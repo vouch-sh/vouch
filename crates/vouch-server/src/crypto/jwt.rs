@@ -175,22 +175,23 @@ impl StateTokenSigner {
         }
     }
 
-    /// Decode and verify a state token JWT.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "KMS state-token validation happens below the layer ArrivalTime lives in"
-    )]
+    /// Decode and verify a state token JWT, judging `exp` against `now`.
+    ///
+    /// `now` is Unix seconds — the crypto layer takes the primitive rather
+    /// than [`crate::arrival::ArrivalTime`], which lives above it. Callers on
+    /// the request path pass the request's arrival instant, so this check and
+    /// whatever the caller does with the decoded state read one clock.
     pub async fn decode_state_token<T: DeserializeOwned>(
         &self,
         token: &str,
         jwt_type: JwtType,
+        now: i64,
     ) -> Result<T, StateTokenError> {
         match self {
             Self::Local { secret } => {
-                decode_state_token(token, jwt_type, secret).map_err(StateTokenError::Jwt)
+                decode_state_token(token, jwt_type, secret, now).map_err(StateTokenError::Jwt)
             }
             Self::Kms { kms_client, key_id } => {
-                let now = jiff::Timestamp::now().as_second();
                 kms_decode(kms_client, key_id, token, jwt_type, now).await
             }
         }
@@ -702,22 +703,33 @@ pub(crate) fn encode_state_token<T: Serialize>(
     )
 }
 
-/// Decode a short-lived state token, validating the `typ` header.
+/// Decode a short-lived state token, validating the `typ` header and `exp`.
 ///
-/// This is a generic helper for the state token types. It decodes with
-/// default validation (only `exp` check), then validates that the `typ`
-/// header matches the expected [`JwtType`].
+/// This is a generic helper for the state token types. It verifies the
+/// signature, validates that the `typ` header matches the expected
+/// [`JwtType`], and rejects a token whose `exp` has passed at `now`.
+///
+/// `exp` is checked here rather than by `jsonwebtoken` so the instant is the
+/// caller's, not `SystemTime::now()` read inside the library: a state token
+/// accepted here and then acted on against a second clock reading is the
+/// two-clock gap [`crate::arrival::ArrivalTime`] exists to close. `exp` stays
+/// mandatory, matching both `jsonwebtoken`'s `validate_exp` behavior and the
+/// KMS branch in [`kms_decode`].
+///
+/// There is no leeway: state tokens are server-issued and server-validated, so
+/// clock skew is zero. A grace period would allow replaying an expired token
+/// after its single-use marker has been cleaned up.
 pub(crate) fn decode_state_token<T: DeserializeOwned>(
     token: &str,
     jwt_type: JwtType,
     secret: &[u8],
+    now: i64,
 ) -> Result<T, jsonwebtoken::errors::Error> {
     let validation = Validation {
-        // No leeway: state tokens are server-issued and server-validated on the
-        // same clock, so clock skew is zero. A 60s grace would allow replaying an
-        // expired token after its DB single-use marker is already cleaned up.
         leeway: 0,
         required_spec_claims: HashSet::new(),
+        // `exp` is validated below against the caller's `now`.
+        validate_exp: false,
         // Skip aud validation — callers that need it (e.g. AuthorizationCode)
         // validate iss/aud manually after decode.
         validate_aud: false,
@@ -730,7 +742,26 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
+    let exp = state_token_exp(token).ok_or_else(|| {
+        jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ExpiredSignature)
+    })?;
+    if now > exp {
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature,
+        ));
+    }
     Ok(data.claims)
+}
+
+/// The `exp` claim of a compact JWS whose signature has already been verified.
+///
+/// `None` when the payload does not decode, is not a JSON object, or carries
+/// no integer `exp` — every one of which the caller treats as expired.
+fn state_token_exp(token: &str) -> Option<i64> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload = decode_segment(payload_b64)?;
+    let raw: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    raw.get("exp")?.as_i64()
 }
 
 #[cfg(test)]
@@ -745,6 +776,10 @@ mod tests {
     use crate::test_utils::{
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
     };
+
+    /// A fixed instant between the test fixtures' `iat` (1_000_000_000) and
+    /// `exp` (9_999_999_999), so state-token decoding is deterministic.
+    const TEST_NOW: i64 = 1_500_000_000;
 
     fn make_ctx(key: &OidcSigningKey) -> TokenValidationContext<'_> {
         TokenValidationContext::new(key, TEST_ISSUER)
@@ -919,6 +954,85 @@ mod tests {
     }
 
     #[test]
+    fn state_token_expiry_is_judged_against_the_caller_clock() {
+        // `exp` is checked against the `now` the caller supplies, not against
+        // `SystemTime::now()` read inside `jsonwebtoken`. A caller whose clock
+        // is the request's arrival instant therefore gets the same answer here
+        // as from every other time comparison serving that request.
+        let state = TestState {
+            data: "hello".to_string(),
+            iat: 1_000_000_000,
+            exp: 1_000_000_060,
+        };
+        let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
+            .expect("encode");
+
+        // One second before expiry: accepted.
+        let fresh: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            1_000_000_059,
+        );
+        assert!(fresh.is_ok(), "a token one second from expiry must decode");
+
+        // At expiry: still accepted — the rule is `now > exp`, matching the
+        // KMS branch in `kms_decode`.
+        let boundary: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            1_000_000_060,
+        );
+        assert!(boundary.is_ok(), "exp == now is not yet expired");
+
+        // One second past expiry: rejected, with no leeway.
+        let stale: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            1_000_000_061,
+        );
+        assert!(
+            matches!(
+                stale.expect_err("expired token must be rejected").kind(),
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature
+            ),
+            "an expired state token must be reported as ExpiredSignature"
+        );
+    }
+
+    #[test]
+    fn state_token_without_exp_is_rejected() {
+        // `exp` stays mandatory now that `jsonwebtoken` no longer enforces it:
+        // a token with no expiry would otherwise be replayable forever.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct NoExp {
+            data: String,
+        }
+
+        let token = encode_state_token(
+            &NoExp {
+                data: "hello".to_string(),
+            },
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+        )
+        .expect("encode");
+
+        let result: Result<NoExp, _> = decode_state_token(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            TEST_NOW,
+        );
+        assert!(
+            result.is_err(),
+            "a state token carrying no exp claim must be rejected"
+        );
+    }
+
+    #[test]
     fn test_state_token_roundtrip() {
         let state = TestState {
             data: "hello".to_string(),
@@ -927,9 +1041,13 @@ mod tests {
         };
         let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
             .expect("encode");
-        let decoded: TestState =
-            decode_state_token(&token, JwtType::RegistrationState, TEST_JWT_SECRET)
-                .expect("decode");
+        let decoded: TestState = decode_state_token(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            TEST_NOW,
+        )
+        .expect("decode");
         assert_eq!(decoded, state);
     }
 
@@ -943,8 +1061,12 @@ mod tests {
         // Encode as RegistrationState, decode as BrowserRegistrationState (different typ)
         let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
             .expect("encode");
-        let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::BrowserRegistrationState, TEST_JWT_SECRET);
+        let result: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::BrowserRegistrationState,
+            TEST_JWT_SECRET,
+            TEST_NOW,
+        );
         assert!(result.is_err(), "Wrong type should be rejected");
     }
 
@@ -958,7 +1080,7 @@ mod tests {
         let token =
             encode_state_token(&state, JwtType::GitHubState, TEST_JWT_SECRET).expect("encode");
         let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::GitHubState, b"wrong-secret");
+            decode_state_token(&token, JwtType::GitHubState, b"wrong-secret", TEST_NOW);
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -980,7 +1102,7 @@ mod tests {
             .await
             .expect("encode");
         let decoded: TestState = signer
-            .decode_state_token(&token, JwtType::Fido2ChallengeState)
+            .decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_NOW)
             .await
             .expect("decode");
         assert_eq!(decoded, state);
@@ -1000,7 +1122,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer
-            .decode_state_token(&token, JwtType::RegistrationState)
+            .decode_state_token(&token, JwtType::RegistrationState, TEST_NOW)
             .await;
         assert!(result.is_err(), "Wrong type should be rejected");
     }
@@ -1021,7 +1143,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer_b
-            .decode_state_token(&token, JwtType::AuthorizationCode)
+            .decode_state_token(&token, JwtType::AuthorizationCode, TEST_NOW)
             .await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
@@ -1050,7 +1172,7 @@ mod tests {
                 .await
                 .expect("encode");
             let decoded: TestState = signer
-                .decode_state_token(&token, jwt_type)
+                .decode_state_token(&token, jwt_type, TEST_NOW)
                 .await
                 .expect("decode");
             assert_eq!(decoded, state, "Roundtrip failed for {:?}", jwt_type);
@@ -1071,7 +1193,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer
-            .decode_state_token(&token, JwtType::RegistrationState)
+            .decode_state_token(&token, JwtType::RegistrationState, TEST_NOW)
             .await;
         assert!(result.is_err(), "Expired token should be rejected");
     }
@@ -1090,23 +1212,22 @@ mod tests {
         assert_eq!(format!("{validation}"), "bad");
     }
 
-    /// Regression for #536: `decode_state_token` must reject tokens a few
-    /// seconds past `exp` with zero leeway. `exp` sits 5s in the past, inside
-    /// jsonwebtoken's default 60s leeway window, so reverting `leeway = 0` to
-    /// the default would *accept* this token and fail the test. A 1970 `exp`
-    /// cannot distinguish `leeway = 0` from the default — this one can.
+    /// Regression for #536: `decode_state_token` must reject a token a few
+    /// seconds past `exp`, with no grace period. `exp` sits 5s before the
+    /// `now` passed in — well inside the 60s window a leniently-configured
+    /// decoder would forgive, which a 1970 `exp` could not distinguish.
     #[test]
     fn test_state_token_recently_expired_rejected_no_leeway() {
-        let now = jiff::Timestamp::now().as_second();
+        let now = 1_700_000_000;
         let state = TestState {
             data: "replay-attempt".to_string(),
             iat: now - 3600,
-            exp: now - 5, // inside the default 60s leeway window, but past exp
+            exp: now - 5,
         };
         let token = encode_state_token(&state, JwtType::Fido2ChallengeState, TEST_JWT_SECRET)
             .expect("encode");
         let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET);
+            decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET, now);
         assert!(
             result.is_err(),
             "State token 5s past exp must be rejected with zero leeway"
@@ -1294,8 +1415,12 @@ mod tests {
             &serde_json::json!({ "sub": "attacker", "exp": 9_999_999_999i64 }),
         );
 
-        let decoded =
-            decode_state_token::<StateClaims>(&token, JwtType::RegistrationState, TEST_JWT_SECRET);
+        let decoded = decode_state_token::<StateClaims>(
+            &token,
+            JwtType::RegistrationState,
+            TEST_JWT_SECRET,
+            TEST_NOW,
+        );
         assert!(
             decoded.is_err(),
             "an Unsecured JWS must never be accepted as a state token"

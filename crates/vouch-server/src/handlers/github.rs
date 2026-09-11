@@ -196,9 +196,14 @@ impl GitHubStateToken {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::GitHubState)
+            .decode_state_token(
+                token,
+                crate::crypto::jwt::JwtType::GitHubState,
+                arrival.as_second(),
+            )
             .await
     }
 }
@@ -542,7 +547,7 @@ async fn handle_oauth_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer, arrival).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -613,7 +618,7 @@ async fn handle_installation_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer, arrival).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -841,7 +846,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer).await.expect("encode");
-        let decoded = GitHubStateToken::decode(&encoded, &signer)
+        let decoded = GitHubStateToken::decode(&encoded, &signer, test_arrival())
             .await
             .expect("decode");
 
@@ -858,7 +863,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer).await.expect("encode");
-        let decoded = GitHubStateToken::decode(&encoded, &signer)
+        let decoded = GitHubStateToken::decode(&encoded, &signer, test_arrival())
             .await
             .expect("decode");
 
@@ -877,7 +882,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer_a).await.expect("encode");
-        let result = GitHubStateToken::decode(&encoded, &signer_b).await;
+        let result = GitHubStateToken::decode(&encoded, &signer_b, test_arrival()).await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -891,7 +896,11 @@ mod tests {
 
         // Try decoding with wrong JwtType via the raw signer
         let result: Result<GitHubStateToken, _> = signer
-            .decode_state_token(&encoded, JwtType::RegistrationState)
+            .decode_state_token(
+                &encoded,
+                JwtType::RegistrationState,
+                test_arrival().as_second(),
+            )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");
     }

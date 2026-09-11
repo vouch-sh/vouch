@@ -227,9 +227,14 @@ impl BrowserRegistrationState {
     async fn decode(
         token: &str,
         signer: &crate::crypto::jwt::StateTokenSigner,
+        arrival: ArrivalTime,
     ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .decode_state_token(
+                token,
+                crate::crypto::jwt::JwtType::BrowserRegistrationState,
+                arrival.as_second(),
+            )
             .await
     }
 }
@@ -282,13 +287,10 @@ impl RegistrationCompletion {
     /// Returns a 400 `ServiceError` for client data that is not JSON or names
     /// the wrong ceremony type or origin, or a state token that fails to
     /// decode.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "fallback expiry for a state token whose exp will not parse"
-    )]
     async fn validate(
         req: BrowserRegisterCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
         let expected_origin = state.config().base_url.clone();
         let client_data = ClientDataProof::verify(
@@ -313,13 +315,15 @@ impl RegistrationCompletion {
             ServiceError::api(StatusCode::BAD_REQUEST, "invalid_client_data", message)
         })?;
 
-        let reg_state = BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
-            })?;
+        let reg_state =
+            BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer, arrival)
+                .await
+                .map_err(|e| {
+                    ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                })?;
 
-        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+        let expires_at =
+            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -1445,7 +1449,7 @@ pub(crate) async fn browser_register_complete(
     client_info: ClientInfo,
     ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    let checked = RegistrationCompletion::validate(req, &state).await?;
+    let checked = RegistrationCompletion::validate(req, &state, arrival).await?;
 
     // Bind the caller to the state JWT's user_id. `browser_register_start`
     // minted the state from the session cookie's `sub`; completion must
