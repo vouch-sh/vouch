@@ -307,6 +307,185 @@ async fn test_patch_user_deactivate_revokes_ssh_certificates() {
     );
 }
 
+/// Regression for the sticky `deactivated` flag: a multi-op PATCH
+/// `[active=false, active=true]` on a previously-active user has the net
+/// state change `active=true→true` (RFC 7644 §3.5.2: operations are applied
+/// in array order to produce a final resource state), so revocation must
+/// NOT fire. The pre-fix `deactivated |= user.active && !active` in the
+/// `active` setter kept `deactivated` true after the first op, so
+/// `revoke_then_persist` ran anyway — deleting sessions, revoking SSH
+/// certificates, and clearing the GitHub refresh token while `persist`
+/// wrote `active=true`. The audit row also recorded the contradiction
+/// `{"active": true, "deactivated": true}`.
+#[tokio::test]
+async fn test_patch_user_active_round_trip_does_not_revoke() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-roundtrip", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "roundtrip@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_000_077,
+        &user_id,
+        "roundtrip@test-org.example.com",
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no revocations yet"
+    );
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}, {"op": "replace", "path": "active", "value": true}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid response");
+    assert_eq!(
+        resp["active"].as_bool(),
+        Some(true),
+        "final resource must remain active"
+    );
+
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked");
+    assert!(
+        revoked.is_empty(),
+        "a still-active user's SSH certificates must not be revoked; \
+         got {} revocation(s)",
+        revoked.len()
+    );
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let update_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"update\"") && e.data.contains(&user_id))
+        .collect();
+    assert!(
+        !update_events.is_empty(),
+        "an scim_operation update audit event must be recorded"
+    );
+    let details = update_events
+        .iter()
+        .find_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .and_then(|v| {
+            v.get("details")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
+        .expect("audit event has a details string");
+    let details: serde_json::Value = serde_json::from_str(&details).expect("details is JSON");
+    assert_eq!(details["active"].as_bool(), Some(true));
+    assert_eq!(
+        details["deactivated"].as_bool(),
+        Some(false),
+        "deactivated must be false; with seed true and final true there is no \
+         net transition. The audit row must not contradict the persisted state."
+    );
+}
+
+/// Companion guard against over-correcting: a multi-op PATCH whose net
+/// effect genuinely deactivates (seed `active=true`, final `active=false`)
+/// must still revoke SSH certificates, even when the deactivation is one
+/// of several operations applied in array order.
+#[tokio::test]
+async fn test_patch_user_multi_op_deactivation_still_revokes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-multi-op-deactivate", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "multi-op-deactivate@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_000_078,
+        &user_id,
+        "multi-op-deactivate@test-org.example.com",
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no revocations yet"
+    );
+
+    // Two operations in array order: a name change and a deactivation. The
+    // net transition is active=true→false, so revocation must fire.
+    let (status, _body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "displayName", "value": "Renamed"}, {"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "a genuine multi-op deactivation must still revoke the SSH certificate"
+    );
+}
+
 #[tokio::test]
 async fn test_patch_user_active_string_rejected() {
     // PATCH with `"active": "false"` (string, not bool) must return 400

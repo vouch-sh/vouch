@@ -339,8 +339,13 @@ struct UserPatch {
     active: bool,
     name: Option<String>,
     external_id: Option<String>,
-    /// Set when an operation takes `active` from true to false; the handler
-    /// then invalidates sessions and revokes the user's credentials.
+    /// True when the net effect of the whole PATCH takes `active` from true
+    /// (the seed) to false (the final value); the handler then invalidates
+    /// sessions and revokes the user's credentials. Computed once after all
+    /// operations are applied (RFC 7644 §3.5.2: operations are applied in
+    /// array order to produce a new resource state) rather than accumulated
+    /// per-operation, so a PATCH that flips `active` false then back to true
+    /// does not revoke the credentials of a still-active user.
     deactivated: bool,
 }
 
@@ -356,7 +361,9 @@ const USER_ATTRIBUTES: &[Attribute<UserPatch>] = &[
             let Some(active) = value.as_bool() else {
                 return Err(InvalidValue::new(format!("{path} must be a boolean")));
             };
-            user.deactivated |= user.active && !active;
+            // Deactivation is derived from the seed vs. final `active` after
+            // all operations are applied (see `patch_user`); assigning here
+            // keeps the setter focused on the stored field.
             user.active = active;
             Ok(())
         },
@@ -447,6 +454,15 @@ pub(crate) async fn patch_user(
             return invalid.into_response();
         }
     }
+
+    // RFC 7644 §3.5.2: operations are applied in array order to produce a
+    // final resource state, so the deactivation decision is a function of
+    // the net `active` transition (seed → final) — not of any single
+    // intermediate operation. Revocation fires iff the user was active
+    // before the PATCH and is inactive after it; a sequence such as
+    // `[active=false, active=true]` on an active user leaves `active` true
+    // (true→true, no transition) and must not destroy live credentials.
+    patched.deactivated = user.active && !patched.active;
 
     // A deactivation must revoke live credentials BEFORE the active=false write
     // commits: if the write landed first and revocation then failed, the user
