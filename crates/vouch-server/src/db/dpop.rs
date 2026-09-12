@@ -29,7 +29,7 @@ pub(crate) fn deterministic_dpop_jti_id(jti: &str) -> String {
 
 /// Derive a deterministic document ID from a DPoP nonce. Separate domain
 /// from JTIs so the two types' IDs can never collide.
-fn deterministic_dpop_nonce_id(nonce: &str) -> String {
+pub(crate) fn deterministic_dpop_nonce_id(nonce: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
 
     let mut ctx = digest::Context::new(&SHA256);
@@ -59,7 +59,8 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
     Ok(nonce)
 }
 
-/// Atomically validate and consume a DPoP nonce.
+/// Atomically validate and consume a DPoP nonce against a caller-supplied
+/// instant.
 ///
 /// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
 /// outcome is decided by the database row count — no find-then-delete race.
@@ -68,19 +69,31 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
 /// lost cases are deliberately indistinguishable: each is rejected the
 /// same way by RFC 9449.
 ///
+/// `now` is the instant the consume comparison is judged against. Request-
+/// path callers pass the request's [`crate::arrival::ArrivalTime`] so every
+/// time comparison serving one request reads the same instant — see the
+/// policy in [`crate::arrival`]. Stamping a fresh `Timestamp::now()` here
+/// instead would make the expiry check strictly stricter than arrival,
+/// spurning a nonce that was still valid when the request arrived if it
+/// expires during the preceding JTI insert and claims-validation awaits
+/// (the gap the `arrival` discipline exists to close). The sibling JTI
+/// commit ([`check_and_store_dpop_jti_at_second`]) is threaded for the
+/// same reason; the nonce consume is the other request-path expiry
+/// comparison in the same decision.
+///
 /// No witness type is returned because `ValidatedDpopProof` already
 /// carries the "DPoP validation succeeded" marker at the call site
 /// ([`crate::services::oidc::dpop::validate_dpop_common`]); a separate
 /// `DpopNonceClaim` would duplicate that guarantee without any
 /// downstream consumer requiring it.
-pub async fn validate_and_consume_dpop_nonce(
+pub async fn validate_and_consume_dpop_nonce_at(
     store: &DocumentStore,
     nonce: &str,
+    now: &Timestamp,
 ) -> std::result::Result<(), ClaimError> {
     let id = deterministic_dpop_nonce_id(nonce);
-    let now = Timestamp::now();
     let won = store
-        .delete_if_not_expired(&id, &now)
+        .delete_if_not_expired(&id, now)
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
     if won {
@@ -88,6 +101,30 @@ pub async fn validate_and_consume_dpop_nonce(
     } else {
         Err(ClaimError::AlreadyConsumed)
     }
+}
+
+/// Atomically validate and consume a DPoP nonce, judging expiry against the
+/// ambient clock.
+///
+/// Thin wrapper around [`validate_and_consume_dpop_nonce_at`] that stamps
+/// `Timestamp::now()` for callers that have no request-scoped
+/// [`crate::arrival::ArrivalTime`] in scope — currently only the
+/// HTTP-signature middleware ([`crate::infra::httpsig`]), whose nonce store
+/// is shared with DPoP but whose middleware is not passed an arrival
+/// instant. Request-path callers (e.g. `validate_dpop_common`) MUST use
+/// [`validate_and_consume_dpop_nonce_at`] with the request's arrival
+/// instant instead, so the nonce-expiry comparison reads the same clock as
+/// the JTI-retention and freshness checks in the same decision.
+///
+/// The `Timestamp::now()` here is covered by the module-level
+/// `#[expect(clippy::disallowed_methods)]` in [`super::mod@self`]: it is
+/// the ambient stamp the expect was designed to cover, unlike a
+/// request-path comparison — see the comment at the top of `db/mod.rs`.
+pub async fn validate_and_consume_dpop_nonce(
+    store: &DocumentStore,
+    nonce: &str,
+) -> std::result::Result<(), ClaimError> {
+    validate_and_consume_dpop_nonce_at(store, nonce, &Timestamp::now()).await
 }
 
 /// Witness that a DPoP JTI (RFC 9449 §11.1) was atomically committed by

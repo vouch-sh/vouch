@@ -163,6 +163,147 @@ async fn test_dpop_nonce_consume_concurrent() {
     }
 }
 
+// ========================================================================
+// RFC 9449 §8 — DPoP nonce consume judged against the caller-supplied
+// instant (`validate_and_consume_dpop_nonce_at`), not an ambient
+// `Timestamp::now()`.
+//
+// `validate_dpop_common` anchors every time comparison in one request on
+// the request's `ArrivalTime`; the nonce consume is the third such
+// comparison (alongside the JTI retention commit and the freshness
+// check). These tests pin the DB helper that backs it: it must delete the
+// nonce row iff `expires_at > now` *for the supplied `now`*, and a
+// rejected consume must not consume the row. The cross-layer guarantee —
+// that `validate_dpop_common` threads the request's arrival instant
+// into this helper — is covered in `services::oidc::dpop::tests`.
+// ========================================================================
+
+/// Insert a nonce document with a fixed `expires_at` so the consume check
+/// is deterministic — no reliance on which wall-clock instant the helper
+/// might stamp internally.
+async fn seed_nonce_with_expiry(store: &DocumentStore, nonce: &str, expires_at: jiff::Timestamp) {
+    use crate::db::documents::dpop::DpopNonceDoc;
+    let id = crate::db::dpop::deterministic_dpop_nonce_id(nonce);
+    store
+        .insert_with_id(
+            &id,
+            &DpopNonceDoc {
+                nonce: nonce.to_string(),
+                expires_at,
+            },
+        )
+        .await
+        .expect("seed nonce doc");
+}
+
+/// `expires_at > now` is strict: a nonce judged at exactly its `expires_at`
+/// is rejected, and the row is left intact so it can still be consumed at an
+/// earlier instant.
+#[tokio::test]
+async fn test_dpop_nonce_consume_at_rejects_when_now_equals_expires_and_leaves_row() {
+    use crate::db::claim::ClaimError;
+    use jiff::ToSpan;
+
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+    seed_nonce_with_expiry(&store, "nonce-eq", expires_at).await;
+
+    // consumes at exactly `expires_at`: strict `>` → false → rejected.
+    let at_expiry = validate_and_consume_dpop_nonce_at(&store, "nonce-eq", &expires_at).await;
+    assert!(
+        matches!(at_expiry, Err(ClaimError::AlreadyConsumed)),
+        "consume at exactly expires_at must be rejected (strict gt): got {at_expiry:?}"
+    );
+
+    // The rejected consume did NOT delete the row: an earlier `now` succeeds.
+    let earlier = expires_at.checked_sub(1.seconds()).unwrap();
+    assert!(
+        validate_and_consume_dpop_nonce_at(&store, "nonce-eq", &earlier)
+            .await
+            .is_ok(),
+        "nonce valid at the earlier instant must still be consumable after a rejected consume"
+    );
+
+    // Now consumed: a second consume at the earlier instant is rejected.
+    assert!(
+        matches!(
+            validate_and_consume_dpop_nonce_at(&store, "nonce-eq", &earlier).await,
+            Err(ClaimError::AlreadyConsumed)
+        ),
+        "a second consume of the same nonce must be rejected"
+    );
+}
+
+/// The dual-clock gap the fix closes: the same nonce is accepted when
+/// judged at the request's arrival instant but rejected when judged at a
+/// later clock — proving the helper honors the supplied `now`, not an
+/// ambient stamp. Before the fix, `validate_dpop_common` stamped a fresh
+/// `Timestamp::now()` here, so a nonce whose `expires_at` fell between
+/// arrival and consume was spuriously rejected.
+#[tokio::test]
+async fn test_dpop_nonce_consume_at_arrival_accepts_when_later_clock_rejects() {
+    use crate::db::claim::ClaimError;
+    use jiff::ToSpan;
+
+    let (store, _audit) = test_db().await;
+
+    // `expires_at` strictly between the arrival instant and a later one.
+    let arrival: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+    let expires_at = arrival.checked_add(5.seconds()).unwrap();
+    let later = arrival.checked_add(10.seconds()).unwrap();
+    assert!(
+        arrival < expires_at && expires_at < later,
+        "fixture: expires_at must sit strictly between arrival and later"
+    );
+
+    // Accepted at the arrival instant (nonce still valid at arrival).
+    seed_nonce_with_expiry(&store, "nonce-dual-clock", expires_at).await;
+    assert!(
+        validate_and_consume_dpop_nonce_at(&store, "nonce-dual-clock", &arrival)
+            .await
+            .is_ok(),
+        "nonce valid at arrival must be consumed when judged against arrival"
+    );
+
+    // Re-seed (the arrival consume deleted the row) and judge at the later
+    // clock: the same nonce is now rejected, exactly the outcome the
+    // ambient stamp would have produced mid-request.
+    seed_nonce_with_expiry(&store, "nonce-dual-clock", expires_at).await;
+    let rejected = validate_and_consume_dpop_nonce_at(&store, "nonce-dual-clock", &later).await;
+    assert!(
+        matches!(rejected, Err(ClaimError::AlreadyConsumed)),
+        "the same nonce judged at a clock past expires_at must be rejected: got {rejected:?}"
+    );
+}
+
+/// The ambient-clock overload (`validate_and_consume_dpop_nonce`) is kept
+/// for callers without an `ArrivalTime` (the httpsig middleware). It must
+/// still consume a valid nonce, so the httpsig path is unaffected by the
+/// fix.
+#[tokio::test]
+async fn test_dpop_nonce_consume_ambient_overload_still_consumes_valid_nonce() {
+    let (store, _audit) = test_db().await;
+
+    let nonce = generate_dpop_nonce(&store, 300)
+        .await
+        .expect("generate_dpop_nonce");
+    assert!(
+        validate_and_consume_dpop_nonce(&store, &nonce)
+            .await
+            .is_ok(),
+        "ambient overload must consume a valid nonce (httpsig caller path)"
+    );
+    use crate::db::claim::ClaimError;
+    assert!(
+        matches!(
+            validate_and_consume_dpop_nonce(&store, &nonce).await,
+            Err(ClaimError::AlreadyConsumed)
+        ),
+        "ambient overload must reject a second consume (single-use)"
+    );
+}
+
 #[tokio::test]
 async fn test_pending_oauth_consume_concurrent() {
     use crate::db::claim::ClaimError;

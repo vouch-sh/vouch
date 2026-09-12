@@ -610,8 +610,18 @@ async fn validate_dpop_common(
     // window between read and consume. The "this DPoP proof validated
     // successfully" guarantee is carried forward by the returned
     // `ValidatedDpopProof`.
+    //
+    // The consume is judged against `now` (the request's arrival instant),
+    // not a fresh `Timestamp::now()` stamped inside the DB helper: it is
+    // the third time comparison in this one request decision (alongside
+    // the JTI retention commit and the freshness check above), and all
+    // three must read the same instant. A later clock would make the
+    // `expires_at > now` predicate strictly stricter than arrival, rejecting
+    // a nonce that was still valid when the request arrived if it expires
+    // during the awaits between arrival and this point (RFC 9449 §8
+    // nonce-expiry at the tail of a 300 s lifetime). See `arrival.rs`.
     if let Some(nonce) = claims.nonce.as_deref() {
-        match db::validate_and_consume_dpop_nonce(store, nonce).await {
+        match db::validate_and_consume_dpop_nonce_at(store, nonce, &now).await {
             Ok(()) => {}
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
@@ -1980,6 +1990,140 @@ mod tests {
         assert!(
             matches!(blocked, Err(ClaimError::AlreadyConsumed)),
             "rounded-up JTI must block a verbatim replay: got {blocked:?}"
+        );
+    }
+
+    // ========================================================================
+    // RFC 9449 §8 — DPoP nonce consume must read the request's arrival
+    // instant, not a fresh `Timestamp::now()`.
+    //
+    // `validate_dpop_common` anchors its JTI-retention commit and its
+    // freshness check on `arrival.timestamp()`; the nonce consume is the
+    // third time comparison in the same request and must read the same
+    // instant. Before the fix, the consume path stamped a fresh
+    // `Timestamp::now()` inside the DB helper, which is strictly later than
+    // arrival — a nonce whose `expires_at` fell between arrival and that
+    // fresh stamp was rejected (`use_dpop_nonce`) even though it was valid
+    // at the instant the request arrived. This test reproduces that window
+    // deterministically: it inserts a nonce whose `expires_at` sits strictly
+    // between the request's (held-back) arrival instant and the current
+    // wall clock, then drives a signed DPoP proof through the real
+    // `validate_dpop_proof` (token endpoint, `NoncePolicy::Required`).
+    // With the fix the consume judges against arrival and the proof is
+    // accepted; with the bug the ambient stamp is past `expires_at` and
+    // the request is rejected with `UseNonce`.
+    // ========================================================================
+
+    /// Sign a DPoP proof (RFC 9449 §4.2) for a token-endpoint request,
+    /// carrying `nonce` and an `iat` set to the request's arrival second.
+    ///
+    /// Sibling of [`resource_test_dpop_proof`] for the token endpoint: no
+    /// `ath`, optional `nonce`, POST method. The `iat` is taken from
+    /// `arrival_second` so the freshness check (which `validate_dpop_common`
+    /// judges against `arrival`) passes deterministically regardless of the
+    /// current wall clock.
+    fn token_test_dpop_proof(
+        key: &aws_lc_rs::signature::EcdsaKeyPair,
+        jwk: &serde_json::Value,
+        uri: &str,
+        arrival_second: i64,
+        nonce: &str,
+    ) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": jwk });
+        let header_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
+        let claims = serde_json::json!({
+            "jti": uuid::Uuid::now_v7().to_string(),
+            "htm": "POST",
+            "htu": uri,
+            "iat": arrival_second,
+            "nonce": nonce,
+        });
+        let claims_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let sig = key
+            .sign(&rng, signing_input.as_bytes())
+            .expect("sign DPoP proof");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+        format!("{signing_input}.{sig_b64}")
+    }
+
+    #[tokio::test]
+    async fn test_dpop_proof_nonce_consume_uses_arrival_not_ambient_clock() {
+        use crate::db::documents::dpop::DpopNonceDoc;
+        use jiff::ToSpan;
+
+        let store = resource_test_store().await;
+        let (key, jwk) = resource_test_key_pair();
+
+        // The request "arrived" 30s ago; the nonce was issued to expire 10s
+        // after arrival (i.e. ~20s ago). So `expires_at > arrival` (valid at
+        // arrival) but `expires_at < wall_clock_now` (expired by the time
+        // consume would stamp a fresh clock). This straddles the bug window.
+        let wall_now = jiff::Timestamp::now();
+        let arrival_at = wall_now.checked_sub(30.seconds()).expect("arrival");
+        let expires_at = arrival_at.checked_add(10.seconds()).expect("expires_at");
+        assert!(
+            arrival_at < expires_at && expires_at < wall_now,
+            "fixture: expires_at must sit strictly between arrival and the consume wall clock"
+        );
+
+        let nonce = "nonce-straddles-arrival-and-ambient".to_string();
+        let id = crate::db::dpop::deterministic_dpop_nonce_id(&nonce);
+        store
+            .insert_with_id(
+                &id,
+                &DpopNonceDoc {
+                    nonce: nonce.clone(),
+                    expires_at,
+                },
+            )
+            .await
+            .expect("seed nonce doc");
+
+        let uri = "https://example.com/oauth/token";
+        let proof = token_test_dpop_proof(&key, &jwk, uri, arrival_at.as_second(), &nonce);
+
+        // With the fix: the consume judges `expires_at > arrival` → true →
+        // the proof is accepted. The ambient-clock bug would stamp
+        // `Timestamp::now()` (> expires_at) → `UseNonce`.
+        let validated = validate_dpop_proof(
+            &proof,
+            "POST",
+            &[uri.to_string()],
+            &store,
+            300, // config_max_age — well beyond the 30s held-back arrival
+            crate::arrival::ArrivalTime::for_test(arrival_at),
+        )
+        .await;
+
+        assert!(
+            validated.is_ok(),
+            "a DPoP nonce valid at the request's arrival instant must be accepted \
+             even if it expires before the consume-time wall clock; got: {validated:?}"
+        );
+
+        // The nonce was consumed (single use): a verbatim replay must be
+        // rejected as a replay — confirming the consume actually happened,
+        // not that the proof was short-circuited.
+        let replay = validate_dpop_proof(
+            &proof,
+            "POST",
+            &[uri.to_string()],
+            &store,
+            300,
+            crate::arrival::ArrivalTime::for_test(arrival_at),
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(DpopError::ReplayDetected)),
+            "the consumed nonce's JTI must block a verbatim replay: got {replay:?}"
         );
     }
 }

@@ -228,6 +228,7 @@ pub use jwks_cache::{
 pub use dpop::{
     DpopJtiClaim, check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis,
     delete_expired_dpop_nonces, generate_dpop_nonce, validate_and_consume_dpop_nonce,
+    validate_and_consume_dpop_nonce_at,
 };
 
 // Re-export credentials types and functions
