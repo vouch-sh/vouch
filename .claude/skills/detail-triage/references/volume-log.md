@@ -114,3 +114,88 @@ both are concurrency-class. #1312 failed Unit Tests on linux and macOS on
 arrival. #1303 is the size outlier at 968 added lines across 20 files.
 
 Decisions: recorded in the next section once step 3 completes.
+
+## 2026-09-12
+
+Issues #1330–#1337 (8), fix PRs #1338–#1345 (8), 1:1. Full record in
+`.local/detail-triage-2026-09-12.md`.
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-07 | 48 | 132 | 156 | 13 | 30 |
+| 2026-08 | 69 | 152 | 187 | 23 | 40 |
+| 2026-09 | 75 | 33 | 194 | **33** | 30 |
+
+September's `<30d` (33) is the highest of any month and the median age has
+collapsed from 152d to 33d. The backlog-excavation reading no longer holds:
+the scanner is now working mostly on recent code.
+
+Self-caused: 4 of 8, from PRs merged in the previous 24 hours (#1308 ×2,
+#1321, #1303). All four are defects in logic the fix added.
+
+### Classes
+
+- **arrival under-coverage, db layer — 5 members, 1 reported (#1337).** The
+  module-wide `#[expect(clippy::disallowed_methods)]` in `db/mod.rs` is granted
+  per *module* for row stamping and OCC retries, so it also exempts
+  request-deciding expiry *comparisons*. Siblings: `try_consume_authorization_code`,
+  `get_pushed_authorization_request`, `get_pending_oauth_authorization`,
+  `get_scim_token_by_hash`. All over-reject at the tail of a lifetime.
+- **ID token minted from a second clock — #1331 and #1333 are one defect.**
+  Two sites (`claims.rs:321`, `token.rs:986`), each with an `#[expect]` naming
+  the "artifact minting" category to cover a request-scoped decision.
+- **#1330 + #1334 are two halves of PR #1308** — the call site its guard
+  missed, and the client the guard broke.
+
+### Review findings
+
+- **#1332/#1340's premise is false.** OpenSSL 3.6.4's default `x509 -noout
+  -subject` emits `O=Acme, CN=foo` (bare `=`); the `=`-padded form needs an
+  explicit `-nameopt oneline`. Verified locally. The parser change is sound but
+  the doc comment commits the false claim.
+- **#1341 supersedes #1339** (same three files). #1341 makes `issued_at`
+  required and deletes the `#[expect]`; #1339 keeps the ambient fallback.
+- **#1344 fixes the read, not the comparison.** `update_authenticator_counter`
+  still does a signed `max` over bitwise-reinterpreted `u32`, so a counter
+  crossing 2^31 freezes permanently.
+- **#1345 cites the guardrail hole as permission** for its ambient wrapper.
+- **#1338** fails only the spec-coverage ratchet (baseline prune needed).
+
+### Operational
+
+**#1334 is in a shipped release.** #1308 merged 04:45 UTC; v2026.9.3 shipped
+15:34 UTC. WIF (`vouch credential openai`/`anthropic`) returns 401
+`unauthorized_client` for every already-enrolled CLI client. #1342 fixes new
+registrations only.
+
+### Decided
+
+User decisions: no migration for #1334 (no users yet); fix the entire class;
+follow the spec 100%.
+
+- **The db-layer arrival class was fixed as one change (#1346), and the
+  guardrail is what sized it.** Replacing the 14 module-wide `#[expect]`s in
+  `db/mod.rs` with 33 per-function ones turned a 5-member class into a
+  9-member one: client-credential validity, the OIDC state consume, the PAR
+  consume, and the pending-auth consume were all invisible while the exemption
+  was granted per module. Verified by breaking it — a reintroduced ambient
+  clock is now a clippy error under `-D warnings`.
+- #1341 merged as the ID-token class fix; #1339 closed as superseded.
+- #1340 and #1344 amended before merge: #1340's OpenSSL justification
+  corrected, #1344 completed with the u32-space counter comparison (both
+  directions pinned by tests verified to fail against the old code).
+- #1347 replaces #1338 and adds the RFC 7591 §2 fix — an absent `grant_types`
+  reads as `["authorization_code"]`, not as authorized-for-nothing.
+
+### Operational lesson: unsigned bot commits block the queue
+
+`543053bc` on #1338 (`chore: prune rfc8628#5.2 from coverage baseline`, pushed
+by detail-app[bot] after its CI failed) was unsigned, and the merge queue
+rejects the whole branch with "Commits must have verified signatures." Its
+other commits are signed, so this is a separate path in Detail's tooling.
+Correcting it in place means rewriting a shared branch, so the fix is to
+cherry-pick onto a fresh branch and re-open. Worth checking on any Detail PR
+that has had a follow-up commit pushed to it:
+
+    gh api repos/vouch-sh/vouch/pulls/<n>/commits \
+      --jq '.[] | "\(.sha[0:8]) \(.commit.verification.verified)"'
