@@ -229,6 +229,78 @@ def render_diff_sizes(rows: list[dict[str, object]]) -> None:
     print("  counted as production. Treat its prod figure as an upper bound.")
 
 
+def fix_defect_rate(findings: list[Finding], author: str, today: date) -> list[dict[str, object]]:
+    """How often a merged PR is later blamed by a Detail finding, bot vs human.
+
+    This is the number the "draft, not merge candidate" policy rests on. If
+    Detail's fixes were markedly worse than ours, turning auto-fixing off would
+    be the right call; measured, they are not.
+
+    Exposure is controlled by only counting PRs that have had the full window
+    available since merge, and asking whether the *first* blame landed inside
+    it. Two caveats to state whenever quoting this: it is not like-for-like,
+    because Detail PRs are small targeted fixes while human PRs include feature
+    work; and post-merge blame understates the true defect rate, because the
+    scanner does not re-find everything it introduces.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "list", "--state", "merged", "--limit", "1000",
+         "--json", "number,author,mergedAt"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        sys.exit(f"gh pr list failed: {proc.stderr.strip()}")
+
+    merged: dict[int, tuple[str, date]] = {}
+    for row in json.loads(proc.stdout):
+        login = (row.get("author") or {}).get("login") or ""
+        if not row.get("mergedAt") or login == "app/dependabot":
+            continue
+        merged[row["number"]] = (login, date.fromisoformat(row["mergedAt"][:10]))
+
+    first_blame: dict[int, date] = {}
+    for finding in findings:
+        pr = finding.introduced_pr
+        if pr is None:
+            continue
+        if pr not in first_blame or finding.detected < first_blame[pr]:
+            first_blame[pr] = finding.detected
+
+    rows: list[dict[str, object]] = []
+    for window in (14, 30, 60):
+        counts: dict[str, list[int]] = {"detail": [0, 0], "human": [0, 0]}
+        for number, (login, merged_on) in merged.items():
+            if (today - merged_on).days < window:
+                continue
+            group = "detail" if login == author else "human"
+            counts[group][0] += 1
+            blamed = first_blame.get(number)
+            if blamed and (blamed - merged_on).days <= window:
+                counts[group][1] += 1
+        rows.append({
+            "window_days": window,
+            "detail_eligible": counts["detail"][0], "detail_blamed": counts["detail"][1],
+            "human_eligible": counts["human"][0], "human_blamed": counts["human"][1],
+        })
+    return rows
+
+
+def render_fix_defect_rate(rows: list[dict[str, object]]) -> None:
+    def pct(hit: int, total: int) -> str:
+        return f"{hit / total * 100:.1f}%" if total else "-"
+
+    print("Merged PRs later blamed by a Detail finding, by author")
+    print(f"  {'window':>7} {'detail n':>9} {'detail':>7} {'human n':>8} {'human':>7}")
+    for row in rows:
+        print(f"  {row['window_days']:>6}d {row['detail_eligible']:9} "
+              f"{pct(row['detail_blamed'], row['detail_eligible']):>7} "
+              f"{row['human_eligible']:8} "
+              f"{pct(row['human_blamed'], row['human_eligible']):>7}")
+    print("\n  Not like-for-like: Detail PRs are small targeted fixes, human PRs")
+    print("  include feature work. Post-merge blame also understates the real")
+    print("  defect rate -- the scanner does not re-find all it introduces.")
+
+
 def percentile(values: list[int], fraction: float) -> int:
     """Nearest-rank percentile. Exact on small samples, unlike interpolation."""
     ordered = sorted(values)
@@ -360,6 +432,10 @@ def main() -> int:
     parser.add_argument("--pr-diff-sizes", metavar="RANGE",
                         help="split added lines into production vs test for these PRs "
                              "(e.g. 1303-1324 or 1303,1307); skips the issue analysis")
+    parser.add_argument("--fix-defect-rate", metavar="YYYY-MM-DD",
+                        help="how often merged PRs are later blamed by a finding, Detail "
+                             "vs human, as of this date; the evidence behind the "
+                             "draft-not-merge-candidate policy")
     parser.add_argument("--json", action="store_true", dest="as_json",
                         help="emit machine-readable output")
     args = parser.parse_args()
@@ -379,6 +455,15 @@ def main() -> int:
     if not findings:
         sys.exit(f"no issues authored by {args.author} found")
     findings.sort(key=lambda f: f.detected)
+
+    if args.fix_defect_rate:
+        rows = fix_defect_rate(findings, args.author, date.fromisoformat(args.fix_defect_rate))
+        if args.as_json:
+            json.dump(rows, sys.stdout, indent=2)
+            print()
+        else:
+            render_fix_defect_rate(rows)
+        return 0
 
     months, class_rows, unmatched = by_class(findings)
     self_caused_rows = self_caused(findings, fetch_fix_prs(args.author, args.limit))

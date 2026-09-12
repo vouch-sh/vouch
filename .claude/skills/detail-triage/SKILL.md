@@ -118,14 +118,33 @@ strongest class candidates in the batch, not the weakest.
 
 ## Step 3: Decide instance versus class
 
+**A Detail fix PR is a reviewed draft, never a merge candidate.** That is the
+standing policy (set 2026-09-12), and it replaces the earlier "bot PRs merge
+mostly as-is". Green CI, a detailed PR body, and a full test suite make a PR
+look finished; step 6 exists because two of the 22 in the 2026-09-11 batch were
+actively wrong under exactly that appearance.
+
+The policy is not a claim that Detail writes bad fixes — measured over 811
+merged PRs, its fixes are blamed by a later finding at roughly half the rate of
+human PRs (3.6% vs 7.6% within 14 days of merge, 4.3% vs 8.7% within 30). The
+point is that post-merge blame understates the defect rate, because the scanner
+does not re-find everything it introduces. Review is what closes that gap, and
+it is worth doing regardless of who wrote the fix.
+
 Three or more open instances of one pattern makes this decision mandatory, not
 optional. For each class pick one and record which:
 
-- **Instance** — genuinely isolated. Merge Detail's PR as-is once green, per the
-  standing strategy for bot PRs. No surrounding refactor.
+- **Instance** — genuinely isolated. Merge Detail's PR once it has been through
+  step 6 and is green. No surrounding refactor.
 - **Class** — one change that fixes every site found in step 2, per CLAUDE.md
   "fix the class, not the instance". Close Detail's individual PRs as superseded
   rather than merging them, and say so in each.
+
+**Never merge the instance PR for a finding that belongs to a class.** Merging
+it closes the instance and erases the evidence that the class exists, so the
+next pass rediscovers the same pattern at a different call site and the cycle
+repeats. Of every rule here, this is the one that would have changed the most
+outcomes historically.
 
 A class fix that lands without a guardrail will regress, so step 4 is part of
 the same PR, not a follow-up.

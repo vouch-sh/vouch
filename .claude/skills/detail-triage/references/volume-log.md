@@ -75,6 +75,37 @@ Part of the rise is mechanical: Detail has merged 100+ PRs since early August,
 so its commits are increasingly the last to touch any line. That cannot explain
 the 09-08 cases, which are bugs in the added logic itself.
 
+### Fix quality, Detail vs human (2026-09-12)
+
+How often a merged PR is later blamed by a Detail finding, counting only PRs
+with the full window of exposure since merge
+(`detail-stats.py --fix-defect-rate 2026-09-12`):
+
+| window | Detail PRs | blamed | human PRs | blamed |
+|--------|-----------|--------|-----------|--------|
+| 14 days | 167 | 3.6% | 511 | 7.6% |
+| 30 days | 139 | 4.3% | 438 | 8.7% |
+| 60 days | 75 | 0.0% | 371 | 10.2% |
+
+The 60-day row is small-sample for Detail and covers only PRs merged before
+self-attribution began, so it should not be leaned on.
+
+Detail's fixes are blamed at roughly half the human rate. Not like-for-like —
+Detail PRs are small targeted fixes, human PRs include feature work — but it
+is strong enough to settle the question: auto-fixing is not a net source of
+defects, and disabling it would move the work to authors with a higher
+observed rate.
+
+What the number does *not* capture: review of the 2026-09-11 batch found real
+defects in 3 of 22 (14%), well above the 4.3% later-blame rate, because the
+scanner does not re-find everything it introduces. That gap is the entire
+argument for the disposition policy below.
+
+**Policy set 2026-09-12:** auto-fixing stays enabled; a Detail PR is a
+reviewed draft, not a merge candidate; and the instance PR for any finding
+belonging to a class of three or more is never merged, because merging it
+erases the evidence that the class exists.
+
 ### Batch under triage
 
 Issues #1279–#1302 (24) and fix PRs #1303–#1324 (22), all opened between
