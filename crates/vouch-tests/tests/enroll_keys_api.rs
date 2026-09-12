@@ -4,11 +4,13 @@
 
 #![expect(
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "test code: panicking on an assertion failure is the point"
 )]
 
 use axum::http::StatusCode;
 use serde_json::Value;
+use vouch_server::db;
 use vouch_server::test_utils::{
     self, HttpResponse, http_delete_full, http_get_full, http_request_full,
 };
@@ -81,7 +83,7 @@ async fn list_rejects_missing_cookie() {
 #[tokio::test]
 async fn rename_updates_name() {
     let harness = TestHarness::new().await;
-    let (_user, auth_id, token) = harness
+    let (user, auth_id, token) = harness
         .create_authenticated_user("keys-rename@example.com")
         .await
         .expect("create authed user");
@@ -106,6 +108,33 @@ async fn rename_updates_name() {
         renamed.get("name").and_then(Value::as_str),
         Some("renamed-yubikey")
     );
+
+    // The browser form path must record a `key_renamed` audit event in the
+    // audit store (the CLI/Bearer path's equivalent is covered inline in
+    // `handlers::keys::tests::test_rename_key_records_audit_event`). The
+    // event is attributed to the caller, names the renamed authenticator,
+    // and is marked successful — the same shape as `KeyRemoved`.
+    let events = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["key_renamed".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit");
+    assert_eq!(
+        events.len(),
+        1,
+        "rename via the browser form must write exactly one key_renamed audit \
+         event, got {events:?}"
+    );
+    let event = &events[0];
+    assert_eq!(event.event_type, "key_renamed");
+    assert_eq!(event.user_id.as_deref(), Some(user.id.as_str()));
+    let data: Value = serde_json::from_str(&event.data).expect("audit data is JSON");
+    assert_eq!(data["authenticator_id"], auth_id);
+    assert_eq!(data["success"], true);
 }
 
 #[tokio::test]

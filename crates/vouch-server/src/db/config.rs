@@ -25,6 +25,7 @@ pub enum AuthEventType {
     Logout,
     KeyRegistered,
     KeyRemoved,
+    KeyRenamed,
     DeviceAuthApproved,
     /// An upstream `(issuer, subject)` identity was bound to an existing
     /// account on its first IdP login (lazy bind).
@@ -47,6 +48,7 @@ impl AuthEventType {
             Self::Logout => AuditEventKind::Logout,
             Self::KeyRegistered => AuditEventKind::KeyRegistered,
             Self::KeyRemoved => AuditEventKind::KeyRemoved,
+            Self::KeyRenamed => AuditEventKind::KeyRenamed,
             Self::DeviceAuthApproved => AuditEventKind::DeviceAuthApproved,
             Self::IdentityBound => AuditEventKind::IdentityBound,
             Self::IdentityBindRefused => AuditEventKind::IdentityBindRefused,
@@ -213,6 +215,7 @@ mod tests {
             AuthEventType::Logout,
             AuthEventType::KeyRegistered,
             AuthEventType::KeyRemoved,
+            AuthEventType::KeyRenamed,
             AuthEventType::DeviceAuthApproved,
             AuthEventType::IdentityBound,
             AuthEventType::IdentityBindRefused,

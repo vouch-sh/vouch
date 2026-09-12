@@ -216,6 +216,10 @@ impl ActivityId {
         id: 99,
         name: "Identity Bound",
     };
+    const KEY_RENAMED: Self = Self {
+        id: 99,
+        name: "Key Renamed",
+    };
 
     // Authorize Session (3003)
     const ASSIGN_PRIVILEGES: Self = Self {
@@ -324,6 +328,15 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
         }
         AuditEventKind::KeyRemoved => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::MFA_FACTOR_DISABLE)
+        }
+        // A rename mutates an MFA factor's metadata (its user-settable
+        // label), not its lifecycle. OCSF's Account Change class defines
+        // no "MFA Factor Update" activity, so this falls back to the
+        // `activity_id: 99` "Other" escape hatch with a source-specific
+        // label, matching how the codebase handles other account-change
+        // updates without a predefined activity (AdminPromote, etc.).
+        AuditEventKind::KeyRenamed => {
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::KEY_RENAMED)
         }
         AuditEventKind::KeyRegistrationReplay => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::MFA_FACTOR_ENABLE)
@@ -747,7 +760,7 @@ mod tests {
     /// OCSF classification layer without parsing the opaque `data` blob.
     #[test]
     fn activity_id_99_events_have_source_specific_name_and_unmapped_event_type() {
-        let cases: [(AuditEventKind, u16, &str); 5] = [
+        let cases: [(AuditEventKind, u16, &str); 6] = [
             (AuditEventKind::AdminPromote, 3001, "Admin Promote"),
             (AuditEventKind::AdminDemote, 3001, "Admin Demote"),
             (
@@ -761,6 +774,7 @@ mod tests {
                 "OAuth Token Revoked",
             ),
             (AuditEventKind::ScimOperation, 3004, "SCIM Operation"),
+            (AuditEventKind::KeyRenamed, 3001, "Key Renamed"),
         ];
 
         for (kind, expected_class_uid, expected_activity_name) in cases {
