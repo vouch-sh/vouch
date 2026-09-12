@@ -180,39 +180,65 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// when the string is not a parseable RFC 4514 DN, in which case the caller
 /// falls back to exact string comparison.
 ///
-/// Whitespace immediately following an RDN-separator comma is stripped before
-/// parsing. `x509-cert` 0.2.5's `RdnSequence::from_str` splits RDNs on a bare
-/// `,` without trimming, so a leading space on the next attribute-type name
-/// (e.g. `CN=foo, O=Acme`) breaks the parse and the caller falls back to exact
-/// equality — which always rejects, since the cert-side `Name::to_string`
-/// rendering joins RDNs with a bare comma. Stripping comma-following
-/// whitespace makes the common `O=Acme, CN=foo` rendering (e.g. `openssl
-/// x509 -noout -subject`) canonicalize identically to `O=Acme,CN=foo`.
+/// Before parsing, whitespace adjacent to a *structural* separator is
+/// stripped: immediately after an RDN-separator comma, and on both sides of
+/// the `=` that separates each attribute type from its value. `x509-cert`
+/// 0.2.5's `RdnSequence::from_str` splits RDNs on a bare `,` and locates the
+/// attribute type with `s.find('=')` without trimming either side, so a
+/// leading space on the next attribute-type name (e.g. `CN=foo, O=Acme`) or a
+/// space padding the `=` (e.g. `O = Acme`) breaks the parse and the caller
+/// falls back to exact equality — which always rejects, since the cert-side
+/// `Name::to_string` rendering joins RDNs with a bare comma and emits a bare
+/// `=`. Stripping separator-adjacent whitespace makes the common
+/// `O = Acme, CN = foo` rendering — the default `oneline` output of
+/// `openssl x509 -noout -subject` on OpenSSL 3.x, which pads `=` on both
+/// sides — canonicalize identically to `O=Acme,CN=foo`.
 ///
-/// Only a *structural* comma separates RDNs. RFC 4514 §2.4 lets a comma appear
-/// inside an attribute value when escaped with a backslash, and §4 gives
+/// Only a *structural* comma separates RDNs, and only the *first* unescaped
+/// `=` in an RDN is the type/value separator (a later `=` belongs to the
+/// value). RFC 4514 §2.4 lets a comma appear inside an attribute value when
+/// escaped with a backslash, and §4 gives
 /// `CN=James \"Jim\" Smith\, III,DC=example,DC=net` as a valid DN. Stripping
-/// whitespace after every comma would rewrite `Smith\, III` to `Smith\,III`,
-/// changing the value rather than the separator spacing, so the escape state
-/// is tracked and an escaped comma is left untouched.
+/// whitespace after every comma or around every `=` would rewrite
+/// `Smith\, III` to `Smith\,III` (changing the value rather than the
+/// separator spacing), so the escape state is tracked and whitespace is only
+/// stripped around *unescaped* separators — while still in the
+/// attribute-type region (before the RDN's first unescaped `=`) or
+/// immediately after that `=`. Interior value whitespace, and whitespace
+/// around a value-internal `=`, is significant and preserved.
 fn canonicalize_dn(dn: &str) -> Option<String> {
     use std::str::FromStr as _;
     let mut normalized = String::with_capacity(dn.len());
     let mut escaped = false;
-    let mut after_separator = false;
+    // `in_value` is `false` while we are still in the attribute-type region of
+    // the current RDN (before its first unescaped `=`). Whitespace there is
+    // separator-adjacent formatting and is stripped so `O = Acme, CN = foo`
+    // reduces to `O=Acme,CN=foo`; an unescaped `,` returns us here for the
+    // next RDN. A later `=` already lives in the value and does not reset
+    // this flag, so whitespace around a value-internal `=` is preserved.
+    let mut in_value = false;
+    // `after_eq` is set immediately after the RDN's type/value separator `=`
+    // so the leading whitespace of the value (e.g. the `= Acme` padding) is
+    // stripped until the first non-whitespace value character. Interior value
+    // whitespace after that character is preserved.
+    let mut after_eq = false;
     for c in dn.chars() {
-        if after_separator {
-            if c.is_whitespace() {
-                continue;
-            }
-            after_separator = false;
+        if (!in_value || after_eq) && c.is_whitespace() {
+            continue;
         }
+        after_eq = false;
         if escaped {
             escaped = false;
         } else if c == '\\' {
             escaped = true;
+        } else if c == '=' && !in_value {
+            // First unescaped `=` in this RDN — the type/value separator.
+            in_value = true;
+            after_eq = true;
         } else if c == ',' {
-            after_separator = true;
+            // Structural comma ends this RDN; the next one starts in its
+            // attribute-type region.
+            in_value = false;
         }
         normalized.push(c);
     }
@@ -1206,6 +1232,103 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // canonicalize_dn — whitespace around the type/value `=` separator
+    // =========================================================================
+
+    // OpenSSL 3.x's default `oneline` rendering — the output of the bare
+    // `openssl x509 -noout -subject` command the `canonicalize_dn` doc comment
+    // cites — pads the `=` separating each attribute type from its value on
+    // both sides: `O = Acme, CN = foo` (spaces around every `=`). The previous
+    // pre-parser only stripped whitespace after a structural comma, never the
+    // `=`-adjacent spaces, so `RdnSequence::from_str` rejected `O ` as a type
+    // name and `canonicalize_dn` returned `None` — `verify_tls_client_auth`
+    // then fell back to exact string equality and rejected the legitimate
+    // client. The fix also strips whitespace around the (first, unescaped)
+    // `=` of each RDN.
+
+    /// A DN with whitespace around the `=` type/value separator must
+    /// canonicalize to the same string as the bare-`=` form, in both the
+    /// multi-RDN and the single-RDN (the most common operator DN) case. Space
+    /// before `=`, after `=`, both, multiple, and tabs are all stripped so
+    /// OpenSSL 3.x's default `oneline` output reduces to one form.
+    #[test]
+    fn test_canonicalize_dn_tolerates_whitespace_around_equals() {
+        let canonical = canonicalize_dn("O=Acme,CN=foo").expect("bare form parses");
+
+        // Multi-RDN: spaces around the `=` (OpenSSL 3.x default `oneline`).
+        let both = canonicalize_dn("O = Acme, CN = foo").expect("spaced `=` parses");
+        let before = canonicalize_dn("O =Acme,CN =foo").expect("space-before `=` parses");
+        let after = canonicalize_dn("O= Acme,CN= foo").expect("space-after `=` parses");
+        let multi = canonicalize_dn("O  =  Acme,  CN  =  foo").expect("multi-space `=` parses");
+        let tab = canonicalize_dn("O\t=\tAcme,\tCN\t=\tfoo").expect("tab `=` parses");
+
+        assert_eq!(
+            both, canonical,
+            "spaces around `=` must not change canonical form (OpenSSL 3.x default output)"
+        );
+        assert_eq!(before, canonical, "space before `=` must be stripped");
+        assert_eq!(after, canonical, "space after `=` must be stripped");
+        assert_eq!(
+            multi, canonical,
+            "multiple spaces around `=` must be stripped"
+        );
+        assert_eq!(tab, canonical, "tabs around `=` must be stripped");
+
+        // Single-RDN — the most common operator DN (`CN = foo`), same property.
+        let single = canonicalize_dn("CN=foo").expect("single bare parses");
+        assert_eq!(
+            canonicalize_dn("CN = foo").expect("single spaced parses"),
+            single,
+            "single-RDN `=`-adjacent whitespace must be stripped"
+        );
+        assert_eq!(
+            canonicalize_dn("CN\t=\tfoo").expect("single tabbed parses"),
+            single,
+            "single-RDN tab around `=` must be stripped"
+        );
+    }
+
+    /// The verbatim default output of `openssl x509 -noout -subject` on
+    /// OpenSSL 3.x must canonicalize identically to the cert-side
+    /// `Name::to_string` rendering, so an operator can copy-paste that
+    /// command's output as the `tls_client_auth_subject_dn`.
+    #[test]
+    fn test_canonicalize_dn_openssl3_oneline_default_matches_canonical() {
+        // cert-side rendering: what x509_cert `Name::to_string` emits.
+        let cert_side = canonicalize_dn("O=Acme,CN=foo").expect("cert side parses");
+        // OpenSSL 3.x default `oneline` rendering of the same subject.
+        let openssl_default =
+            canonicalize_dn("O = Acme, CN = foo").expect("openssl default parses");
+        assert_eq!(
+            openssl_default, cert_side,
+            "OpenSSL 3.x default output must canonicalize to the cert-side rendering"
+        );
+    }
+
+    /// Only the *first* unescaped `=` in an RDN is the type/value separator; a
+    /// later `=` lives in the value, and whitespace around it is significant.
+    /// Stripping separator-adjacent whitespace must not collapse `a = b`-style
+    /// interior value whitespace into `a=b`.
+    #[test]
+    fn test_canonicalize_dn_preserves_whitespace_around_value_equals() {
+        let with_value_eq_space =
+            canonicalize_dn("CN=a = b").expect("value-internal `=` with spaces parses");
+        let without_value_eq_space =
+            canonicalize_dn("CN=a=b").expect("value-internal `=` no spaces parses");
+        assert_ne!(
+            with_value_eq_space, without_value_eq_space,
+            "whitespace around a value-internal `=` is significant and must be preserved"
+        );
+        // x509_cert's `Display` does not escape interior value whitespace (see
+        // `test_canonicalize_dn_preserves_non_separator_whitespace`), so the
+        // spaces around the value-internal `=` round-trip untouched.
+        assert!(
+            with_value_eq_space.contains("a = b"),
+            "value-internal `=` whitespace must round-trip: got {with_value_eq_space}"
+        );
+    }
+
     /// Whitespace NOT following a comma must be preserved: it is part of the
     /// attribute value (RFC 4514 treats unescaped internal whitespace as
     /// significant), so the fix must not turn a different value into a match.
@@ -1321,8 +1444,10 @@ mod tests {
             "fixture: cert renders bare-comma DN"
         );
 
-        // Comma-space form (the OpenSSL default `oneline` rendering, minus the
-        // spaces around `=` an operator would naturally trim).
+        // Comma-space form (the common `O=Acme, CN=foo` rendering). The full
+        // OpenSSL 3.x default output `O = Acme, CN = foo` — with the spaces
+        // around `=` that command emits — is covered by
+        // `test_verify_tls_client_auth_subject_dn_openssl3_oneline_default`.
         let spaced = "O=Acme, CN=foo";
         assert_ne!(rendered, spaced, "precondition: strings differ by spacing");
         assert!(
@@ -1372,6 +1497,125 @@ mod tests {
         assert!(
             verify_tls_client_auth(&cert, Some("CN=foo, O=Acme"), None, None, None, None).is_err(),
             "a different RDN ordering must mismatch (DN ordering is significant)"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — OpenSSL 3.x default `oneline` subject (`=`-spacing)
+    // =========================================================================
+
+    // End-to-end regression for the `=`-adjacent whitespace bug: an operator
+    // who registers a `tls_client_auth_subject_dn` by copying the verbatim
+    // default output of `openssl x509 -noout -subject` (which on OpenSSL 3.x
+    // pads `=` on both sides, e.g. `O = Acme, CN = foo`) must authenticate.
+    // Before the fix `canonicalize_dn` returned `None` on the verbatim form
+    // and `verify_tls_client_auth` fell back to exact string equality — which
+    // rejects because the cert-side `Name::to_string` rendering has no
+    // `=`-padding.
+
+    /// A two-RDN cert rendered `O=Acme,CN=foo` must authenticate against the
+    /// verbatim OpenSSL 3.x default output `O = Acme, CN = foo` (the command
+    /// the `canonicalize_dn` doc comment cites) and against every
+    /// `=`-spacing/attribute-type-case variant of it.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_openssl3_oneline_default() {
+        let subject = make_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "Acme")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+        assert_eq!(
+            rendered, "O=Acme,CN=foo",
+            "fixture: cert renders bare-`=` bare-comma DN"
+        );
+
+        // The verbatim default `openssl x509 -noout -subject` output on
+        // OpenSSL 3.x (minus the `subject=` prefix) — must authenticate.
+        let openssl_default = "O = Acme, CN = foo";
+        assert_ne!(
+            rendered, openssl_default,
+            "precondition: cert rendering differs from the OpenSSL default by `=`-spacing"
+        );
+        assert!(
+            verify_tls_client_auth(&cert, Some(openssl_default), None, None, None, None).is_ok(),
+            "OpenSSL 3.x default `oneline` output must authenticate against the matching cert"
+        );
+
+        // Variants that differ only by `=`-spacing or attribute-type case
+        // (value case preserved) must also authenticate.
+        for registered in [
+            "O = Acme,CN = foo",
+            "O=Acme, CN = foo",
+            "O= Acme,CN= foo",
+            "O =Acme,CN =foo",
+            "O  =  Acme,  CN  =  foo",
+            "o = Acme, cn = foo",
+        ] {
+            assert!(
+                verify_tls_client_auth(&cert, Some(registered), None, None, None, None).is_ok(),
+                "`=`-spacing/case variant {registered:?} must authenticate"
+            );
+        }
+    }
+
+    /// The single-RDN case — `CN = foo`, the most common operator DN — must
+    /// authenticate against a `CN=foo` cert using the verbatim OpenSSL 3.x
+    /// default output, and against `=`-spacing variants of it.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_single_rdn_openssl3_oneline() {
+        let cert_der = make_test_cert("foo");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+        // `make_test_cert` builds a CN-only subject.
+        assert_eq!(
+            rendered, "CN=foo",
+            "fixture: single-RDN cert renders as CN=foo"
+        );
+
+        // OpenSSL 3.x default output for a single-CN subject.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN = foo"), None, None, None, None).is_ok(),
+            "single-RDN OpenSSL 3.x default `CN = foo` must authenticate"
+        );
+        for registered in ["CN= foo", "CN =foo", "CN  =  foo", "cn = foo"] {
+            assert!(
+                verify_tls_client_auth(&cert, Some(registered), None, None, None, None).is_ok(),
+                "single-RDN `=`-spacing/case variant {registered:?} must authenticate"
+            );
+        }
+    }
+
+    /// `=`-spacing tolerance must not make a genuinely different DN match: a
+    /// different value, a different number of RDNs, and a different RDN order
+    /// must all still be rejected — including when the registered value uses
+    /// the `=`-spaced rendering the fix now tolerates.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_eq_spacing_still_rejects_mismatch() {
+        let subject = make_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "Acme")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // Same `=`-spacing as the OpenSSL default, but a different CN value.
+        assert!(
+            verify_tls_client_auth(&cert, Some("O = Acme, CN = bar"), None, None, None, None)
+                .is_err(),
+            "a `=`-spaced DN with a different value must mismatch"
+        );
+        // Different org value.
+        assert!(
+            verify_tls_client_auth(&cert, Some("O = Other, CN = foo"), None, None, None, None)
+                .is_err(),
+            "a `=`-spaced DN with a different org value must mismatch"
+        );
+        // Fewer RDNs (single-RDN registration vs multi-RDN cert).
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN = foo"), None, None, None, None).is_err(),
+            "a `=`-spaced single-RDN registration must not match a multi-RDN cert"
+        );
+        // Same RDNs, different order — DN ordering is significant.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN = foo, O = Acme"), None, None, None, None)
+                .is_err(),
+            "a `=`-spaced DN with a different RDN order must mismatch"
         );
     }
 }
