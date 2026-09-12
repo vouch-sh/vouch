@@ -50,7 +50,7 @@ async fn test_oidc_state_consume_happy_path() {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let device_auth_id = seed_oidc_state(&store, "happy-state", expires_at).await;
 
-    let (data, _claim) = try_consume_oidc_state(&store, "happy-state")
+    let (data, _claim) = try_consume_oidc_state(&store, "happy-state", jiff::Timestamp::now())
         .await
         .expect("first consume must succeed");
 
@@ -69,11 +69,11 @@ async fn test_oidc_state_consume_replay_rejected() {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     seed_oidc_state(&store, "replay-state", expires_at).await;
 
-    let _first = try_consume_oidc_state(&store, "replay-state")
+    let _first = try_consume_oidc_state(&store, "replay-state", jiff::Timestamp::now())
         .await
         .expect("first consume must succeed");
 
-    let replayed = try_consume_oidc_state(&store, "replay-state").await;
+    let replayed = try_consume_oidc_state(&store, "replay-state", jiff::Timestamp::now()).await;
     assert!(
         matches!(replayed, Err(ClaimError::AlreadyConsumed)),
         "second consume must be rejected as AlreadyConsumed, got: {replayed:?}"
@@ -88,7 +88,7 @@ async fn test_oidc_state_consume_expired_rejected() {
     let expires_at: jiff::Timestamp = "2000-01-01T00:00:00Z".parse().unwrap();
     seed_oidc_state(&store, "expired-state", expires_at).await;
 
-    let result = try_consume_oidc_state(&store, "expired-state").await;
+    let result = try_consume_oidc_state(&store, "expired-state", jiff::Timestamp::now()).await;
     assert!(
         matches!(result, Err(ClaimError::AlreadyConsumed)),
         "expired state must be reported as AlreadyConsumed (indistinguishable \
@@ -101,7 +101,7 @@ async fn test_oidc_state_consume_not_found_rejected() {
     use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
-    let result = try_consume_oidc_state(&store, "never-existed").await;
+    let result = try_consume_oidc_state(&store, "never-existed", jiff::Timestamp::now()).await;
     assert!(
         matches!(result, Err(ClaimError::AlreadyConsumed)),
         "missing state must be reported as AlreadyConsumed: got {result:?}"
@@ -118,8 +118,8 @@ async fn test_oidc_state_consume_concurrent() {
     let store_a = store.clone();
     let store_b = store.clone();
     let (result_a, result_b) = tokio::join!(
-        try_consume_oidc_state(&store_a, "race-state"),
-        try_consume_oidc_state(&store_b, "race-state"),
+        try_consume_oidc_state(&store_a, "race-state", jiff::Timestamp::now()),
+        try_consume_oidc_state(&store_b, "race-state", jiff::Timestamp::now()),
     );
 
     let a_won = result_a.is_ok();

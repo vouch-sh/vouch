@@ -17,6 +17,7 @@ use super::types::{
 };
 use super::urn;
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::error::ServiceError;
@@ -25,6 +26,7 @@ use crate::error::ServiceError;
 ///
 /// Returns a paginated list of Group resources, with optional filtering.
 pub(crate) async fn list_groups(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
@@ -38,7 +40,7 @@ pub(crate) async fn list_groups(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -194,6 +196,7 @@ fn members_read_error_response() -> Response {
 ///
 /// Creates a new Group resource. Returns 201 Created on success.
 pub(crate) async fn create_group(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(group): Json<ScimGroup>,
@@ -211,7 +214,7 @@ pub(crate) async fn create_group(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -273,6 +276,7 @@ pub(crate) async fn create_group(
 ///
 /// Retrieves a single Group resource by ID, including its members.
 pub(crate) async fn get_group(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -283,7 +287,7 @@ pub(crate) async fn get_group(
     }
 
     // Authenticate
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -480,6 +484,7 @@ async fn record_partial_group_update(
 }
 
 pub(crate) async fn patch_group(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -491,7 +496,7 @@ pub(crate) async fn patch_group(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -635,6 +640,7 @@ pub(crate) async fn patch_group(
 /// Permanently deletes a Group resource. Returns 204 No Content on success.
 /// Group membership records are cascade-deleted.
 pub(crate) async fn delete_group(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -645,7 +651,7 @@ pub(crate) async fn delete_group(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };

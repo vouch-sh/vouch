@@ -113,7 +113,13 @@ pub(crate) async fn complete_login(
     // ── 2. Validate pending authorization exists (read, don't consume) ────
     // The pending auth will be consumed by the authorize endpoint when
     // it issues the authorization code via handle_pending_auth.
-    match db::get_pending_oauth_authorization(&state.store, &query.pending_auth).await {
+    match db::get_pending_oauth_authorization(
+        &state.store,
+        &query.pending_auth,
+        arrival.timestamp(),
+    )
+    .await
+    {
         Ok(Some(_)) => {}
         Ok(None) => {
             tracing::warn!(
@@ -244,6 +250,7 @@ pub(crate) async fn complete_login(
 /// form, or query-string redirect) via the shared `oauth_error_response`
 /// helper.
 pub(crate) async fn deny_login(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
@@ -264,14 +271,19 @@ pub(crate) async fn deny_login(
 
     // Consume pending authorization. The `_claim` witness is bound to
     // satisfy `#[must_use]`; downstream code uses `pending` directly.
-    let (pending, _claim) =
-        match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-            Ok(pair) => pair,
-            Err(db::claim::ClaimError::AlreadyConsumed) => {
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
+    let (pending, _claim) = match db::consume_pending_oauth_authorization(
+        &state.store,
+        &query.pending_auth,
+        arrival.timestamp(),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(db::claim::ClaimError::AlreadyConsumed) => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
 
     // Build the access_denied error response, dispatching on response_mode:
     // - Jwt:      JARM signed JWT delivered via the `response` query parameter.

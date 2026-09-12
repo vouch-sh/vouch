@@ -181,6 +181,11 @@ impl KeyResolver for OAuthClientKeyResolver {
     /// issuance path (`generate_dpop_nonce`): both are opaque random
     /// single-use values with the same validity window, and the atomic
     /// delete-if-not-expired gives single-use semantics on every backend.
+    ///
+    /// Unlike the DPoP path, the expiry comparison here reads an ambient
+    /// clock: `vouch_httpsig`'s `NonceValidator` trait passes only the nonce,
+    /// so there is no request instant to anchor to. Threading one would mean
+    /// widening a trait in a crate that has no concept of an Axum request.
     fn validate_nonce(
         &self,
         nonce: &str,
@@ -190,8 +195,14 @@ impl KeyResolver for OAuthClientKeyResolver {
 
         // Own the nonce: the returned future may only borrow `self`.
         let nonce = nonce.to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the httpsig nonce validator trait carries no request instant"
+        )]
+        let now = jiff::Timestamp::now();
         async move {
-            match crate::db::validate_and_consume_dpop_nonce(&self.state.store, &nonce).await {
+            match crate::db::validate_and_consume_dpop_nonce(&self.state.store, &nonce, &now).await
+            {
                 Ok(()) => NonceValidation::Valid,
                 Err(
                     crate::db::ClaimError::AlreadyConsumed | crate::db::ClaimError::InvalidInput(_),

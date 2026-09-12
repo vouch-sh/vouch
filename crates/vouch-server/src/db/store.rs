@@ -893,6 +893,10 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if serialization, encryption, or the database write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the row's created_at and updated_at"
+    )]
     pub async fn upsert<T: DocumentType>(&self, id: &str, doc: &T) -> Result<()> {
         crate::with_dsql_retry!(async {
             let SerializedDoc {
@@ -1229,6 +1233,7 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
+    #[expect(clippy::disallowed_methods, reason = "stamps the row's last_used_at")]
     pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
         #[cfg(test)]
         {
@@ -1349,6 +1354,10 @@ impl DocumentStore {
     ///
     /// Returns an error if serialization, encryption, or the database
     /// write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn compare_and_update<T: DocumentType>(
         &self,
         id: &str,
@@ -1527,6 +1536,10 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "background sweep cutoff, serves no request"
+    )]
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
         crate::with_dsql_retry!(async {
             let now = jiff::Timestamp::now().to_string();
@@ -1808,6 +1821,10 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the row's created_at and updated_at"
+    )]
     pub async fn insert_with_id<T: DocumentType>(
         &mut self,
         id: &str,
@@ -1975,6 +1992,7 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
+    #[expect(clippy::disallowed_methods, reason = "stamps the row's updated_at")]
     pub async fn update<T: DocumentType>(&mut self, id: &str, doc: &T) -> Result<()> {
         let SerializedDoc {
             encrypted,
@@ -2214,6 +2232,10 @@ impl StoreTransaction<'_> {
     /// or if a matched document changed since it was read ([`VersionConflict`]).
     /// Any error aborts the caller's transaction — the transaction is rolled
     /// back when dropped, so no partial batch is ever persisted.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn update_by_index<T, F>(
         &mut self,
         field: &str,
@@ -2382,6 +2404,10 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database
     /// write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn compare_and_update<T: DocumentType>(
         &mut self,
         id: &str,

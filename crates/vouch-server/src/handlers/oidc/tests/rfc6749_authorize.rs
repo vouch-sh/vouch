@@ -1705,10 +1705,14 @@ async fn test_pending_auth_with_bootstrap_session_returns_to_login_and_preserves
         "must return to /login carrying the same pending id, got: {location}"
     );
     assert!(
-        crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
-            .await
-            .expect("pending lookup")
-            .is_some(),
+        crate::db::get_pending_oauth_authorization(
+            &state.store,
+            &pending_id,
+            jiff::Timestamp::now()
+        )
+        .await
+        .expect("pending lookup")
+        .is_some(),
         "the refused session must not spend the single-use pending id"
     );
 
@@ -1770,10 +1774,14 @@ async fn test_pending_auth_without_session_returns_to_login_and_preserves_pendin
         "must return to /login carrying the same pending id, got: {location}"
     );
     assert!(
-        crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
-            .await
-            .expect("pending lookup")
-            .is_some(),
+        crate::db::get_pending_oauth_authorization(
+            &state.store,
+            &pending_id,
+            jiff::Timestamp::now()
+        )
+        .await
+        .expect("pending lookup")
+        .is_some(),
         "the sessionless return must not spend the single-use pending id"
     );
 }

@@ -588,7 +588,7 @@ pub(crate) async fn oidc_callback(
     // get-then-delete pattern, closing the read-vs-consume TOCTOU that
     // let two concurrent callbacks both pass validation and issue tokens.
     let (stored_state, oidc_state_claim) =
-        match db::try_consume_oidc_state(&state.store, &oidc_state).await {
+        match db::try_consume_oidc_state(&state.store, &oidc_state, arrival.timestamp()).await {
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {

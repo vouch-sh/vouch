@@ -373,6 +373,10 @@ impl AuditStore {
     /// Shared swallow-and-log behind [`Self::record_event`] and
     /// [`Self::record_event_with_domain`] — the one place audit write
     /// failures are formatted.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the audit row's created_at"
+    )]
     async fn record_best_effort<D: AuditData>(
         &self,
         kind: AuditEventKind,
@@ -448,6 +452,10 @@ impl AuditStore {
     ///
     /// Returns an error if the database write fails.
     #[cfg(any(test, feature = "test-utils"))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixture stamps its own instant"
+    )]
     pub async fn insert_json_event_for_test(
         &self,
         kind: AuditEventKind,

@@ -222,6 +222,10 @@ pub async fn list_org_signing_keys(
 /// immediately.
 ///
 /// Returns the normalized label on success.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven claim, not a request-path comparison"
+)]
 pub async fn claim_subdomain(
     store: &DocumentStore,
     org_id: &str,
@@ -370,6 +374,7 @@ pub async fn claim_subdomain(
 /// Releasing is already disruptive (discovery returns 404 during the cooldown), so
 /// dropping a Previous key's still-valid tokens on release is acceptable: the caller
 /// should communicate the disruption to end users.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's released_at")]
 pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Option<String>> {
     let result: Result<Option<String>, SubdomainClaimError> = crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
@@ -459,6 +464,10 @@ pub(super) fn subdomain_to_release(data: &OrganizationDoc) -> Option<String> {
 /// Returns [`SubdomainClaimError::OccConflict`] when the claim slot loses its
 /// CAS race — callers run inside `with_dsql_retry!`, which re-runs the whole
 /// transaction from a fresh read. Other failures are terminal.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the claim slot's released_at"
+)]
 pub(super) async fn release_ineligible_subdomain(
     tx: &mut StoreTransaction<'_>,
     org_id: &str,

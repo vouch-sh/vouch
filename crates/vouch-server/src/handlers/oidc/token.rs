@@ -581,6 +581,7 @@ async fn resolve_non_jwt_auth(
     headers: &HeaderMap,
     auth: &ClientAuthParams,
     client_cert: &OptionalClientCert,
+    arrival: ArrivalTime,
 ) -> Result<
     (
         crate::services::oidc::token::AuthenticatedClient,
@@ -603,7 +604,7 @@ async fn resolve_non_jwt_auth(
     // mTLS is the auth method — the secret is intentionally NOT validated).
     // In that case we fall through to the mTLS dispatch below.
     let secret_auth_outcome = if c.client_secret.is_some() {
-        match crate::services::oidc::token::authenticate_client(state, &c).await {
+        match crate::services::oidc::token::authenticate_client(state, &c, arrival).await {
             Ok((auth_client, Some(verification))) => {
                 return Ok((auth_client, ClientAuthProof::ClientSecret(verification)));
             }
@@ -768,7 +769,7 @@ async fn handle_authorization_code_grant(
     let non_jwt_auth = if has_jwt_assertion {
         None
     } else {
-        match resolve_non_jwt_auth(&state, &headers, &auth, &client_cert).await {
+        match resolve_non_jwt_auth(&state, &headers, &auth, &client_cert, arrival).await {
             Ok(pair) => Some(pair),
             // RFC 6749 §5.2: every failure inside `resolve_non_jwt_auth` is a
             // client-authentication failure, so a client that used

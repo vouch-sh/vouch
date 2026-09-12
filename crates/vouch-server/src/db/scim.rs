@@ -167,6 +167,7 @@ impl From<Document<ScimTokenDoc>> for ScimToken {
 pub async fn get_scim_token_by_hash(
     store: &DocumentStore,
     token_hash: &str,
+    now: Timestamp,
 ) -> Result<Option<ScimToken>> {
     let doc = store
         .find_one::<ScimTokenDoc>("token_hash", token_hash)
@@ -177,7 +178,6 @@ pub async fn get_scim_token_by_hash(
     };
 
     // Check expiration
-    let now = Timestamp::now();
     if let Some(expires_at) = doc.data.expires_at
         && expires_at <= now
     {
@@ -223,6 +223,10 @@ pub struct CreateScimTokenParams<'a> {
 /// - `ServiceError::NotFound` — organization does not exist.
 /// - `ServiceError::Api(409 "token_limit_reached")` — cap reached (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the token's created_at, and the cap count re-reads per OCC attempt"
+)]
 pub async fn create_scim_token(
     store: &DocumentStore,
     params: &CreateScimTokenParams<'_>,

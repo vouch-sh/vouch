@@ -164,6 +164,10 @@ pub async fn record_ssh_certificate_issuance(
 }
 
 /// Get all non-expired issued SSH certificates for a user.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "filters a listing, not a request accept/reject"
+)]
 pub async fn get_issued_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,
@@ -221,6 +225,10 @@ pub async fn is_ssh_certificate_revoked(store: &DocumentStore, serial: &str) -> 
 }
 
 /// Get all revoked SSH certificates (for KRL generation).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "filters a KRL listing, not a request accept/reject"
+)]
 pub async fn get_revoked_ssh_certificates(
     store: &DocumentStore,
 ) -> Result<Vec<RevokedSshCertificate>> {
@@ -235,6 +243,10 @@ pub async fn get_revoked_ssh_certificates(
 
 /// Revoke all SSH certificates for a user by looking up issued certs
 /// and inserting a revocation record for each real serial.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "OCC retry re-reads the clock per attempt to stamp the revocation rows"
+)]
 pub(in crate::db) async fn revoke_all_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,

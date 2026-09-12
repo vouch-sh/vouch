@@ -6,6 +6,7 @@
 //! the file whose scope matches; add a new file (and list it here) when
 //! none does:
 //!
+//! - [`arrival_anchored_expiry`] — Request-deciding expiry comparisons read the caller's instant, not an ambient clock.
 //! - [`audit_events`] — Auth/key/device audit event logging and expiry.
 //! - [`authenticators`] — Authenticator (security key) CRUD and counting.
 //! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows.
@@ -101,6 +102,7 @@ fn test_org_doc(domain: &str) -> crate::db::documents::organization::Organizatio
     }
 }
 
+mod arrival_anchored_expiry;
 mod audit_events;
 mod authenticators;
 mod cascade_delete;

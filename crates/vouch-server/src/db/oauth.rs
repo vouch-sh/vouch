@@ -1172,6 +1172,10 @@ impl OAuthClientSecret {
 /// - `ServiceError::Api(409 "max_secrets_reached")` — cap already reached (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 /// - `ServiceError::Internal` — unexpected database or serialization error.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the secret's created_at and expires_at"
+)]
 pub async fn create_oauth_client_secret(
     store: &DocumentStore,
     oauth_client_id: &str,
@@ -1320,6 +1324,7 @@ pub async fn get_oauth_secret_by_hash(
 }
 
 /// Revoke all secrets for an OAuth client.
+#[expect(clippy::disallowed_methods, reason = "stamps the revocation time")]
 pub async fn revoke_all_oauth_client_secrets(
     store: &DocumentStore,
     oauth_client_id: &str,
@@ -1376,6 +1381,7 @@ pub async fn get_oauth_client_secret_by_id(
 /// - `ServiceError::Api(409 "last_secret")` — would leave zero active secrets (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 /// - `ServiceError::Internal` — unexpected database or serialization error.
+#[expect(clippy::disallowed_methods, reason = "stamps the revocation time")]
 pub async fn revoke_oauth_client_secret(
     store: &DocumentStore,
     secret_id: &str,
@@ -2040,10 +2046,16 @@ pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore) -> Result<
 /// distinguishable from the HTTP client's perspective, and we never see
 /// the raw stored secret in application code. Do NOT replace this with
 /// a fetch-then-compare pattern; that would reintroduce a timing channel.
+///
+/// `now` decides the secret's validity window, so request-path callers pass
+/// the request's [`crate::arrival::ArrivalTime`] instant: this is the client
+/// authentication decision for the request, and it must read the same clock
+/// as the rest of that decision rather than one stamped later.
 pub async fn validate_oauth_client_credentials(
     store: &DocumentStore,
     client_id: &str,
     secret_hash: &str,
+    now: Timestamp,
 ) -> Result<Option<OAuthClient>> {
     let Some(client) = get_oauth_client_by_client_id(store, client_id).await? else {
         return Ok(None);
@@ -2061,7 +2073,6 @@ pub async fn validate_oauth_client_credentials(
         return Ok(None);
     }
 
-    let now = Timestamp::now();
     if !secret.is_valid(&now) {
         return Ok(None);
     }
@@ -2700,14 +2711,24 @@ mod tests {
             .await
             .expect("create second secret");
 
-        let result1 = validate_oauth_client_credentials(&store, &client.client_id, &hash1)
-            .await
-            .expect("validate with first");
+        let result1 = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash1,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with first");
         assert!(result1.is_some());
 
-        let result2 = validate_oauth_client_credentials(&store, &client.client_id, hash2)
-            .await
-            .expect("validate with second");
+        let result2 = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            hash2,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with second");
         assert!(result2.is_some());
     }
 
@@ -2731,9 +2752,14 @@ mod tests {
             .await
             .expect("revoke");
 
-        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
-            .await
-            .expect("validate");
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate");
 
         assert!(result.is_none());
     }
@@ -2764,9 +2790,14 @@ mod tests {
         // Fault every `update_last_used_at` write with a non-retryable `Err`.
         store.set_last_used_remaining_successes(0);
 
-        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
-            .await
-            .expect("credential validation must not fail when the last_used_at write fails");
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("credential validation must not fail when the last_used_at write fails");
         assert!(
             result.is_some(),
             "validated client must be returned even under an injected last_used_at fault"
@@ -2774,9 +2805,14 @@ mod tests {
 
         // Control: with the fault cleared, validation still returns the client.
         store.set_last_used_remaining_successes(u64::MAX);
-        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
-            .await
-            .expect("validate with fault cleared");
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with fault cleared");
         assert!(result.is_some());
     }
 

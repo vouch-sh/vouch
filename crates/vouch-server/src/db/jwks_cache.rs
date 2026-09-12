@@ -32,6 +32,10 @@ pub async fn get_jwks_cache(
 /// Insert or update the JWKS cache for a parent document.
 ///
 /// Uses `DocumentStore::upsert` for last-write-wins idempotent semantics.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the cache row's cached_at"
+)]
 pub async fn upsert_jwks_cache(
     store: &DocumentStore,
     parent_id: &str,

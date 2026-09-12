@@ -611,7 +611,7 @@ async fn validate_dpop_common(
     // successfully" guarantee is carried forward by the returned
     // `ValidatedDpopProof`.
     if let Some(nonce) = claims.nonce.as_deref() {
-        match db::validate_and_consume_dpop_nonce(store, nonce).await {
+        match db::validate_and_consume_dpop_nonce(store, nonce, &now).await {
             Ok(()) => {}
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)

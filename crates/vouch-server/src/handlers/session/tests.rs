@@ -394,7 +394,7 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce)
+    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce, &jiff::Timestamp::now())
         .await
         .expect("consume nonce");
 

@@ -418,6 +418,10 @@ pub struct DeviceCodeClaim {
 /// code be redeemed when a retry lands past `expires_at`. The per-attempt
 /// stamp is authoritative for both the `data.expires_at <= now` gate and
 /// the `consumed_at` audit record.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "OCC retry re-reads the clock per attempt"
+)]
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
@@ -475,6 +479,7 @@ pub async fn try_consume_device_auth(
 
 /// Update the last poll time for a device auth request.
 /// Returns true if poll was allowed, false if polling too fast.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's last-poll time")]
 pub async fn update_device_auth_poll_time(
     store: &DocumentStore,
     id: &str,
@@ -562,12 +567,16 @@ pub async fn create_oidc_state(
 /// two concurrent enrollment-callback requests could both read the same
 /// state, both pass validation, and both proceed to issue tokens before
 /// either delete completed.
+///
+/// `now` both decides the expiry comparison and stamps `consumed_at`, so
+/// request-path callers pass the request's [`crate::arrival::ArrivalTime`]
+/// instant rather than letting this read a later clock than the rest of the
+/// callback's checks.
 pub async fn try_consume_oidc_state(
     store: &DocumentStore,
     state: &str,
+    now: Timestamp,
 ) -> std::result::Result<(OidcState, OidcStateClaim), ClaimError> {
-    let now = Timestamp::now();
-
     let doc = store
         .find_one::<OidcStateDoc>("state", state)
         .await

@@ -313,7 +313,7 @@ pub(crate) async fn complete_client_auth(
             presentation,
         } => {
             let client_id = creds.client_id.clone();
-            match authenticate_client(state, &creds).await {
+            match authenticate_client(state, &creds, arrival).await {
                 Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
                     client,
                     client_id,
@@ -351,7 +351,7 @@ pub(crate) async fn complete_client_auth(
                 client_id: client_id.clone(),
                 client_secret: None,
             };
-            match authenticate_client(state, &creds).await {
+            match authenticate_client(state, &creds, arrival).await {
                 Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
                     client,
                     client_id,

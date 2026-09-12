@@ -17,6 +17,7 @@ use super::types::{
 };
 use super::urn;
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::redact_email;
@@ -25,6 +26,7 @@ use crate::redact_email;
 ///
 /// Returns a paginated list of User resources, with optional filtering.
 pub(crate) async fn list_users(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
@@ -38,7 +40,7 @@ pub(crate) async fn list_users(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -192,12 +194,13 @@ pub(super) fn create_scim_user_error_response(
 /// Creates a new User resource. Returns 201 Created on success,
 /// 409 Conflict if the user already exists (RFC 7644 Section 3.3.1).
 pub(crate) async fn create_user(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(user): Json<ScimUser>,
 ) -> Response {
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -293,6 +296,7 @@ pub(crate) async fn create_user(
 ///
 /// Retrieves a single User resource by ID.
 pub(crate) async fn get_user(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -303,7 +307,7 @@ pub(crate) async fn get_user(
     }
 
     // Authenticate
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -402,6 +406,7 @@ const USER_ATTRIBUTES: &[Attribute<UserPatch>] = &[
 /// remove) applied against [`USER_ATTRIBUTES`]. Deactivating a user
 /// invalidates all sessions and revokes SSH certificates.
 pub(crate) async fn patch_user(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -413,7 +418,7 @@ pub(crate) async fn patch_user(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
@@ -585,6 +590,7 @@ pub(crate) async fn patch_user(
 /// Permanently deletes a User resource. Returns 204 No Content on success.
 /// All sessions are invalidated and SSH certificates are revoked.
 pub(crate) async fn delete_user(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -595,7 +601,7 @@ pub(crate) async fn delete_user(
     }
 
     // Authenticate and check scope
-    let auth = match authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };

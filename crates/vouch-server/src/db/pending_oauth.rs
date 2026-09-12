@@ -93,6 +93,10 @@ pub struct CreatePendingOAuthParams<'a> {
 }
 
 /// Create a pending OAuth authorization.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the row's created_at and expires_at"
+)]
 pub async fn create_pending_oauth_authorization(
     store: &DocumentStore,
     params: CreatePendingOAuthParams<'_>,
@@ -129,12 +133,16 @@ pub async fn create_pending_oauth_authorization(
 /// Get a pending OAuth authorization by ID.
 ///
 /// Returns None if not found, expired, or already consumed.
+///
+/// `now` decides the expiry comparison, so request-path callers pass the
+/// request's [`crate::arrival::ArrivalTime`] instant. A clock stamped here
+/// would be ≥ arrival and could drop a deferred login that was still
+/// resumable when the request arrived.
 pub async fn get_pending_oauth_authorization(
     store: &DocumentStore,
     id: &str,
+    now: Timestamp,
 ) -> Result<Option<PendingOAuthAuthorization>> {
-    let now = Timestamp::now();
-
     let doc = store.get::<PendingOAuthAuthDoc>(id).await?;
     match doc {
         Some(d) if d.data.consumed_at.is_none() && d.data.expires_at > now => {
@@ -175,12 +183,15 @@ pub(crate) struct PendingOauthClaim {
 /// All "lost" cases (not found, expired, already consumed, concurrent
 /// consumer won) map to [`ClaimError::AlreadyConsumed`] — deliberately
 /// indistinguishable, each rejected as an invalid `pending_auth`.
+///
+/// `now` both decides the expiry comparison and stamps `consumed_at`, so
+/// request-path callers pass the request's [`crate::arrival::ArrivalTime`]
+/// instant.
 pub(crate) async fn consume_pending_oauth_authorization(
     store: &DocumentStore,
     id: &str,
+    now: Timestamp,
 ) -> std::result::Result<(PendingOAuthAuthorization, PendingOauthClaim), ClaimError> {
-    let now = Timestamp::now();
-
     let doc = store
         .get::<PendingOAuthAuthDoc>(id)
         .await

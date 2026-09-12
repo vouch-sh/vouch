@@ -43,6 +43,7 @@ fn deterministic_dpop_nonce_id(nonce: &str) -> String {
 /// Stores the nonce under a deterministic document ID derived from the
 /// nonce itself, so [`validate_and_consume_dpop_nonce`] can perform an
 /// atomic primary-key DELETE without a find-then-delete TOCTOU window.
+#[expect(clippy::disallowed_methods, reason = "stamps the nonce's expires_at")]
 pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -> Result<String> {
     let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
     let now = Timestamp::now();
@@ -59,7 +60,7 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
     Ok(nonce)
 }
 
-/// Atomically validate and consume a DPoP nonce.
+/// Atomically validate and consume a DPoP nonce, judged against `now`.
 ///
 /// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
 /// outcome is decided by the database row count — no find-then-delete race.
@@ -67,6 +68,14 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
 /// concurrent caller) returns [`ClaimError::AlreadyConsumed`]. The three
 /// lost cases are deliberately indistinguishable: each is rejected the
 /// same way by RFC 9449.
+///
+/// `now` decides the expiry comparison, so a request-path caller passes the
+/// request's [`crate::arrival::ArrivalTime`] instant: this comparison is one
+/// of three serving a single DPoP decision, alongside the JTI retention
+/// commit and the freshness check, and all three must read one instant. A
+/// clock stamped here instead is always ≥ arrival, which makes the predicate
+/// strictly stricter and rejects a nonce that was still valid when the
+/// request arrived but expired during the intervening awaits.
 ///
 /// No witness type is returned because `ValidatedDpopProof` already
 /// carries the "DPoP validation succeeded" marker at the call site
@@ -76,11 +85,11 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
 pub async fn validate_and_consume_dpop_nonce(
     store: &DocumentStore,
     nonce: &str,
+    now: &Timestamp,
 ) -> std::result::Result<(), ClaimError> {
     let id = deterministic_dpop_nonce_id(nonce);
-    let now = Timestamp::now();
     let won = store
-        .delete_if_not_expired(&id, &now)
+        .delete_if_not_expired(&id, now)
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
     if won {
