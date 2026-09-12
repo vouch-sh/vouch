@@ -3410,3 +3410,383 @@ async fn test_revoke_tokens_rejects_deactivated_user() {
         "secrets must survive the rejected revoke-all"
     );
 }
+
+// ========================================================================
+// DELETE /api/v1/applications/:id — ClientDeleted audit event
+// ========================================================================
+
+/// `delete_application_api` must record a `ClientDeleted` (`oauth_client_deleted`)
+/// audit event after the delete commits, mirroring the RFC 7592 delete path.
+/// Regression for the audit-parity gap: the most destructive application
+/// operation left no durable record in the audit/OCSF pipeline.
+#[tokio::test]
+async fn delete_application_api_records_client_deleted_audit_event() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "audit-delete@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+
+    assert_eq!(
+        events.len(),
+        1,
+        "API delete must write exactly one audit event; got {}",
+        events.len()
+    );
+}
+
+/// The `ClientDeleted` event's org-domain attribution must fall through to the
+/// client's own org when the owning user has no org. Regression for the
+/// pre-resolution step: the client doc is already deleted when the event is
+/// recorded, so a naive client-org lookup would miss. Mirrors the RFC 7592
+/// regression test at `rfc7592.rs:1821`.
+#[tokio::test]
+async fn delete_application_api_attributes_org_domain_for_org_owned_client() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "api-org-owned-deleted.example").await;
+    // The owner has no org of their own, so the user-org branch of the
+    // resolution guard does not fire; attribution must come from the captured
+    // `client.org_id`.
+    let owner = create_test_user(&state.store, "solo-owner-api@personal.example").await;
+    let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &owner.id,
+            email: &owner.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            org_id: Some(org.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(owner.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("api-org-owned-deleted.example"),
+        "the client's own org must be attributed even though the owning user \
+         has no org and the client doc is already deleted by the time the \
+         event is recorded"
+    );
+}
+
+// ========================================================================
+// DELETE /api/v1/applications/:id — ClientDeleted org-domain/edge cases
+// (guards B/G7, G9, G14, G15 not pinned by the two parity tests above)
+// ========================================================================
+
+/// **G7** — when the owning user belongs to an org and the deleted app is
+/// personal (`org_id == None`), the `ClientDeleted` event's `email_domain`
+/// must be the acting user's own org domain (resolved via the
+/// `user.org_id` → `get_organization_domain` branch of the pre-resolution
+/// guard, since `upsert_user_with_org` leaves `org_domain` unstamped).
+#[tokio::test]
+async fn delete_application_api_attributes_user_org_domain_for_personal_app() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "user-org-personal.example").await;
+    let owner = create_test_user_in_org(
+        &state.store,
+        "org-member@user-org-personal.example",
+        &org.id,
+        false,
+    )
+    .await;
+    let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &owner.id,
+            email: &owner.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    // Personal app: client.org_id == None even though the owner has an org.
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(owner.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("user-org-personal.example"),
+        "a personal app deleted by an org member must be attributed to the \
+         acting user's own org domain"
+    );
+}
+
+/// **G9** — when neither the owning user nor the deleted app has an org, the
+/// `ClientDeleted` event's `email_domain` must be `None` (no spurious
+/// attribution, no panic, no failed lookup surfacing as an error).
+#[tokio::test]
+async fn delete_application_api_no_org_when_personal_app_and_solo_owner() {
+    let (app, state) = test_app().await;
+
+    let owner = create_test_user(&state.store, "solo-no-org@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &owner.id,
+            email: &owner.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(owner.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+    assert!(
+        events[0].email_domain.is_none(),
+        "an app with no org deleted by a user with no org must have no \
+         email_domain attribution; got {:?}",
+        events[0].email_domain
+    );
+}
+
+/// **G14** — a non-owner caller is rejected with 404 and must write **no**
+/// `oauth_client_deleted` event (the audit row reflects only a successful
+/// delete commit). Pins the "no event on rejection" half that the existing
+/// `test_delete_application_not_found` (response half) does not assert.
+#[tokio::test]
+async fn delete_application_api_non_owner_writes_no_audit_event() {
+    let (app, state) = test_app().await;
+
+    let owner = create_test_user(&state.store, "owner@non-owner-audit.example").await;
+    let caller = create_test_user(&state.store, "caller@non-owner-audit.example").await;
+    let caller_auth_id = create_test_authenticator(&state.store, &caller.id).await;
+    let caller_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &caller.id,
+            email: &caller.email,
+            auth_id: Some(&caller_auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &bearer(&caller_token))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "non-owner must get 404");
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        events.is_empty(),
+        "a rejected (non-owner) delete must write no oauth_client_deleted event; \
+         got {events_len}",
+        events_len = events.len()
+    );
+    // The client must survive a rejected delete.
+    assert!(
+        crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db read")
+            .is_some(),
+        "the application must still exist after a rejected delete"
+    );
+}
+
+/// **G14 (deactivated)** — a deactivated owner is rejected (401
+/// `unauthorized`) and must write **no** `oauth_client_deleted` event.
+#[tokio::test]
+async fn delete_application_api_deactivated_owner_writes_no_audit_event() {
+    let (app, state) = test_app().await;
+    let (app_id, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-del-audit@example.com").await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}"),
+        &[("Authorization", &bearer(&token))],
+    )
+    .await;
+    // The handler's `load_active_owned_client` gates on an active user first.
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        events.is_empty(),
+        "a rejected (deactivated owner) delete must write no oauth_client_deleted \
+         event; got {events_len}",
+        events_len = events.len()
+    );
+}
+
+/// **G15** — when `delete_oauth_client_and_revoke_sessions` errors, the handler
+/// returns 500 `db_error` and must write **no** `oauth_client_deleted` event;
+/// the audit row reflects only what actually committed. Uses the same
+/// fault-injection seam as `test_delete_application_partial_failure_*`:
+/// `set_delete_by_index_remaining_successes(0)` faults the cascade's first
+/// `delete_by_index` (the M2M session sweep), so `delete_oauth_client` is never
+/// reached and the client document survives.
+#[tokio::test]
+async fn delete_application_api_failed_delete_writes_no_audit_event() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_delete_by_index_remaining_successes(0);
+    })
+    .await;
+
+    let user = create_test_user(&state.store, "failed-delete-audit@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a faulted delete must surface as 500 db_error, not 204"
+    );
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        events.is_empty(),
+        "a failed delete must write no oauth_client_deleted event; got {events_len}",
+        events_len = events.len()
+    );
+    // The client document must survive the failed delete (the cascade faults
+    // before `delete_oauth_client`).
+    assert!(
+        crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db read")
+            .is_some(),
+        "the application must still exist after a failed delete cascade"
+    );
+}

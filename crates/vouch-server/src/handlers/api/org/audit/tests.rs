@@ -656,3 +656,105 @@ fn ndjson_body_always_emits_at_least_one_line_even_over_budget() {
     );
     assert_eq!(next_cursor.as_deref(), None, "no more events, so no cursor");
 }
+
+/// **G16 end-to-end (in-process)** — a `ClientDeleted` audit event written by
+/// the Applications API delete handler surfaces through the real
+/// `?format=ocsf` audit-export endpoint as an OCSF Entity Management
+/// (`class_uid == 3004`) / Delete (`activity_id == 4`) row carrying the deleted
+/// client's `oauth_client_id`. This is the parity the bug report's §8 asks for:
+/// before the fix the OCSF export contained no `ENTITY_DELETE` rows for
+/// API-surface deletions; after the fix it contains exactly one.
+///
+/// Drives the full axum router end-to-end: a real owner DELETE writes the
+/// audit row, then an org-scoped `audit:read` token reads the OCSF projection.
+/// No external IdP is needed — `create_test_audit_token` mints the org API
+/// token directly. The deleted client is a personal app owned by an org member,
+/// so the `ClientDeleted` event is attributed to the owner's org domain and is
+/// visible to the org-scoped audit consumer.
+///
+/// The audit export applies a read-after-write `LAG_WINDOW_SECONDS = 30` lag:
+/// events newer than `now - 30s` are excluded so pollers don't race with
+/// writers. The live delete above writes the event at ~now, so we wait out the
+/// lag window before reading — mirroring a real poller that polls after the
+/// event has aged past the window.
+#[tokio::test]
+async fn ocsf_export_shows_entity_delete_after_application_api_delete() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "ocsf-e2e.example").await;
+    let owner =
+        create_test_user_in_org(&state.store, "owner@ocsf-e2e.example", &org.id, false).await;
+    let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &owner.id,
+            email: &owner.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Personal app (client.org_id == None) owned by an org member: the
+    // `ClientDeleted` event attributes to the owner's org domain
+    // ("ocsf-e2e.example"), so it is visible to the org-scoped audit token.
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+
+    // Real API delete by the owner → writes OauthClientDeleted to the audit
+    // store, attributed to "ocsf-e2e.example".
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{}", client.app_id),
+        &[("Authorization", &format!("Bearer {session}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Wait out the export's 30s read-after-write lag window so the just-written
+    // event becomes visible to the audit endpoint (a real poller polls after
+    // this interval; 36s gives a 6s margin past the 30s cutoff).
+    tokio::time::sleep(std::time::Duration::from_secs(36)).await;
+
+    // Read the OCSF export as an org-scoped audit consumer.
+    let token = create_test_audit_token(&state.store, "poller", &org.id).await;
+    let (status, body) = http_get(
+        &app,
+        &format!("{PATH}?format=ocsf&limit=100"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let events = resp["events"].as_array().expect("events array");
+
+    // `OauthClientDeleted` projects to Entity Management (3004) / ENTITY_DELETE
+    // (activity_id 4). activity_id 4 is NOT 99, so it carries no
+    // `unmapped.event_type` — identify the row by class_uid and the embedded
+    // `oauth_client_id`.
+    let entity_delete = events
+        .iter()
+        .find(|ev| ev["class_uid"] == 3004 && ev["activity_id"] == 4)
+        .expect(
+            "the API delete must surface as an Entity Management/ENTITY_DELETE \
+             row in the OCSF export",
+        );
+    assert_eq!(
+        entity_delete["class_uid"], 3004,
+        "OauthClientDeleted maps to Entity Management (3004)"
+    );
+    assert_eq!(
+        entity_delete["activity_id"], 4,
+        "ENTITY_DELETE activity_id is 4 (Delete)"
+    );
+    assert_eq!(
+        entity_delete["activity_name"], "Delete",
+        "ENTITY_DELETE activity_name is 'Delete'"
+    );
+    assert_eq!(
+        entity_delete["type_uid"], 300404,
+        "type_uid is class_uid * 100 + activity_id (3004 * 100 + 4)"
+    );
+    assert_eq!(
+        entity_delete["data"]["oauth_client_id"], client.app_id,
+        "the OCSF row must carry the deleted client's app_id in its data"
+    );
+}
