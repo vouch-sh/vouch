@@ -98,6 +98,28 @@ class Finding:
         return [name for name, pattern in CLASSES if re.search(pattern, self.title, re.I)]
 
 
+def fetch_fix_prs(author: str, limit: int) -> set[int]:
+    """PR numbers authored by Detail, for the self-caused-regression measure."""
+    proc = subprocess.run(
+        [
+            "gh", "pr", "list",
+            "--state", "all",
+            "--limit", str(limit),
+            "--json", "number,author",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        sys.exit(f"gh pr list failed: {proc.stderr.strip()}")
+    return {
+        row["number"]
+        for row in json.loads(proc.stdout)
+        if (row.get("author") or {}).get("login") == author
+    }
+
+
 def fetch(author: str, limit: int) -> list[Finding]:
     """Read every Detail-authored issue through the gh CLI."""
     proc = subprocess.run(
@@ -193,8 +215,36 @@ def by_class(findings: list[Finding]) -> tuple[list[str], list[dict[str, object]
     return months, rows, unmatched
 
 
+def self_caused(findings: list[Finding], fix_prs: set[int]) -> list[dict[str, object]]:
+    """Per batch, how many findings are attributed to one of Detail's own fix PRs.
+
+    A rising share means merging the fix PRs is feeding the next scan. Read it
+    with care: as Detail's PR count grows, its commits are increasingly the last
+    to touch any given line, which inflates the share for mechanical reasons.
+    Confirm a spike by reading whether the finding is a defect in the logic the
+    fix added, rather than merely in a file it touched.
+    """
+    batches: dict[date, list[Finding]] = collections.defaultdict(list)
+    for finding in findings:
+        batches[finding.detected].append(finding)
+
+    rows: list[dict[str, object]] = []
+    for detected in sorted(batches):
+        bucket = batches[detected]
+        attributed = [f for f in bucket if f.introduced_pr is not None]
+        rows.append(
+            {
+                "date": detected.isoformat(),
+                "issues": len(bucket),
+                "attributed": len(attributed),
+                "from_fix_pr": sum(1 for f in attributed if f.introduced_pr in fix_prs),
+            }
+        )
+    return rows
+
+
 def render(findings: list[Finding], months: list[str], class_rows: list[dict[str, object]],
-           unmatched: list[Finding]) -> None:
+           unmatched: list[Finding], self_caused_rows: list[dict[str, object]]) -> None:
     print(f"{len(findings)} Detail issues, "
           f"{findings[0].detected.isoformat()} to {findings[-1].detected.isoformat()}\n")
 
@@ -216,6 +266,17 @@ def render(findings: list[Finding], months: list[str], class_rows: list[dict[str
         cells = " ".join(f"{row['by_month'][m]:3}" for m in months)
         print(f"  {row['class']:28} {row['total']:5}  {cells}")
     print(f"\n  {len(unmatched)} issues matched no class; read those titles directly.")
+
+    print("\nFindings introduced by one of Detail's own fix PRs (batches of 5+)")
+    print(f"  {'batch':12} {'issues':>6} {'attributed':>10} {'from fix PR':>12}")
+    for row in self_caused_rows:
+        if row["issues"] < 5:
+            continue
+        print(f"  {row['date']:12} {row['issues']:6} {row['attributed']:10} "
+              f"{row['from_fix_pr']:12}")
+    print("\n  A rising share means merging the fix PRs feeds the next scan. Some of")
+    print("  it is mechanical -- Detail's commits become the last to touch a line --")
+    print("  so confirm a spike by checking the finding is in the logic the fix added.")
 
 
 def main() -> int:
@@ -239,12 +300,14 @@ def main() -> int:
     findings.sort(key=lambda f: f.detected)
 
     months, class_rows, unmatched = by_class(findings)
+    self_caused_rows = self_caused(findings, fetch_fix_prs(args.author, args.limit))
     if args.as_json:
         json.dump(
             {
                 "total": len(findings),
                 "monthly": monthly(findings),
                 "classes": class_rows,
+                "self_caused": self_caused_rows,
                 "unmatched": [{"number": f.number, "title": f.title} for f in unmatched],
                 "open_bug_ids": {
                     f.number: f.bug_id for f in findings if f.state == "OPEN" and f.bug_id
@@ -255,7 +318,7 @@ def main() -> int:
         )
         print()
     else:
-        render(findings, months, class_rows, unmatched)
+        render(findings, months, class_rows, unmatched, self_caused_rows)
     return 0
 
 

@@ -37,16 +37,30 @@ The script reads every Detail-authored issue through `gh`, extracts the
 "Introduced in [#N] … on DATE" attribution from each body, and reports volume,
 bug age, and keyword-clustered classes per detection month.
 
-Read two columns together:
+Read three things together:
 
 - **median / p90 age** — how far back into history this pass reached.
 - **`<30d`** — findings against code merged in the last month.
+- **`from fix PR`** — findings attributed to one of Detail's *own* earlier fix
+  PRs.
 
 A climbing median with a flat `<30d` means Detail is working through backlog:
 volume is high for a reason that no process change will fix, and the right
 response is throughput. A climbing `<30d` means new code is generating findings
-as fast as old code is being cleaned up, and the right response is a guardrail.
-Say which of the two you are looking at before proposing any remedy.
+as fast as old code is cleaned up, and the right response is a guardrail. Say
+which of the two you are looking at before proposing any remedy.
+
+`from fix PR` is the one that decides how this batch gets merged. When it is
+high, merging fix PRs as-is is feeding the next scan, and the loop only breaks
+by making class decisions *before* merging. Part of the signal is mechanical —
+as Detail's merged PR count grows, its commits are increasingly the last to
+touch any given line — so confirm a spike by checking whether the finding is a
+defect in the logic the fix *added* rather than merely in a file it touched.
+The 2026-09-08 batch is the recorded worked example: all seven findings were
+attributed to fix PRs merged two days earlier, and each was a defect in the
+added logic (a stale timestamp in a retry the fix introduced, a zero-boundary
+bypass of a cap the fix introduced, a residual gap in a window the fix
+widened).
 
 The class table is **keyword clustering over titles — directional, not
 rigorous**. Titles overlap classes and a large share match none. Use it to spot

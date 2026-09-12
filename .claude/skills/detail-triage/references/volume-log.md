@@ -53,6 +53,28 @@ this table that adding overlapping rules is not the lever — the `detail-rules`
 skill is wired into no CI job, git hook, or Makefile target, so no rule gates a
 merge.
 
+### Findings introduced by Detail's own fix PRs
+
+| batch | issues | attributed | from a fix PR |
+|-------|--------|-----------|---------------|
+| 2026-04-15 → 2026-08-29 (14 batches) | 151 | 129 | 0 |
+| 2026-08-31 | 9 | 9 | 8 |
+| 2026-09-02 | 5 | 5 | 4 |
+| 2026-09-06 | 27 | 23 | 1 |
+| 2026-09-08 | 7 | 7 | 7 |
+| 2026-09-11 | 24 | 21 | 2 |
+
+Zero for four and a half months, then a sudden onset at the end of August. The
+2026-09-08 batch is the worked example the skill cites: every finding was
+attributed to a fix PR merged two days earlier, and each was a defect in the
+logic the fix added — #1256 ← #1229 (stale timestamp in the new OCC retry),
+#1255 ← #1236 (zero-boundary bypass of the new subject-TTL cap), #1254 ← #1238
+(residual gap in the widened DPoP JTI window).
+
+Part of the rise is mechanical: Detail has merged 100+ PRs since early August,
+so its commits are increasingly the last to touch any line. That cannot explain
+the 09-08 cases, which are bugs in the added logic itself.
+
 ### Batch under triage
 
 Issues #1279–#1302 (24) and fix PRs #1303–#1324 (22), all opened between
