@@ -34,6 +34,7 @@ async fn test_user_cascade_delete() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

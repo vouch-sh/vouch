@@ -88,6 +88,7 @@ async fn test_device_auth_authorization_flow() {
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -267,6 +268,7 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -331,6 +333,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -411,6 +414,7 @@ async fn test_try_consume_device_auth_expired_returns_false() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

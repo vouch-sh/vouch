@@ -81,6 +81,17 @@ pub struct CreateAuthenticatorParams<'a> {
     pub aaguid: Option<&'a str>,
     pub user_handle: Option<&'a [u8]>,
     pub attestation_verified: bool,
+    /// The verified `authData.signCount` from the registration ceremony
+    /// (WebAuthn L2 §7.1 step 23: "Associate the `credentialId` with a new
+    /// stored signature counter value initialized to the value of
+    /// `authData.signCount`"). The first assertion's clone-detection guard
+    /// (`webauthn_verify::verify_assertion_inner`) runs against this
+    /// stored value, so it must reflect the registration `signCount` — not
+    /// a hardcoded `0` — for the spec-permitted global-counter
+    /// authenticator class that reports a non-zero value at make. `0` is
+    /// the spec-correct value for per-credential-counter (CTAP 2.1+) and
+    /// counter-less authenticators; pass it through unchanged for those.
+    pub counter: u32,
 }
 
 /// Create a new authenticator.
@@ -94,7 +105,19 @@ pub async fn create_authenticator(
         name: params.name.to_string(),
         credential_id: URL_SAFE_NO_PAD.encode(params.credential_id),
         public_key: URL_SAFE_NO_PAD.encode(params.public_key),
-        counter: 0,
+        // WebAuthn counter is u32; stored bit-identical as i32 (the column
+        // type, see `AuthenticatorDoc::counter`). Real authenticators never
+        // approach 2^31 uses, and the bitwise reinterpret preserves DB
+        // monotonicity comparisons — see `update_authenticator_counter`'s
+        // callers in `services/oidc/fido2_grant.rs` and
+        // `handlers/browser_login.rs`, which use the same `cast_signed`
+        // for assertion counters. The registration value initializes the
+        // stored counter to `authData.signCount` (WebAuthn L2 §7.1 step
+        // 23) rather than `0`, so the first assertion's clone-detection
+        // check (`webauthn_verify::verify_assertion_inner` at the
+        // `stored_counter != 0 && counter <= stored_counter` guard) runs
+        // against a spec-correct baseline.
+        counter: params.counter.cast_signed(),
         aaguid: params.aaguid.map(String::from),
         user_handle: params.user_handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
         attestation_verified: params.attestation_verified,

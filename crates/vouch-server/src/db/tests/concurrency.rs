@@ -85,6 +85,7 @@ async fn test_device_auth_consume_concurrent() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -246,6 +247,7 @@ async fn test_authorize_device_auth_concurrent() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -785,6 +787,7 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -868,6 +871,7 @@ async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1036,6 +1040,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1153,6 +1158,7 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1259,6 +1265,7 @@ async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1357,6 +1364,7 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1474,6 +1482,7 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1622,6 +1631,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

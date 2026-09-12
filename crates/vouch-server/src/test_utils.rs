@@ -962,6 +962,7 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

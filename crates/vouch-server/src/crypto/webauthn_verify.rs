@@ -506,7 +506,11 @@ pub struct RegistrationVerificationResult {
     pub public_key_cose: Vec<u8>,
     /// The AAGUID from the authenticator (16 bytes, hex-encoded).
     pub aaguid: Option<String>,
-    /// The counter value from registration (usually 0).
+    /// The verified `authData.signCount` from registration (WebAuthn L2
+    /// §7.1 step 23). Persisted at registration as the credential's initial
+    /// stored signature counter — see `db::create_authenticator`. `0` for
+    /// per-credential-counter (CTAP 2.1+) and counter-less authenticators;
+    /// the actual global-counter reading for the legacy CTAP 2.0 class.
     pub counter: u32,
     /// The verified attestation chain, when one was validated.
     ///
@@ -632,12 +636,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     }
 
     // Extract counter
-    let counter_bytes: [u8; 4] = auth_data_bytes
-        .get(33..37)
-        .ok_or(VerifyError::InvalidAuthDataLength)?
-        .try_into()
-        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
-    let counter = u32::from_be_bytes(counter_bytes);
+    let counter = extract_counter_from_auth_data(&auth_data_bytes)?;
 
     // Extract attested credential data (starts at byte 37)
     // AAGUID (16 bytes) + credential ID length (2 bytes) + credential ID + COSE key
@@ -794,6 +793,72 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         counter,
         attestation,
     })
+}
+
+/// Extract the `authData.signCount` from a CBOR-encoded WebAuthn attestation
+/// object (WebAuthn Level 2 §7.1 step 23: "Associate the `credentialId` with
+/// a new stored signature counter value initialized to the value of
+/// `authData.signCount`").
+///
+/// [`verify_registration_with_verifier`] already returns the verified
+/// counter on its [`RegistrationVerificationResult`]; this helper exists for
+/// the second registration path, which runs through `webauthn-rs`'s
+/// `finish_passkey_registration` (in `handlers/enroll.rs`). The `Passkey`
+/// that API returns wraps the registration counter behind a `pub(crate)`
+/// field with no public accessor, so the call site cannot read the value.
+/// Re-parsing the same `authData` bytes the verifier already consumed — the
+/// counter is a big-endian 4-byte integer at byte offset 33 of `authData`
+/// (`rpIdHash(32) + flags(1) + signCount(4)`) — is the least-invasive way to
+/// thread the §7.1 step 23 value into storage without widening the
+/// dependency's feature surface (the `danger-credential-internals` cargo
+/// feature would, and routing the path through the custom verifier would
+/// change the attestation-acceptance contract; see the bug report's "Out of
+/// scope" appendix).
+///
+/// This function performs no cryptographic verification. It must only be
+/// called on an attestation object that has already been verified — either
+/// by [`verify_registration_with_verifier`] or by
+/// `webauthn_rs::Webauthn::finish_passkey_registration`. A failure here on a
+/// verified attestation indicates a server-side parsing bug, not a
+/// malformed client response.
+///
+/// # Errors
+///
+/// [`VerifyError::InvalidClientData`] if the attestation object is not a
+/// CBOR map containing an `authData` byte string; [`VerifyError::InvalidAuthDataLength`]
+/// if `authData` is shorter than the 37-byte minimum.
+pub fn extract_sign_count(attestation_object: &[u8]) -> Result<u32, VerifyError> {
+    let att_obj: ciborium::Value = ciborium::from_reader(attestation_object)
+        .map_err(|e| VerifyError::InvalidClientData(format!("Invalid attestation CBOR: {e}")))?;
+    let att_map = match att_obj {
+        ciborium::Value::Map(m) => m,
+        _ => {
+            return Err(VerifyError::InvalidClientData(
+                "attestation_object is not a CBOR map".to_string(),
+            ));
+        }
+    };
+    let auth_data_bytes = cbor_map_get_bytes(&att_map, "authData")?;
+    extract_counter_from_auth_data(&auth_data_bytes)
+}
+
+/// Read the big-endian 4-byte signature counter from `authData` bytes.
+///
+/// `authData` layout per WebAuthn Level 2 §6.1: `rpIdHash(32) + flags(1) +
+/// signCount(4) + [attestedCredentialData]`. The counter lives at byte
+/// offset 33..37. Used by [`extract_sign_count`] and by the inline parse in
+/// [`verify_registration_with_verifier`]; factored out so both paths agree
+/// on the offset.
+fn extract_counter_from_auth_data(auth_data_bytes: &[u8]) -> Result<u32, VerifyError> {
+    if auth_data_bytes.len() < 37 {
+        return Err(VerifyError::InvalidAuthDataLength);
+    }
+    let counter_bytes: [u8; 4] = auth_data_bytes
+        .get(33..37)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .try_into()
+        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
+    Ok(u32::from_be_bytes(counter_bytes))
 }
 
 /// Verify a packed attestation statement.
