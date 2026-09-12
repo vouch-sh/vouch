@@ -1307,6 +1307,171 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
     );
 }
 
+// ========================================================================
+// CLI grant_types contract — end-to-end through `/oauth/register`
+//
+// `vouch credential openai|anthropic` authenticate as the CLI's single FAPI
+// client and send `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+// to mint a Vouch-issued ID-token assertion. Since commit 45b8de2d the server
+// enforces RFC 6749 §5.2 `unauthorized_client` in `handle_token_exchange_grant`
+// via `OAuthClient::is_authorized_for_grant`, which reads the stored
+// `grant_types` at request time — so a CLI client whose registration omits
+// `token-exchange` (the pre-fix `[device_code, fido2-assertion]` vector) is
+// rejected. The CLI registration (`vouch-cli/src/fapi/registration.rs`) now
+// declares `token-exchange`; these tests drive the real `/oauth/register` with
+// the CLI's exact `grant_types` vector — pre-fix and post-fix shapes — then
+// run the WIF token-exchange the CLI performs, exercising the full
+// registration → storage → gate → exchange pipeline.
+// ========================================================================
+
+/// Register a CLI-shape FAPI client via the real `/oauth/register` endpoint
+/// (open registration), mirroring `vouch-cli/src/fapi/registration.rs`.
+///
+/// Returns the server-assigned `client_id` paired with the ES256 signing key
+/// (pkcs8 bytes) whose public JWK was registered inline, so the caller can
+/// build `private_key_jwt` client assertions for `/oauth/token`.
+///
+/// `dpop_bound_access_tokens` is set `false` (the CLI sets it `true`) to
+/// isolate the `grant_types` gate — the contract the CLI depends on — from
+/// FAPI sender-constraint enforcement (DPoP), which is independently pinned
+/// in `rfc9449.rs`. The `grant_types` vector is the CLI's exact vector.
+async fn register_cli_shape_client(app: &axum::Router, grant_types: &[&str]) -> (String, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let body = serde_json::json!({
+        "token_endpoint_auth_method": "private_key_jwt",
+        "grant_types": grant_types,
+        "response_types": [],
+        "dpop_bound_access_tokens": false,
+        "jwks": { "keys": [jwk] },
+        "client_name": "vouch-cli/test",
+        "software_id": "vouch-cli",
+    });
+    let (status, resp) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "CLI-shape registration must succeed for grant_types {grant_types:?}: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    (client_id, pkcs8_bytes)
+}
+
+/// The CLI's pre-fix registration (`grant_types` without `token-exchange`) MUST
+/// be rejected by the gate with HTTP 401 `unauthorized_client` — pinning the
+/// exact regression that broke WIF credential commands. This is the CLI's real
+/// grant vector (`device_code` + `fido2-assertion`), driven through
+/// `/oauth/register`, not the harness-minted default.
+#[tokio::test]
+async fn test_wif_token_exchange_rejected_when_cli_grant_vector_omits_token_exchange() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-cli-grants-buggy@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Pre-fix CLI shape: device_code + fido2-assertion, token-exchange OMITTED.
+    let (client_id, pkcs8_bytes) = register_cli_shape_client(
+        &app,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+        ],
+    )
+    .await;
+
+    let assertion = build_client_assertion(&client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &requested_token_type={ID_TOKEN_TYPE}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "omitting token-exchange from the CLI grant vector must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "the pre-fix CLI grant vector must yield unauthorized_client: {resp}"
+    );
+}
+
+/// The CLI's post-fix registration (`grant_types` WITH `token-exchange`) MUST
+/// allow the WIF token-exchange to succeed and mint a clean OIDC ID token —
+/// proving the fix. The grant vector is the CLI's exact post-fix shape, driven
+/// through `/oauth/register`, not the harness-minted default.
+#[tokio::test]
+async fn test_wif_token_exchange_succeeds_when_cli_grant_vector_includes_token_exchange() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-cli-grants-fixed@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Post-fix CLI shape: device_code + fido2-assertion + token-exchange.
+    let (client_id, pkcs8_bytes) = register_cli_shape_client(
+        &app,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+    )
+    .await;
+
+    let assertion = build_client_assertion(&client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &requested_token_type={ID_TOKEN_TYPE}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the post-fix CLI grant vector (with token-exchange) WIF exchange must succeed: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["issued_token_type"], ID_TOKEN_TYPE,
+        "the issued token must be an OIDC ID token (WIF assertion): {resp}"
+    );
+    let id_token = json["access_token"].as_str().expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(claims["sub"], "wif-cli-grants-fixed@example.com");
+}
+
 #[tokio::test]
 async fn test_rfc8693_id_token_audience_routing() {
     // RFC 8707: the requested audience becomes the ID token's `aud` claim.
