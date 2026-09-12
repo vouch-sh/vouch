@@ -1394,16 +1394,27 @@ async fn complete_pending_auth(
         && let Some(session_auth_time) = session_auth_time
         && session_auth_time < pending.created_at.as_second()
     {
-        let age_secs = arrival.as_second().saturating_sub(session_auth_time).max(0);
-        let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
-        let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
         // Reject only when the session age *exceeds* max_age (strict `>`).
         // A session exactly at the threshold (age == max_age) satisfies the
         // requirement: it is "not older than" the threshold. Using `>=`
         // here would reject the boundary and make max_age=0 impossible to
         // complete even for a session created during this request. This is
         // consistent with the established pattern in keys.rs and dpop.rs.
-        if age_u64 > max_age_u64 {
+        //
+        // The elapsed time is compared at full precision, matching the
+        // direct `authorize_authenticated_user` path. Truncating "now" to
+        // whole seconds first floors the age by up to 1 second and lets a
+        // session whose true age is in (max_age, max_age + 1) through,
+        // diverging from the direct path that would have forced
+        // re-authentication for the same session (OIDC Core 3.1.2.1).
+        // `pending.max_age` is stored as `i64`, so the limit is built
+        // directly; the direct path's `i64::try_from`/`unwrap_or` is its
+        // `u64`-to-`i64` saturation and is not needed here.
+        let elapsed = arrival
+            .timestamp()
+            .duration_since(jiff::Timestamp::from_second(session_auth_time).unwrap_or_default());
+        let limit = jiff::SignedDuration::from_secs(max_age);
+        if elapsed > limit {
             return resolved
                 .error_redirect(
                     state,
