@@ -651,7 +651,7 @@ pub(crate) async fn browser_login_complete(
 
     // Server-side WebAuthn signature verification (offloaded to a blocking
     // thread — see verify_login_assertion for rationale).
-    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    let stored_counter = authenticator.counter.cast_unsigned();
 
     use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
     let verification_result = match verify_login_assertion(LoginAssertionParams {

@@ -276,7 +276,7 @@ pub(crate) async fn exchange_fido2_assertion(
     let user = lookup_result.user;
 
     // Verify WebAuthn assertion
-    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    let stored_counter = authenticator.counter.cast_unsigned();
     // Cloned for the failure audit event below, since the success path moves
     // `params.client_info` when it records the LoginSuccess event.
     let failure_client_info = params.client_info.clone();
