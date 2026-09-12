@@ -951,10 +951,28 @@ pub(crate) async fn complete_enrollment_after_identity(
         }
     };
 
-    // Get authenticator (if any) for session claims
-    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
-        .await
-        .unwrap_or_default();
+    // Get authenticator (if any) for session claims. Fail closed: a transient
+    // DB error here is indistinguishable from "user has zero authenticators"
+    // under a `.unwrap_or_default()`, yet it silently degrades the session's
+    // authenticator binding (`authenticator_id`, `hardware_aaguid`) and
+    // misroutes a returning CLI user to `/enroll/keys` instead of `/login` —
+    // the same hazard the `org_domain` block below fails closed for, and every
+    // other production call site of `get_authenticators_for_user` propagates
+    // the error. Read paths are not wrapped in `with_dsql_retry!`, so the `Err`
+    // escapes with no retry; log and return the session-failed error page so
+    // the user restarts rather than receiving a silently degraded session.
+    let existing_auths = match db::get_authenticators_for_user(&state.store, &user.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to read authenticators for session claims: {e}");
+            return ErrorTemplate {
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-failed").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
     let existing_authenticator = existing_auths.first();
     let authenticator_id = existing_authenticator.map(|a| a.id.clone());
     let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
