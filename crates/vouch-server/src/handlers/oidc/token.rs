@@ -1206,6 +1206,10 @@ fn resolve_exchange_audience(
 /// RFC 8693 Section 2.1: The token exchange grant requires client
 /// authentication. The client_id in the authenticated credentials must
 /// match any client_id provided in the request body.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 8693 token-exchange: authenticate, authorize grant, bind, exchange"
+)]
 async fn handle_token_exchange_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -1245,6 +1249,28 @@ async fn handle_token_exchange_grant(
     let pending_jti = any_auth.pending_jti;
     let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
+
+    // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated, so
+    // credential failures have already mapped to `invalid_client` above. Now
+    // confirm the authenticated client is registered (RFC 7591 §2
+    // `grant_types`) for the token-exchange grant before any grant-specific
+    // validation runs — so a client registered for `authorization_code` only
+    // (the dynamic-registration default) cannot exercise
+    // `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`. Mirrors the
+    // check `exchange_client_credentials` performs for the `client_credentials`
+    // grant, keeping the interpretation of `grant_types` consistent across
+    // every grant handler that authenticates a client.
+    if !authenticated_client
+        .client
+        .is_authorized_for_grant(OAuthGrantType::TokenExchange.as_str())
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::UnauthorizedClient,
+            "Client is not authorized for token exchange grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
     let dpop_header = headers
@@ -1475,6 +1501,29 @@ async fn handle_fido2_assertion_grant(
             );
         }
     };
+
+    // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated via
+    // `private_key_jwt`, so a bad assertion already mapped to `invalid_client`
+    // above. Now confirm the authenticated client is registered (RFC 7591 §2
+    // `grant_types`) for the fido2-assertion grant before the WebAuthn
+    // assertion is examined — matching the check `exchange_client_credentials`
+    // and `handle_token_exchange_grant` perform, so a client registered for
+    // `authorization_code` only cannot exercise this grant. The CLI registers
+    // FAPI clients with `grant_types: [..., "urn:ietf:params:oauth:grant-type:fido2-assertion"]`
+    // (`vouch-cli/src/fapi/registration.rs`); this enforces that contract. The
+    // response omits the `WWW-Authenticate` challenge — `unauthorized_client`
+    // is a grant-authorization failure, not a client-authentication failure.
+    if !jwt_authenticated
+        .client
+        .is_authorized_for_grant(OAuthGrantType::Fido2Assertion.as_str())
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::UnauthorizedClient,
+            "Client is not authorized for fido2-assertion grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
 
     // Validate DPoP proof if present
     let dpop_header = headers

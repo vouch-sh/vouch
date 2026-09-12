@@ -1562,6 +1562,22 @@ pub struct TestClientSpec {
     pub registration_access_token_hash: Option<String>,
 }
 
+/// Every `grant_type` the token endpoint dispatches (`OAuthGrantType`), as the
+/// wire strings registration stores in `grant_types`. Test clients default to
+/// being authorized for *all* supported grants so a test that exercises, say,
+/// the token-exchange or fido2-assertion grant does not first have to opt into
+/// it — the grant_types authorization check (`is_authorized_for_grant`,
+/// RFC 6749 §5.2 `unauthorized_client`) would otherwise reject a client whose
+/// `grant_types` was left `None`. Tests that *verify* the authorization check
+/// restrict the client explicitly (e.g. `enable_grant_types(&["authorization_code"])`).
+#[must_use]
+pub fn all_supported_grant_types() -> Vec<String> {
+    crate::services::oidc::grant_type::OAuthGrantType::supported_wire_values()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 impl Default for TestClientSpec {
     fn default() -> Self {
         Self {
@@ -1576,7 +1592,10 @@ impl Default for TestClientSpec {
             jwks: TestJwks::None,
             jwks_uri: Option::None,
             dpop_bound_access_tokens: false,
-            grant_types: Option::None,
+            // Authorized for every grant by default (see `all_supported_grant_types`)
+            // so grant-exercising tests do not silently hit the §5.2
+            // `unauthorized_client` check. Restrict explicitly to test denial.
+            grant_types: Some(all_supported_grant_types()),
             fapi_profile: Option::None,
             id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: Option::None,
