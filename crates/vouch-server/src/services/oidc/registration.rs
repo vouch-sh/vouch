@@ -1154,10 +1154,14 @@ fn validate_grant_and_response_types(
         }
     }
 
+    // RFC 7591 §2: "If omitted, the default behavior is that the client will
+    // use only the `authorization_code` Grant Type." Materializing it here
+    // keeps the stored row explicit; `OAuthClient::is_authorized_for_grant`
+    // resolves an absent list to the same constant for rows written elsewhere.
     let grant_types = request
         .grant_types
         .take()
-        .unwrap_or_else(|| vec!["authorization_code".to_string()]);
+        .unwrap_or_else(|| vec![vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE.to_string()]);
     let response_types = request
         .response_types
         .take()

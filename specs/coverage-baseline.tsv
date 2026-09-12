@@ -2020,7 +2020,6 @@ rfc8414#6.1#cebb45a2	MUST	To protect against information disclosure and tamperin
 rfc8414#6.2#c52a5346	MUST	TLS certificate checking MUST be performed by the client, as described in Section 6.1, when making an authorization server metadata request.
 rfc8414#6.2#e2a2583e	MUST	To prevent this, the client MUST ensure that the issuer identifier URL it is using as the prefix for the metadata request exactly matches the value of the "issu
 rfc8628#5.1#047c935e	SHOULD	The user code SHOULD have enough entropy that, when combined with rate-limiting and other mitigations, a brute-force attack becomes infeasible.
-rfc8628#5.2#c2d84f9e	SHOULD	As the device code is not displayed to the user and thus there are no usability considerations on the length, a very high entropy code SHOULD be used.
 rfc8628#5.4#978bf787	SHOULD	To mitigate such an attack, it is RECOMMENDED to inform the user that they are authorizing a device during the user- interaction step (see Section 3.3) and to c
 rfc8628#5.4#def2895d	SHOULD	The authorization server SHOULD display information about the device so that the user could notice if a software client was attempting to impersonate a hardware
 rfc8628#5.5#fc8dab50	SHOULD	Devices SHOULD take into account the operating environment when considering how to communicate the code to the user to reduce the chances it will be observed by
