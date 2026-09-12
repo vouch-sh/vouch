@@ -180,6 +180,35 @@ pub(crate) async fn revoke(
         Err(response) => return response,
     };
 
+    // Commit the JTI (if any) BEFORE the destructive revocation. The
+    // `revoke` endpoint authenticates via `private_key_jwt` (RFC 7523), and
+    // `PendingJti::commit` is the replay-prevention gate: a replayed
+    // assertion MUST be rejected before `svc_revoke` runs, otherwise a replay
+    // deletes all of the victim user's sessions and only *then* returns 401
+    // (a TOCTOU). There is no DPoP nonce validation on this endpoint, so
+    // deferred commitment provides no retry benefit — the JTI is committed
+    // up front, matching the ordering the token-issuance and PAR handlers
+    // enforce (PR #407 / df5c59bb) and the invariant documented on
+    // `PendingJti` itself.
+    if let Some(p) = pending_jti {
+        match p.commit(&state).await {
+            Ok(_claim) => {}
+            Err(ClientAuthError::InvalidCredentials) => {
+                // JTI was already used — replay. No revocation has run, so no
+                // session state was mutated. Reject so the client mints a new
+                // assertion.
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            Err(e) => {
+                // Transient DB error. Revocation has NOT run yet — return 500
+                // so the client retries the whole request rather than the
+                // server silently succeeding without the replay guard.
+                tracing::warn!("JTI commit failed for revoke: {e:?}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    }
+
     let _result = svc_revoke(
         &state,
         params.token.expose_secret(),
@@ -188,22 +217,6 @@ pub(crate) async fn revoke(
         &caller_client_id,
     )
     .await;
-
-    // Commit JTI after revocation so clients can retry on failure.
-    if let Some(p) = pending_jti {
-        match p.commit(&state).await {
-            Ok(_claim) => {}
-            Err(ClientAuthError::InvalidCredentials) => {
-                // JTI was already used — reject so the client generates a new assertion.
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(e) => {
-                // Transient DB error. Revocation already succeeded — return 200
-                // per RFC 7009 §2 and log for ops visibility.
-                tracing::warn!("JTI commit failed for revoke (revocation succeeded): {e:?}");
-            }
-        }
-    }
 
     // Always return 200 per RFC 7009 Section 2 (for valid clients)
     StatusCode::OK.into_response()

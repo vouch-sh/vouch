@@ -644,3 +644,178 @@ async fn issue_human_token(
         .expect("access_token present")
         .to_string()
 }
+
+/// Issue a real access token to `jwt_client` by exchanging an authorization
+/// code at `/oauth/token` using `private_key_jwt` authentication.
+///
+/// Each call mints a fresh authorization code (distinct `nonce`) and a fresh
+/// assertion (distinct issuance `jti`) so the resulting tokens are backed by
+/// independent real session rows. The token is issued *to* the JWT client, so
+/// the `/oauth/revoke` ownership check (`caller_client_id == claims.client_id`)
+/// passes and `svc_revoke` actually runs against the victim's session.
+async fn issue_token_to_private_key_jwt_client(
+    app: &axum::Router,
+    state: &std::sync::Arc<crate::AppState>,
+    user: &crate::db::User,
+    authenticator_id: &str,
+    jwt_client: &TestOAuthClient,
+    pkcs8_bytes: &[u8],
+    issuance_jti: &str,
+) -> String {
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let code = issue_code(
+        state,
+        user,
+        authenticator_id,
+        &jwt_client.client_id,
+        TestCodeSpec {
+            nonce: Some(issuance_jti),
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = build_client_assertion(
+        &jwt_client.client_id,
+        &token_endpoint,
+        pkcs8_bytes,
+        Some(issuance_jti),
+    );
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={redirect}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        redirect = urlencoding::encode("https://example.com/callback"),
+    );
+    let (status, resp_body) = http_post_form(app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "token issuance via private_key_jwt must succeed: {resp_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON response");
+    json["access_token"]
+        .as_str()
+        .expect("response contains access_token")
+        .to_string()
+}
+
+/// Regression for the TOCTOU in the `revoke` handler: a replayed
+/// `private_key_jwt` assertion MUST be rejected at `PendingJti::commit`
+/// *before* `svc_revoke` runs, so the replay cannot delete the victim's
+/// sessions while still returning 401.
+///
+/// The existing [`test_rfc7009_revoke_private_key_jwt_jti_replay_rejected`]
+/// uses fake token strings (`some_token` / `some_other_token`) that match no
+/// real session, so `svc_revoke` is a no-op and the 401 assertion passes
+/// regardless of commit ordering — it cannot distinguish "replay prevented
+/// before the business logic" from "business logic ran but was a no-op".
+///
+/// This test creates a **real** access token (a real session), performs a
+/// legitimate first revocation that commits the JTI (which deletes all the
+/// user's sessions), issues a **second** real token, then replays the same
+/// JTI against the second token. Under the bug, `svc_revoke` deletes the
+/// second session *before* the JTI replay is detected, so the second token
+/// stops working despite the 401 replay response. Under the fix, the JTI
+/// commit runs first and returns 401, `svc_revoke` never runs, and the second
+/// token keeps working.
+#[tokio::test]
+async fn test_rfc7009_revoke_jti_replay_does_not_revoke_sessions_before_reject() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-toctou@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Issue a real access token to the JWT client so the revoke-endpoint
+    // ownership check passes and `svc_revoke` actually performs revocation.
+    let token_first = issue_token_to_private_key_jwt_client(
+        &app,
+        &state,
+        &user,
+        &auth_id,
+        &jwt_client,
+        &pkcs8_bytes,
+        "revoke-toctou-issue-1",
+    )
+    .await;
+
+    let revoke_url = format!("{}/oauth/revoke", state.config().base_url);
+    let replay_jti = "revoke-toctou-replay-jti";
+
+    // Legitimate first revocation with `replay_jti`: commits the JTI and
+    // revokes the user's (single) session. Must return 200.
+    let assertion = build_client_assertion(
+        &jwt_client.client_id,
+        &revoke_url,
+        &pkcs8_bytes,
+        Some(replay_jti),
+    );
+    let body1 = format!(
+        "token={token_first}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+    let (status1, _) = http_post_form(&app, "/oauth/revoke", &body1, &[]).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "first (legitimate) revocation must return 200"
+    );
+
+    // The first revocation deleted ALL the user's sessions (human-presence
+    // logout). Issue a fresh token (a new session) to replay against.
+    let token_second = issue_token_to_private_key_jwt_client(
+        &app,
+        &state,
+        &user,
+        &auth_id,
+        &jwt_client,
+        &pkcs8_bytes,
+        "revoke-toctou-issue-2",
+    )
+    .await;
+
+    // Sanity: the second token is alive before the replay.
+    let (status, _) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token_second}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second token must work before the replay"
+    );
+
+    // Replay the SAME JTI (assertion) with the fresh token.
+    let body2 = format!(
+        "token={token_second}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+    let (status2, _) = http_post_form(&app, "/oauth/revoke", &body2, &[]).await;
+    assert_eq!(
+        status2,
+        StatusCode::UNAUTHORIZED,
+        "replayed JTI at revoke must be rejected with 401"
+    );
+
+    // The replay MUST NOT have revoked the second token. Under the bug,
+    // `svc_revoke` ran before the JTI commit and deleted the user's session,
+    // so this userinfo lookup would return 401 despite the replay being
+    // rejected — the session is already gone.
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token_second}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "replayed JTI must NOT delete the victim's session before the replay \
+         is rejected — the second token must still work after the 401 replay \
+         (got {status}: {body})"
+    );
+}
