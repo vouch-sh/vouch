@@ -152,6 +152,16 @@ pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Opt
 
 /// Get a user by ID.
 pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Option<User>> {
+    // Test-only seam: deterministically simulate a user that vanished between
+    // two reads (a concurrent `delete_user` that committed in the window
+    // between the `SignedInSession` extractor's `load_active_user` read and a
+    // handler's second `get_user_by_id` read). The handlers' org-scoping fix
+    // treats `Ok(None)` here as a rejection — never a benign `None` that
+    // flows into a NULL `org_id`.
+    #[cfg(test)]
+    if store.run_get_user_by_id_test_hook(user_id) {
+        return Ok(None);
+    }
     let doc = store.get::<UserDoc>(user_id).await?;
     Ok(doc.map(User::from))
 }

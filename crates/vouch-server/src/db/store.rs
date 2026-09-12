@@ -370,6 +370,9 @@ pub struct DocumentStore {
     /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
+    /// See [`GetUserByIdTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    get_user_by_id_test_hook: Option<GetUserByIdTestHook>,
     /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
     /// next `n` `delete` calls succeed (each consuming one unit), after which
     /// every subsequent `delete` returns a non-retryable `Err` before opening
@@ -486,6 +489,24 @@ pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + S
 #[cfg(test)]
 pub(crate) type PostSecretRevokeTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only seam for [`get_user_by_id`](super::users::get_user_by_id): a
+/// synchronous predicate that, when it returns `true` for `user_id`,
+/// short-circuits that read to `Ok(None)`.
+///
+/// [`crate::handlers::extractors::SignedInSession`] calls
+/// `load_active_user` (one `get_user_by_id` read) and then several web
+/// handlers issue a *second* `get_user_by_id` to resolve the caller's
+/// `org_id`. A concurrent `delete_user` that commits between those two reads
+/// makes the second read return `Ok(None)`, which the handlers used to map
+/// to `None` — persisting an organization-scoped OAuth client with a NULL
+/// `org_id`. This hook lets a handler test deterministically reproduce that
+/// race through the full router (the existing `modify_test_hook` /`
+/// delete_test_hook` seams fire only inside writes, and there is no write
+/// between the two reads). Compiled out of non-test builds, so production
+/// pays nothing. See [`Self::set_get_user_by_id_test_hook`].
+#[cfg(test)]
+pub(crate) type GetUserByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -501,6 +522,8 @@ impl DocumentStore {
             delete_test_hook: None,
             #[cfg(test)]
             post_secret_revoke_test_hook: None,
+            #[cfg(test)]
+            get_user_by_id_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
             #[cfg(test)]
@@ -554,6 +577,29 @@ impl DocumentStore {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
         }
+    }
+
+    /// Install the [`GetUserByIdTestHook`] seam for
+    /// [`get_user_by_id`](super::users::get_user_by_id). Lets handler tests
+    /// deterministically drive the "user vanished between the
+    /// [`SignedInSession`](crate::handlers::extractors::SignedInSession)
+    /// extractor's `load_active_user` read and a handler's second
+    /// `get_user_by_id` read" race through the full router — the only path
+    /// the org-scoped-app/NULL-org_id bug takes.
+    #[cfg(test)]
+    pub(crate) fn set_get_user_by_id_test_hook(&mut self, hook: GetUserByIdTestHook) {
+        self.get_user_by_id_test_hook = Some(hook);
+    }
+
+    /// Run the installed `get_user_by_id_test_hook` for `user_id`, returning
+    /// `true` when the read should short-circuit to `Ok(None)` (simulating a
+    /// concurrent `delete_user` that committed between two reads). No-op
+    /// (`false`) in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) fn run_get_user_by_id_test_hook(&self, user_id: &str) -> bool {
+        self.get_user_by_id_test_hook
+            .as_ref()
+            .is_some_and(|hook| hook(user_id))
     }
 
     /// Install a hook that runs inside
