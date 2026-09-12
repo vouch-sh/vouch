@@ -67,6 +67,14 @@ impl AwsConfig {
         }
     }
 
+    /// The resolved file path this config is (or will be) written to.
+    ///
+    /// May differ from `~/.aws/config` when `AWS_CONFIG_FILE` is set.
+    #[must_use]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Check if a profile exists in the config.
     #[must_use]
     pub(crate) fn profile_exists(&self, name: &str) -> bool {
@@ -1079,5 +1087,31 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
     #[test]
     fn aws_config_needs_home_when_env_is_absent() {
         assert_eq!(AwsConfig::config_path_from(None, None), None);
+    }
+
+    #[test]
+    fn aws_config_env_does_not_need_home() {
+        // With AWS_CONFIG_FILE set, the path is resolved from the env value
+        // alone — no home directory required. This is the case the fix in
+        // load_or_create_aws_config relies on: setup succeeds even when
+        // home_dir() returns None, as long as the override path is writable.
+        let got = AwsConfig::config_path_from(Some(std::ffi::OsStr::new("/etc/aws/alt.ini")), None);
+        assert_eq!(got, Some(PathBuf::from("/etc/aws/alt.ini")));
+    }
+
+    #[test]
+    fn aws_config_path_accessor_returns_resolved_path() {
+        let path = PathBuf::from("/custom/aws/config");
+        let config = AwsConfig::empty(path.clone());
+        assert_eq!(config.path(), path);
+    }
+
+    #[test]
+    fn aws_config_path_reflects_load_from() {
+        let file = create_temp_config(
+            "[profile vouch]\ncredential_process = vouch credential aws --role arn:aws:iam::1:role/R\n",
+        );
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+        assert_eq!(config.path(), file.path());
     }
 }
