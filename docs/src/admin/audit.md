@@ -24,6 +24,7 @@ code, ASN, and network organization resolved from the client IP.
 | `logout` | User logged out (including RFC 7009 token revocation) |
 | `key_registered` | Additional hardware key registered (`vouch register`) |
 | `key_removed` | Hardware key removed |
+| `key_renamed` | Hardware key renamed |
 | `device_auth_approved` | Browser approved a CLI device-authorization request |
 | `key_registration_replay` | Replayed key-registration link rejected (possible attack) |
 | `identity_bound` | Upstream IdP identity (issuer + subject) bound to an account on its first IdP login; `data.idp_issuer` names the issuer |
@@ -260,7 +261,7 @@ event types onto four Identity & Access Management classes. Native JSON stays th
 lossless representation — this is a projection for SIEM ingestion, and every field Vouch
 records is still present in `data`.
 
-Six event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
+Seven event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
 predefined activity for them. Per the OCSF 1.9.0 spec, when `activity_id` is `99` the
 `activity_name` attribute **must** carry a source-specific label (not the literal "Other"), so
 each of these events emits a distinct `activity_name` and also preserves the original Vouch
@@ -272,6 +273,7 @@ each of these events emits a distinct `activity_name` and also preserves the ori
 | `admin_demote` | Account Change (3001) | 99 | `Admin Demote` |
 | `admin_revoke_credentials` | Account Change (3001) | 99 | `Admin Revoke Credentials` |
 | `identity_bound` | Account Change (3001) | 99 | `Identity Bound` |
+| `key_renamed` | Account Change (3001) | 99 | `Key Renamed` |
 | `oauth_token_revoked` | Authorize Session (3003) | 99 | `OAuth Token Revoked` |
 | `scim_operation` | Entity Management (3004) | 99 | `SCIM Operation` |
 
@@ -286,6 +288,7 @@ each of these events emits a distinct `activity_name` and also preserves the ori
 | `identity_bound` | 3001 | Account Change |
 | `key_registered` | 3001 | Account Change |
 | `key_removed` | 3001 | Account Change |
+| `key_renamed` | 3001 | Account Change |
 | `key_registration_replay` | 3001 | Account Change |
 | `admin_promote` | 3001 | Account Change |
 | `admin_demote` | 3001 | Account Change |

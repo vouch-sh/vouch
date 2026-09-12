@@ -286,10 +286,28 @@ pub async fn revoke_token(
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
 
+    // RFC 9068 §2.2 / RFC 6749 §4.4: M2M (`client_credentials`) access tokens
+    // carry the OAuth `client_id` as the JWT `sub` claim, and their sessions
+    // are persisted with `user_id == client_id` (one session per token — see
+    // `client_credentials.rs`). Revoking one such token via the per-user
+    // `delete_sessions_for_user(user_id)` path would delete EVERY concurrent
+    // M2M session for that client, violating RFC 7009 §2.1 which targets "the
+    // particular token" being revoked. Detect M2M tokens via JWT-intrinsic
+    // claims (`sub == client_id` and no `email` grant, which is the only
+    // access-token-issuing grant with that shape — see the grant table in
+    // `client_credentials.rs`) and route them to single-token deletion by
+    // hash, preserving the human "logout = full logout" behavior otherwise.
+    let is_m2m = matches!(
+        decoded,
+        Some(DecodedToken::AccessToken(ref claims)) if claims.sub == claims.client_id && claims.email.is_none()
+    );
+
     // When we know the user, revoke ALL their sessions (human presence
-    // attestation means logout = full logout). Fall back to single-token
-    // deletion when the token couldn't be decoded.
-    let revoked = if let Some(ref user_id) = sub {
+    // attestation means logout = full logout). M2M tokens, and tokens that
+    // couldn't be decoded, fall back to single-token deletion by hash.
+    let revoked = if let Some(ref user_id) = sub
+        && !is_m2m
+    {
         match db::delete_sessions_for_user(&state.store, user_id).await {
             Ok(count) => {
                 if count > 0 {
@@ -312,7 +330,8 @@ pub async fn revoke_token(
             }
         }
     } else {
-        // Token couldn't be decoded — best-effort delete by hash
+        // M2M token, or token that couldn't be decoded — revoke ONLY the
+        // named token per RFC 7009 §2.1.
         let token_hash = hash_token(token);
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => {

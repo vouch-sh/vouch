@@ -85,6 +85,7 @@ async fn test_device_auth_consume_concurrent() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -246,6 +247,7 @@ async fn test_authorize_device_auth_concurrent() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -375,9 +377,11 @@ async fn test_remove_additional_domain_concurrent() {
     let store_b = store.clone();
     let org_a = org.id.clone();
     let org_b = org.id.clone();
+    let cache_a = SessionCache::new(100, 30);
+    let cache_b = SessionCache::new(100, 30);
     let (result_a, result_b) = tokio::join!(
-        async move { remove_additional_domain(&store_a, &org_a, "extra-remove.com").await },
-        async move { remove_additional_domain(&store_b, &org_b, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_a, &cache_a, &org_a, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_b, &cache_b, &org_b, "extra-remove.com").await },
     );
 
     for (label, r) in [("a", &result_a), ("b", &result_b)] {
@@ -785,6 +789,7 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -868,6 +873,7 @@ async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1036,6 +1042,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1153,6 +1160,7 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1259,6 +1267,7 @@ async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1357,6 +1366,7 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1474,6 +1484,7 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -1622,6 +1633,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await

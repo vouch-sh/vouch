@@ -389,9 +389,14 @@ async fn test_create_scim_user_toctou_domain_removal_during_creation() {
     // if it lands before the user-creation's CAS, the CAS fails and retries.
     let org_id_for_remove = org.id.clone();
     let remove_handle = tokio::spawn(async move {
-        remove_additional_domain(&store_for_remove, &org_id_for_remove, "toctou.example.com")
-            .await
-            .expect("remove domain")
+        remove_additional_domain(
+            &store_for_remove,
+            &SessionCache::new(100, 30),
+            &org_id_for_remove,
+            "toctou.example.com",
+        )
+        .await
+        .expect("remove domain")
     });
 
     let create_result = create_handle.await.expect("create task panicked");

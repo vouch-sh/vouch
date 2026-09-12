@@ -63,6 +63,7 @@ pub(crate) async fn rename_key_form(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
     Form(form): Form<RenameKeyForm>,
 ) -> Response {
@@ -102,7 +103,18 @@ pub(crate) async fn rename_key_form(
     };
 
     match key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await {
-        Ok(_) => Redirect::to("/enroll/keys").into_response(),
+        Ok(_) => {
+            let event = db::AuthEventParams {
+                user_id: token.sub.clone(),
+                event_type: db::AuthEventType::KeyRenamed,
+                authenticator_id: Some(key_id.clone()),
+                success: true,
+                client: client_info,
+                ..Default::default()
+            };
+            db::record_auth_event(&state.audit, event, token.email.clone()).await;
+            Redirect::to("/enroll/keys").into_response()
+        }
         Err(err) => {
             tracing::warn!(error = ?err, "rename_key_form: rename failed");
             // Name-shape failures are handled above with specific messages; the

@@ -954,14 +954,26 @@ pub(crate) fn parse_scim_filter(
     let filter_lower = filter.to_lowercase();
     let attr_lower = attr.to_lowercase();
 
-    let Some(attr_pos) = filter_lower.find(&attr_lower) else {
+    // Anchor the attribute-name lookup to the start of the filter expression
+    // (after optional leading whitespace). SCIM filters begin with the
+    // attribute name, so an unanchored substring `find` would match the
+    // attribute name inside the filter's quoted value — e.g.
+    // `externalId eq "displayName Reviewers Team"` would falsely match the
+    // `displayName` inside the value when checking for `displayName`, then
+    // read the following value token as the operator and surface a spurious
+    // `UnsupportedOperator` error (HTTP 400 `invalidFilter`) instead of
+    // returning `Ok(None)` so the caller can try the next attribute. Requiring
+    // a trailing whitespace boundary also prevents matching a longer token
+    // that merely starts with the attribute name (e.g. `userNamefoo` must not
+    // match `userName`).
+    let filter_trimmed = filter_lower.trim_start();
+    let Some(rest) = filter_trimmed.strip_prefix(&attr_lower) else {
         return Ok(None);
     };
-
-    let after_attr = filter_lower
-        .get(attr_pos.saturating_add(attr_lower.len())..)
-        .unwrap_or("");
-    let after_attr_trimmed = after_attr.trim_start();
+    if !rest.starts_with(char::is_whitespace) {
+        return Ok(None);
+    }
+    let after_attr_trimmed = rest.trim_start();
 
     let Some(space_end) = after_attr_trimmed.find(' ') else {
         return Ok(None);

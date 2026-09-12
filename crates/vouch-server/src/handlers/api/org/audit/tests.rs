@@ -388,7 +388,7 @@ async fn ocsf_format_projects_class_uid() {
 /// OCSF 1.9.0 MUST: events mapped to `activity_id: 99` (Other) must
 /// emit a source-specific `activity_name` (not the literal "Other")
 /// and preserve `event_type` in `unmapped`. End-to-end check through
-/// the `?format=ocsf` HTTP endpoint, covering all five affected kinds
+/// the `?format=ocsf` HTTP endpoint, covering all six affected kinds
 /// and confirming `AdminPromote`/`AdminDemote` are distinguishable.
 #[tokio::test]
 async fn ocsf_format_activity_id_99_events_carry_source_specific_name() {
@@ -400,7 +400,7 @@ async fn ocsf_format_activity_id_99_events_carry_source_specific_name() {
         .checked_sub(jiff::Span::new().minutes(5))
         .expect("valid timestamp");
     // Seed one event of each activity_id: 99 kind.
-    let cases: [(AuditEventKind, u16, &str); 5] = [
+    let cases: [(AuditEventKind, u16, &str); 6] = [
         (AuditEventKind::AdminPromote, 3001, "Admin Promote"),
         (AuditEventKind::AdminDemote, 3001, "Admin Demote"),
         (
@@ -414,6 +414,7 @@ async fn ocsf_format_activity_id_99_events_carry_source_specific_name() {
             "OAuth Token Revoked",
         ),
         (AuditEventKind::ScimOperation, 3004, "SCIM Operation"),
+        (AuditEventKind::KeyRenamed, 3001, "Key Renamed"),
     ];
     for (kind, _, _) in &cases {
         state

@@ -17,6 +17,7 @@ use crate::services::auth::{
     CreateOAuthTokenParams, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
+use crate::services::oidc::grant_type::OAuthGrantType;
 use std::sync::Arc;
 
 /// Result of a client credentials grant exchange.
@@ -50,12 +51,13 @@ pub(crate) async fn exchange_client_credentials(
     proof: TokenIssuanceProof,
     arrival: ArrivalTime,
 ) -> ServiceResult<ClientCredentialsResult> {
-    // Verify client has client_credentials in its registered grant_types
-    let has_grant = client
-        .grant_types
-        .as_ref()
-        .is_some_and(|gts| gts.iter().any(|g| g == "client_credentials"));
-    if !has_grant {
+    // RFC 6749 §5.2 `unauthorized_client`: the authenticated client must be
+    // registered for the `client_credentials` grant type (RFC 7591 §2
+    // `grant_types`). The check mirrors `handle_token_exchange_grant` and
+    // `handle_fido2_assertion_grant`, which enforce the same field for their
+    // grants — keeping the interpretation of `grant_types` consistent across
+    // every grant handler that authenticates a client.
+    if !client.is_authorized_for_grant(OAuthGrantType::ClientCredentials.as_str()) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::UnauthorizedClient,
             "Client is not authorized for client_credentials grant",

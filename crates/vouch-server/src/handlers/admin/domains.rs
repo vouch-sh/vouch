@@ -422,7 +422,14 @@ pub(crate) async fn admin_remove_domain(
         }
     };
 
-    match db::remove_additional_domain(&state.store, &org_id, normalized.as_str()).await {
+    match db::remove_additional_domain(
+        &state.store,
+        &state.session_cache,
+        &org_id,
+        normalized.as_str(),
+    )
+    .await
+    {
         Ok(Some(summary)) => {
             let revoked = summary.revoked_user_count;
             let errored = summary.revocation_errored;
@@ -487,5 +494,178 @@ pub(crate) async fn admin_remove_domain(
                 Tr::new("admin-domains-error-internal").to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::test_utils::*;
+
+    /// End-to-end (HTTP) regression for the session-cache invalidation bug:
+    /// removing a verified additional domain must evict the in-process
+    /// `SessionCache` for matching users on the same instance, so a victim's
+    /// bearer token stops authenticating immediately instead of after the
+    /// cache TTL. Drives the real `admin_remove_domain` handler through the
+    /// axum router (real `OrgAdmin` extractor + CSRF origin check), not just
+    /// the `db::` function.
+    #[tokio::test]
+    async fn admin_remove_domain_invalidates_session_cache_over_http() {
+        let (app, state) = test_app().await;
+
+        // Org owning primary "example.com" plus a VERIFIED additional domain
+        // "added.example.com". Verified directly via db::mark_additional_domain_verified
+        // (bypasses the DNS TXT lookup the admin_verify handler performs).
+        let org = create_test_org(&state.store, "example.com").await;
+        crate::db::add_additional_domain(
+            &state.store,
+            &org.id,
+            "added.example.com",
+            "admin-id",
+            "admin@example.com",
+        )
+        .await
+        .expect("add additional domain");
+        crate::db::mark_additional_domain_verified(&state.store, &org.id, "added.example.com")
+            .await
+            .expect("mark verified");
+
+        // Org admin (primary-domain email — NOT matched by the removal, so the
+        // admin keeps their session and the POST completes).
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let admin_auth = create_test_authenticator(&state.store, &admin.id).await;
+        let admin_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&admin_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let admin_cookie = format!("{}={admin_token}", vouch_common::SESSION_COOKIE_NAME);
+
+        // Victim on the additional domain — exactly the user set
+        // revoke_sessions_for_domain_users targets.
+        let victim =
+            create_test_user_in_org(&state.store, "victim@added.example.com", &org.id, false).await;
+        let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+        let victim_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &victim.id,
+                email: &victim.email,
+                auth_id: Some(&victim_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let victim_hash = crate::crypto::hash_token(&victim_token);
+
+        // Peer on the primary domain — not matched; their cache Hit and DB row
+        // must survive per-user invalidation (no over-invalidation).
+        let peer = create_test_user_in_org(&state.store, "peer@example.com", &org.id, false).await;
+        let peer_auth = create_test_authenticator(&state.store, &peer.id).await;
+        let peer_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &peer.id,
+                email: &peer.email,
+                auth_id: Some(&peer_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let peer_hash = crate::crypto::hash_token(&peer_token);
+
+        // Seed the per-process cache the way a prior request to this instance
+        // would: a first lookup hits the DB and inserts the session as a Hit.
+        assert!(
+            state
+                .session_cache
+                .get_session_by_token_hash(&state.store, &victim_hash, test_arrival())
+                .await
+                .expect("seed victim lookup")
+                .is_some(),
+            "victim session must exist in DB before seeding"
+        );
+        assert!(
+            state
+                .session_cache
+                .get_session_by_token_hash(&state.store, &peer_hash, test_arrival())
+                .await
+                .expect("seed peer lookup")
+                .is_some(),
+            "peer session must exist in DB before seeding"
+        );
+
+        // Production path: admin POSTs the remove form. Goes through the real
+        // router, OrgAdmin extractor, CSRF origin check, and the handler which
+        // threads state.session_cache into db::remove_additional_domain.
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/domains/added.example.com/remove",
+            "",
+            &[
+                ("Cookie", admin_cookie.as_str()),
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "admin remove should redirect on success"
+        );
+
+        // The fix (same-instance): the victim's stale cache Hit is evicted, so
+        // a bearer-token request with the revoked token is rejected (401)
+        // instead of succeeding for up to the cache TTL.
+        let victim_auth_hdr = format!("Bearer {victim_token}");
+        let (status, _body) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", victim_auth_hdr.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "victim's revoked token must NOT authenticate after domain removal \
+             (cache must be evicted on this instance)"
+        );
+
+        // Negative control: the peer (primary domain) is unaffected. Their
+        // cache Hit survives per-user invalidation, so their token still
+        // authenticates immediately after the removal.
+        let peer_auth_hdr = format!("Bearer {peer_token}");
+        let (status, _body) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", peer_auth_hdr.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "non-matching peer's token MUST still authenticate after per-user \
+             invalidation (no over-invalidation)"
+        );
+
+        // Membership contract: the victim keeps org_id (domain removal does
+        // not demote membership).
+        let victim_after = state
+            .store
+            .get::<crate::db::documents::user::UserDoc>(&victim.id)
+            .await
+            .expect("get victim")
+            .expect("victim exists");
+        assert_eq!(victim_after.data.org_id, Some(org.id.clone()));
     }
 }

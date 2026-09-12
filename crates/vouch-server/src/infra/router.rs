@@ -386,8 +386,12 @@ fn build_authorization_endpoint_routes(
 
 /// Rate-limited general routes (SCIM, admin API).
 ///
-/// `/api/v1/org/*` and `/scim/v2/*` are OAuth 2.0 protected resources
-/// and get the RFC 9728 `resource_metadata` middleware.
+/// `/api/v1/org/*` and `/scim/v2/*` carry RFC 6750 Bearer tokens and get
+/// the RFC 9728 `resource_metadata` middleware on their 401 responses.
+/// Note `/scim/v2/*` is NOT an RFC 6749/9728 OAuth 2.0 protected resource
+/// (its tokens are admin-minted opaque credentials), so it is excluded
+/// from the per-resource metadata document allowlist — see
+/// [`crate::services::oidc::protected_resource::PROTECTED_RESOURCE_PREFIXES`].
 fn build_general_limited_routes(
     state: &Arc<AppState>,
     config: &config::ServerConfig,

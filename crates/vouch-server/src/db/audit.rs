@@ -146,6 +146,7 @@ audit_event_kinds! {
     Logout => "logout", AuthEvents, Authentication;
     KeyRegistered => "key_registered", AuthEvents, Authentication;
     KeyRemoved => "key_removed", AuthEvents, Authentication;
+    KeyRenamed => "key_renamed", AuthEvents, Authentication;
     DeviceAuthApproved => "device_auth_approved", AuthEvents, Authentication;
     KeyRegistrationReplay => "key_registration_replay", AuthEvents, Authentication;
     // Upstream identity binding (issuer/subject account linking)

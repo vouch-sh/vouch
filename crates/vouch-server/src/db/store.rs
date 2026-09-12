@@ -361,12 +361,18 @@ pub struct DocumentStore {
     /// See [`ModifyTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     modify_test_hook: Option<ModifyTestHook>,
+    /// See [`CompareAndUpdateTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    compare_and_update_test_hook: Option<CompareAndUpdateTestHook>,
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
     /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
+    /// See [`GetUserByIdTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    get_user_by_id_test_hook: Option<GetUserByIdTestHook>,
     /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
     /// next `n` `delete` calls succeed (each consuming one unit), after which
     /// every subsequent `delete` returns a non-retryable `Err` before opening
@@ -403,6 +409,18 @@ pub struct DocumentStore {
     /// See [`Self::set_delete_by_index_remaining_successes`].
     #[cfg(test)]
     delete_by_index_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only fault-injection budget for [`DocumentStore::find_all`]: the
+    /// next `n` `find_all` calls succeed (each consuming one unit), after
+    /// which every subsequent `find_all` returns a non-retryable `Err` before
+    /// issuing its query. Mirrors the existing
+    /// [`Self::delete_remaining_successes`] test hook and is compiled out of
+    /// non-test builds, so production behavior is unchanged. Read paths
+    /// (`find_all`, `find_one`, `find_by_id`, `find_paginated`) are not wrapped
+    /// in `with_dsql_retry!`, so a transient DB `Err` escapes immediately to
+    /// the caller — this seam reproduces that exact control-flow shape without
+    /// a real DB outage. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    find_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -419,6 +437,22 @@ pub(crate) type ModifyHookFuture =
 /// task-scheduling races.
 #[cfg(test)]
 pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
+
+/// Test-only hook invoked inside [`DocumentStore::compare_and_update`] right
+/// before the version-guarded `UPDATE` runs, receiving the `doc_id`.
+///
+/// Lets tests deterministically interleave a concurrent write (through a
+/// hookless store clone) that bumps the document's version, so the guarded
+/// `UPDATE` matches zero rows and `compare_and_update` returns `Ok(false)` —
+/// exactly what a real concurrent writer that won the version race looks like
+/// to the single-shot CAS — without relying on task-scheduling races. Unlike
+/// [`ModifyTestHook`], `compare_and_update` is single-shot (it does not loop on
+/// `Ok(false)`), so a one-shot hook is sufficient; tests that must fire exactly
+/// once guard with their own `AtomicBool`. Mirrors [`ModifyTestHook`] for the
+/// blind-CAS path used by the preconfigured-policy toggle (and other
+/// `compare_and_update` callers).
+#[cfg(test)]
+pub(crate) type CompareAndUpdateTestHook = Arc<dyn Fn(&str) -> ModifyHookFuture + Send + Sync>;
 
 /// Boxed future returned by a [`DeleteTestHook`].
 #[cfg(test)]
@@ -455,6 +489,24 @@ pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + S
 #[cfg(test)]
 pub(crate) type PostSecretRevokeTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only seam for [`get_user_by_id`](super::users::get_user_by_id): a
+/// synchronous predicate that, when it returns `true` for `user_id`,
+/// short-circuits that read to `Ok(None)`.
+///
+/// [`crate::handlers::extractors::SignedInSession`] calls
+/// `load_active_user` (one `get_user_by_id` read) and then several web
+/// handlers issue a *second* `get_user_by_id` to resolve the caller's
+/// `org_id`. A concurrent `delete_user` that commits between those two reads
+/// makes the second read return `Ok(None)`, which the handlers used to map
+/// to `None` — persisting an organization-scoped OAuth client with a NULL
+/// `org_id`. This hook lets a handler test deterministically reproduce that
+/// race through the full router (the existing `modify_test_hook` /`
+/// delete_test_hook` seams fire only inside writes, and there is no write
+/// between the two reads). Compiled out of non-test builds, so production
+/// pays nothing. See [`Self::set_get_user_by_id_test_hook`].
+#[cfg(test)]
+pub(crate) type GetUserByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -465,9 +517,13 @@ impl DocumentStore {
             #[cfg(test)]
             modify_test_hook: None,
             #[cfg(test)]
+            compare_and_update_test_hook: None,
+            #[cfg(test)]
             delete_test_hook: None,
             #[cfg(test)]
             post_secret_revoke_test_hook: None,
+            #[cfg(test)]
+            get_user_by_id_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
             #[cfg(test)]
@@ -476,6 +532,8 @@ impl DocumentStore {
             update_by_index_stale_once: None,
             #[cfg(test)]
             delete_by_index_remaining_successes: None,
+            #[cfg(test)]
+            find_remaining_successes: None,
         }
     }
 
@@ -495,6 +553,14 @@ impl DocumentStore {
         self.modify_test_hook = Some(hook);
     }
 
+    /// Install a hook that runs inside `compare_and_update` right before the
+    /// version-guarded `UPDATE` executes, so a hookless concurrent writer can
+    /// bump the document's version and force `Ok(false)`.
+    #[cfg(test)]
+    pub(crate) fn set_compare_and_update_test_hook(&mut self, hook: CompareAndUpdateTestHook) {
+        self.compare_and_update_test_hook = Some(hook);
+    }
+
     /// Install a hook that runs inside `delete_user` after the transaction
     /// begins but before the existence check. Lets handler tests simulate a
     /// concurrent delete that wins the race.
@@ -511,6 +577,29 @@ impl DocumentStore {
         if let Some(hook) = &self.delete_test_hook {
             hook(id).await;
         }
+    }
+
+    /// Install the [`GetUserByIdTestHook`] seam for
+    /// [`get_user_by_id`](super::users::get_user_by_id). Lets handler tests
+    /// deterministically drive the "user vanished between the
+    /// [`SignedInSession`](crate::handlers::extractors::SignedInSession)
+    /// extractor's `load_active_user` read and a handler's second
+    /// `get_user_by_id` read" race through the full router — the only path
+    /// the org-scoped-app/NULL-org_id bug takes.
+    #[cfg(test)]
+    pub(crate) fn set_get_user_by_id_test_hook(&mut self, hook: GetUserByIdTestHook) {
+        self.get_user_by_id_test_hook = Some(hook);
+    }
+
+    /// Run the installed `get_user_by_id_test_hook` for `user_id`, returning
+    /// `true` when the read should short-circuit to `Ok(None)` (simulating a
+    /// concurrent `delete_user` that committed between two reads). No-op
+    /// (`false`) in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) fn run_get_user_by_id_test_hook(&self, user_id: &str) -> bool {
+        self.get_user_by_id_test_hook
+            .as_ref()
+            .is_some_and(|hook| hook(user_id))
     }
 
     /// Install a hook that runs inside
@@ -659,6 +748,53 @@ impl DocumentStore {
             let Some(next) = current.checked_sub(1) else {
                 return Err(anyhow::anyhow!(
                     "injected delete_by_index fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// [`DocumentStore::find_all`] calls to `successes`, after which every
+    /// subsequent `find_all` returns a non-retryable `Err` before issuing its
+    /// query. The fault fires at the entry to `find_all`, so the exercised
+    /// control-flow shape is "the indexed read returns `Err`" — exactly the
+    /// shape a transient DB read failure (pool exhaustion, connection loss,
+    /// DSQL OCC abort, `SQLITE_BUSY`) presents to callers like
+    /// [`crate::db::get_authenticators_for_user`], which the IdP callback
+    /// reads session authenticator claims through. Read paths are not wrapped
+    /// in `with_dsql_retry!`, so this `Err` escapes to the caller with no
+    /// retry; the seam lets a regression test assert the caller fails closed
+    /// rather than silently degrading the session. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_find_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.find_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `find_all` success budget, returning
+    /// `Ok` while budget remains and a non-retryable `Err` once it is
+    /// exhausted. No-op (`Ok`) when [`Self::set_find_remaining_successes`] was
+    /// not called (no budget installed). The CAS loop avoids underflow if a
+    /// budget is shared via [`Clone`]. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    fn consume_find_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.find_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected find_all fault: remaining-successes budget exhausted"
                 ));
             };
             if budget
@@ -930,6 +1066,10 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Vec<Document<T>>> {
+        #[cfg(test)]
+        {
+            self.consume_find_success_budget()?;
+        }
         let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
@@ -1228,6 +1368,15 @@ impl DocumentStore {
             let encapped: Option<&str> = encrypted.encapped_key.as_deref();
             let expires_str = expires.map(|ts| ts.to_string());
             let expires_ref: Option<&str> = expires_str.as_deref();
+
+            // Test seam: let a hookless concurrent writer bump this row's
+            // version (or otherwise mutate it) before the guarded UPDATE
+            // runs, so the CAS observes a version mismatch and returns
+            // `Ok(false)`. No-op in non-test builds and when no hook is set.
+            #[cfg(test)]
+            if let Some(hook) = &self.compare_and_update_test_hook {
+                hook(id).await;
+            }
 
             let mut tx = self.pool.begin().await?;
 

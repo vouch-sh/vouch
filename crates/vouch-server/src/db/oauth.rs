@@ -219,6 +219,26 @@ impl OAuthClient {
             .as_deref()
             .is_some_and(|uris| uris.iter().any(|u| u == uri))
     }
+
+    /// Whether the client is registered (RFC 7591 §2 `grant_types`) for the
+    /// grant whose `grant_type` wire value is `grant`.
+    ///
+    /// Matches the enforcement pattern established by the `client_credentials`
+    /// grant handler: when `grant_types` is `None` the client is treated as
+    /// *not* authorized for any grant (returning `false`), so a manually-managed
+    /// client with no declared `grant_types` is rejected just like one that
+    /// declared `grant_types: ["authorization_code"]`. Callers pass the
+    /// [`crate::services::oidc::grant_type::OAuthGrantType::as_str`] wire value
+    /// so the comparison is against the same strings registration stores.
+    ///
+    /// RFC 6749 §5.2 `unauthorized_client`: "The authenticated client is not
+    /// authorized to use this authorization grant type."
+    #[must_use]
+    pub fn is_authorized_for_grant(&self, grant: &str) -> bool {
+        self.grant_types
+            .as_ref()
+            .is_some_and(|gts| gts.iter().any(|g| g == grant))
+    }
 }
 
 // ============================================================================
@@ -502,10 +522,12 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
 /// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
 /// way in both places instead of silently read as absent by a separate,
-/// more lenient parser. Two other JWKS consumers still parse leniently from
-/// raw `serde_json::Value` and are unaffected by this type: the mTLS `x5c`
-/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`) and
-/// the RFC 9421 signature key resolver (`infra/httpsig.rs`).
+/// more lenient parser. The RFC 9421 signature key resolver
+/// (`infra/httpsig.rs::OAuthClientKeyResolver`) also parses through this type
+/// (and selects via `JwkEntry::is_usable_for`), so it shares the same
+/// rejection semantics. One JWKS consumer still parses leniently from raw
+/// `serde_json::Value` and is unaffected by this type: the mTLS `x5c`
+/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JwkSet {
     /// The keys in the set.

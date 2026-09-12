@@ -448,6 +448,7 @@ pub struct DomainRemovalSummary {
 /// user lands wherever their email maps in the new state.
 pub async fn remove_additional_domain(
     store: &DocumentStore,
+    session_cache: &crate::db::sessions::SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<Option<DomainRemovalSummary>> {
@@ -529,7 +530,9 @@ pub async fn remove_additional_domain(
     // different rows, and a failure here must not undo the removal (the
     // domain is already gone from login matching). Log and continue.
     let (revoked_user_count, revocation_errored) =
-        match revoke_sessions_for_domain_users(store, org_id, normalized.as_str()).await {
+        match revoke_sessions_for_domain_users(store, session_cache, org_id, normalized.as_str())
+            .await
+        {
             Ok(n) => (n, false),
             Err(e) => {
                 tracing::warn!(
@@ -551,8 +554,17 @@ pub async fn remove_additional_domain(
 /// Revoke active sessions for every user in `org_id` whose email's domain
 /// equals `domain` (case-insensitive). Returns the number of users whose
 /// sessions were deleted (count of users, not count of sessions).
+///
+/// `session_cache` is invalidated per affected user — a DB delete alone does
+/// not evict the in-process `SessionCache`, so without the companion
+/// [`SessionCache::invalidate_for_user`] a revoked session would keep serving
+/// as a `Hit` until the cache TTL elapsed. This mirrors the contract every
+/// other production `delete_sessions_for_user` caller follows
+/// (`revoke_user_access`, `revoke_token`, `revoke_tokens_api`,
+/// `delete_oauth_client_and_revoke_sessions`).
 async fn revoke_sessions_for_domain_users(
     store: &DocumentStore,
+    session_cache: &crate::db::sessions::SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<u64> {
@@ -570,6 +582,10 @@ async fn revoke_sessions_for_domain_users(
         }
         match crate::db::sessions::delete_sessions_for_user(store, &user.id).await {
             Ok(_) => {
+                // Companion cache eviction: invalidate only after the DB
+                // delete committed, so a cache refill can't reintroduce the
+                // revoked session. Matches the other revocation paths.
+                session_cache.invalidate_for_user(&user.id);
                 tracing::info!(
                     user_id = %user.id,
                     org_id = %org_id,
@@ -1308,7 +1324,8 @@ mod tests {
             .await
             .unwrap();
 
-        remove_additional_domain(&store, &org_a.id, "shared.com")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        remove_additional_domain(&store, &cache, &org_a.id, "shared.com")
             .await
             .unwrap()
             .expect("domain was attached");
@@ -1394,7 +1411,8 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "Acme.Co.UK")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "Acme.Co.UK")
             .await
             .unwrap();
         let summary = summary.expect("entry was attached, must be removed");
@@ -1909,7 +1927,8 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let summary = remove_additional_domain(&store, &org.id, "never-added.example.com")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "never-added.example.com")
             .await
             .unwrap();
         assert!(summary.is_none());
@@ -1987,7 +2006,8 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "acme.co.uk")
+        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "acme.co.uk")
             .await
             .unwrap()
             .expect("entry was attached, must be removed");

@@ -395,6 +395,12 @@ pub(crate) async fn register_complete(
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
             attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23). `verified.counter`
+            // is the server-side parse of the same `authData` bytes
+            // `verify_registration` already verified above, so it is the
+            // trusted initial value — not the request body's counter field.
+            counter: verified.counter,
         },
     )
     .await?;
@@ -443,6 +449,7 @@ pub(crate) async fn list_keys(
 pub(crate) async fn rename_key(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
@@ -470,6 +477,16 @@ pub(crate) async fn rename_key(
     let _user = super::session::load_active_user(&state, &token.sub).await?;
 
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
+
+    let event = db::AuthEventParams {
+        user_id: token.sub.clone(),
+        event_type: db::AuthEventType::KeyRenamed,
+        authenticator_id: Some(key_id.clone()),
+        success: true,
+        client: client_info,
+        ..Default::default()
+    };
+    db::record_auth_event(&state.audit, event, token.email.clone()).await;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -1454,6 +1471,110 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Renaming a key must record a `key_renamed` audit event carrying the
+    /// caller's user id, the renamed authenticator's id, `success: true`,
+    /// and the captured client metadata — the audit-store record the
+    /// sibling `delete_key`/`register_complete` paths already write, and
+    /// which every mutation of an `AuthenticatorDoc` is expected to emit.
+    #[tokio::test]
+    async fn test_rename_key_records_audit_event() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rename-audit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"Audit Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Exactly one key_renamed event, attributed to the caller and the
+        // renamed authenticator, marked successful.
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            events.len(),
+            1,
+            "rename must write exactly one key_renamed audit event, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.event_type, "key_renamed");
+        assert_eq!(event.user_id.as_deref(), Some(user.id.as_str()));
+        let data: serde_json::Value =
+            serde_json::from_str(&event.data).expect("audit data is valid JSON");
+        assert_eq!(data["authenticator_id"], auth_id);
+        assert_eq!(data["success"], true);
+    }
+
+    /// A rejected rename (invalid name) must not write a `key_renamed`
+    /// audit event — the audit record is evidence the mutation succeeded,
+    /// so a validation failure must leave the audit store untouched.
+    #[tokio::test]
+    async fn test_rename_key_rejected_name_writes_no_audit_event() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rename-noaudit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":""}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            events.is_empty(),
+            "a rejected rename must not write a key_renamed audit event, got {events:?}"
+        );
     }
 
     /// A deactivated user holding a live session must not rename a security

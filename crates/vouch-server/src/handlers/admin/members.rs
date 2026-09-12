@@ -1438,6 +1438,7 @@ mod tests {
                             aaguid: None,
                             user_handle: Some(doc_id.as_bytes()),
                             attestation_verified: false,
+                            counter: 0,
                         },
                     )
                     .await
@@ -1598,6 +1599,7 @@ mod tests {
                             aaguid: None,
                             user_handle: Some(doc_id.as_bytes()),
                             attestation_verified: false,
+                            counter: 0,
                         },
                     )
                     .await

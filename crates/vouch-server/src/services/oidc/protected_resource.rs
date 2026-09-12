@@ -92,6 +92,18 @@ pub const SIGNED_METADATA_TYP: &str = "oauth-protected-resource+jwt";
 /// identical to the resource identifier used by the client") because
 /// we never echo back a resource URL that isn't actually served.
 ///
+/// Qualification: an entry must be an OAuth 2.0 protected resource in
+/// the RFC 6749/9728 sense — its endpoints accept access tokens *issued
+/// by an authorization server* (RFC 6749 §1.4). RFC 6750 Bearer
+/// transport alone is not sufficient: a route that carries an opaque
+/// admin-minted credential as `Authorization: Bearer <opaque>` is
+/// RFC 6750-compliant transport but is not an OAuth 2.0 protected
+/// resource when no authorization server can mint a token the route
+/// accepts. `/scim/v2/*` is therefore deliberately excluded — it
+/// authenticates against a disjoint SCIM token table (admin-minted
+/// via `/api/v1/org/scim-tokens`), so any `authorization_servers`
+/// entry for it would be a false claim (RFC 9728 §2).
+///
 /// The list is intentionally prefix-based: a client that asks about
 /// `v1/credentials/aws/token` also matches the `v1/credentials/aws`
 /// prefix if one were registered. Matches are exact or
@@ -107,7 +119,6 @@ pub const PROTECTED_RESOURCE_PREFIXES: &[&str] = &[
     "v1/keys",
     "api/v1/org",
     "api/v1/applications",
-    "scim/v2",
 ];
 
 /// Protected Resource Metadata document (RFC 9728 §2).
@@ -447,8 +458,27 @@ mod tests {
             SubPathClassification::Known("oauth/register/abc-123".to_string())
         );
         assert_eq!(
+            classify_sub_path("api/v1/org/audit-events"),
+            SubPathClassification::Known("api/v1/org/audit-events".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_sub_path_scim_v2_is_not_a_protected_resource() {
+        // `/scim/v2/*` authenticates against a disjoint SCIM token
+        // table (admin-minted opaque credentials), not AS-issued OAuth
+        // access tokens, so it is not an RFC 6749/9728 OAuth 2.0
+        // protected resource. Per-prefix and deeper SCIM paths must
+        // classify as Unknown so no false RFC 9728 metadata document is
+        // served for them.
+        assert_eq!(classify_sub_path("scim/v2"), SubPathClassification::Unknown);
+        assert_eq!(
+            classify_sub_path("scim/v2/Users"),
+            SubPathClassification::Unknown
+        );
+        assert_eq!(
             classify_sub_path("scim/v2/Users/42"),
-            SubPathClassification::Known("scim/v2/Users/42".to_string())
+            SubPathClassification::Unknown
         );
     }
 

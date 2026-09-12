@@ -66,7 +66,23 @@ fn make_registration_auth_data(
     credential_id: &[u8],
     cose_key: &[u8],
 ) -> Vec<u8> {
-    let mut auth_data = make_auth_data(rp_id, 0x45, 0); // UP + UV + AT
+    make_registration_auth_data_with_counter(rp_id, aaguid, credential_id, cose_key, 0)
+}
+
+/// Same as [`make_registration_auth_data`] but with an explicit
+/// registration `signCount` (WebAuthn L2 §6.1 authData layout:
+/// `rpIdHash(32) + flags(1) + signCount(4) + attestedCredentialData`). Used
+/// to drive registration flows through fixtures that report a non-zero
+/// `signCount` at makeCredential — the global-counter authenticator
+/// class (§6.3.2 step 10 first branch).
+fn make_registration_auth_data_with_counter(
+    rp_id: &str,
+    aaguid: [u8; 16],
+    credential_id: &[u8],
+    cose_key: &[u8],
+    counter: u32,
+) -> Vec<u8> {
+    let mut auth_data = make_auth_data(rp_id, 0x45, counter); // UP + UV + AT
     auth_data.extend_from_slice(&aaguid);
     let cred_id_len = u16::try_from(credential_id.len()).unwrap();
     auth_data.extend_from_slice(&cred_id_len.to_be_bytes());
@@ -1328,6 +1344,340 @@ fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
         &TestCoseVerifier::always_succeed(),
     );
     assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
+}
+
+// =========================================================================
+// Registration signature counter — extract_sign_count and end-to-end
+// clone-detection coverage (WebAuthn L2 §7.1 step 23)
+// =========================================================================
+//
+// §7.1 step 23: "Associate the credentialId with a new stored signature
+// counter value initialized to the value of `authData.signCount`."
+// `extract_sign_count` is the helper `handlers/enroll.rs` uses to recover
+// that value from the same CBOR attestation object
+// `finish_passkey_registration` already verified (the `webauthn-rs` 0.5.5
+// `Passkey` API hides the registration counter behind a `pub(crate)`
+// field). The CLI path (`handlers/keys.rs`) reads it directly off
+// `RegistrationVerificationResult::counter`; the two paths share
+// `extract_counter_from_auth_data`, so they agree by construction — the
+// parity test below pins that contract.
+
+// §6.3.2 step 10 first branch: a global-counter authenticator with prior
+// use reports a non-zero signCount at makeCredential.
+#[test]
+fn test_extract_sign_count_returns_nonzero_counter_from_attestation_object() {
+    let rp_id = "example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data =
+        make_registration_auth_data_with_counter(rp_id, [1; 16], b"cred-id", &cose_key, 42);
+    let attestation = make_attestation_object_none(&auth_data);
+
+    let counter = extract_sign_count(&attestation).expect("extract_sign_count should succeed");
+    assert_eq!(counter, 42);
+}
+
+// §6.3.2 step 10 third branch: a counter-less authenticator reports
+// signCount = 0 at make; the spec-correct stored value for that class is 0.
+#[test]
+fn test_extract_sign_count_returns_zero_for_counter_less_authenticator() {
+    let rp_id = "example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+    let attestation = make_attestation_object_none(&auth_data);
+
+    let counter = extract_sign_count(&attestation).expect("extract_sign_count should succeed");
+    assert_eq!(counter, 0);
+}
+
+// §6.1 authData is at least 37 bytes (rpIdHash(32) + flags(1) + signCount(4))
+// before any attested credential data. A short authData has no signCount.
+#[test]
+fn test_extract_sign_count_rejects_short_authdata() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("authData".to_string()),
+        ciborium::Value::Bytes(vec![0u8; 36]), // 1 byte short of 37
+    )]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidAuthDataLength),
+        "got {err:?}"
+    );
+}
+
+// The attestation object CBOR top-level must be a map. A bare integer /
+// array / text is not a conforming attestation object.
+#[test]
+fn test_extract_sign_count_rejects_non_map_cbor() {
+    let mut buf = Vec::new();
+    ciborium::into_writer(&ciborium::Value::Integer(42.into()), &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// A map missing the `authData` byte-string field is not a conforming
+// attestation object.
+#[test]
+fn test_extract_sign_count_rejects_missing_authdata_key() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("none".to_string()),
+        ),
+        (
+            ciborium::Value::Text("attStmt".to_string()),
+            ciborium::Value::Map(vec![]),
+        ),
+    ]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// A non-byte-string `authData` value is rejected (the CDDL types every
+// authData as `bytes`); mirrors the strict path `verify_registration` takes.
+#[test]
+fn test_extract_sign_count_rejects_non_bytes_authdata_value() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("authData".to_string()),
+        ciborium::Value::Integer(0.into()),
+    )]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// `verify_registration_with_verifier` surfaces the verified authData.signCount
+// on `RegistrationVerificationResult::counter`, so the CLI registration path
+// (`handlers/keys.rs`) can thread the value directly to `create_authenticator`
+// without re-parsing.
+#[test]
+fn test_verify_registration_returns_nonzero_counter_from_authdata() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data =
+        make_registration_auth_data_with_counter(rp_id, [1; 16], b"cred-id", &cose_key, 5);
+    let attestation = make_attestation_object_none(&auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let result = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("verify_registration should succeed");
+
+    assert_eq!(
+        result.counter, 5,
+        "verify_registration must surface the authData.signCount on the result"
+    );
+}
+
+// Parity between `extract_sign_count` and `verify_registration_with_verifier`
+// is the contract `handlers/enroll.rs` relies on when it re-parses authData
+// (its `Passkey` has no public counter accessor) instead of reading
+// `RegistrationVerificationResult::counter`. Both paths share
+// `extract_counter_from_auth_data`, so they must agree on the same bytes.
+#[test]
+fn test_extract_sign_count_agrees_with_verify_registration() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    for sign_count in [0_u32, 1, 7, 42, 1_000, u32::MAX] {
+        let auth_data = make_registration_auth_data_with_counter(
+            rp_id, [1; 16], b"cred-id", &cose_key, sign_count,
+        );
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+        let verified = verify_registration_with_verifier(
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: origin,
+                require_user_verification: true,
+                origin_policy: OriginPolicy::AllowLoopbackVariations,
+            },
+            &TestCoseVerifier::always_succeed(),
+        )
+        .expect("verify_registration should succeed");
+
+        let extracted = extract_sign_count(&attestation).expect("extract_sign_count");
+        assert_eq!(verified.counter, extracted, "verifier and helper disagree");
+        assert_eq!(
+            verified.counter, sign_count,
+            "verifier returned wrong counter"
+        );
+    }
+}
+
+// End-to-end clone-detection coverage for the §7.1 step 23 fix. A
+// global-counter authenticator registers with signCount = N (N > 0). The
+// handler threads `verified.counter` → `create_authenticator`, and the
+// stored counter becomes `N`. The first assertion's clone-detection guard
+// (`stored_counter != 0 && counter <= stored_counter`) then runs against
+// the spec-correct baseline:
+//   * a clone's first assertion at counter M ≤ N is rejected with
+//     `CounterNotIncreasing` — the early detection tripwire the bug
+//     suppresses by writing `0` (the bug's behavior is asserted in the
+//     `buggy_stored_counter` block to document the regression the fix
+//     closes);
+//   * the legitimate user's first assertion at counter N+1 is accepted
+//     and the stored counter advances.
+//
+// The DB hop is exercised separately by
+// `db::tests::authenticators::test_create_authenticator_persists_nonzero_registration_counter`;
+// here the stored counter is fed directly from the verifier's result to
+// mirror the value the handler would persist.
+#[test]
+fn test_first_assertion_clone_detection_uses_registration_counter() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+    // Registration: global-counter authenticator with prior use reports
+    // signCount = 5 at makeCredential (§6.3.2 step 10 first branch).
+    let registration_sign_count: u32 = 5;
+    let reg_auth_data = make_registration_auth_data_with_counter(
+        rp_id,
+        [1; 16],
+        b"cred-id",
+        &cose_key,
+        registration_sign_count,
+    );
+    let reg_attestation = make_attestation_object_none(&reg_auth_data);
+    let reg_client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let verified = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &reg_attestation,
+            client_data_json: &reg_client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("verify_registration should succeed");
+    assert_eq!(verified.counter, registration_sign_count);
+
+    // Mirror the value `handlers/keys.rs` would persist via
+    // `create_authenticator` (and that `fido2_grant.rs`/`browser_login.rs`
+    // would later read back as the assertion's `stored_counter`).
+    let stored_counter = verified.counter;
+
+    // First assertion from a clone whose counter starts at M ≤ N (the
+    // clone has performed fewer operations than the original had at the
+    // moment of registration).
+    let clone_counter: u32 = 3;
+    let clone_auth_data = make_auth_data(rp_id, 0x05, clone_counter);
+    let clone_client_data = make_client_data_json("webauthn.get", challenge, origin);
+
+    let clone_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &clone_auth_data,
+            client_data_json: &clone_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    );
+    assert!(
+        matches!(clone_result, Err(VerifyError::CounterNotIncreasing)),
+        "the first assertion with clone_counter ({clone_counter}) <= stored \
+         ({stored_counter}) must be rejected as a possible clone — got \
+         {clone_result:?}"
+    );
+
+    // The bug: under a hardcoded-`0` stored counter, the guard short-circuits
+    // on `stored_counter == 0` and the same first-assertion clone is
+    // accepted — the regression this fix closes. Pinned here so a future
+    // edit that re-introduces the `0` initialization must update this
+    // block to keep the test green, surfacing the regression review.
+    let buggy_stored_counter: u32 = 0;
+    let buggy_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &clone_auth_data,
+            client_data_json: &clone_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter: buggy_stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    );
+    assert!(
+        buggy_result.is_ok(),
+        "under the bug (stored = 0), the first assertion must be accepted \
+         because the guard short-circuits on stored_counter == 0; got \
+         {buggy_result:?}"
+    );
+
+    // The legitimate user's first assertion at counter = N+1 (strictly
+    // greater than stored) is accepted, and the assertion result carries
+    // the new counter that the handler persists via
+    // `update_authenticator_counter`.
+    let legit_counter: u32 = 6;
+    let legit_auth_data = make_auth_data(rp_id, 0x05, legit_counter);
+    let legit_client_data = make_client_data_json("webauthn.get", challenge, origin);
+
+    let legit_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &legit_auth_data,
+            client_data_json: &legit_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("the legitimate first assertion must be accepted");
+    assert_eq!(
+        legit_result.counter, legit_counter,
+        "the assertion result carries the new counter the handler will persist"
+    );
 }
 
 // =========================================================================
