@@ -188,15 +188,34 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// rendering joins RDNs with a bare comma. Stripping comma-following
 /// whitespace makes the common `O=Acme, CN=foo` rendering (e.g. `openssl
 /// x509 -noout -subject`) canonicalize identically to `O=Acme,CN=foo`.
+///
+/// Only a *structural* comma separates RDNs. RFC 4514 §2.4 lets a comma appear
+/// inside an attribute value when escaped with a backslash, and §4 gives
+/// `CN=James \"Jim\" Smith\, III,DC=example,DC=net` as a valid DN. Stripping
+/// whitespace after every comma would rewrite `Smith\, III` to `Smith\,III`,
+/// changing the value rather than the separator spacing, so the escape state
+/// is tracked and an escaped comma is left untouched.
 fn canonicalize_dn(dn: &str) -> Option<String> {
     use std::str::FromStr as _;
-    let normalized: String = dn.chars().fold(String::new(), |mut acc, c| {
-        if c.is_whitespace() && acc.ends_with(',') {
-            return acc;
+    let mut normalized = String::with_capacity(dn.len());
+    let mut escaped = false;
+    let mut after_separator = false;
+    for c in dn.chars() {
+        if after_separator {
+            if c.is_whitespace() {
+                continue;
+            }
+            after_separator = false;
         }
-        acc.push(c);
-        acc
-    });
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == ',' {
+            after_separator = true;
+        }
+        normalized.push(c);
+    }
     let rdns = x509_cert::name::RdnSequence::from_str(&normalized).ok()?;
     let der = der::Encode::to_der(&rdns).ok()?;
     let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
@@ -1201,6 +1220,34 @@ mod tests {
         assert_eq!(
             with_value_space, "CN=foo bar,O=Acme",
             "value-internal space must round-trip unchanged"
+        );
+    }
+
+    /// RFC 4514 §2.4 permits a comma inside an attribute value when it is
+    /// escaped, and §4 gives `CN=James \"Jim\" Smith\, III,DC=example,DC=net`
+    /// as a valid DN. Only an *unescaped* comma separates RDNs, so the
+    /// whitespace strip must not fire after an escaped one — doing so rewrites
+    /// `Smith\, III` to `Smith\,III` and changes the value.
+    #[test]
+    fn test_canonicalize_dn_preserves_space_after_escaped_comma() {
+        let rfc_example = canonicalize_dn(r#"CN=James \"Jim\" Smith\, III,DC=example,DC=net"#)
+            .expect("RFC 4514 §4 example must parse");
+        assert!(
+            rfc_example.contains(r"Smith\, III"),
+            "space after an escaped comma belongs to the value: got {rfc_example}"
+        );
+
+        // The same DN written with a space after the *structural* comma must
+        // canonicalize identically — separator spacing is not significant.
+        let spaced = canonicalize_dn(r#"CN=Doe\, John, O=Acme"#).expect("spaced separator");
+        let tight = canonicalize_dn(r#"CN=Doe\, John,O=Acme"#).expect("tight separator");
+        assert_eq!(
+            spaced, tight,
+            "separator spacing must normalize while the escaped comma is preserved"
+        );
+        assert!(
+            spaced.contains(r"Doe\, John"),
+            "escaped comma and its following space must survive: got {spaced}"
         );
     }
 
