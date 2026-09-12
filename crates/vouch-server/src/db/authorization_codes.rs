@@ -56,12 +56,17 @@ pub struct AuthCodeClaim {
 /// rejected as `invalid_grant`. The caller is responsible for replay
 /// detection follow-up (revoking tokens for the affected user) based on
 /// the `AlreadyConsumed` signal.
+///
+/// `now` both decides the expiry comparison and stamps `consumed_at`, and
+/// request-path callers pass the request's [`crate::arrival::ArrivalTime`]
+/// instant. A clock stamped here would be ≥ arrival, making the expiry
+/// predicate stricter than every other check in the same token request and
+/// rejecting a code that was live when the request arrived.
 pub async fn try_consume_authorization_code(
     store: &DocumentStore,
     code_hash: &str,
+    now: Timestamp,
 ) -> std::result::Result<AuthCodeClaim, ClaimError> {
-    let now = Timestamp::now();
-
     let doc = store
         .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
         .await

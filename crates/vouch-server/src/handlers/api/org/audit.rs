@@ -157,16 +157,17 @@ async fn authenticate(
 
     if let Some(token) = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER) {
         let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
-        let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to look up org API token");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Database error",
-                )
-            })?;
+        let token_record =
+            db::get_scim_token_by_hash(&state.store, &token_hash, arrival.timestamp())
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to look up org API token");
+                    ServiceError::api(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "db_error",
+                        "Database error",
+                    )
+                })?;
 
         if let Some(token_record) = token_record {
             let org_id = token_record.org_id.ok_or_else(|| {

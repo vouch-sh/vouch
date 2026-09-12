@@ -319,7 +319,7 @@ pub(crate) async fn login_page(
 
     // Look up pending auth to check prompt and get client name.
     let pending = if let Some(ref pending_id) = query.pending_auth {
-        db::get_pending_oauth_authorization(&state.store, pending_id)
+        db::get_pending_oauth_authorization(&state.store, pending_id, arrival.timestamp())
             .await
             .ok()
             .flatten()
@@ -1222,10 +1222,14 @@ mod tests {
             resp.headers.get("location")
         );
         assert!(
-            crate::db::get_pending_oauth_authorization(&state.store, &pending_id)
-                .await
-                .expect("pending lookup")
-                .is_some(),
+            crate::db::get_pending_oauth_authorization(
+                &state.store,
+                &pending_id,
+                jiff::Timestamp::now(),
+            )
+            .await
+            .expect("pending lookup")
+            .is_some(),
             "rendering the form must not spend the single-use pending id"
         );
     }

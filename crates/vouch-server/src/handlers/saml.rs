@@ -106,7 +106,7 @@ pub(crate) async fn acs(
     // `GrantProof::EnrollmentBootstrap`. Replaces the prior
     // get-then-delete pattern, closing the read-vs-consume TOCTOU.
     let (stored_state, oidc_state_claim) =
-        match db::try_consume_oidc_state(&state.store, &relay_state).await {
+        match db::try_consume_oidc_state(&state.store, &relay_state, arrival.timestamp()).await {
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {

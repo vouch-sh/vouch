@@ -854,6 +854,7 @@ async fn handle_jar_request(
 async fn lookup_par(
     state: &Arc<AppState>,
     ctx: ParRequestContext<'_>,
+    arrival: ArrivalTime,
 ) -> Result<db::PushedAuthorizationRequest, Response> {
     let ParRequestContext {
         request_uri,
@@ -861,7 +862,14 @@ async fn lookup_par(
         fallback_redirect_uri,
         response_mode,
     } = ctx;
-    match db::get_pushed_authorization_request(&state.store, request_uri, client_id).await {
+    match db::get_pushed_authorization_request(
+        &state.store,
+        request_uri,
+        client_id,
+        arrival.timestamp(),
+    )
+    .await
+    {
         Ok(Some(p)) => Ok(p),
         Ok(None) => {
             tracing::warn!(
@@ -928,7 +936,7 @@ async fn handle_par_request(
     arrival: ArrivalTime,
 ) -> Response {
     // FAPI 2.0 Section 5.3.2.2 Note 3: Look up the PAR without consuming it.
-    let par = match lookup_par(state, ctx).await {
+    let par = match lookup_par(state, ctx, arrival).await {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -1207,28 +1215,31 @@ async fn handle_pending_auth(
     // session this endpoint refuses — or one lost mid-flow — burned the id,
     // so the user's retry could only ever see "session expired" (#1168).
     // Same check-before-spend ordering as the OIDC callback (#1071).
-    let pending = match db::get_pending_oauth_authorization(&state.store, pending_id).await {
-        Ok(Some(pending)) => pending,
-        Ok(None) => {
-            tracing::warn!(
-                pending_id,
-                "Pending OAuth authorization not found or expired"
-            );
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: Tr::new("authorize-denied-session-expired"),
+    let pending =
+        match db::get_pending_oauth_authorization(&state.store, pending_id, arrival.timestamp())
+            .await
+        {
+            Ok(Some(pending)) => pending,
+            Ok(None) => {
+                tracing::warn!(
+                    pending_id,
+                    "Pending OAuth authorization not found or expired"
+                );
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: Tr::new("authorize-denied-session-expired"),
+                }
+                .into_response();
             }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: Tr::new("authorize-denied-generic"),
+            Err(e) => {
+                tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: Tr::new("authorize-denied-generic"),
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     // Phase A: re-validate client active + redirect_uri (errors → page).
     // This guards against the client being deactivated or redirect_uri removed
@@ -1270,28 +1281,33 @@ async fn handle_pending_auth(
             // The session is acceptable — spend the single-use claim. The
             // `_claim` witness is bound to satisfy `#[must_use]`; completion
             // uses `pending` (the consumed record's data), not the pre-read.
-            let (pending, _claim) =
-                match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
-                    Ok(pair) => pair,
-                    // Lost the claim race to a concurrent submission of the
-                    // same id, or the record expired between read and claim.
-                    Err(db::claim::ClaimError::AlreadyConsumed) => {
-                        tracing::warn!(pending_id, "Pending OAuth authorization already consumed");
-                        return AuthorizeDeniedTemplate {
-                            client_name: resolved.client.name.clone(),
-                            error_message: Tr::new("authorize-denied-session-expired"),
-                        }
-                        .into_response();
+            let (pending, _claim) = match db::consume_pending_oauth_authorization(
+                &state.store,
+                pending_id,
+                arrival.timestamp(),
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                // Lost the claim race to a concurrent submission of the
+                // same id, or the record expired between read and claim.
+                Err(db::claim::ClaimError::AlreadyConsumed) => {
+                    tracing::warn!(pending_id, "Pending OAuth authorization already consumed");
+                    return AuthorizeDeniedTemplate {
+                        client_name: resolved.client.name.clone(),
+                        error_message: Tr::new("authorize-denied-session-expired"),
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to consume pending OAuth authorization: {}", e);
-                        return AuthorizeDeniedTemplate {
-                            client_name: resolved.client.name.clone(),
-                            error_message: Tr::new("authorize-denied-generic"),
-                        }
-                        .into_response();
+                    .into_response();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to consume pending OAuth authorization: {}", e);
+                    return AuthorizeDeniedTemplate {
+                        client_name: resolved.client.name.clone(),
+                        error_message: Tr::new("authorize-denied-generic"),
                     }
-                };
+                    .into_response();
+                }
+            };
             complete_pending_auth(
                 state,
                 &resolved,
@@ -1457,7 +1473,7 @@ async fn complete_pending_auth(
                 client_id: &pending.client_id,
                 mode: db::ParConsumptionMode::SkipExpiry,
             };
-            match db::ParConsumptionProof::consume(&state.store, par).await {
+            match db::ParConsumptionProof::consume(&state.store, par, arrival.timestamp()).await {
                 Ok(proof) => proof,
                 Err(db::claim::ClaimError::AlreadyConsumed) => {
                     return resolved
@@ -1831,6 +1847,7 @@ async fn authorize_authenticated_user(
         authenticator,
         par_to_consume,
         response_mode,
+        arrival,
     )
     .await
 }
@@ -1913,6 +1930,7 @@ async fn issue_code_after_reauth_check(
     authenticator: &Authenticator,
     par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
+    arrival: ArrivalTime,
 ) -> Response {
     // Steps 5 & 6: Validate requested ACR (RFC 9470) and `resource` against the
     // client's registered URIs (RFC 8707). Shared with `complete_pending_auth`
@@ -1936,34 +1954,36 @@ async fn issue_code_after_reauth_check(
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
     let par_proof = match par_to_consume {
         None => db::ParConsumptionProof::not_pushed(),
-        Some(par) => match db::ParConsumptionProof::consume(&state.store, par).await {
-            Ok(proof) => proof,
-            Err(db::claim::ClaimError::AlreadyConsumed) => {
-                return oauth_error_response(
-                    state,
-                    oauth_client,
-                    validated.redirect_uri(),
-                    OAuthErrorCode::InvalidRequest,
-                    "The request_uri has already been used or is invalid",
-                    validated.state(),
-                    response_mode,
-                )
-                .await;
+        Some(par) => {
+            match db::ParConsumptionProof::consume(&state.store, par, arrival.timestamp()).await {
+                Ok(proof) => proof,
+                Err(db::claim::ClaimError::AlreadyConsumed) => {
+                    return oauth_error_response(
+                        state,
+                        oauth_client,
+                        validated.redirect_uri(),
+                        OAuthErrorCode::InvalidRequest,
+                        "The request_uri has already been used or is invalid",
+                        validated.state(),
+                        response_mode,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to consume PAR: {e}");
+                    return oauth_error_response(
+                        state,
+                        oauth_client,
+                        validated.redirect_uri(),
+                        OAuthErrorCode::ServerError,
+                        "Failed to process pushed authorization request",
+                        validated.state(),
+                        response_mode,
+                    )
+                    .await;
+                }
             }
-            Err(e) => {
-                tracing::error!("Failed to consume PAR: {e}");
-                return oauth_error_response(
-                    state,
-                    oauth_client,
-                    validated.redirect_uri(),
-                    OAuthErrorCode::ServerError,
-                    "Failed to process pushed authorization request",
-                    validated.state(),
-                    response_mode,
-                )
-                .await;
-            }
-        },
+        }
     };
 
     // Step 8: Issue authorization code.

@@ -41,8 +41,8 @@ async fn test_authorization_code_consume_concurrent() {
     let store_a = store.clone();
     let store_b = store.clone();
     let (result_a, result_b) = tokio::join!(
-        try_consume_authorization_code(&store_a, "race-code-hash"),
-        try_consume_authorization_code(&store_b, "race-code-hash"),
+        try_consume_authorization_code(&store_a, "race-code-hash", jiff::Timestamp::now()),
+        try_consume_authorization_code(&store_b, "race-code-hash", jiff::Timestamp::now()),
     );
 
     let a_won = result_a.is_ok();
@@ -143,8 +143,12 @@ async fn test_dpop_nonce_consume_concurrent() {
     let nonce_a = nonce.clone();
     let nonce_b = nonce.clone();
     let (result_a, result_b) = tokio::join!(
-        async move { validate_and_consume_dpop_nonce(&store_a, &nonce_a).await },
-        async move { validate_and_consume_dpop_nonce(&store_b, &nonce_b).await },
+        async move {
+            validate_and_consume_dpop_nonce(&store_a, &nonce_a, &jiff::Timestamp::now()).await
+        },
+        async move {
+            validate_and_consume_dpop_nonce(&store_b, &nonce_b, &jiff::Timestamp::now()).await
+        },
     );
 
     let a_won = result_a.is_ok();
@@ -197,8 +201,12 @@ async fn test_pending_oauth_consume_concurrent() {
     let id_a = id.clone();
     let id_b = id.clone();
     let (result_a, result_b) = tokio::join!(
-        async move { consume_pending_oauth_authorization(&store_a, &id_a).await },
-        async move { consume_pending_oauth_authorization(&store_b, &id_b).await },
+        async move {
+            consume_pending_oauth_authorization(&store_a, &id_a, jiff::Timestamp::now()).await
+        },
+        async move {
+            consume_pending_oauth_authorization(&store_b, &id_b, jiff::Timestamp::now()).await
+        },
     );
 
     let a_won = result_a.is_ok();

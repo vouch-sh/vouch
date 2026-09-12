@@ -18,6 +18,7 @@ pub(crate) mod types;
 pub(crate) mod urn;
 pub(crate) mod users;
 
+use crate::arrival::ArrivalTime;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
@@ -147,9 +148,14 @@ impl ScimAuth {
 /// SCIM endpoints require authentication via OAuth 2.0 Bearer Token
 /// (RFC 6750). The token is validated against the SCIM token store.
 /// Returns the token ID and scope for authorization checks.
+///
+/// Takes the request's [`ArrivalTime`] because the token-expiry comparison
+/// decides this request, so it reads the same instant as every other
+/// temporal check serving it.
 pub(crate) async fn authenticate_scim(
     state: &AppState,
     headers: &HeaderMap,
+    arrival: ArrivalTime,
 ) -> Result<ScimAuth, (StatusCode, Json<ScimError>)> {
     let auth_header = headers
         .get("authorization")
@@ -171,7 +177,7 @@ pub(crate) async fn authenticate_scim(
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Verify token exists and is valid
-    let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
+    let token_record = db::get_scim_token_by_hash(&state.store, &token_hash, arrival.timestamp())
         .await
         .map_err(|_| {
             (

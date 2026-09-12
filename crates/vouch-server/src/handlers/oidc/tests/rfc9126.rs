@@ -1245,6 +1245,7 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             client_id: &client.client_id,
             mode: db::ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await
     .expect("First consumption should succeed");
@@ -1269,6 +1270,7 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             client_id: &client.client_id,
             mode: db::ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await;
     assert!(
@@ -1332,6 +1334,7 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
                     client_id: &client_id_a,
                     mode: db::ParConsumptionMode::EnforceExpiry,
                 },
+                jiff::Timestamp::now(),
             )
             .await
         },
@@ -1343,6 +1346,7 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
                     client_id: &client_id_b,
                     mode: db::ParConsumptionMode::EnforceExpiry,
                 },
+                jiff::Timestamp::now(),
             )
             .await
         },
@@ -1738,6 +1742,7 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
             client_id: &client.client_id,
             mode: crate::db::ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await
     .expect("Pre-consumption should succeed");

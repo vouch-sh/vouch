@@ -865,9 +865,14 @@ async fn test_revoke_all_oauth_client_secrets_blocks_subsequent_credential_valid
     // Sanity: validate succeeds before revoke_all_oauth_client_secrets. If
     // this fails, the test fixture did not seed a usable secret and the
     // assertion below would pass vacuously.
-    let pre = validate_oauth_client_credentials(&store, &app.client_id, &secret_hash)
-        .await
-        .expect("validate before revoke must not error");
+    let pre = validate_oauth_client_credentials(
+        &store,
+        &app.client_id,
+        &secret_hash,
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("validate before revoke must not error");
     assert!(
         pre.is_some(),
         "secret must validate before revoke_all_oauth_client_secrets — \
@@ -886,9 +891,14 @@ async fn test_revoke_all_oauth_client_secrets_blocks_subsequent_credential_valid
     // After the revoke commit, validation must fail (return None). This is
     // what closes the concurrent-mint window the delete path's
     // secret-revoke-first ordering exploits.
-    let post = validate_oauth_client_credentials(&store, &app.client_id, &secret_hash)
-        .await
-        .expect("validate after revoke must not error");
+    let post = validate_oauth_client_credentials(
+        &store,
+        &app.client_id,
+        &secret_hash,
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("validate after revoke must not error");
     assert!(
         post.is_none(),
         "validate_oauth_client_credentials must return None after \
@@ -982,7 +992,13 @@ async fn test_delete_oauth_client_revokes_secrets_before_sweeps_closes_concurren
             // §2a interleaving: `validate_oauth_client_credentials` running at
             // the precise instant between `revoke_all_oauth_client_secrets`'s
             // commit and the first session sweep's commit.
-            let r = validate_oauth_client_credentials(&store, &client_id, &secret_hash).await;
+            let r = validate_oauth_client_credentials(
+                &store,
+                &client_id,
+                &secret_hash,
+                jiff::Timestamp::now(),
+            )
+            .await;
             *outcome.lock().expect("outcome lock") = Some(r);
         })
     }));

@@ -202,6 +202,7 @@ impl crate::db::pool::RetryableError for MarkVerifiedError {
 /// TXT record before [`verify_additional_domain`] will mark the entry verified.
 /// Until then, the entry is stored on the org but is not indexed and does
 /// not participate in login matching.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's added_at")]
 pub async fn add_additional_domain(
     store: &DocumentStore,
     org_id: &str,
@@ -331,6 +332,7 @@ pub async fn get_verification_token(
 /// the stored token. Re-runs the cross-org conflict check inside the
 /// transaction to guard against a TOCTOU race where another org verified
 /// the same domain between add and verify.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's verified_at")]
 pub async fn mark_additional_domain_verified(
     store: &DocumentStore,
     org_id: &str,
@@ -873,6 +875,10 @@ pub async fn list_all_verified_additional_domains(
 ///
 /// Returns [`RecheckEffect::NotFound`] if the entry has been removed or is
 /// already unverified, so callers can stop tracking it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the row's last-checked time"
+)]
 pub async fn record_recheck_result(
     store: &DocumentStore,
     org_id: &str,

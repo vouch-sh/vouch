@@ -21,10 +21,14 @@ async fn test_client_secret_hash_roundtrip() {
     // db::validate_oauth_client_credentials finds the secret when we
     // hash the plaintext secret with the same function.
     let secret_hash = crate::handlers::hash_token(&client.client_secret);
-    let result =
-        crate::db::validate_oauth_client_credentials(&state.store, &client.client_id, &secret_hash)
-            .await
-            .expect("DB query should succeed");
+    let result = crate::db::validate_oauth_client_credentials(
+        &state.store,
+        &client.client_id,
+        &secret_hash,
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("DB query should succeed");
 
     assert!(
         result.is_some(),

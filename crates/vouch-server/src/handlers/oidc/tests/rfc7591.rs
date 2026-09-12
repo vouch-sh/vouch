@@ -2372,7 +2372,7 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce)
+    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce, &jiff::Timestamp::now())
         .await
         .expect("consume nonce");
 

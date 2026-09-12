@@ -59,6 +59,7 @@ pub struct CreateGitHubInstallationParams<'a> {
 }
 
 /// Create a new GitHub App installation for an organization.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's installed_at")]
 pub async fn create_github_installation(
     store: &DocumentStore,
     params: &CreateGitHubInstallationParams<'_>,
@@ -163,6 +164,7 @@ async fn resolve_installation_doc_id(
 /// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
 /// targeting the same installation never produce a lost update. If the
 /// installation is deleted between index-resolve and modify, returns `Ok(false)`.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's suspended_at")]
 pub async fn suspend_github_installation(
     store: &DocumentStore,
     installation_id: i64,

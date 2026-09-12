@@ -326,7 +326,7 @@ pub(crate) async fn exchange_authorization_code(
     // The returned witness is the structural proof threaded into the
     // TokenIssuanceProof below — the only path to `GrantProof::AuthorizationCode`.
     let code_hash = hash_token(params.code);
-    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code).await?;
+    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code, arrival).await?;
 
     let user = load_and_validate_grant_subject(state, &auth_code).await?;
 
@@ -589,8 +589,9 @@ async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
     auth_code: &AuthorizationCode,
+    arrival: ArrivalTime,
 ) -> ServiceResult<crate::db::AuthCodeClaim> {
-    match db::try_consume_authorization_code(&state.store, code_hash).await {
+    match db::try_consume_authorization_code(&state.store, code_hash, arrival.timestamp()).await {
         Ok(claim) => Ok(claim),
         Err(db::claim::ClaimError::AlreadyConsumed) => {
             tracing::warn!(
@@ -838,6 +839,7 @@ impl AuthorizationCode {
 pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
+    arrival: ArrivalTime,
 ) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
@@ -909,6 +911,7 @@ pub async fn authenticate_client(
             &state.store,
             &credentials.client_id,
             &secret_hash,
+            arrival.timestamp(),
         )
         .await?;
 
@@ -2035,7 +2038,12 @@ mod tests {
             client_secret: Some(SecretString::from(client.client_secret.clone())),
         };
 
-        let result = authenticate_client(&state, &creds).await;
+        let result = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "secret-based auth must not fail when only the last_used_at write fails: {result:?}"
@@ -2085,7 +2093,12 @@ mod tests {
             client_secret: Some(SecretString::from(client.client_secret.clone())),
         };
 
-        let result = authenticate_client(&state, &creds).await;
+        let result = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
         assert!(
             matches!(result, Err(ClientAuthError::FapiSecretRejected)),
             "a FAPI client's secret must be refused, got {result:?}"

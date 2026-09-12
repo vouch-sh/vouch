@@ -407,9 +407,10 @@ async fn test_oidc_callback_rejects_replayed_state() {
     .expect("create_oidc_state");
 
     // Pre-consume to simulate a successful prior callback.
-    let _claim = crate::db::try_consume_oidc_state(&state.store, oidc_state_value)
-        .await
-        .expect("pre-consume must succeed");
+    let _claim =
+        crate::db::try_consume_oidc_state(&state.store, oidc_state_value, jiff::Timestamp::now())
+            .await
+            .expect("pre-consume must succeed");
 
     // Submit the callback with the now-consumed state. The handler
     // calls `try_consume_oidc_state` first, which returns
@@ -900,7 +901,7 @@ async fn seed_and_consume_oidc_state(
     )
     .await
     .expect("create_oidc_state");
-    crate::db::try_consume_oidc_state(&state.store, state_value)
+    crate::db::try_consume_oidc_state(&state.store, state_value, jiff::Timestamp::now())
         .await
         .expect("consume oidc state")
 }
