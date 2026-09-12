@@ -16,6 +16,7 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use vouch_common::protocol;
 
 /// Maximum number of active (non-revoked, non-expired) secrets per OAuth client.
 ///
@@ -223,11 +224,16 @@ impl OAuthClient {
     /// Whether the client is registered (RFC 7591 §2 `grant_types`) for the
     /// grant whose `grant_type` wire value is `grant`.
     ///
-    /// Matches the enforcement pattern established by the `client_credentials`
-    /// grant handler: when `grant_types` is `None` the client is treated as
-    /// *not* authorized for any grant (returning `false`), so a manually-managed
-    /// client with no declared `grant_types` is rejected just like one that
-    /// declared `grant_types: ["authorization_code"]`. Callers pass the
+    /// A stored `None` means the registration omitted `grant_types`, and
+    /// RFC 7591 §2 fixes what that means — "If omitted, the default behavior
+    /// is that the client will use only the `authorization_code` Grant Type."
+    /// So `None` is the default list, not the empty one: it authorizes
+    /// `authorization_code` and nothing else. Dynamic registration
+    /// materializes that default when the field is absent
+    /// (`services/oidc/registration.rs`), so `None` only reaches here for a
+    /// manually-managed row, which the spec still entitles to the default.
+    ///
+    /// Callers pass the
     /// [`crate::services::oidc::grant_type::OAuthGrantType::as_str`] wire value
     /// so the comparison is against the same strings registration stores.
     ///
@@ -235,9 +241,10 @@ impl OAuthClient {
     /// authorized to use this authorization grant type."
     #[must_use]
     pub fn is_authorized_for_grant(&self, grant: &str) -> bool {
-        self.grant_types
-            .as_ref()
-            .is_some_and(|gts| gts.iter().any(|g| g == grant))
+        match self.grant_types.as_ref() {
+            Some(gts) => gts.iter().any(|g| g == grant),
+            None => grant == protocol::GRANT_TYPE_AUTHORIZATION_CODE,
+        }
     }
 }
 
@@ -2081,6 +2088,59 @@ pub async fn validate_oauth_client_credentials(
 )]
 mod tests {
     use super::*;
+
+    /// RFC 7591 §2 `grant_types`: "If omitted, the default behavior is that
+    /// the client will use only the `authorization_code` Grant Type." A
+    /// stored `None` is therefore the default list, not the empty one — it
+    /// authorizes `authorization_code` and rejects every other grant.
+    #[tokio::test]
+    async fn test_absent_grant_types_defaults_to_authorization_code() {
+        let store = test_store().await;
+        // `create_client_and_secret` registers with `grant_types: None`, which
+        // is exactly the absent-field row this test is about.
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+        assert!(
+            client.grant_types.is_none(),
+            "fixture precondition: the stored row has no grant_types"
+        );
+
+        assert!(
+            client.is_authorized_for_grant("authorization_code"),
+            "RFC 7591 §2: omitted grant_types defaults to authorization_code"
+        );
+        for other in [
+            "client_credentials",
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ] {
+            assert!(
+                !client.is_authorized_for_grant(other),
+                "the default list is authorization_code ONLY; {other} must be rejected"
+            );
+        }
+    }
+
+    /// An explicit list is honored verbatim — declaring `authorization_code`
+    /// is the same as omitting the field, and declaring something else does
+    /// not silently inherit the default.
+    #[tokio::test]
+    async fn test_explicit_grant_types_are_honored_verbatim() {
+        let store = test_store().await;
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        client.grant_types = Some(vec!["client_credentials".to_string()]);
+        assert!(client.is_authorized_for_grant("client_credentials"));
+        assert!(
+            !client.is_authorized_for_grant("authorization_code"),
+            "an explicit list that omits authorization_code must not inherit the default"
+        );
+
+        client.grant_types = Some(vec![]);
+        assert!(
+            !client.is_authorized_for_grant("authorization_code"),
+            "an explicitly empty list authorizes nothing — it is not the absent case"
+        );
+    }
 
     #[test]
     fn test_is_valid_post_logout_redirect_uri_str() {

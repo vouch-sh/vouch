@@ -67,6 +67,18 @@
 //! how a call site spells it, and it is the only spelling
 //! `HeaderName::from_static` accepts.
 
+/// RFC 6749 §4.1.3 (Access Token Request) — authorization code grant.
+///
+/// > grant_type
+/// >          REQUIRED.  Value MUST be set to "authorization_code".
+///
+/// <https://www.rfc-editor.org/rfc/rfc6749#section-4.1.3>
+///
+/// Also the value RFC 7591 §2 makes a registration's `grant_types` default to
+/// when the field is omitted, so the server's registration default and the
+/// authorization check for an absent list resolve to this one constant.
+pub const GRANT_TYPE_AUTHORIZATION_CODE: &str = "authorization_code";
+
 /// RFC 8628 §3.4 (Device Access Token Request) — device authorization grant.
 ///
 /// > grant_type
