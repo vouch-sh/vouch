@@ -347,3 +347,110 @@ async fn test_zero_stored_registration_counter_accepts_first_assertion() {
         "stored counter should remain 0 after the counter-less first assertion"
     );
 }
+
+/// A credential whose registration `signCount` has the high bit set
+/// (`>= 2^31`) must have its clone-detection guard honored, not silently
+/// disabled for the credential's entire lifetime.
+///
+/// `create_authenticator` persists the registration counter via
+/// `u32::cast_signed` (a bitwise `u32 -> i32` reinterpret), so a `signCount`
+/// of `0x8000_0001` is stored as the negative `i32` `-2147483647`. The
+/// assertion handlers read the stored counter back into `u32` to feed the
+/// clone-detection guard. Reading with `u32::try_from(...).unwrap_or(0)` (a
+/// checked *semantic* conversion) collapses every negative `i32` to `0`,
+/// short-circuiting the guard's `stored_counter != 0 && …` predicate and
+/// disabling clone detection for every assertion of the credential. Reading
+/// with `i32::cast_unsigned` (the symmetric bitwise inverse of the write
+/// path) recovers the original `0x8000_0001` and lets the guard fire.
+///
+/// This test pins the read-path round-trip end-to-end: it seeds a high-bit
+/// stored counter, confirms the DB round-trips the bit pattern, confirms the
+/// `cast_unsigned` read (not the lossy `try_from`) recovers it, and drives a
+/// FIDO2 assertion whose counter (`0`, the mock's first `authenticate()`) is
+/// `<=` the stored value — so the guard must reject it.
+#[tokio::test]
+async fn test_high_bit_stored_registration_counter_rejects_clone_assertion() {
+    let harness = TestHarness::new().await;
+
+    let user = harness
+        .create_user("highbit-counter-e2e@example.com")
+        .await
+        .expect("Failed to create user");
+
+    // Simulate a global-counter authenticator that reported a `signCount`
+    // with the high bit set at make. `0x8000_0001` is the canonical witness:
+    // `cast_signed` reinterprets it to a negative `i32`, exposing the
+    // read-path asymmetry the bug turns on.
+    let device = IntegrationMockDevice::new();
+    let high_bit_counter: u32 = 0x8000_0001;
+    let auth_id = register_mock_device_in_db_with_counter(
+        &harness,
+        &user.id,
+        &user.email,
+        &device,
+        high_bit_counter,
+    )
+    .await;
+
+    // Confirm the DB stored the high-bit u32 as a negative i32 via the
+    // write path's `cast_signed` bitwise reinterpretation, and that the
+    // `cast_unsigned` read is the symmetric inverse that recovers the
+    // original value. The lossy `u32::try_from(...).unwrap_or(0)` read
+    // collapses this negative i32 to 0 — the collapse that short-circuits
+    // the guard.
+    let auth_before = db::get_authenticator_by_id(&harness.state.store, &auth_id)
+        .await
+        .expect("db lookup")
+        .expect("authenticator exists");
+    assert_eq!(
+        auth_before.counter,
+        high_bit_counter.cast_signed(),
+        "write path (cast_signed) must store the bit pattern verbatim"
+    );
+    assert_eq!(
+        u32::try_from(auth_before.counter).unwrap_or(0),
+        0,
+        "the lossy try_from read collapses the negative i32 to 0"
+    );
+    assert_eq!(
+        auth_before.counter.cast_unsigned(),
+        high_bit_counter,
+        "the cast_unsigned read recovers the original high-bit value"
+    );
+
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    let (status, json) = exchange_fido2_assertion(
+        &harness, &device, &challenge, &state, &user.id, &client, &pkcs8,
+    )
+    .await;
+
+    // The mock's first authenticate() returns counter = 0 (fetch_add(1)
+    // returns the old value). The guard evaluates `0 <= 0x8000_0001` →
+    // reject, surfacing at the token endpoint as 400 + `invalid_grant`.
+    assert_ne!(
+        status, 200,
+        "assertion with counter 0 <= stored {high_bit_counter:#010x} must be rejected; \
+         Response: {json}"
+    );
+    assert_eq!(
+        json["error"], "invalid_grant",
+        "fido2_grant should return invalid_grant for the clone assertion: {json}"
+    );
+
+    // The rejection must leave a `login_failed` audit row attributed to the
+    // authenticator, confirming attribution survives the full DB → read
+    // conversion → guard → assertion → audit path.
+    let failed_events = login_failed_audit_events(&harness, &user.id).await;
+    assert!(
+        !failed_events.is_empty(),
+        "a login_failed audit row must be recorded for the rejected high-bit-counter assertion"
+    );
+    let attributed = failed_events.iter().find(|ev| ev.data.contains(&auth_id));
+    assert!(
+        attributed.is_some(),
+        "at least one login_failed audit row must attribute the rejection \
+         to the authenticator ({auth_id}); got rows: {failed_events:?}"
+    );
+}

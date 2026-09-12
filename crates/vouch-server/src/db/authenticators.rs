@@ -199,6 +199,15 @@ pub async fn get_authenticator_by_id(
 /// parallel authentication flows never regress the counter. A missing
 /// authenticator is warned and ignored (the caller should not fail an
 /// ongoing authentication solely due to a missing counter record).
+///
+/// The max runs in `u32` space. WebAuthn `signCount` is a `u32`
+/// (WebAuthn L2 §6.1) stored bit-identically in an `i32` column via
+/// `cast_signed`, so every value at or above 2^31 is a negative `i32`.
+/// Comparing those as signed inverts the order across that boundary: a
+/// stored `0x7FFF_FFFF` would beat an incoming `0x8000_0000`, freezing the
+/// counter at 2^31-1 for the rest of the credential's life, and a stored
+/// high-bit value would lose to any low incoming one, regressing the
+/// baseline the clone-detection guard compares against.
 pub async fn update_authenticator_counter(
     store: &DocumentStore,
     authenticator_id: &str,
@@ -206,7 +215,8 @@ pub async fn update_authenticator_counter(
 ) -> Result<()> {
     let found = store
         .modify::<AuthenticatorDoc, _>(authenticator_id, |data| {
-            data.counter = std::cmp::max(data.counter, counter);
+            data.counter =
+                std::cmp::max(data.counter.cast_unsigned(), counter.cast_unsigned()).cast_signed();
         })
         .await?;
     if !found {
