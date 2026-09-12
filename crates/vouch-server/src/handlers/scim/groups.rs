@@ -765,23 +765,25 @@ pub(crate) fn db_group_to_scim(
 ///
 /// RFC 7643 §2.1 makes ABNF strings — including the `compareOp` token
 /// (`eq`) and the attribute name (`value`) — case-insensitive, so a
-/// path such as `members[value EQ "user-id"]` must be accepted.  We
-/// search for the `value eq "` needle in a lowercased copy of `path`
-/// and map the found offset back to the original string via char
-/// counting, mirroring `parse_scim_filter` (`db/scim.rs:988`).  The
-/// char-count remap avoids the byte-offset hazard of `to_lowercase()`
-/// for inputs that change byte length under special-casing rules
-/// (e.g. ß -> ss).  Slicing the value out of the original `path`
-/// preserves its case.
+/// path such as `members[value EQ "user-id"]` must be accepted.
+///
+/// The needle is pure ASCII, so it is matched ASCII-case-insensitively
+/// against `path` itself. Case-folding the input and mapping the offset back
+/// is what this must not do: Unicode lowercasing preserves neither byte
+/// length (`ß` → `ss`) nor character count (`İ` U+0130 → two chars), so an
+/// offset measured in the folded copy can land mid-value in the original and
+/// truncate the extracted id. Matching in place needs no remap at all, and
+/// the resulting byte offset is always a character boundary because every
+/// matched byte is ASCII. Slicing the value out of `path` preserves its case.
 fn parse_member_filter(path: &str) -> Option<String> {
-    let lower = path.to_lowercase();
-    let needle = "value eq \"";
-    let lower_end = lower.find(needle)?.saturating_add(needle.len());
+    let needle = b"value eq \"";
+    let start = path
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))?
+        .saturating_add(needle.len());
 
-    let char_offset = lower.get(..lower_end)?.chars().count();
-    let orig_byte_pos = path.char_indices().nth(char_offset).map(|(i, _)| i)?;
-    let rest = path.get(orig_byte_pos..)?;
-
+    let rest = path.get(start..)?;
     let end = rest.find('"')?;
     rest.get(..end).map(String::from)
 }
@@ -835,5 +837,27 @@ mod parse_member_filter_tests {
     fn bare_members_path_returns_none() {
         assert_eq!(parse_member_filter("members"), None);
         assert_eq!(parse_member_filter("members[]"), None);
+    }
+
+    #[test]
+    fn value_survives_length_changing_case_folding() {
+        // Matching happens on the original path, so a character whose
+        // lowercase form is a different byte length (`ß` -> `ss`) or a
+        // different character count (`İ` U+0130 -> two chars) cannot shift
+        // the extracted id. Folding the path first and remapping the offset
+        // truncated the value to "ictim-user-id" for the U+0130 case.
+        assert_eq!(
+            parse_member_filter("members[\u{0130} value eq \"victim-user-id\"]"),
+            Some("victim-user-id".to_string())
+        );
+        assert_eq!(
+            parse_member_filter("members[\u{00DF} value EQ \"victim-user-id\"]"),
+            Some("victim-user-id".to_string())
+        );
+        // Non-ASCII inside the value itself is returned verbatim.
+        assert_eq!(
+            parse_member_filter("members[value eq \"İstanbul-user\"]"),
+            Some("İstanbul-user".to_string())
+        );
     }
 }
