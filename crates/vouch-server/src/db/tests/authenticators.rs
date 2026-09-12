@@ -236,3 +236,77 @@ async fn test_create_authenticator_preserves_high_bit_counter_via_cast_signed() 
 
     crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
 }
+
+// The monotonic max in `update_authenticator_counter` runs in u32 space.
+// WebAuthn signCount is a u32 (WebAuthn L2 §6.1) held bit-identically in an
+// i32 column, so a signed comparison inverts the order across 2^31: the
+// counter would stop advancing there, and a high-bit baseline would be
+// overwritten by any low value. Both directions are pinned here.
+
+/// Seed an authenticator at `counter` and return its id.
+async fn seed_authenticator_at(store: &DocumentStore, email: &str, counter: u32) -> String {
+    let (user_id, _) = upsert_user(store, email, None)
+        .await
+        .expect("Failed to create user");
+    create_authenticator(
+        store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: email,
+            name: "YubiKey",
+            credential_id: email.as_bytes(),
+            public_key: &[10u8; 65],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+            counter,
+        },
+    )
+    .await
+    .expect("Failed to create authenticator")
+}
+
+#[tokio::test]
+async fn test_counter_advances_across_the_high_bit_boundary() {
+    let (store, _audit) = test_db().await;
+    let auth_id = seed_authenticator_at(&store, "boundary-up@example.com", 0x7FFF_FFFF).await;
+
+    // The next signCount a real authenticator would emit after i32::MAX.
+    let next: u32 = 0x8000_0000;
+    update_authenticator_counter(&store, &auth_id, next.cast_signed())
+        .await
+        .expect("counter update");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("db lookup")
+        .expect("authenticator exists");
+    assert_eq!(
+        auth.counter.cast_unsigned(),
+        next,
+        "a signed max would keep 0x7FFF_FFFF and freeze the counter at 2^31-1 forever"
+    );
+}
+
+#[tokio::test]
+async fn test_high_bit_counter_is_not_regressed_by_a_lower_value() {
+    let (store, _audit) = test_db().await;
+    let high: u32 = 0x8000_0001;
+    let auth_id = seed_authenticator_at(&store, "boundary-down@example.com", high).await;
+
+    // A replayed or cloned assertion carrying a far lower count must not win.
+    update_authenticator_counter(&store, &auth_id, 5i32)
+        .await
+        .expect("counter update");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("db lookup")
+        .expect("authenticator exists");
+    assert_eq!(
+        auth.counter.cast_unsigned(),
+        high,
+        "a signed max would pick the positive 5 over a negative i32 and regress \
+         the clone-detection baseline"
+    );
+}
