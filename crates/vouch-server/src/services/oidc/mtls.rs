@@ -189,10 +189,19 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// space padding the `=` (e.g. `O = Acme`) breaks the parse and the caller
 /// falls back to exact equality — which always rejects, since the cert-side
 /// `Name::to_string` rendering joins RDNs with a bare comma and emits a bare
-/// `=`. Stripping separator-adjacent whitespace makes the common
-/// `O = Acme, CN = foo` rendering — the default `oneline` output of
-/// `openssl x509 -noout -subject` on OpenSSL 3.x, which pads `=` on both
-/// sides — canonicalize identically to `O=Acme,CN=foo`.
+/// `=`. Stripping separator-adjacent whitespace makes both of the renderings
+/// an operator is likely to paste in canonicalize identically to
+/// `O=Acme,CN=foo`:
+///
+/// - `O=Acme, CN=foo` — comma-space, bare `=`. This is what `openssl x509
+///   -noout -subject` prints by default (verified against OpenSSL 3.6.4), and
+///   what `-text` shows on the `Subject:` line.
+/// - `O = Acme, CN = foo` — `=` padded on both sides. This is the `oneline`
+///   name format, which the operator gets by passing `-nameopt oneline`
+///   explicitly; it is *not* the default for `-subject`.
+///
+/// The `=`-padded form is handled because it is a plausible paste, not
+/// because any command emits it by default.
 ///
 /// Only a *structural* comma separates RDNs, and only the *first* unescaped
 /// `=` in an RDN is the type/value separator (a later `=` belongs to the
@@ -1192,8 +1201,8 @@ mod tests {
 
     // The cert-side `Name::to_string` rendering joins RDNs with a bare comma,
     // but operators commonly register DNs with a space after the comma (e.g.
-    // copied from `openssl x509 -noout -subject`, whose default `oneline`
-    // format uses `, `). `x509-cert` 0.2.5's `RdnSequence::from_str` splits on
+    // copied from `openssl x509 -noout -subject`, whose default output uses
+    // `, `). `x509-cert` 0.2.5's `RdnSequence::from_str` splits on
     // a bare `,` without trimming the next segment, so the un-normalized parse
     // failed and `verify_tls_client_auth` fell back to exact equality — which
     // always rejects because the two renderings differ by that one space.
@@ -1236,27 +1245,29 @@ mod tests {
     // canonicalize_dn — whitespace around the type/value `=` separator
     // =========================================================================
 
-    // OpenSSL 3.x's default `oneline` rendering — the output of the bare
-    // `openssl x509 -noout -subject` command the `canonicalize_dn` doc comment
-    // cites — pads the `=` separating each attribute type from its value on
-    // both sides: `O = Acme, CN = foo` (spaces around every `=`). The previous
-    // pre-parser only stripped whitespace after a structural comma, never the
-    // `=`-adjacent spaces, so `RdnSequence::from_str` rejected `O ` as a type
-    // name and `canonicalize_dn` returned `None` — `verify_tls_client_auth`
-    // then fell back to exact string equality and rejected the legitimate
-    // client. The fix also strips whitespace around the (first, unescaped)
-    // `=` of each RDN.
+    // OpenSSL's `oneline` name format pads the `=` separating each attribute
+    // type from its value on both sides: `O = Acme, CN = foo`. An operator
+    // reaches it with `openssl x509 -noout -subject -nameopt oneline`; the
+    // bare `-subject` default prints `O=Acme, CN=foo` with a bare `=`
+    // (verified against OpenSSL 3.6.4), which the comma-space handling
+    // already covers. The pre-parser stripped whitespace only after a
+    // structural comma, never the `=`-adjacent spaces, so
+    // `RdnSequence::from_str` rejected `O ` as a type name and
+    // `canonicalize_dn` returned `None` — `verify_tls_client_auth` then fell
+    // back to exact string equality and rejected a legitimately matching
+    // client. It now also strips whitespace around the first unescaped `=`
+    // of each RDN.
 
     /// A DN with whitespace around the `=` type/value separator must
     /// canonicalize to the same string as the bare-`=` form, in both the
     /// multi-RDN and the single-RDN (the most common operator DN) case. Space
     /// before `=`, after `=`, both, multiple, and tabs are all stripped so
-    /// OpenSSL 3.x's default `oneline` output reduces to one form.
+    /// OpenSSL's `oneline` name format reduces to one form.
     #[test]
     fn test_canonicalize_dn_tolerates_whitespace_around_equals() {
         let canonical = canonicalize_dn("O=Acme,CN=foo").expect("bare form parses");
 
-        // Multi-RDN: spaces around the `=` (OpenSSL 3.x default `oneline`).
+        // Multi-RDN: spaces around the `=` (OpenSSL's `oneline` format).
         let both = canonicalize_dn("O = Acme, CN = foo").expect("spaced `=` parses");
         let before = canonicalize_dn("O =Acme,CN =foo").expect("space-before `=` parses");
         let after = canonicalize_dn("O= Acme,CN= foo").expect("space-after `=` parses");
@@ -1265,7 +1276,7 @@ mod tests {
 
         assert_eq!(
             both, canonical,
-            "spaces around `=` must not change canonical form (OpenSSL 3.x default output)"
+            "spaces around `=` must not change canonical form (OpenSSL `-nameopt oneline`)"
         );
         assert_eq!(before, canonical, "space before `=` must be stripped");
         assert_eq!(after, canonical, "space after `=` must be stripped");
@@ -1289,20 +1300,20 @@ mod tests {
         );
     }
 
-    /// The verbatim default output of `openssl x509 -noout -subject` on
-    /// OpenSSL 3.x must canonicalize identically to the cert-side
+    /// The verbatim output of `openssl x509 -noout -subject -nameopt oneline`
+    /// must canonicalize identically to the cert-side
     /// `Name::to_string` rendering, so an operator can copy-paste that
     /// command's output as the `tls_client_auth_subject_dn`.
     #[test]
-    fn test_canonicalize_dn_openssl3_oneline_default_matches_canonical() {
+    fn test_canonicalize_dn_oneline_nameopt_matches_canonical() {
         // cert-side rendering: what x509_cert `Name::to_string` emits.
         let cert_side = canonicalize_dn("O=Acme,CN=foo").expect("cert side parses");
-        // OpenSSL 3.x default `oneline` rendering of the same subject.
-        let openssl_default =
-            canonicalize_dn("O = Acme, CN = foo").expect("openssl default parses");
+        // OpenSSL `-nameopt oneline` rendering of the same subject.
+        let openssl_oneline =
+            canonicalize_dn("O = Acme, CN = foo").expect("openssl oneline parses");
         assert_eq!(
-            openssl_default, cert_side,
-            "OpenSSL 3.x default output must canonicalize to the cert-side rendering"
+            openssl_oneline, cert_side,
+            "OpenSSL `oneline` output must canonicalize to the cert-side rendering"
         );
     }
 
@@ -1444,10 +1455,10 @@ mod tests {
             "fixture: cert renders bare-comma DN"
         );
 
-        // Comma-space form (the common `O=Acme, CN=foo` rendering). The full
-        // OpenSSL 3.x default output `O = Acme, CN = foo` — with the spaces
-        // around `=` that command emits — is covered by
-        // `test_verify_tls_client_auth_subject_dn_openssl3_oneline_default`.
+        // Comma-space form: what `openssl x509 -noout -subject` prints by
+        // default. The `=`-padded `O = Acme, CN = foo` form, which `-nameopt
+        // oneline` emits, is covered by
+        // `test_verify_tls_client_auth_subject_dn_oneline_nameopt`.
         let spaced = "O=Acme, CN=foo";
         assert_ne!(rendered, spaced, "precondition: strings differ by spacing");
         assert!(
@@ -1501,24 +1512,23 @@ mod tests {
     }
 
     // =========================================================================
-    // verify_tls_client_auth — OpenSSL 3.x default `oneline` subject (`=`-spacing)
+    // verify_tls_client_auth — OpenSSL `oneline` subject (`=`-spacing)
     // =========================================================================
 
     // End-to-end regression for the `=`-adjacent whitespace bug: an operator
     // who registers a `tls_client_auth_subject_dn` by copying the verbatim
-    // default output of `openssl x509 -noout -subject` (which on OpenSSL 3.x
-    // pads `=` on both sides, e.g. `O = Acme, CN = foo`) must authenticate.
+    // output of `openssl x509 -noout -subject -nameopt oneline` (which pads
+    // `=` on both sides, e.g. `O = Acme, CN = foo`) must authenticate.
     // Before the fix `canonicalize_dn` returned `None` on the verbatim form
     // and `verify_tls_client_auth` fell back to exact string equality — which
     // rejects because the cert-side `Name::to_string` rendering has no
     // `=`-padding.
 
     /// A two-RDN cert rendered `O=Acme,CN=foo` must authenticate against the
-    /// verbatim OpenSSL 3.x default output `O = Acme, CN = foo` (the command
-    /// the `canonicalize_dn` doc comment cites) and against every
+    /// verbatim `-nameopt oneline` output `O = Acme, CN = foo` and against every
     /// `=`-spacing/attribute-type-case variant of it.
     #[test]
-    fn test_verify_tls_client_auth_subject_dn_openssl3_oneline_default() {
+    fn test_verify_tls_client_auth_subject_dn_oneline_nameopt() {
         let subject = make_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "Acme")]);
         let cert_der = make_self_signed_cert_with_subject(subject);
         let cert = parse_client_certificate(&cert_der).expect("parse");
@@ -1528,16 +1538,16 @@ mod tests {
             "fixture: cert renders bare-`=` bare-comma DN"
         );
 
-        // The verbatim default `openssl x509 -noout -subject` output on
-        // OpenSSL 3.x (minus the `subject=` prefix) — must authenticate.
-        let openssl_default = "O = Acme, CN = foo";
+        // The verbatim `openssl x509 -noout -subject -nameopt oneline` output
+        // (minus the `subject=` prefix) — must authenticate.
+        let openssl_oneline = "O = Acme, CN = foo";
         assert_ne!(
-            rendered, openssl_default,
-            "precondition: cert rendering differs from the OpenSSL default by `=`-spacing"
+            rendered, openssl_oneline,
+            "precondition: cert rendering differs from the `oneline` form by `=`-spacing"
         );
         assert!(
-            verify_tls_client_auth(&cert, Some(openssl_default), None, None, None, None).is_ok(),
-            "OpenSSL 3.x default `oneline` output must authenticate against the matching cert"
+            verify_tls_client_auth(&cert, Some(openssl_oneline), None, None, None, None).is_ok(),
+            "OpenSSL `oneline` output must authenticate against the matching cert"
         );
 
         // Variants that differ only by `=`-spacing or attribute-type case
@@ -1558,10 +1568,10 @@ mod tests {
     }
 
     /// The single-RDN case — `CN = foo`, the most common operator DN — must
-    /// authenticate against a `CN=foo` cert using the verbatim OpenSSL 3.x
-    /// default output, and against `=`-spacing variants of it.
+    /// authenticate against a `CN=foo` cert using the verbatim `-nameopt
+    /// oneline` output, and against `=`-spacing variants of it.
     #[test]
-    fn test_verify_tls_client_auth_subject_dn_single_rdn_openssl3_oneline() {
+    fn test_verify_tls_client_auth_subject_dn_single_rdn_oneline_nameopt() {
         let cert_der = make_test_cert("foo");
         let cert = parse_client_certificate(&cert_der).expect("parse");
         let rendered = cert.subject_dn.as_deref().expect("subject DN");
@@ -1571,10 +1581,10 @@ mod tests {
             "fixture: single-RDN cert renders as CN=foo"
         );
 
-        // OpenSSL 3.x default output for a single-CN subject.
+        // OpenSSL `-nameopt oneline` output for a single-CN subject.
         assert!(
             verify_tls_client_auth(&cert, Some("CN = foo"), None, None, None, None).is_ok(),
-            "single-RDN OpenSSL 3.x default `CN = foo` must authenticate"
+            "single-RDN OpenSSL `oneline` `CN = foo` must authenticate"
         );
         for registered in ["CN= foo", "CN =foo", "CN  =  foo", "cn = foo"] {
             assert!(
