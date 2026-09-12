@@ -24,7 +24,6 @@ use crate::services::auth::{
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -443,7 +442,10 @@ pub(crate) async fn exchange_authorization_code(
     let id_token_alg =
         authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
 
-    // Generate ID token (with at_hash computed from the access token)
+    // Generate ID token (with at_hash computed from the access token).
+    // `arrival` is threaded here so the ID token's `exp`/`iat` share the
+    // same instant as the access token's `exp` and the session's `expires_at`
+    // — see `arrival.rs` for why request-scoped temporal claims read one clock.
     let id_token = generate_id_token(
         state,
         IdTokenParams {
@@ -460,6 +462,7 @@ pub(crate) async fn exchange_authorization_code(
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
+        arrival,
     )
     .await?;
 
@@ -978,12 +981,20 @@ struct IdTokenParams<'a> {
 }
 
 /// Generate an OIDC ID token.
-#[expect(clippy::disallowed_methods, reason = "mints the ID token's exp")]
+///
+/// `iat`/`exp` are stamped from `arrival` — the same instant
+/// [`create_oauth_access_token`] used for the access token's `exp` and the
+/// session's `expires_at` — so all temporal claims of one token response
+/// share one clock reading per the contract documented in
+/// [`crate::arrival`]. Reading `Timestamp::now()` here instead would let the
+/// ID token's `exp` exceed the access token's `exp` (and the session's
+/// `expires_at`) by the processing latency between the two mints.
 async fn generate_id_token(
     state: &Arc<AppState>,
     params: IdTokenParams<'_>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<String> {
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     let expires_seconds = i64::try_from(params.expires_in)
         .map_err(|_| ServiceError::Internal("Invalid expires_in value".to_string()))?;
     let exp = now
@@ -2599,5 +2610,118 @@ mod tests {
         assert!(debug.contains("Bearer"), "{debug}");
         assert!(debug.contains("3600"), "{debug}");
         assert!(debug.contains("AuthCodeExchangeResult"), "{debug}");
+    }
+
+    // =========================================================================
+    // generate_id_token — arrival anchoring
+    //
+    // Commit addbaecd threaded `arrival` into `create_oauth_access_token` so
+    // the access token's `exp` and the session's `expires_at` share one instant,
+    // but left `generate_id_token` on `Timestamp::now()`. Within one token
+    // response the ID token's `exp` could exceed the access token's `exp` by
+    // the latency between the two mints.
+    //
+    // The test fixes the request `arrival` at a deterministic instant `T`
+    // and asserts the ID token's `iat` == `T` and `exp` == `T + expires_in`.
+    // Before the fix, `generate_id_token` stamped `iat`/`exp` from
+    // `Timestamp::now()`, so `iat` would equal the wall clock, not `T`.
+    // =========================================================================
+
+    /// Decode the middle segment of a JWT into a `serde_json::Value`. Used in
+    /// tests to inspect claims without signature verification.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        let mut parts = token.split('.');
+        let _header = parts.next().expect("JWT header segment");
+        let payload = parts.next().expect("JWT payload segment");
+        let bytes = URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url-decoded payload");
+        serde_json::from_slice(&bytes).expect("JSON payload")
+    }
+
+    /// Minimal `TokenBinding::Bearer` — no DPoP proof, no mTLS thumbprint.
+    #[tokio::test]
+    async fn test_generate_id_token_stamps_iat_and_exp_from_arrival() {
+        let state = crate::test_utils::test_app_state().await;
+        let scope = ScopeSet::parse("openid");
+        let expires_in: u64 = 3600;
+        // Fixed-past arrival deliberately far from the wall clock so a drift to
+        // `Timestamp::now()` is observable as a different value, not just a
+        // second-rounding coincidental match.
+        let arrival = crate::arrival::ArrivalTime::for_test_second(1_700_000_000);
+
+        let id_token = generate_id_token(
+            &state,
+            IdTokenParams {
+                client_id: "test-client",
+                user_id: "user1",
+                email: "test@example.com",
+                nonce: None,
+                expires_in,
+                binding: TokenBinding::Bearer,
+                scope: &scope,
+                hardware_verification: HardwareVerification::Verified { auth_time: None },
+                access_token: None,
+                id_token_alg: "ES256",
+            },
+            arrival,
+        )
+        .await
+        .expect("ID token signing should succeed");
+
+        let claims = decode_jwt_payload(id_token.as_str());
+        assert_eq!(
+            claims.get("iat").and_then(|v| v.as_i64()),
+            Some(1_700_000_000),
+            "iat must be stamped from `arrival`, not an ambient `Timestamp::now()`"
+        );
+        assert_eq!(
+            claims.get("exp").and_then(|v| v.as_i64()),
+            Some(1_700_000_000 + i64::try_from(expires_in).expect("fits in i64")),
+            "exp must be `arrival.as_second() + expires_in`"
+        );
+    }
+
+    /// Sanity check that `generate_id_token` still produces a well-formed
+    /// token (with `iat` ≤ `exp` and a non-empty signature) when driven via
+    /// `arrival`, the production request-scoped instant.
+    #[tokio::test]
+    async fn test_generate_id_token_iat_not_after_exp() {
+        let state = crate::test_utils::test_app_state().await;
+        let scope = ScopeSet::parse("openid");
+        let arrival = crate::arrival::ArrivalTime::for_test_second(1_700_000_000);
+
+        let id_token = generate_id_token(
+            &state,
+            IdTokenParams {
+                client_id: "test-client",
+                user_id: "user1",
+                email: "test@example.com",
+                nonce: None,
+                expires_in: 60,
+                binding: TokenBinding::Bearer,
+                scope: &scope,
+                hardware_verification: HardwareVerification::Verified { auth_time: None },
+                access_token: None,
+                id_token_alg: "ES256",
+            },
+            arrival,
+        )
+        .await
+        .expect("ID token signing should succeed");
+
+        let claims = decode_jwt_payload(id_token.as_str());
+        let iat = claims
+            .get("iat")
+            .and_then(|v| v.as_i64())
+            .expect("iat present");
+        let exp = claims
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .expect("exp present");
+        assert!(
+            iat <= exp,
+            "iat ({iat}) must not exceed exp ({exp}); the ID token's lifetime window must be non-negative"
+        );
     }
 }

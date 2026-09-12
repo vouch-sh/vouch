@@ -1522,6 +1522,84 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
     );
 }
 
+/// The exchanged ID token's signed `exp` claim must agree with the
+/// `token_exchange` audit row's `expires_at`. Commit addbaecd anchored the
+/// audit row's `expires_at` on the request's `arrival` but left
+/// `OidcIdTokenClaimsBuilder::build` on `Timestamp::now()`, so the signed
+/// JWT and the audit row were stamped from two different clocks and could
+/// disagree about the lifetime of one token. The fix threads `arrival` into
+/// the builder so both records share one instant; the (incorrect) comment
+/// that claimed this was already true is removed.
+#[tokio::test]
+async fn test_rfc8693_id_token_exp_matches_audit_expires_at() {
+    use crate::db::documents::oauth::TokenExchangeDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "id-vs-audit@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    // The signed JWT's `exp` claim.
+    let claims = decode_jwt_payload(id_token);
+    let exp = claims["exp"].as_i64().expect("ID token exp present");
+
+    // The audit row's `expires_at` (a `jiff::Timestamp`) must equal the
+    // signed JWT's `exp` — both stamped from the same arrival instant.
+    let issued_hash = crate::crypto::hash_token(id_token);
+    let audit_rows = state
+        .store
+        .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+        .await
+        .expect("query token_exchange by subject_user_id");
+    let audit_row = audit_rows
+        .into_iter()
+        .find(|d| d.data.issued_token_hash == issued_hash)
+        .expect("a token_exchange audit row for the issued ID token must exist");
+    assert_eq!(
+        audit_row.data.expires_at.as_second(),
+        exp,
+        "token_exchange audit row expires_at ({}) must equal the issued ID \
+         token's JWT exp ({exp}) — the audit row records the same lifetime as \
+         the signed token, both anchored on the request's arrival",
+        audit_row.data.expires_at.as_second(),
+    );
+}
+
 #[tokio::test]
 async fn test_rfc8693_id_token_carries_hardware_aaguid() {
     // The ID token surfaces the backing authenticator's AAGUID so relying

@@ -477,15 +477,12 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "reports the issued token's expiry to the caller"
-)]
 pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
     client_info: ClientInfo,
     HardwareVerifiedToken(token): HardwareVerifiedToken,
+    arrival: ArrivalTime,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     let pinned_role = params.role_arn.as_deref();
     if let Some(role_arn) = pinned_role {
@@ -514,6 +511,11 @@ pub(crate) async fn get_aws_token(
             )
         })?;
 
+    // The request's arrival instant anchors the issued token's `iat`/`exp`
+    // and the audit record's `token_expires_at` to the same clock reading,
+    // so the signed JWT and the audit row cannot disagree by the latency
+    // between the two stamps — see `arrival.rs` for the contract.
+    let now = arrival.timestamp();
     let config = state.config();
     let result = issue_aws_token(
         &ctx.issuer,
@@ -522,20 +524,18 @@ pub(crate) async fn get_aws_token(
         &ctx.user_email,
         &ctx.token,
         pinned_role,
+        now,
     )
     .await
     .map_err(map_aws_error)?;
 
     // Record issuance — including the role ARN the token is pinned to — as a
     // queryable audit event, so operators can see which role each OIDC token
-    // was created for.
+    // was created for. `token_expires_at` reads the same `now` the JWT was
+    // stamped from, so the audit row and the signed token report one expiry.
     let token_expires_at = i64::try_from(result.expires_in)
         .ok()
-        .and_then(|secs| {
-            Timestamp::now()
-                .checked_add(jiff::Span::new().seconds(secs))
-                .ok()
-        })
+        .and_then(|secs| now.checked_add(jiff::Span::new().seconds(secs)).ok())
         .map(|t| t.to_string());
     state
         .audit
@@ -1293,6 +1293,84 @@ mod tests {
             .expect("base64url header");
         let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
         assert_eq!(header["alg"], "RS256");
+    }
+
+    /// The AWS token's signed `exp` claim must agree with the `token_expires_at`
+    /// recorded in the `aws_credential` audit event for the same request.
+    /// Commit addbaecd left `OidcIdTokenClaimsBuilder::build` on
+    /// `Timestamp::now()` while the handler's audit `token_expires_at` read
+    /// a separate `Timestamp::now()`, so the signed JWT and the audit row
+    /// could disagree about the token's expiry. The fix threads the request's
+    /// `arrival` into both, so the two records share one instant.
+    #[tokio::test]
+    async fn test_aws_token_exp_matches_audit_token_expires_at() {
+        use base64::Engine;
+
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "aws-audit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "AWS token request should succeed: {body}"
+        );
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+
+        // Decode the signed JWT's `exp` claim (Unix seconds).
+        let payload_b64 = id_token.split('.').nth(1).expect("jwt payload");
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .expect("base64url payload");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("payload JSON");
+        let jwt_exp = claims["exp"].as_i64().expect("ID token exp present");
+
+        // The audit row's `token_expires_at` must agree with the JWT's `exp`.
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["aws_credential".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one AWS token request -> one audit event");
+        let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("event data");
+        let token_expires_at_str = data["token_expires_at"]
+            .as_str()
+            .expect("token_expires_at present in audit event");
+        let token_expires_at: jiff::Timestamp = token_expires_at_str
+            .parse()
+            .expect("parse RFC 3339 timestamp");
+        assert_eq!(
+            token_expires_at.as_second(),
+            jwt_exp,
+            "audit token_expires_at ({}) must equal the issued JWT's exp ({jwt_exp}) — \
+             both are anchored on the request's arrival instant",
+            token_expires_at.as_second(),
+        );
     }
 
     /// Without an RSA key in AppState the handler fails closed with 501.
