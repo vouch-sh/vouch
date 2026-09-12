@@ -54,13 +54,31 @@ fn sanitize_profile_name(name: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-/// Open (or create) `~/.aws/config` and ensure the `.aws` directory exists.
+/// Derive the directory to create/secure for an AWS config file path.
+///
+/// Returns the parent directory of `config_path`, or `None` when the path
+/// is a bare filename (`parent()` yields an empty string) — in that case
+/// the file lands in the CWD, which already exists, so no directory needs
+/// creating.
+///
+/// Factored out of [`load_or_create_aws_config`] so the directory-derivation
+/// logic is testable without mutating process environment variables
+/// (`std::env::set_var` is `unsafe` under edition 2024 and the workspace
+/// denies `unsafe_code`).
+fn config_parent_dir(config_path: &std::path::Path) -> Option<&std::path::Path> {
+    config_path.parent().filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Open (or create) the AWS config file and ensure its parent directory exists.
+///
+/// The config path is resolved by [`AwsConfig::default_path`], which honors
+/// `AWS_CONFIG_FILE` — so the directory secured here is the parent of the
+/// *resolved* path, whether that is `~/.aws` or the override location.
 fn load_or_create_aws_config() -> Result<AwsConfig> {
     let config_path = AwsConfig::default_path()?;
-    let aws_dir = vouch_common::paths::home_dir()
-        .context(tr!("err-could-not-determine-home-directory"))?
-        .join(".aws");
-    ensure_secure_dir(&aws_dir)?;
+    if let Some(parent) = config_parent_dir(&config_path) {
+        ensure_secure_dir(parent)?;
+    }
     Ok(AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path)))
 }
 
@@ -439,6 +457,7 @@ fn write_sts_profile(
     tr_println!(
         "setup-aws-added-profile-block",
         profile = profile_name.as_str(),
+        config_path = config.path().display().to_string(),
     );
     Ok(())
 }
@@ -1233,6 +1252,10 @@ fn entitled_role_profile_name(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 
@@ -1518,5 +1541,160 @@ mod tests {
             ),
             None
         );
+    }
+
+    // -- config_parent_dir --
+    //
+    // `AWS_CONFIG_FILE` names the file itself and may live anywhere. The
+    // directory to create/secure must be derived from the *resolved* config
+    // path, not hardcoded to `~/.aws`. These tests cover the pure helper in
+    // isolation; the env-reading `AwsConfig::default_path` / `config_path_from`
+    // pair is covered in `integrations/aws/config.rs` (see
+    // `aws_config_env_is_the_file_itself`, `aws_config_env_does_not_need_home`).
+
+    /// Default `~/.aws/config` → parent is `~/.aws` (backward-compatible).
+    #[test]
+    fn config_parent_dir_resolves_default_home_aws() {
+        let path = std::path::Path::new("/home/alice/.aws/config");
+        assert_eq!(
+            config_parent_dir(path),
+            Some(std::path::Path::new("/home/alice/.aws"))
+        );
+    }
+
+    /// `AWS_CONFIG_FILE` override → parent is the override's directory, not
+    /// `~/.aws`.
+    #[test]
+    fn config_parent_dir_resolves_override_parent() {
+        let path = std::path::Path::new("/etc/aws/alt.ini");
+        assert_eq!(
+            config_parent_dir(path),
+            Some(std::path::Path::new("/etc/aws"))
+        );
+    }
+
+    /// A bare relative filename (`AWS_CONFIG_FILE=config`) yields an empty
+    /// parent string, which the guard filters to `None` — no directory
+    /// creation is attempted (the CWD already exists).
+    #[test]
+    fn config_parent_dir_bare_filename_is_none() {
+        assert_eq!(config_parent_dir(std::path::Path::new("config")), None);
+    }
+
+    /// A relative path with a directory (`AWS_CONFIG_FILE=aws/config`)
+    /// yields the relative directory as the parent.
+    #[test]
+    fn config_parent_dir_relative_directory() {
+        assert_eq!(
+            config_parent_dir(std::path::Path::new("aws/config")),
+            Some(std::path::Path::new("aws"))
+        );
+    }
+
+    /// A root-level file (`AWS_CONFIG_FILE=/config`) has `/` as its parent.
+    #[test]
+    fn config_parent_dir_root_level_file() {
+        assert_eq!(
+            config_parent_dir(std::path::Path::new("/config")),
+            Some(std::path::Path::new("/"))
+        );
+    }
+
+    /// Regression for bug report Repro 1: with `AWS_CONFIG_FILE` set to a
+    /// writable location, setup must succeed without needing `~/.aws`. The
+    /// override parent is created and secured; `~/.aws` is never touched.
+    #[cfg(unix)]
+    #[test]
+    fn override_parent_created_and_secured_without_home_aws() -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+        let override_parent = home.path().join("alt-aws");
+        let config_path = override_parent.join("config");
+
+        let parent = config_parent_dir(&config_path)
+            .ok_or_else(|| anyhow::anyhow!("expected Some(parent) for a nested config path"))?;
+        ensure_secure_dir(parent)?;
+
+        assert!(override_parent.is_dir());
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&override_parent)?.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "override parent should be secured to 0700"
+        );
+
+        // ~/.aws must NOT have been created — the fix derives the directory
+        // from config_path.parent(), not from home_dir().join(".aws").
+        let home_aws = home.path().join(".aws");
+        assert!(
+            !home_aws.exists(),
+            "~/.aws must not be created when the config path is overridden"
+        );
+        Ok(())
+    }
+
+    /// Default-path regression: without `AWS_CONFIG_FILE`, `config_parent_dir`
+    /// returns `~/.aws` and `ensure_secure_dir` creates it at 0700.
+    #[cfg(unix)]
+    #[test]
+    fn default_path_creates_and_secures_home_aws() -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+        let aws_dir = home.path().join(".aws");
+        let config_path = aws_dir.join("config");
+
+        let parent = config_parent_dir(&config_path)
+            .ok_or_else(|| anyhow::anyhow!("expected Some(parent) for ~/.aws/config"))?;
+        ensure_secure_dir(parent)?;
+
+        assert!(aws_dir.is_dir());
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&aws_dir)?.permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        Ok(())
+    }
+
+    /// Regression for bug report Repro 3: with `AWS_CONFIG_FILE` set, an
+    /// existing `~/.aws` at mode 0755 (the typical mode after `aws configure`)
+    /// must NOT be tightened to 0700. Before the fix, `ensure_secure_dir` was
+    /// unconditionally called on `~/.aws` regardless of the override.
+    #[cfg(unix)]
+    #[test]
+    fn override_does_not_tighten_existing_home_aws_mode() -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+
+        // Pre-existing ~/.aws at 0755.
+        let aws_dir = home.path().join(".aws");
+        std::fs::create_dir_all(&aws_dir)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&aws_dir, std::fs::Permissions::from_mode(0o755))?;
+
+        // Override config lives in a different directory.
+        let override_parent = home.path().join("alt-aws");
+        let config_path = override_parent.join("config");
+        let parent = config_parent_dir(&config_path)
+            .ok_or_else(|| anyhow::anyhow!("expected Some(parent) for override path"))?;
+        ensure_secure_dir(parent)?;
+
+        // ~/.aws mode must be unchanged — the fix secures the override
+        // parent, not ~/.aws.
+        let mode = std::fs::metadata(&aws_dir)?.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "~/.aws mode must not change when the config path is overridden"
+        );
+        Ok(())
+    }
+
+    /// The `AwsConfig::path()` accessor returns the resolved config file
+    /// path so the success message can print it instead of a hardcoded
+    /// `~/.aws/config`.
+    #[test]
+    fn aws_config_path_reflects_override_location() {
+        let path = std::path::PathBuf::from("/tmp/aws-alt/config");
+        let config = super::AwsConfig::empty(path.clone());
+        assert_eq!(config.path(), path);
     }
 }

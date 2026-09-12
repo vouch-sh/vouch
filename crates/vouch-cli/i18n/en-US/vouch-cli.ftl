@@ -1135,7 +1135,7 @@ setup-aws-already-configured-block =
 # placeable. Keeping the entire block as one message means a translator can
 # re-flow the prose and adjust spacing without coordinating across 5 keys.
 setup-aws-added-profile-block =
-    Added profile [{ $profile }] to ~/.aws/config
+    Added profile [{ $profile }] to { $config_path }
 
     Use AWS CLI with the profile:
 
