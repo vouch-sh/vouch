@@ -851,8 +851,6 @@ rfc4253#9#9feb5824	MUST NOT	Either party MAY initiate the re-exchange, but roles
 rfc4253#9#e6684f2b	SHOULD	It is RECOMMENDED that the keys be changed after each gigabyte of transmitted data or after each hour of connection time, whichever comes sooner.
 rfc4514#1#b5e187ce	SHOULD	Section 2 details the RECOMMENDED algorithm for converting a DN from its ASN.1 structured representation to a string.
 rfc4514#1#f7d75506	MUST	While other documents may define other algorithms for converting a DN from its ASN.1 structured representation to a string, all algorithms MUST produce strings 
-rfc4514#2#da69d549	MUST	Other documents may describe other algorithms for converting a distinguished name to a string, but only strings that conform to the grammar defined in Section 3
-rfc4514#2#fe9bbbfc	SHOULD	This section defines the RECOMMENDED algorithm for converting a distinguished name from an ASN.1-structured representation to a UTF-8 [RFC3629] encoded Unicode 
 rfc4514#2.3#eb364a2b	SHOULD	However, implementations SHOULD provide a mechanism to allow their knowledge of registered short names to be updated.
 rfc4514#3#10bc3561	MUST	Implementations MUST recognize AttributeType name strings (descriptors) listed in the following table, but MAY recognize other name strings.
 rfc4514#3#b8ea25a2	SHOULD	However, as there is no requirement that alternative DN string representations be recognized (and, if so, how), implementations SHOULD only generate DN strings 
