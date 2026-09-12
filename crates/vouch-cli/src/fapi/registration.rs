@@ -67,6 +67,29 @@ impl std::fmt::Debug for RegistrationResponse {
     }
 }
 
+/// Grant types the FAPI CLI client declares during RFC 7591 registration.
+///
+/// The CLI authenticates as this single registered client for every grant it
+/// exercises, so the server's RFC 6749 §5.2 `unauthorized_client` gate —
+/// `OAuthClient::is_authorized_for_grant` (`vouch-server/src/db/oauth.rs`),
+/// which reads the stored `grant_types` at request time — requires each one
+/// to be listed here:
+/// - [`protocol::GRANT_TYPE_DEVICE_CODE`] — `vouch login` device authorization.
+/// - [`protocol::GRANT_TYPE_FIDO2_ASSERTION`] — `vouch login` step-up to
+///   hardware verification.
+/// - [`protocol::GRANT_TYPE_TOKEN_EXCHANGE`] — Workload Identity Federation
+///   credential commands (`vouch credential openai|anthropic`) mint a
+///   Vouch-issued ID-token assertion via RFC 8693 token exchange.
+///
+/// Omitting a grant the CLI uses makes the server reject that grant's requests
+/// with HTTP 401 `unauthorized_client`; commit `45b8de2d` added the
+/// token-exchange gate that first exposed the missing `token-exchange` entry.
+const REGISTERED_GRANT_TYPES: &[&str] = &[
+    protocol::GRANT_TYPE_DEVICE_CODE,
+    protocol::GRANT_TYPE_FIDO2_ASSERTION,
+    protocol::GRANT_TYPE_TOKEN_EXCHANGE,
+];
+
 /// Register this CLI installation as a FAPI 2.0 client.
 ///
 /// Calls `POST /oauth/register` with the generated ES256 public key.
@@ -112,10 +135,7 @@ pub async fn register_fapi_client(
 
     let request = RegistrationRequest {
         token_endpoint_auth_method: "private_key_jwt",
-        grant_types: vec![
-            protocol::GRANT_TYPE_DEVICE_CODE,
-            protocol::GRANT_TYPE_FIDO2_ASSERTION,
-        ],
+        grant_types: REGISTERED_GRANT_TYPES.to_vec(),
         response_types: vec![],
         dpop_bound_access_tokens: true,
         jwks,
@@ -211,5 +231,37 @@ impl std::fmt::Debug for RegistrationResult {
             .field("registration_client_uri", &self.registration_client_uri)
             .field("dpop_key_id", &self.dpop_key_id)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CLI authenticates as a single registered FAPI client for every
+    /// grant it exercises, so the server's RFC 6749 §5.2 `unauthorized_client`
+    /// gate — `OAuthClient::is_authorized_for_grant`, which reads the stored
+    /// `grant_types` at request time — requires each one to be listed in
+    /// [`REGISTERED_GRANT_TYPES`]. Omitting one makes the server reject that
+    /// grant's requests with HTTP 401 `unauthorized_client`. Commit `45b8de2d`
+    /// added the token-exchange gate that first exposed a missing
+    /// `token-exchange` entry, breaking the WIF credential commands
+    /// (`vouch credential openai|anthropic`). This pins the full contract so
+    /// the omission cannot silently recur.
+    #[test]
+    fn registered_grant_types_declare_every_grant_the_cli_uses() {
+        assert!(
+            REGISTERED_GRANT_TYPES.contains(&protocol::GRANT_TYPE_DEVICE_CODE),
+            "device_code grant is used by `vouch login`"
+        );
+        assert!(
+            REGISTERED_GRANT_TYPES.contains(&protocol::GRANT_TYPE_FIDO2_ASSERTION),
+            "fido2-assertion grant is used by `vouch login` step-up"
+        );
+        assert!(
+            REGISTERED_GRANT_TYPES.contains(&protocol::GRANT_TYPE_TOKEN_EXCHANGE),
+            "token-exchange grant is used by WIF credential commands \
+             (`vouch credential openai|anthropic`)"
+        );
     }
 }
