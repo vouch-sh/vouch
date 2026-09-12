@@ -611,17 +611,24 @@ fn validate_single_subject_confirmation(
         });
     }
 
-    // Check NotOnOrAfter
-    if let Some(not_on_or_after_str) = conf_data.attribute("NotOnOrAfter") {
-        let not_on_or_after = parse_saml_timestamp(not_on_or_after_str)?;
-        let skewed_now = now
-            .checked_sub(jiff::Span::new().seconds(CLOCK_SKEW_SECS))
-            .unwrap_or(now);
-        if skewed_now >= not_on_or_after {
-            return Err(ResponseError::TimeValidation(format!(
-                "SubjectConfirmationData expired: NotOnOrAfter={not_on_or_after_str}"
-            )));
-        }
+    // SAML Profiles 4.1.4.3: NotOnOrAfter MUST be validated. It sits on the
+    // same signed SubjectConfirmationData element as Recipient and
+    // InResponseTo, so the check can always be made; absence of it is a
+    // failure, not a case to skip — a bearer confirmation with no time bound
+    // must not be accepted.
+    let not_on_or_after_str = conf_data.attribute("NotOnOrAfter").ok_or_else(|| {
+        ResponseError::TimeValidation(
+            "missing NotOnOrAfter in SubjectConfirmationData (required for bearer)".to_string(),
+        )
+    })?;
+    let not_on_or_after = parse_saml_timestamp(not_on_or_after_str)?;
+    let skewed_now = now
+        .checked_sub(jiff::Span::new().seconds(CLOCK_SKEW_SECS))
+        .unwrap_or(now);
+    if skewed_now >= not_on_or_after {
+        return Err(ResponseError::TimeValidation(format!(
+            "SubjectConfirmationData expired: NotOnOrAfter={not_on_or_after_str}"
+        )));
     }
 
     Ok(())
