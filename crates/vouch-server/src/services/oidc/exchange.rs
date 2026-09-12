@@ -509,10 +509,12 @@ pub(crate) async fn exchange_token(
     // including when the subject's integer-second remaining TTL is 0 — so an
     // exchanged access token never outlives its subject token (see
     // [`cap_lifetime_by_subject_ttl`]).
-    // The cap is measured from the request's arrival, and
-    // `create_oauth_access_token` stamps the issued `exp` from that same
-    // instant, so `exp_issued = arrival + min(session, subject_exp - arrival)`
-    // can never exceed `subject_exp`.
+    // The cap is measured from the request's arrival, and both issuance
+    // branches stamp the issued `exp` from that same instant
+    // (`create_oauth_access_token` via `arrival.timestamp()`,
+    // `issue_id_token` via `build_at_second(arrival.as_second())`), so
+    // `exp_issued = arrival + min(session, subject_exp - arrival)` can never
+    // exceed `subject_exp`.
     let expires_in = cap_lifetime_by_subject_ttl(
         state.config().session_hours.saturating_mul(3600),
         subject_decoded.exp(),
@@ -539,7 +541,7 @@ pub(crate) async fn exchange_token(
     // tighten further if needed — never bypassable.
     //
     // The issued ID token claims `hardware_verified: true` unconditionally
-    // (see `OidcIdTokenClaimsBuilder::build`). To prevent a non-hardware
+    // (see `OidcIdTokenClaimsBuilder::build_at_second`). To prevent a non-hardware
     // subject token (e.g., an enrollment bootstrap session created after
     // upstream SSO but before FIDO2 registration) from minting a WIF
     // assertion that downstream relying parties trust as hardware-attested,
@@ -776,7 +778,7 @@ async fn issue_id_token(
         .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
         .hd(ctx.org_domain.map(String::from))
         .valid_for_seconds(expires_in)
-        .build()
+        .build_at_second(arrival.as_second())
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
 
     let org_keys = super::org_keys::resolve_org_keys(state, org.as_ref())
@@ -791,8 +793,11 @@ async fn issue_id_token(
         .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;
 
     // Log the exchange for audit (best-effort — failures are non-fatal).
-    // The recorded `expires_at` describes the token just signed, whose `exp`
-    // the claims builder derived from the same arrival instant.
+    // The recorded `expires_at` describes the token just signed: `build_at_second`
+    // stamped the JWT's `exp` from `arrival.as_second()` (the same instant the
+    // subject-TTL cap was measured from), so `arrival + expires_in` reproduces
+    // the signed token's actual `exp` rather than a re-derived value that can
+    // drift from it.
     let now = arrival.timestamp();
     let issued_token_hash = hash_token(&id_token);
     let expires_at = i64::try_from(expires_in)

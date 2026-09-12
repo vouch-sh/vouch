@@ -1466,6 +1466,152 @@ async fn test_rfc8693_id_token_lifetime_capped_at_default() {
     );
 }
 
+/// RFC 8693 §2.2.1 `expires_in` describes the issued token. The server's
+/// design decision (the `expires_in = min(session_hours*3600, subject_exp -
+/// arrival)` cap, mirrored by the ID-token branch's `valid_for_seconds`)
+/// commits to bounding the *issued* ID token by the subject token's
+/// remaining TTL. The ID-token branch must do the same as the access-token
+/// branch: the issued JWT `exp` and the `token_exchange` audit row's
+/// `expires_at` must all carry the capped lifetime, and the issued `exp`
+/// must derive from the same `arrival` instant the cap was measured from so
+/// it can never exceed `subject_exp`.
+///
+/// Forges a subject token with `exp = now + 60s` (well below the 600s
+/// federation ceiling, so the subject-TTL cap binds) and a matching session
+/// row, performs an exchange requesting `requested_token_type=id_token`, and
+/// asserts:
+/// 1. The reported `expires_in` reflects the capped lifetime (~60s).
+/// 2. The issued ID token's decoded `exp - iat` matches the reported
+///    `expires_in`.
+/// 3. The issued ID token's `exp` does not exceed the subject token's `exp`
+///    (the design invariant: an exchanged token may never outlive the token
+///    it was derived from).
+/// 4. The `token_exchange` audit row's `expires_at` equals the issued ID
+///    token's actual JWT `exp` — the audit row and the signed JWT must agree
+///    on one token's lifetime.
+#[tokio::test]
+async fn test_rfc8693_id_token_exp_not_capped_by_subject_ttl() {
+    use crate::db::documents::oauth::TokenExchangeDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "id-token-cap-exp@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Mint a full-lifetime token, then re-sign it as a short-lived subject
+    // token (exp = now + 60s) with its own matching session row. 60s is well
+    // below DEFAULT_ID_TOKEN_EXPIRES_SECS (600s), so the subject-TTL cap is
+    // the binding one (not the federation ceiling).
+    let base = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let subject_token =
+        forge_short_lived_access_token(&state, &user.id, &user.email, Some(&auth_id), &base, 60)
+            .await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "Exchange should succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let reported_expires_in = response["expires_in"].as_u64().expect("expires_in present");
+
+    // (1) The reported `expires_in` must reflect the capped lifetime (~60s),
+    //     not the federation ceiling (600s) or the full session (28800s).
+    assert!(
+        reported_expires_in <= 65,
+        "reported expires_in ({reported_expires_in}s) should be capped by the \
+         subject token's remaining TTL (~60s), not the federation ceiling or \
+         the full session_hours"
+    );
+
+    let id_claims = decode_jwt_payload(id_token);
+    let id_exp = id_claims["exp"].as_i64().expect("issued exp present");
+    let id_iat = id_claims["iat"].as_i64().expect("issued iat present");
+    let id_lifetime = id_exp.saturating_sub(id_iat);
+
+    // (2) The issued ID token's actual lifetime (`exp - iat`) must match the
+    //     reported `expires_in`. Both must derive from the same `arrival`
+    //     so the value the client receives describes the token it
+    //     accompanies (RFC 8693 §2.2.1).
+    assert!(
+        id_lifetime <= 65,
+        "issued ID token lifetime ({id_lifetime}s from iat to exp) should be \
+         capped by the subject token's remaining TTL (~60s), not the \
+         federation ceiling (600s) or the full session_hours (28800s)"
+    );
+    assert_eq!(
+        id_lifetime,
+        i64::try_from(reported_expires_in).expect("expires_in fits in i64"),
+        "the issued ID token's actual lifetime ({id_lifetime}s) must equal \
+         the `expires_in` value reported to the client ({reported_expires_in}s)"
+    );
+
+    // (3) The issued ID token must not outlive its subject in absolute terms.
+    //     The cap and the mint must read one instant — the request's arrival —
+    //     so `exp_issued = arrival + min(session, subject_exp - arrival)` is
+    //     at or before `subject_exp`. Before the fix, `build()` stamped `exp`
+    //     from a later `Timestamp::now()`, pushing `exp_issued` past
+    //     `subject_exp` by the gap between `arrival` and `build()`.
+    let subject_exp = decode_jwt_payload(&subject_token)["exp"]
+        .as_i64()
+        .expect("subject exp present");
+    assert!(
+        id_exp <= subject_exp,
+        "issued ID token exp ({id_exp}) must not be later than the subject \
+         token's exp ({subject_exp}); an exchanged token may never outlive \
+         the token it was derived from"
+    );
+
+    // (4) The `token_exchange` audit row's `expires_at` must agree with the
+    //     issued ID token's actual JWT `exp` — the audit row and the signed
+    //     JWT must record the same lifetime for one token. Before the fix,
+    //     the audit row was recomputed as `arrival + expires_in` while the
+    //     JWT `exp` was stamped from `build()`'s own `Timestamp::now()`, so
+    //     the two could disagree whenever `build()` ran in a later integer
+    //     second than `arrival`.
+    let issued_hash = crate::crypto::hash_token(id_token);
+    let audit_rows = state
+        .store
+        .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+        .await
+        .expect("query token_exchange by subject_user_id");
+    let audit_row = audit_rows
+        .into_iter()
+        .find(|d| d.data.issued_token_hash == issued_hash)
+        .expect("a token_exchange audit row for the issued ID token must exist");
+    assert_eq!(
+        audit_row.data.expires_at.as_second(),
+        id_exp,
+        "token_exchange audit row expires_at ({}) must equal the issued ID \
+         token's JWT exp ({id_exp}) — the audit row and the signed JWT must \
+         agree on one token's lifetime",
+        audit_row.data.expires_at.as_second()
+    );
+}
+
 #[tokio::test]
 async fn test_rfc8693_id_token_not_persisted_as_session() {
     // The minted ID token must not be stored as a session — it is a one-shot

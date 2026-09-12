@@ -308,20 +308,28 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
-    /// Build the OIDC ID token claims.
+    /// Build the OIDC ID token claims, stamping `iat`/`exp` from the
+    /// caller-supplied instant.
+    ///
+    /// Request paths that already carry a request-scoped arrival instant
+    /// (RFC 8693 token exchange) pass `arrival.as_second()` here so the cap,
+    /// the audit row's `expires_at`, and the signed JWT's `exp` read one
+    /// clock. Stamping `exp` from a later `Timestamp::now()` inside this
+    /// builder would let the issued token outlive its subject by the gap
+    /// between the two readings (the design invariant
+    /// `issue_id_token` commits to), and the audit row's `expires_at` —
+    /// recomputed as `arrival + expires_in` — would disagree with the actual
+    /// JWT `exp`.
+    ///
+    /// `now_seconds` is taken as integer seconds because the JWT `exp` and
+    /// `iat` claims are integer-second values (RFC 7519 §4.1.4 / §4.1.6).
     ///
     /// # Errors
     ///
     /// Returns an error if required fields (issuer, subject, audience) are missing.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "mints the ID token's iat and exp"
-    )]
-    pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
-        let now = jiff::Timestamp::now();
-        let exp = now
-            .as_second()
-            .saturating_add(i64::try_from(self.valid_for_seconds).unwrap_or(28800));
+    pub fn build_at_second(self, now_seconds: i64) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
+        let exp =
+            now_seconds.saturating_add(i64::try_from(self.valid_for_seconds).unwrap_or(28800));
 
         Ok(OidcIdTokenClaims {
             iss: self
@@ -335,7 +343,7 @@ impl OidcIdTokenClaimsBuilder {
                 .audience
                 .ok_or(ClaimsBuildError::MissingField("audience"))?,
             exp,
-            iat: now.as_second(),
+            iat: now_seconds,
             jti: uuid::Uuid::now_v7().to_string(),
             email: self
                 .email
@@ -349,6 +357,26 @@ impl OidcIdTokenClaimsBuilder {
             aws_tags: self.aws_tags,
             aws_roles: self.aws_roles,
         })
+    }
+
+    /// Build the OIDC ID token claims.
+    ///
+    /// Stamps `iat`/`exp` from the system wall clock at build time. Callers
+    /// that have a request-scoped arrival instant (RFC 8693 token exchange)
+    /// should use [`Self::build_at_second`] instead so the issued token's
+    /// `exp`, the subject-TTL cap, and the audit row's `expires_at` read one
+    /// clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required fields (issuer, subject, audience) are missing.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "mints the ID token's iat and exp when no arrival instant is available"
+    )]
+    pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
+        let now_seconds = jiff::Timestamp::now().as_second();
+        self.build_at_second(now_seconds)
     }
 }
 
@@ -598,6 +626,136 @@ mod tests {
         assert!(
             json.get("https://aws.amazon.com/roles").is_none(),
             "aws roles claim should be absent when no pin is requested"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // build_at_second: stamping iat/exp from a caller-supplied instant.
+    //
+    // RFC 8693 token exchange measures the subject-TTL cap from the
+    // request's `arrival.as_second()` and recomputes the audit row's
+    // `expires_at` as `arrival + expires_in`. The issued JWT's `exp` must
+    // be stamped from that same instant, or the token can outlive its
+    // subject by the gap between `arrival` and `Timestamp::now()` inside
+    // `build()`, and the audit row's `expires_at` can disagree with the
+    // signed `exp`. These tests pin `build_at_second` to the supplied
+    // instant and confirm `build()` keeps reading the wall clock.
+    // ---------------------------------------------------------------------
+
+    /// `build_at_second` stamps `iat` and `exp` from the supplied instant,
+    /// not from the wall clock. A fixed `now_seconds` produces a fixed `iat`
+    /// and `exp = now_seconds + valid_for_seconds`, regardless of when the
+    /// call runs.
+    #[test]
+    fn test_build_at_second_stamps_exp_and_iat_from_supplied_instant() {
+        let now_seconds = 1_700_000_000_i64;
+        let valid_for = 600_i64;
+        let claims = OidcIdTokenClaimsBuilder::for_audience(
+            "https://vouch.example.com",
+            "user@example.com",
+            "https://vouch.example.com",
+        )
+        .email("user@example.com")
+        .valid_for_seconds(u64::try_from(valid_for).unwrap())
+        .build_at_second(now_seconds)
+        .unwrap();
+
+        assert_eq!(
+            claims.iat, now_seconds,
+            "iat must equal the supplied instant, not the wall clock"
+        );
+        assert_eq!(
+            claims.exp,
+            now_seconds.saturating_add(valid_for),
+            "exp must be now_seconds + valid_for_seconds, not wall_clock + valid_for_seconds"
+        );
+    }
+
+    /// `build_at_second` with a sentinel instant must NOT reflect the wall
+    /// clock. Using a far-past instant that the wall clock can never reach
+    /// makes the assertion deterministic: if `iat`/`exp` were stamped from
+    /// `Timestamp::now()`, they would be billions of seconds larger.
+    #[test]
+    fn test_build_at_second_ignores_wall_clock() {
+        let sentinel = 100_i64;
+        let claims = OidcIdTokenClaimsBuilder::for_audience(
+            "https://vouch.example.com",
+            "user@example.com",
+            "aud",
+        )
+        .valid_for_seconds(60)
+        .build_at_second(sentinel)
+        .unwrap();
+
+        assert_eq!(claims.iat, sentinel);
+        assert_eq!(claims.exp, 160);
+        // belt-and-braces: wall clock is nowhere near epoch+100s
+        assert!(
+            claims.iat < jiff::Timestamp::now().as_second() - 1_000_000,
+            "iat ({}) must be the sentinel, not the wall clock",
+            claims.iat
+        );
+    }
+
+    /// `build_at_second` propagates the same required-field validation as
+    /// `build()` — a builder missing `issuer` still returns
+    /// `MissingField("issuer")` and does not panic on the missing field.
+    #[test]
+    fn test_build_at_second_requires_issuer() {
+        let result = OidcIdTokenClaimsBuilder::new()
+            .subject("user@example.com")
+            .audience("aud")
+            .valid_for_seconds(60)
+            .build_at_second(1_700_000_000);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("issuer"))
+        ));
+    }
+
+    /// `build_at_second` preserves the `email`-defaults-to-`subject` rule, so
+    /// it and `build()` remain interchangeable for any caller that only
+    /// differs in which instant supplies `iat`/`exp`.
+    #[test]
+    fn test_build_at_second_email_defaults_to_subject() {
+        let claims = OidcIdTokenClaimsBuilder::new()
+            .issuer("https://vouch.example.com")
+            .subject("user@example.com")
+            .audience("aud")
+            .valid_for_seconds(60)
+            .build_at_second(1_700_000_000)
+            .unwrap();
+        assert_eq!(
+            claims.email, "user@example.com",
+            "email defaults to subject"
+        );
+    }
+
+    /// `build()` reads the wall clock: stamping `iat` from a known instant
+    /// by sleeping past an integer-second boundary produces an `iat` that
+    /// advances. This is the symmetric counterpart to
+    /// `test_build_at_second_ignores_wall_clock` — together they prove the
+    /// two methods read different clocks, so the exchange path must use
+    /// `build_at_second(arrival.as_second())` to stay on one clock.
+    #[test]
+    fn test_build_stamps_iat_from_wall_clock_not_a_supplied_instant() {
+        let before = jiff::Timestamp::now().as_second();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        let claims = OidcIdTokenClaimsBuilder::for_audience(
+            "https://vouch.example.com",
+            "user@example.com",
+            "https://vouch.example.com",
+        )
+        .email("user@example.com")
+        .valid_for_seconds(60)
+        .build()
+        .unwrap();
+        assert!(
+            claims.iat > before,
+            "build() iat ({}) must reflect the wall clock (>{before}), \
+             not an externally-supplied instant",
+            claims.iat
         );
     }
 }
