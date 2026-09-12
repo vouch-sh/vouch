@@ -11,6 +11,7 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::token::validate_dpop_if_present;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -93,7 +94,11 @@ pub(crate) async fn device_code(
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
 
-    // If a client_id is provided, it must refer to a registered OAuth client.
+    // If a client_id is provided, it must refer to a registered OAuth client
+    // that is authorized (RFC 7591 §2 `grant_types`) for the device_code
+    // grant. Rejecting at creation avoids surfacing a usable `user_code` to
+    // the user for an unauthorized client; the redemption path re-checks so
+    // a client restricted mid-flow still cannot redeem.
     if let Some(client_id) = req.client_id.as_deref() {
         let client = db::get_oauth_client_by_client_id(&state.store, client_id)
             .await
@@ -104,10 +109,13 @@ pub(crate) async fn device_code(
                     "Failed to validate client_id",
                 )
             })?;
-        if client.is_none() {
+        let client = client.ok_or_else(|| {
+            ServiceError::oauth(OAuthErrorCode::InvalidClient, "Unknown client_id")
+        })?;
+        if !client.is_authorized_for_grant(OAuthGrantType::DeviceCode.as_str()) {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "Unknown client_id",
+                OAuthErrorCode::UnauthorizedClient,
+                "Client is not authorized for device_code grant",
             ));
         }
     }
@@ -391,6 +399,34 @@ pub(crate) async fn device_token(
                 },
                 None => None,
             };
+
+            // RFC 7591 §2 `grant_types` / RFC 6749 §5.2 `unauthorized_client`:
+            // the registered client loaded above for FAPI sender-constraint
+            // enforcement must also be authorized for the device_code grant
+            // before any token is issued. The other token-endpoint grants that
+            // load a registered client (`client_credentials`, `token_exchange`,
+            // `fido2_assertion`) enforce the same field via
+            // `is_authorized_for_grant`; the device-code grant authenticates by
+            // the consumed `device_code` (`ClientAuthProof::NoAuth`) rather
+            // than client credentials, so its client lookup happens here — this
+            // closes the registration-contract gap left by commit 45b8de2.
+            // Runs before `try_consume_device_auth` so an unauthorized client
+            // does not burn the single-use device code, matching the mTLS gate
+            // below. The built-in CLI flow carries no `client_id` and is
+            // unaffected: `oauth_client` is `None` and the guard is skipped.
+            if let Some(ref oc) = oauth_client
+                && !oc.is_authorized_for_grant(OAuthGrantType::DeviceCode.as_str())
+            {
+                return Err(oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    OAuthError {
+                        error: OAuthErrorCode::UnauthorizedClient.as_str().to_string(),
+                        error_description: Some(
+                            "Client is not authorized for device_code grant".to_string(),
+                        ),
+                    },
+                ));
+            }
 
             // RFC 8705 §2 / parity with the authorization-code, client-credentials,
             // refresh-token, and PAR grants: a client registered with
