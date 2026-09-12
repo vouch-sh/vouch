@@ -2628,3 +2628,491 @@ async fn test_rfc8693_resource_uris_permissive_client_allows_arbitrary_audience(
         "permissive client's token aud must be the requested arbitrary audience"
     );
 }
+
+// ========================================================================
+// `logout_invalidates_exchange` applied to the actor token (the temporal
+// half of the #550 "mirroring" gap).
+//
+// The subject path already evaluates `logout_invalidates_exchange` against
+// the subject's `user_id`. Before this fix, the actor path ran only the
+// structural checks (decode, session row, `user.active`, self-delegation,
+// depth) and never consulted the policy engine, so a still-signed,
+// still-row-backed access token belonging to a browser-logged-out user
+// could be presented as the `actor_token` and mint a derivative RFC 9068
+// token whose `act.sub` names the logged-out victim.
+//
+// Browser logout (`POST /logout` / RP-initiated logout) deletes only the
+// cookie session row and records a `Logout` audit event; the access-token
+// session rows survive, so `get_session_by_token_hash` still returns
+// `Ok(Some(..))`. The `Logout` event is exactly what
+// `logout_invalidates_exchange` consumes, and exactly what the actor path
+// ignored. These tests seed the `Logout` (and an anchoring `Login`) for the
+// actor user the same way `POST /logout` would, leaving the actor token's
+// session row present, so they exercise the temporal policy half that the
+// structural-only checks never covered.
+//
+// Only `logout_invalidates_exchange` maps onto the actor — the other
+// ExchangeToken policies (`exchange_ip_consistency`,
+// `token_exchange_step_up`, `exchange_rate_limit`) reason about the
+// *request* or the *subject's* history, so applying them to the actor would
+// ban cross-IP delegations and require the actor to have logged in within
+// 15m. The fix must reject a logged-out actor without over-blocking a
+// logged-in one.
+// ========================================================================
+
+/// Seed a `Login` (success) audit event at `mins_ago` for `user_id`.
+///
+/// `logout_invalidates_exchange` anchors on a successful `Login`; without
+/// one the `since` idiom cannot hold from either side and the forbid fires,
+/// which would mask whether a denial came from the subject or the actor.
+/// The authorization-code flow the test fixtures use records
+/// `oauth_token_issued` (an `IssueToken` action) but never `Login`, so the
+/// `Login` row must be seeded explicitly for any user the policy evaluates.
+async fn seed_login_success(state: &std::sync::Arc<crate::AppState>, user_id: &str, mins_ago: i64) {
+    let ts = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().minutes(mins_ago))
+        .expect("backdate login audit event");
+    state
+        .audit
+        .insert_user_event_for_test(db::AuditEventKind::LoginSuccess, user_id, ts, "{}")
+        .await
+        .expect("seed login_success audit event");
+}
+
+/// Seed a `Logout` audit event at `mins_ago` for `user_id`, mirroring the
+/// `Logout` row `POST /logout` records. Unlike CLI logout / admin revocation,
+/// browser logout does NOT cascade to access-token session rows, so the
+/// actor token's session row is left intact by design.
+async fn seed_logout(state: &std::sync::Arc<crate::AppState>, user_id: &str, mins_ago: i64) {
+    let ts = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().minutes(mins_ago))
+        .expect("backdate logout audit event");
+    state
+        .audit
+        .insert_user_event_for_test(db::AuditEventKind::Logout, user_id, ts, "{}")
+        .await
+        .expect("seed logout audit event");
+}
+
+/// A delegated exchange presenting a *logged-out* user's still-valid access
+/// token as the `actor_token` must be rejected with `invalid_request` when
+/// the org has `logout_invalidates_exchange` enabled. Before the fix the
+/// actor path ran no temporal policy, so the `Logout` the victim just
+/// produced was consumed for the subject half and ignored for the actor
+/// half.
+#[tokio::test]
+async fn test_rfc8693_logged_out_actor_rejected_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-logout.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    // Attacker is the subject: a legitimate, still-logged-in user whose
+    // token the exchange is performed *for* (`sub` of the issued token).
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-actor-logout@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+    // The subject policy gate evaluates `logout_invalidates_exchange` against
+    // the attacker: needs a `Login` with no subsequent `Logout` to allow.
+    seed_login_success(&state, &attacker.id, 30).await;
+
+    // Victim is the actor: their access-token session row is still present
+    // (browser-only logout deletes only the cookie row), the token still
+    // verifies, and `user.active` is true — but a `Logout` has occurred
+    // since their last `Login`, which is the signal the policy consumes.
+    let victim = create_test_user_in_org(
+        &state.store,
+        "victim-actor-logout@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={victim_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "exchange with a logged-out actor must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8693 §2.2.2: an actor token "unacceptable based on policy" MUST
+    // yield the invalid_request error code.
+    assert_eq!(
+        error["error"], "invalid_request",
+        "logged-out actor must report invalid_request: {body}"
+    );
+}
+
+/// A delegated exchange presenting a *logged-in* user's access token as the
+/// `actor_token` must still succeed when `logout_invalidates_exchange` is
+/// enabled — the fix must not over-block valid delegations. The actor has a
+/// `Login` and no subsequent `Logout`, so the policy's `since` idiom holds
+/// and the forbid does not fire.
+#[tokio::test]
+async fn test_rfc8693_logged_in_actor_accepted_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-logged-in.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-actor-in@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+    seed_login_success(&state, &attacker.id, 30).await;
+
+    let actor =
+        create_test_user_in_org(&state.store, "actor-still-in@example.com", &org.id, false).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    // A Login with NO subsequent Logout — the actor is still logged in.
+    seed_login_success(&state, &actor.id, 30).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "exchange with a logged-in actor must succeed when \
+         logout_invalidates_exchange is enabled: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let exchanged_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(exchanged_token);
+    // The `act` chain still carries the logged-in actor, proving the
+    // delegation path is intact and the policy did not silently drop it.
+    assert_eq!(
+        claims["act"]["sub"], "actor-still-in@example.com",
+        "the logged-in actor must appear in the act claim: {body}"
+    );
+}
+
+/// When `logout_invalidates_exchange` is NOT enabled, a logged-out actor's
+/// token must still be accepted — the policy is opt-in per org, and the
+/// absence of the policy must leave the pre-fix behavior (structural checks
+/// only) intact. Guards against the fix accidentally denying actor tokens
+/// unconditionally.
+#[tokio::test]
+async fn test_rfc8693_logged_out_actor_accepted_without_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-no-policy.example").await;
+    // The org has NO active policies — `logout_invalidates_exchange` is not
+    // installed, so the actor path's temporal gate is a no-op.
+
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-no-policy@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+
+    let victim =
+        create_test_user_in_org(&state.store, "victim-no-policy@example.com", &org.id, false).await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    // The victim has logged out, but the policy is not enabled, so the
+    // Logout audit event must not block the exchange.
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={victim_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "without logout_invalidates_exchange enabled the logged-out actor \
+         must still be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token: {body}"
+    );
+}
+
+// ========================================================================
+// Supplementary coverage for the guarantees the original three tests did
+// not directly assert: the *subject*-side rejection, the org-less actor
+// exemption, and the re-login remediation path.
+// ========================================================================
+
+/// Subject path still blocks a logged-out subject under the policy.
+///
+/// The same pre-logout token presented as the `subject_token` (no
+/// `actor_token`) under an org with `logout_invalidates_exchange` enabled
+/// MUST be rejected. This is the pre-existing behavior of
+/// `evaluate_exchange_policies` (which has always evaluated the subject);
+/// the fix must not weaken it. Confirms the asymmetry described in the bug
+/// report: the subject half was never broken, only the actor half.
+#[tokio::test]
+async fn test_rfc8693_logged_out_subject_rejected_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "subject-logout.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let victim =
+        create_test_user_in_org(&state.store, "victim-subject@example.com", &org.id, false).await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let client = create_test_oauth_client(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    // The victim's access-token session row is still present (browser-only
+    // logout deletes the cookie row, not the access-token row), but a
+    // `Logout` has occurred since their last `Login` — the signal the
+    // subject path's `evaluate_exchange_policies` consumes.
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={victim_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "exchange with a logged-out subject must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "logged-out subject must report invalid_request: {body}"
+    );
+}
+
+/// An actor whose `user.org_id` is `None` is exempt from the actor
+/// policy gate, mirroring the subject path, which skips
+/// `evaluate_exchange_policies` when `subject_user.org_id` is `None`.
+///
+/// The policy is per-org, so a user with no org has no active config to
+/// consult. The fix's `if let Some(ref actor_org_id) = actor_user.org_id`
+/// guard skips the evaluation entirely. Even with a seeded `Logout`, an
+/// org-less actor's token MUST be accepted — guards against the fix
+/// accidentally denying actor tokens for users with no org.
+#[tokio::test]
+async fn test_rfc8693_org_less_actor_exempt_from_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    // Subject: in an org with the policy enabled, but logged IN (no
+    // Logout), so the subject path allows.
+    let org = create_test_org(&state.store, "subject-org.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+    let subject =
+        create_test_user_in_org(&state.store, "subject-with-org@example.com", &org.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    seed_login_success(&state, &subject.id, 30).await;
+
+    // Actor: NO org (create_test_user does not set org_id), with a seeded
+    // Login+Logout. Because `actor_user.org_id` is `None`, the actor policy
+    // gate is skipped — the exchange MUST succeed.
+    let actor = create_test_user(&state.store, "org-less-actor@example.com").await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    seed_login_success(&state, &actor.id, 30).await;
+    seed_logout(&state, &actor.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an org-less actor must be exempt from logout_invalidates_exchange: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token for the org-less actor: {body}"
+    );
+}
+
+/// Re-login after logout re-enables the actor.
+///
+/// The `logout_invalidates_exchange` policy's `since` idiom
+/// (`!Logout since Login{result:true}`) re-anchors on a new
+/// `Login{result:true}` recorded AFTER the `Logout`, so the forbid stops
+/// firing. A `Login` → `Logout` → `Login{result:true}` sequence for the
+/// actor MUST allow the subsequent exchange — the policy's designed
+/// remediation path.
+#[tokio::test]
+async fn test_rfc8693_relogin_after_logout_re_enables_actor() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "relogin.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let subject =
+        create_test_user_in_org(&state.store, "subject-relogin@example.com", &org.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    seed_login_success(&state, &subject.id, 30).await;
+
+    let actor =
+        create_test_user_in_org(&state.store, "actor-relogin@example.com", &org.id, false).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    // Login → Logout → Login{result:true}: the re-anchoring login is the
+    // most recent event, so the `!Logout since Login{result:true}` idiom
+    // no longer holds and the forbid does not fire.
+    seed_login_success(&state, &actor.id, 30).await;
+    seed_logout(&state, &actor.id, 20).await;
+    seed_login_success(&state, &actor.id, 1).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a re-login after logout must re-enable the actor: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let exchanged_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(exchanged_token);
+    assert_eq!(
+        claims["act"]["sub"], "actor-relogin@example.com",
+        "the re-logged-in actor must appear in the act claim: {body}"
+    );
+}
