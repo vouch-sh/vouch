@@ -18,9 +18,10 @@ not rigorous: titles overlap several classes and some match none. Use it to
 spot recurrence worth investigating, never as a count to quote as fact.
 
 Usage:
-    python3 detail-stats.py                  # monthly + class tables
-    python3 detail-stats.py --json           # machine-readable
-    python3 detail-stats.py --since 2026-08  # only detections from this month on
+    python3 detail-stats.py                        # monthly + class tables
+    python3 detail-stats.py --json                 # machine-readable
+    python3 detail-stats.py --since 2026-08        # detections from this month on
+    python3 detail-stats.py --pr-diff-sizes 1303-1324   # prod vs test lines per PR
 """
 
 from __future__ import annotations
@@ -43,8 +44,10 @@ INTRODUCED_RE = re.compile(
     r"Introduced in \[#(?P<pr>\d+)\][^\n]*? on (?P<when>[A-Za-z]{3,9} \d{1,2}, \d{4})"
 )
 
-# Detail links each issue to the hosted bug record. These IDs are what
-# `detail rules create --bug-ids` expects as evidence for a class rule.
+# Detail links each issue to its hosted bug record. These IDs are what
+# `detail rules create --bug-ids` takes as evidence when requesting a rule for a
+# confirmed class (step 5), and they also let a triage record cite the upstream
+# bug alongside the issue number.
 BUG_ID_RE = re.compile(r"\b(bug_[0-9a-f-]{36})\b")
 
 # Keyword clusters over issue titles. Deliberately overlapping -- an issue can
@@ -158,6 +161,72 @@ def fetch(author: str, limit: int) -> list[Finding]:
             )
         )
     return findings
+
+
+def diff_sizes(spec: str) -> list[dict[str, object]]:
+    """Split each PR's added lines into production and test, via `gh pr diff`.
+
+    Most of a Detail fix PR is tests, so reviewing the whole diff buries the
+    logic the fix introduces -- which is where the defects are. This reports
+    what to actually read.
+
+    The split is by file path, so it over-counts production for files carrying
+    an inline `#[cfg(test)] mod tests` -- which this repo keeps in the
+    production file until it passes ~500 lines. A PR reporting zero test lines
+    has inline tests, not no tests.
+    """
+    if "-" in spec:
+        lo, hi = spec.split("-", 1)
+        numbers = list(range(int(lo), int(hi) + 1))
+    else:
+        numbers = [int(n) for n in spec.split(",")]
+
+    rows: list[dict[str, object]] = []
+    for number in numbers:
+        proc = subprocess.run(
+            ["gh", "pr", "diff", str(number)],
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            rows.append({"pr": number, "error": proc.stderr.strip()[:80]})
+            continue
+
+        is_test = False
+        prod = test = 0
+        prod_files: list[str] = []
+        for line in proc.stdout.splitlines():
+            if line.startswith("+++ b/"):
+                path = line.removeprefix("+++ b/")
+                is_test = "test" in path or path.startswith("specs/")
+                if not is_test:
+                    prod_files.append(path)
+            elif line.startswith("+") and not line.startswith("+++"):
+                if is_test:
+                    test += 1
+                else:
+                    prod += 1
+        rows.append({"pr": number, "prod": prod, "test": test, "files": prod_files})
+    return rows
+
+
+def render_diff_sizes(rows: list[dict[str, object]]) -> None:
+    print(f"{'pr':>6} {'prod+':>6} {'test+':>6}  production files")
+    for row in rows:
+        if "error" in row:
+            print(f"{row['pr']:>6} {'-':>6} {'-':>6}  ERROR: {row['error']}")
+            continue
+        shown = ", ".join(
+            f.removeprefix("crates/vouch-server/src/") for f in row["files"][:3]
+        )
+        if len(row["files"]) > 3:
+            shown += f", +{len(row['files']) - 3} more"
+        print(f"{row['pr']:>6} {row['prod']:>6} {row['test']:>6}  {shown}")
+    total_prod = sum(r.get("prod", 0) for r in rows)
+    total_test = sum(r.get("test", 0) for r in rows)
+    print(f"\n  {total_prod} production lines to read, {total_test} test lines to skim.")
+    print("  Split is by file path: a PR showing 0 test lines has inline "
+          "#[cfg(test)] tests,")
+    print("  counted as production. Treat its prod figure as an upper bound.")
 
 
 def percentile(values: list[int], fraction: float) -> int:
@@ -288,9 +357,21 @@ def main() -> int:
                         help="maximum issues to read from gh (default: 1000)")
     parser.add_argument("--since", metavar="YYYY-MM",
                         help="only count detections in this month or later")
+    parser.add_argument("--pr-diff-sizes", metavar="RANGE",
+                        help="split added lines into production vs test for these PRs "
+                             "(e.g. 1303-1324 or 1303,1307); skips the issue analysis")
     parser.add_argument("--json", action="store_true", dest="as_json",
                         help="emit machine-readable output")
     args = parser.parse_args()
+
+    if args.pr_diff_sizes:
+        rows = diff_sizes(args.pr_diff_sizes)
+        if args.as_json:
+            json.dump(rows, sys.stdout, indent=2)
+            print()
+        else:
+            render_diff_sizes(rows)
+        return 0
 
     findings = fetch(args.author, args.limit)
     if args.since:
