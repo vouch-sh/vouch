@@ -1732,6 +1732,7 @@ mod tests {
                 aaguid: None,
                 user_handle: Some(user.id.as_bytes()),
                 attestation_verified: false,
+                counter: 0,
             },
         )
         .await

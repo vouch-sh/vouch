@@ -497,15 +497,17 @@ async fn test_rfc9728_resource_identity_path_variants() {
 
 #[tokio::test]
 async fn test_rfc9728_resource_identity_deeper_path() {
-    // Paths deeper than a registered prefix match (e.g. `scim/v2/Users/42`).
-    // The returned `resource` echoes the entire sub-path.
+    // Paths deeper than a registered prefix match (e.g. a specific
+    // RFC 7592 client under the `oauth/register` prefix). The returned
+    // `resource` echoes the entire sub-path.
     let (app, state) = test_app().await;
 
-    let url = format!("{WELL_KNOWN_SUFFIX}/scim/v2/Users/42");
+    let deeper = "oauth/register/test-client-123";
+    let url = format!("{WELL_KNOWN_SUFFIX}/{deeper}");
     let (status, body) = http_get(&app, &url, &[]).await;
     assert_eq!(status, StatusCode::OK);
     let m: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    let expected = format!("{}/scim/v2/Users/42", state.config().base_url);
+    let expected = format!("{}/{deeper}", state.config().base_url);
     assert_eq!(m["resource"].as_str(), Some(expected.as_str()));
 }
 
@@ -520,13 +522,58 @@ async fn test_rfc9728_unknown_subpath_returns_404() {
     assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
-/// Canonical, hand-maintained list of every URL prefix Vouch serves
-/// as an OAuth 2.0 protected resource (i.e. requires a bearer/DPoP
-/// access token). Mirrors the routes layered with
-/// [`crate::infra::resource_metadata::layer`] in
-/// [`crate::infra::router`]. The drift-detection test below cross-
-/// checks this against [`PROTECTED_RESOURCE_PREFIXES`] in the service
-/// layer; updates to either side must keep them in sync.
+#[tokio::test]
+async fn test_rfc9728_scim_v2_metadata_not_served() {
+    // `/scim/v2/*` authenticates against a disjoint SCIM token table
+    // (admin-minted opaque credentials via `/api/v1/org/scim-tokens`),
+    // not AS-issued OAuth access tokens. It is therefore not an
+    // RFC 6749/9728 OAuth 2.0 protected resource, and serving an RFC
+    // 9728 document for it cannot be truthful: the `authorization_servers`
+    // field would have to list an AS that can mint a token `/scim/v2/*`
+    // accepts, and no such AS exists (the AS at `base_url` issues tokens
+    // whose scope universe is `openid`/`email`, and any OAuth token
+    // presented at `/scim/v2/*` fails the SCIM-token-table lookup with
+    // `401 "Invalid token"`). The fix is to omit `scim/v2` from
+    // `PROTECTED_RESOURCE_PREFIXES` so every per-resource SCIM document
+    // 404s via `SubPathClassification::Unknown`.
+    let (app, _state) = test_app().await;
+
+    // The per-prefix document and every deeper SCIM path must 404.
+    for sub in [
+        "scim/v2",
+        "scim/v2/Users",
+        "scim/v2/Users/42",
+        "scim/v2/Groups",
+    ] {
+        let url = format!("{WELL_KNOWN_SUFFIX}/{sub}");
+        let (status, _body) = http_get(&app, &url, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "GET {url} must 404: scim/v2 is not an RFC 6749/9728 OAuth 2.0 \
+             protected resource"
+        );
+    }
+}
+
+/// Canonical, hand-maintained list of every URL prefix for which Vouch
+/// serves an RFC 9728 per-resource Protected Resource Metadata document
+/// at `/.well-known/oauth-protected-resource/{path}`. Entries must be
+/// endpoints that are OAuth 2.0 protected resources in the RFC 6749/9728
+/// sense — they accept AS-issued access tokens, not merely RFC 6750
+/// Bearer transport for an opaque admin-minted credential. The drift-
+/// detection test below cross-checks this against
+/// [`PROTECTED_RESOURCE_PREFIXES`] in the service layer; the two lists
+/// MUST stay in sync.
+///
+/// This is a subset of the routes layered with
+/// [`crate::infra::resource_metadata::layer`]: that middleware also
+/// applies to `/scim/v2/*` (which carries RFC 6750 Bearer transport),
+/// but SCIM is deliberately omitted here because its tokens are
+/// admin-minted opaque credentials looked up in a disjoint token
+/// table — no authorization server can issue a token `/scim/v2/*`
+/// accepts, so an RFC 9728 document for it cannot be truthful. See
+/// [`PROTECTED_RESOURCE_PREFIXES`] for the rationale.
 const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
     "oauth/userinfo",
     "oauth/introspect",
@@ -540,7 +587,6 @@ const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
     "v1/keys",
     "api/v1/org",
     "api/v1/applications",
-    "scim/v2",
 ];
 
 #[tokio::test]

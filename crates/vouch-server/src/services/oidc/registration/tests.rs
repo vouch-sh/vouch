@@ -599,6 +599,12 @@ fn test_response_serialization_omits_none_fields() {
         software_id: None,
         software_version: None,
         dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
         id_token_signed_response_alg: "ES256".to_string(),
         authorization_signed_response_alg: None,
         introspection_signed_response_alg: None,
@@ -637,6 +643,17 @@ fn test_response_serialization_omits_none_fields() {
     assert!(value.get("software_id").is_none());
     assert!(value.get("software_version").is_none());
     assert!(value.get("dpop_bound_access_tokens").is_none());
+    // RFC 8705 §2.1.2/§3 metadata must be omitted when absent, not sent as null.
+    assert!(
+        value
+            .get("tls_client_certificate_bound_access_tokens")
+            .is_none()
+    );
+    assert!(value.get("tls_client_auth_subject_dn").is_none());
+    assert!(value.get("tls_client_auth_san_dns").is_none());
+    assert!(value.get("tls_client_auth_san_uri").is_none());
+    assert!(value.get("tls_client_auth_san_ip").is_none());
+    assert!(value.get("tls_client_auth_san_email").is_none());
 }
 
 /// When `client_secret` is present, `client_secret_expires_at` must also be present
@@ -667,6 +684,12 @@ fn test_response_serialization_includes_secret_fields_when_present() {
         software_id: None,
         software_version: None,
         dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
         id_token_signed_response_alg: "ES256".to_string(),
         authorization_signed_response_alg: None,
         introspection_signed_response_alg: None,
@@ -683,6 +706,89 @@ fn test_response_serialization_includes_secret_fields_when_present() {
     assert_eq!(value["client_secret"], "s3cr3t");
     assert_eq!(value["client_secret_expires_at"], 0);
     assert_eq!(value["redirect_uris"].as_array().unwrap().len(), 1);
+}
+
+/// All six RFC 8705 client-metadata fields must be present in the serialized
+/// registration response when set, so a client can confirm its mTLS metadata
+/// was accepted (RFC 7591 §3.2.1: "the authorization server MUST return all
+/// registered metadata about this client").
+// RFC 8705 §2.1.2 names the five certificate-subject parameters; RFC 8705 §3
+// names tls_client_certificate_bound_access_tokens.
+#[test]
+fn test_response_serialization_echoes_rfc8705_metadata() {
+    let response = RegistrationResponse {
+        client_id: "mtls-client-id".to_string(),
+        client_secret: None,
+        client_secret_expires_at: None,
+        client_id_issued_at: Some(1_700_000_000),
+        registration_access_token: None,
+        registration_client_uri: None,
+        redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+        token_endpoint_auth_method: "tls_client_auth".to_string(),
+        grant_types: vec!["authorization_code".to_string()],
+        response_types: vec!["code".to_string()],
+        client_name: Some("mTLS Echo Client".to_string()),
+        client_uri: None,
+        logo_uri: None,
+        tos_uri: None,
+        policy_uri: None,
+        scope: None,
+        contacts: None,
+        jwks: None,
+        jwks_uri: None,
+        software_id: None,
+        software_version: None,
+        dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: Some(true),
+        tls_client_auth_subject_dn: Some("CN=mtls-echo.example.com".to_string()),
+        tls_client_auth_san_dns: Some("mtls.example.com".to_string()),
+        tls_client_auth_san_uri: Some("https://mtls.example.com/id".to_string()),
+        tls_client_auth_san_ip: Some("198.51.100.1".to_string()),
+        tls_client_auth_san_email: Some("mtls@example.com".to_string()),
+        id_token_signed_response_alg: "ES256".to_string(),
+        authorization_signed_response_alg: None,
+        introspection_signed_response_alg: None,
+        request_object_signing_alg: None,
+        require_signed_request_object: None,
+        userinfo_signed_response_alg: None,
+        request_uris: None,
+        post_logout_redirect_uris: None,
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    // RFC 8705 §3: the certificate-bound flag round-trips as a JSON boolean.
+    assert_eq!(
+        value["tls_client_certificate_bound_access_tokens"], true,
+        "tls_client_certificate_bound_access_tokens must echo when set: {json}"
+    );
+    // RFC 8705 §2.1.2: the five certificate-subject parameters round-trip verbatim.
+    assert_eq!(
+        value["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=mtls-echo.example.com"),
+        "tls_client_auth_subject_dn must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_dns"].as_str(),
+        Some("mtls.example.com"),
+        "tls_client_auth_san_dns must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_uri"].as_str(),
+        Some("https://mtls.example.com/id"),
+        "tls_client_auth_san_uri must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "tls_client_auth_san_ip must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_email"].as_str(),
+        Some("mtls@example.com"),
+        "tls_client_auth_san_email must echo when set: {json}"
+    );
 }
 
 // =========================================================================

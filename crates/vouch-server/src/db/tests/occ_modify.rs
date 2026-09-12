@@ -37,6 +37,7 @@ async fn test_update_authenticator_name_only_name_changes() {
             aaguid: Some("aaguid-rename"),
             user_handle: None,
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
