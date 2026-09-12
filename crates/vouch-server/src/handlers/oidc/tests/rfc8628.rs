@@ -349,3 +349,350 @@ async fn test_rfc8628_device_code_replay_revokes_only_that_code_s_token() {
     assert_token_alive(&app, &token_b, "a token from a different device code").await;
     assert_token_alive(&app, &token_c, "a token from a grant with no code").await;
 }
+
+// ========================================================================
+// RFC 7591 §2 `grant_types` enforcement for the device_code grant
+//
+// Commit 45b8de2 (`fix(oidc): enforce grant_types for token-exchange and
+// fido2-assertion`) added `is_authorized_for_grant` checks to every grant
+// handler that authenticates the client at the token endpoint
+// (`client_credentials`, `token_exchange`, `fido2_assertion`). The device_code
+// grant authenticates by the consumed `device_code` (`ClientAuthProof::NoAuth`)
+// rather than client credentials, so it was excluded — but `device_token`
+// still loads the registered client from the stored `client_id` for FAPI
+// sender-constraint enforcement, so the metadata needed to enforce
+// `grant_types` is available. These tests pin the fix: a client restricted to
+// `["authorization_code"]` (the dynamic-registration default when `grant_types`
+// is omitted) MUST receive HTTP 401 `unauthorized_client` at redemption, while
+// registered clients and the built-in CLI flow keep working (no regression).
+// Mirrors the `grant_types` enforcement tests in `rfc7523.rs`.
+// ========================================================================
+
+/// Set (or clear) the `grant_types` of an OAuth client, mirroring the
+/// `enable_grant_types` helper in `rfc7523.rs`. `None` means the client is not
+/// authorized for any grant (matching `is_authorized_for_grant`'s `None`
+/// semantics — a manually-managed client with no declared `grant_types`).
+async fn set_grant_types(
+    store: &db::store::DocumentStore,
+    client_id: &str,
+    grants: Option<&[&str]>,
+) {
+    let oauth_client = db::get_oauth_client_by_client_id(store, client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+    let grants: Option<Vec<String>> = grants.map(|g| g.iter().map(|s| (*s).to_string()).collect());
+    store
+        .modify::<db::documents::oauth::OAuthClientDoc, _>(&oauth_client.id, |data| {
+            data.grant_types = grants.clone();
+        })
+        .await
+        .expect("Failed to update grant_types");
+}
+
+/// Like `setup_authorized_device` but stores a `client_id` on the device
+/// authorization request — exercising the registered-client redemption path
+/// (FAPI sender-constraint + `grant_types` enforcement). Creates the device
+/// auth directly in the store so the test isolates the *redemption* gate from
+/// the creation-endpoint gate.
+async fn setup_authorized_device_for_client(
+    state: &std::sync::Arc<crate::AppState>,
+    user: &crate::db::User,
+    authenticator_id: &str,
+    label: &str,
+    client_id: &str,
+) -> String {
+    let device_code = format!("grant_dev_{label}");
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    let id = crate::db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(&device_code),
+        &format!("GD{label}"),
+        Some(client_id),
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create device authorization request");
+    crate::db::authorize_device_auth(
+        &state.store,
+        crate::db::AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user.id,
+            user_email: &user.email,
+            authenticator_id,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("approve device authorization");
+    device_code
+}
+
+/// RFC 7591 §2 / RFC 6749 §5.2 `unauthorized_client`: a client registered for
+/// `authorization_code` only (the dynamic-registration default when
+/// `grant_types` is omitted) MUST NOT be able to redeem a device code at the
+/// token endpoint — the device_code grant loads the registered client from
+/// the stored `client_id` and must enforce `grant_types` on the same lookup.
+#[tokio::test]
+async fn test_device_grant_rejects_redemption_for_client_not_registered_for_device_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-grant-unauth@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Restrict to authorization_code only — the default when `grant_types`
+    // is omitted via dynamic registration.
+    set_grant_types(
+        &state.store,
+        &client.client_id,
+        Some(&["authorization_code"]),
+    )
+    .await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "unauth", &client.client_id).await;
+
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "device_code grant must reject a client not registered for it: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "rejected redemption must return unauthorized_client, not issue a token: {body}"
+    );
+}
+
+/// No-regression control: a client registered for the device_code grant (the
+/// `test_utils` default — all supported grants) redeems a device code and
+/// receives an access token attributed to its `client_id`.
+#[tokio::test]
+async fn test_device_grant_redeems_for_client_registered_for_device_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-grant-auth@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "auth", &client.client_id).await;
+
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered client should redeem: {body}"
+    );
+    let token_json: serde_json::Value =
+        serde_json::from_str(&body).expect("token response is JSON");
+    assert!(
+        token_json.get("access_token").is_some(),
+        "access_token must be issued to a client registered for device_code: {body}"
+    );
+}
+
+/// The `grant_types` gate runs before `try_consume_device_auth`, so an
+/// unauthorized client does not burn the single-use device code. Re-authorize
+/// the client for device_code and the *same* device code must then redeem —
+/// proving the rejection was the gate, not code consumption. Mirrors the
+/// fido2-assertion control in `rfc7523.rs`.
+#[tokio::test]
+async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-grant-retry@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    set_grant_types(
+        &state.store,
+        &client.client_id,
+        Some(&["authorization_code"]),
+    )
+    .await;
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "retry", &client.client_id).await;
+
+    // First poll: rejected by the grant_types gate. The code is NOT consumed.
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "gate must reject: {body}");
+
+    // Re-authorize the client for device_code (toggle the gate off).
+    set_grant_types(
+        &state.store,
+        &client.client_id,
+        Some(&["urn:ietf:params:oauth:grant-type:device_code"]),
+    )
+    .await;
+
+    // Second poll on the SAME device code: succeeds, proving it was not burned.
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the same device code must redeem once the client is re-authorized: {body}"
+    );
+    let token_json: serde_json::Value =
+        serde_json::from_str(&body).expect("token response is JSON");
+    assert!(
+        token_json.get("access_token").is_some(),
+        "access_token must be issued after re-authorization: {body}"
+    );
+}
+
+/// A manually-managed client with no declared `grant_types` (`None`) is
+/// treated as not authorized for any grant by `is_authorized_for_grant`, so
+/// the device_code redemption gate must reject it just like
+/// `["authorization_code"]`.
+#[tokio::test]
+async fn test_device_grant_rejects_redemption_for_client_with_no_grant_types() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-grant-none@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    set_grant_types(&state.store, &client.client_id, None).await;
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "none", &client.client_id).await;
+
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "device_code grant must reject a client with no grant_types: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "expected unauthorized_client for a client with no grant_types: {body}"
+    );
+}
+
+/// The built-in CLI flow carries no `client_id`, so `oauth_client` is `None`
+/// and the `grant_types` gate is skipped — redemption must still succeed.
+/// Pins the no-`client_id` happy path against the new gate to guard against a
+/// future regression that moves the check out of the `Some(ref oc)` guard.
+#[tokio::test]
+async fn test_device_grant_no_client_id_builtin_flow_unaffected_by_gate() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-grant-cli@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+
+    // No client_id stored on the device authorization request.
+    let device_code = setup_authorized_device(&state, &user, &auth, "cli").await;
+
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "built-in CLI flow (no client_id) must still issue a token: {body}"
+    );
+    let token_json: serde_json::Value =
+        serde_json::from_str(&body).expect("token response is JSON");
+    assert!(
+        token_json.get("access_token").is_some(),
+        "access_token must be issued for the no-client_id flow: {body}"
+    );
+}
+
+/// Defense-in-depth (RFC 7591 §2): the device-authorization *creation*
+/// endpoint rejects a `client_id` not registered for the device_code grant
+/// before surfacing a usable `user_code`, so the user is never shown an
+/// authorization prompt for a flow the client cannot complete.
+#[tokio::test]
+async fn test_device_code_creation_rejects_client_not_registered_for_device_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-create-unauth@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    set_grant_types(
+        &state.store,
+        &client.client_id,
+        Some(&["authorization_code"]),
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &format!("client_id={}&scope=openid", client.client_id),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "device code creation must reject a client not registered for device_code: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        resp["error"], "unauthorized_client",
+        "creation must return unauthorized_client for an unauthorized client_id: {body}"
+    );
+    assert!(
+        resp.get("device_code").is_none(),
+        "no device_code should be surfaced for an unauthorized client: {body}"
+    );
+}
+
+/// End-to-end: a client registered for device_code creates a device
+/// authorization via `/oauth/device`, the user approves it, and polling
+/// `/oauth/token` returns an access token — verifying the full flow works
+/// alongside the new `grant_types` enforcement at both endpoints.
+#[tokio::test]
+async fn test_device_grant_end_to_end_registered_client_flow() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-e2e@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // 1. Create the device authorization via the HTTP endpoint.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &format!("client_id={}&scope=openid", client.client_id),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create device auth: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let device_code = resp["device_code"]
+        .as_str()
+        .expect("device_code")
+        .to_string();
+
+    // 2. Approve it (look up by the hashed code, the same way the handler does).
+    let request = db::get_device_auth_by_code_hash(&state.store, &sha256_base64url(&device_code))
+        .await
+        .expect("lookup device auth")
+        .expect("device auth exists");
+    crate::db::authorize_device_auth(
+        &state.store,
+        crate::db::AuthorizeDeviceAuthParams {
+            id: &request.id,
+            user_id: &user.id,
+            user_email: &user.email,
+            authenticator_id: &auth,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
+        },
+    )
+    .await
+    .expect("approve device auth");
+
+    // 3. Poll for a token.
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(status, StatusCode::OK, "end-to-end redeem: {body}");
+    let token_json: serde_json::Value =
+        serde_json::from_str(&body).expect("token response is JSON");
+    assert!(
+        token_json.get("access_token").is_some(),
+        "access_token must be issued end-to-end: {body}"
+    );
+}
