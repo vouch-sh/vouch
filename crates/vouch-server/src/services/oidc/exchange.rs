@@ -769,6 +769,13 @@ async fn issue_id_token(
     let audience = ctx.audience.unwrap_or(&issuer);
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
+    // Stamp the arrival instant once and use it for every temporal claim of
+    // this response. The ID token's `iat`/`exp` (built by the claims builder)
+    // and the audit record's `expires_at` both read this same `now`, so the
+    // signed JWT's `exp` and the audit row cannot disagree by the latency
+    // between the two mints — see `arrival.rs` for the contract.
+    let now = arrival.timestamp();
+
     // `hardware_aaguid` and `hd` are session-time snapshots — they reflect the
     // authenticator/org state at session creation and survive later rotations
     // of the user's keys or organization membership.
@@ -776,6 +783,7 @@ async fn issue_id_token(
         .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
         .hd(ctx.org_domain.map(String::from))
         .valid_for_seconds(expires_in)
+        .issued_at(now)
         .build()
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
 
@@ -790,10 +798,10 @@ async fn issue_id_token(
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;
 
-    // Log the exchange for audit (best-effort — failures are non-fatal).
-    // The recorded `expires_at` describes the token just signed, whose `exp`
-    // the claims builder derived from the same arrival instant.
-    let now = arrival.timestamp();
+    // Log the exchange for audit (best-effort — failures are non-fatal). The
+    // audit's `expires_at` is derived from the same `now` (the request's
+    // arrival instant) the claims builder stamped onto the JWT's `exp`, so
+    // the row and the signed token agree on the lifetime of one token.
     let issued_token_hash = hash_token(&id_token);
     let expires_at = i64::try_from(expires_in)
         .ok()
@@ -1277,5 +1285,121 @@ mod tests {
         assert!(debug.contains("Bearer"), "{debug}");
         assert!(debug.contains("3600"), "{debug}");
         assert!(debug.contains("TokenExchangeResult"), "{debug}");
+    }
+
+    // ========================================================================
+    // issue_id_token — arrival anchoring
+    //
+    // Commit addbaecd threaded `arrival` into the audit record's `expires_at`
+    // but left `OidcIdTokenClaimsBuilder::build` on `Timestamp::now()`. The
+    // signed JWT's `exp` and the audit's `expires_at` were stamped from two
+    // different clocks, so the row and the signed token could disagree on
+    // one token's lifetime. The fix stamps both from a single arrival
+    // instant; this test pins that contract by holding `arrival` fixed at a
+    // deterministic past instant and asserting:
+    //   * the ID token's `iat`/`exp` were stamped from `arrival`, not
+    //     `Timestamp::now()` (which would have produced the wall clock at
+    //     `iat`);
+    //   * the audit's `expires_at` equals the ID token's `exp`.
+    // ========================================================================
+
+    /// Decode the middle segment of a JWT into a `serde_json::Value`. Used in
+    /// tests to inspect claims without signature verification.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        use base64::Engine;
+        let mut parts = token.split('.');
+        let _header = parts.next().expect("JWT header segment");
+        let payload = parts.next().expect("JWT payload segment");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64 decode");
+        serde_json::from_slice(&bytes).expect("JSON payload")
+    }
+
+    /// A request for an exchanged ID token is anchored on a single arrival
+    /// instant: the JWT's `iat`/`exp` and the audit's `expires_at` all read
+    /// that instant, so the row and the signed token cannot disagree about
+    /// one token's lifetime.
+    #[tokio::test]
+    async fn test_issue_id_token_anchors_jwt_exp_and_audit_expires_at_on_arrival() {
+        use crate::db::documents::oauth::TokenExchangeDoc;
+        use crate::test_utils::{create_test_user, test_app_state};
+
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "id-token-arrival@example.com").await;
+        // Far below `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s) so the federation
+        // ceiling in `issue_id_token` does not clamp `expires_in`.
+        let expires_in = 60;
+        let arrival_seconds: i64 = 1_700_000_000;
+        let arrival = crate::arrival::ArrivalTime::for_test_second(arrival_seconds);
+
+        let result = issue_id_token(
+            &state,
+            IdTokenContext {
+                user_id: &user.id,
+                email: &user.email,
+                subject_token_hash: "subject-token-hash-test",
+                audience: None,
+                expires_in,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: "token-exchange-client-id",
+            },
+            arrival,
+        )
+        .await
+        .expect("issue_id_token should succeed");
+
+        // The reported `expires_in` must match the requested ceiling because
+        // it is below the federation default.
+        assert_eq!(
+            result.expires_in, expires_in,
+            "the response's expires_in must be the capped lifetime"
+        );
+
+        let id_token = result.access_token.expose_secret();
+        let claims = decode_jwt_payload(id_token);
+        let iat = claims
+            .get("iat")
+            .and_then(|v| v.as_i64())
+            .expect("iat present");
+        let exp = claims
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .expect("exp present");
+
+        // The JWT itself was stamped from `arrival`, not from `Timestamp::now()`.
+        // Before the fix `iat` was the wall clock, ~1_700_000_000 seconds later
+        // than this fixed-past arrival.
+        assert_eq!(
+            iat, arrival_seconds,
+            "ID token iat must be stamped from `arrival`, not an ambient `Timestamp::now()`"
+        );
+        assert_eq!(
+            exp,
+            arrival_seconds + i64::try_from(expires_in).expect("expires_in fits in i64"),
+            "ID token exp must be `arrival.as_second() + expires_in`"
+        );
+
+        // The audit row's `expires_at` must equal the signed JWT's `exp` — the
+        // row records the same lifetime as the token it describes.
+        let issued_token_hash = crate::crypto::hash_token(id_token);
+        let audit_rows = state
+            .store
+            .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+            .await
+            .expect("query token_exchange by subject_user_id");
+        let audit_row = audit_rows
+            .into_iter()
+            .find(|d| d.data.issued_token_hash == issued_token_hash)
+            .expect("a token_exchange audit row for the issued token must exist");
+        assert_eq!(
+            audit_row.data.expires_at.as_second(),
+            exp,
+            "token_exchange audit row expires_at ({}) must equal the issued ID \
+             token's JWT exp ({exp}) — the audit row records the same lifetime \
+             as the signed token, both anchored on `arrival`",
+            audit_row.data.expires_at.as_second(),
+        );
     }
 }

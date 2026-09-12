@@ -213,6 +213,10 @@ fn build_aws_session_tags(
 /// * `pinned_role` - Role ARN to pin the token to via the
 ///   `https://aws.amazon.com/roles` claim; `None` omits the claim (STS then
 ///   accepts the token for any role trusting this issuer)
+/// * `now` - The request's arrival instant, used to stamp the token's
+///   `iat`/`exp`. Passed from the caller so the AWS JWT shares one instant
+///   with the audit record and any sibling credential of the same response —
+///   see [`crate::arrival`] for the contract.
 pub(crate) async fn issue_aws_token(
     issuer: &str,
     session_hours: u64,
@@ -220,6 +224,7 @@ pub(crate) async fn issue_aws_token(
     user_email: &str,
     token: &ValidatedResourceToken,
     pinned_role: Option<&str>,
+    now: jiff::Timestamp,
 ) -> AwsResult<AwsTokenResult> {
     // Token validity matches session duration
     let expires_in = session_hours.saturating_mul(3600);
@@ -238,6 +243,7 @@ pub(crate) async fn issue_aws_token(
         .aws_tags(aws_tags)
         .aws_role(pinned_role)
         .valid_for_seconds(expires_in)
+        .issued_at(now)
         .build()
         .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
 
@@ -322,6 +328,14 @@ mod tests {
     const USER_EMAIL: &str = "user@example.com";
     const TEST_AAGUID: &str = "ee882879-721c-4913-9775-3dfcce97072a";
 
+    /// A deterministic reference instant passed as the `now` parameter to
+    /// `issue_aws_token`, so tests can assert exact `iat`/`exp` values (and
+    /// `iat`/`exp` cannot drift from a sibling audit stamp) rather than a
+    /// window around `Timestamp::now()`. Mirrors `claims::tests::test_now`.
+    fn test_now() -> jiff::Timestamp {
+        jiff::Timestamp::from_second(1_700_000_000).expect("test timestamp in range")
+    }
+
     /// Build a `ValidatedResourceToken` carrying only the federation-snapshot
     /// fields the `issue_*` functions read (`hardware_aaguid`, `org_domain`,
     /// `dpop_source`). The remaining fields are placeholders; a hardware-verified
@@ -359,6 +373,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -383,6 +398,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -421,6 +437,7 @@ mod tests {
                 None,
             ),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -456,6 +473,7 @@ mod tests {
                 Some("claude-code".to_string()),
             ),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -496,6 +514,7 @@ mod tests {
                 None,
             ),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -529,6 +548,7 @@ mod tests {
                 Some("cursor".to_string()),
             ),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -583,6 +603,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -602,6 +623,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -625,6 +647,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             Some(role),
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -648,6 +671,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -669,6 +693,7 @@ mod tests {
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
             None,
+            test_now(),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -677,6 +702,39 @@ mod tests {
         assert_eq!(
             claims["hardware_aaguid"], TEST_AAGUID,
             "hardware_aaguid claim must reflect the supplied snapshot"
+        );
+    }
+
+    /// The `now` parameter to `issue_aws_token` anchors the issued JWT's
+    /// `iat`/`exp`. Commit addbaecd left `OidcIdTokenClaimsBuilder::build` on
+    /// `Timestamp::now()`, so the AWS JWT's `iat`/`exp` would have read the
+    /// wall clock rather than the request's arrival instant. Asserting the
+    /// exact integers against a fixed-past timestamp pins the contract: this
+    /// test fails on the buggy builder because `iat` equals the wall clock,
+    /// not the supplied `now`.
+    #[tokio::test]
+    async fn test_aws_token_iat_exp_anchored_on_now_input() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
+            test_now(),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+        let id_claims = decode_jwt_payload(result.id_token.expose_secret());
+        assert_eq!(
+            id_claims["iat"].as_i64(),
+            Some(1_700_000_000),
+            "iat must be stamped from the `now` parameter, not an ambient `Timestamp::now()`"
+        );
+        assert_eq!(
+            id_claims["exp"].as_i64(),
+            Some(1_700_000_000 + i64::try_from(SESSION_HOURS * 3600).expect("fits")),
+            "exp must be `now.as_second() + session_hours * 3600`"
         );
     }
 }

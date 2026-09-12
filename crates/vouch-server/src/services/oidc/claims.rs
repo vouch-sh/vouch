@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OIDC token claims for cloud provider identity federation.
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use vouch_common::protocol;
 
@@ -169,6 +170,15 @@ pub struct OidcIdTokenClaimsBuilder {
     aws_tags: Option<AwsSessionTags>,
     aws_roles: Option<Vec<String>>,
     valid_for_seconds: u64,
+    /// Reference instant stamped onto `iat` and `exp`. Production callers
+    /// pass the request's [`crate::arrival::ArrivalTime`] instant (via
+    /// [`crate::arrival::ArrivalTime::timestamp`]) so this token's
+    /// `exp`/`iat` share one instant with every other credential in the
+    /// same response — required by `arrival.rs` for request-scoped
+    /// temporal claims. Defaulting this to `Timestamp::now()` here would
+    /// reintroduce the two-clock drift the `disallowed-methods` lint guards
+    /// against, so [`build`](Self::build) rejects an unset `issued_at`.
+    issued_at: Option<Timestamp>,
 }
 
 impl OidcIdTokenClaimsBuilder {
@@ -186,6 +196,7 @@ impl OidcIdTokenClaimsBuilder {
             aws_tags: None,
             aws_roles: None,
             valid_for_seconds: 28800, // 8 hours default
+            issued_at: None,
         }
     }
 
@@ -308,39 +319,64 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Anchor the token's `iat`/`exp` to a specific instant.
+    ///
+    /// Production callers pass the request's `ArrivalTime` instant (via
+    /// [`crate::arrival::ArrivalTime::timestamp`]) so this token's
+    /// `exp`/`iat` share one instant with every other credential in the same
+    /// response — the contract [`crate::arrival`] establishes for
+    /// request-scoped temporal claims. Leaving `issued_at` unset fails
+    /// [`build`](Self::build): the build cannot fall back to an ambient
+    /// `Timestamp::now()` because that reopens the gap the
+    /// `disallowed-methods` lint guards against.
+    #[must_use]
+    pub fn issued_at(mut self, now: Timestamp) -> Self {
+        self.issued_at = Some(now);
+        self
+    }
+
     /// Build the OIDC ID token claims.
     ///
     /// # Errors
     ///
-    /// Returns an error if required fields (issuer, subject, audience) are missing.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "mints the ID token's iat and exp"
-    )]
+    /// Returns an error if required fields (issuer, subject, audience, or
+    /// `issued_at`) are missing. `issued_at` is required because a caller
+    /// that has no reference instant is a request the
+    /// [`crate::arrival`] middleware never stamped, not a relaxed default
+    /// the builder should paper over. The `issuer`/`subject`/`audience`
+    /// checks run before the `issued_at` check so a test asserting
+    /// `MissingField("issuer")` (etc.) is not preempted by the new required
+    /// field.
     pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
-        let now = jiff::Timestamp::now();
+        let iss = self
+            .issuer
+            .ok_or(ClaimsBuildError::MissingField("issuer"))?;
+        let sub = self
+            .subject
+            .clone()
+            .ok_or(ClaimsBuildError::MissingField("subject"))?;
+        let aud = self
+            .audience
+            .ok_or(ClaimsBuildError::MissingField("audience"))?;
+        let email = self
+            .email
+            .or(self.subject)
+            .ok_or(ClaimsBuildError::MissingField("email"))?;
+        let now = self
+            .issued_at
+            .ok_or(ClaimsBuildError::MissingField("issued_at"))?;
         let exp = now
             .as_second()
             .saturating_add(i64::try_from(self.valid_for_seconds).unwrap_or(28800));
 
         Ok(OidcIdTokenClaims {
-            iss: self
-                .issuer
-                .ok_or(ClaimsBuildError::MissingField("issuer"))?,
-            sub: self
-                .subject
-                .clone()
-                .ok_or(ClaimsBuildError::MissingField("subject"))?,
-            aud: self
-                .audience
-                .ok_or(ClaimsBuildError::MissingField("audience"))?,
+            iss,
+            sub,
+            aud,
             exp,
             iat: now.as_second(),
             jti: uuid::Uuid::now_v7().to_string(),
-            email: self
-                .email
-                .or(self.subject)
-                .ok_or(ClaimsBuildError::MissingField("email"))?,
+            email,
             email_verified: true,
             hardware_verified: true,
             hardware_aaguid: self.hardware_aaguid,
@@ -367,6 +403,14 @@ impl Default for OidcIdTokenClaimsBuilder {
 mod tests {
     use super::*;
 
+    /// A deterministic reference instant used by [`issued_at`](OidcIdTokenClaimsBuilder::issued_at)
+    /// so tests can assert exact `iat`/`exp` values rather than a window
+    /// around `Timestamp::now()`. Matches the convention in `arrival.rs`'s
+    /// `for_test_second` boundary tests.
+    fn test_now() -> Timestamp {
+        Timestamp::from_second(1_700_000_000).unwrap()
+    }
+
     #[test]
     fn test_builder_creates_valid_claims() {
         let result = OidcIdTokenClaimsBuilder::new()
@@ -376,6 +420,7 @@ mod tests {
             .email("user@example.com")
             .hardware_aaguid(Some("ee882879-721c-4913-9775-3dfcce97072a".to_string()))
             .valid_for_seconds(3600)
+            .issued_at(test_now())
             .build();
 
         assert!(result.is_ok());
@@ -398,6 +443,7 @@ mod tests {
         let result = OidcIdTokenClaimsBuilder::new()
             .subject("user@example.com")
             .audience("test")
+            .issued_at(test_now())
             .build();
 
         assert!(result.is_err());
@@ -412,6 +458,7 @@ mod tests {
         let result = OidcIdTokenClaimsBuilder::new()
             .issuer("https://vouch.example.com")
             .audience("test")
+            .issued_at(test_now())
             .build();
 
         assert!(result.is_err());
@@ -426,6 +473,7 @@ mod tests {
         let result = OidcIdTokenClaimsBuilder::new()
             .issuer("https://vouch.example.com")
             .subject("user@example.com")
+            .issued_at(test_now())
             .build();
 
         assert!(result.is_err());
@@ -436,11 +484,56 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_requires_issued_at() {
+        // `issued_at` is required: a caller that has no reference instant is a
+        // request the `arrival` middleware never stamped, not a relaxed default
+        // the builder should paper over — see the build() doc comment.
+        let result = OidcIdTokenClaimsBuilder::new()
+            .issuer("https://vouch.example.com")
+            .subject("user@example.com")
+            .audience("test")
+            .build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("issued_at"))
+        ));
+    }
+
+    #[test]
+    fn test_builder_issued_at_anchors_iat_and_exp() {
+        // The `issued_at` reference instant is the value stamped onto `iat`
+        // and (shifted by `valid_for_seconds`) onto `exp`. Asserting the exact
+        // integers prevents a regression where `build()` falls back to an
+        // ambient `Timestamp::now()` and ignores the supplied instant.
+        let claims = OidcIdTokenClaimsBuilder::new()
+            .issuer("https://vouch.example.com")
+            .subject("user@example.com")
+            .audience("test")
+            .valid_for_seconds(3600)
+            .issued_at(test_now())
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            claims.iat, 1_700_000_000,
+            "iat must be stamped from `issued_at`, not an ambient clock"
+        );
+        assert_eq!(
+            claims.exp,
+            1_700_000_000 + 3600,
+            "exp must be `issued_at.as_second() + valid_for_seconds`"
+        );
+    }
+
+    #[test]
     fn test_email_defaults_to_subject() {
         let result = OidcIdTokenClaimsBuilder::new()
             .issuer("https://vouch.example.com")
             .subject("user@example.com")
             .audience("test")
+            .issued_at(test_now())
             .build();
 
         assert!(result.is_ok());
@@ -453,6 +546,7 @@ mod tests {
     fn test_for_aws_uses_issuer_as_audience() {
         let result =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .issued_at(test_now())
                 .build();
 
         assert!(result.is_ok());
@@ -469,10 +563,12 @@ mod tests {
     fn test_jti_is_unique_per_build() {
         let claims1 =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .issued_at(test_now())
                 .build()
                 .unwrap();
         let claims2 =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .issued_at(test_now())
                 .build()
                 .unwrap();
         assert_ne!(claims1.jti, claims2.jti);
@@ -485,6 +581,7 @@ mod tests {
             "user@example.com",
             "kubernetes",
         )
+        .issued_at(test_now())
         .build();
 
         assert!(result.is_ok());
@@ -506,6 +603,7 @@ mod tests {
             "user@example.com",
             "my-cluster",
         )
+        .issued_at(test_now())
         .build();
 
         assert!(result.is_ok());
@@ -529,6 +627,7 @@ mod tests {
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
                 .hd(Some("example.com".to_string()))
                 .aws_tags(aws_tags)
+                .issued_at(test_now())
                 .build()
                 .unwrap();
 
@@ -561,6 +660,7 @@ mod tests {
     fn test_aws_tags_omitted_when_none() {
         let claims =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .issued_at(test_now())
                 .build()
                 .unwrap();
 
@@ -576,6 +676,7 @@ mod tests {
         let claims =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
                 .aws_role(Some("arn:aws:iam::123456789012:role/MyRole"))
+                .issued_at(test_now())
                 .build()
                 .unwrap();
 
@@ -591,6 +692,7 @@ mod tests {
         let claims =
             OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
                 .aws_role(None)
+                .issued_at(test_now())
                 .build()
                 .unwrap();
 

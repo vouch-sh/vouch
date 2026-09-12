@@ -96,6 +96,46 @@ async fn test_oidc_id_token_required_claims() {
     assert!(claims.get("iat").is_some(), "ID token must have iat");
 }
 
+/// The ID token's `exp` must not exceed the access token's `exp` for the same
+/// authorization-code token response. Commit addbaecd anchored the access
+/// token's `exp` on `ArrivalTime` but left the ID token's `exp` on
+/// `Timestamp::now()`, so the two reads lived on different clocks and the ID
+/// token's `exp` could drift past the access token's `exp` by the latency
+/// between the two mints. With the fix both temporal claims share one arrival
+/// instant and have the same lifetime, so the two `exp` values agree.
+#[tokio::test]
+async fn test_oidc_auth_code_id_token_exp_not_after_access_token_exp() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "id-vs-access@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let access_claims = decode_jwt_payload(&access_token);
+    let id_claims = decode_jwt_payload(&id_token);
+    let access_exp = access_claims["exp"]
+        .as_i64()
+        .expect("access token exp present");
+    let id_exp = id_claims["exp"].as_i64().expect("ID token exp present");
+
+    assert!(
+        id_exp <= access_exp,
+        "ID token exp ({id_exp}) must not exceed the access token exp ({access_exp}) \
+         for one token response — both are anchored on the request's arrival"
+    );
+    // Both derive from the same `arrival.as_second() + expires_in`, so they
+    // must be exactly equal (the access token route has no separate round
+    // trip that would shift itself relative to arrival).
+    assert_eq!(
+        id_exp, access_exp,
+        "ID token exp and access token exp should agree exactly — both derived \
+         from the same arrival instant and the same expires_in"
+    );
+}
+
 #[tokio::test]
 async fn test_oidc_id_token_aud_contains_client_id() {
     // OIDC Core Section 2: Audience must include the requesting client_id.
