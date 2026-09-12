@@ -9,9 +9,9 @@
 use super::*;
 use crate::test_utils::test_arrival;
 use crate::test_utils::{
-    TestSessionSpec, create_test_authenticator, create_test_session_with, create_test_user,
-    http_delete_full, http_get_full, http_post_json, test_app, test_app_state, test_config,
-    test_domain,
+    TestSessionSpec, build_test_app_state, create_test_authenticator, create_test_session_with,
+    create_test_user, http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
+    test_config, test_domain,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -688,6 +688,7 @@ async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
         &not_before,
         &not_on_or_after,
         Some(request_id),
+        Some(&not_on_or_after),
     );
     let saml_response = B64.encode(xml.as_bytes());
 
@@ -1211,6 +1212,192 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
     assert!(
         logins.is_empty(),
         "an IdP sign-in that still owes an assertion is not a completed login"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error() {
+    // Regression for the `unwrap_or_default()` swallow site. A transient DB
+    // read error on `get_authenticators_for_user` must NOT be treated as "user
+    // has zero authenticators": a returning CLI user would otherwise be
+    // misrouted to `/enroll/keys` (register a new key) instead of `/login`
+    // (assert with an existing key), and the session would be minted with
+    // `authenticator_id = None` / `hardware_aaguid = None`, silently
+    // degrading its authenticator binding. The fix fails closed, mirroring
+    // the adjacent `org_domain` block: the callback returns the
+    // `enroll-error-session-failed` error page and sets no session cookie.
+    //
+    // `set_find_remaining_successes(0)` faults the very next
+    // `DocumentStore::find_all`. The setup helpers and `enroll_user_with_org`
+    // use only point lookups (`store.get`/`find_one`) and writes, never
+    // `find_all`, so the budget survives setup and is consumed only by the
+    // authenticator read inside `complete_enrollment_after_identity` — the
+    // sole `find_all` in that handler. Under the bug the read would be
+    // swallowed and the request would proceed to a `303 See Other` to
+    // `/enroll/keys` with a session cookie; under the fix the error page
+    // renders (200 OK, no redirect, no cookie).
+    let state = build_test_app_state(Vec::new(), |store| {
+        store.set_find_remaining_successes(0);
+    })
+    .await;
+    let user = create_test_user(&state.store, "cli-returning-dberr@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code_hash = "cli-returning-dberr-code-hash";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let device_auth_id = crate::db::create_device_auth_request(
+        &state.store,
+        device_code_hash,
+        "CLI-DBERR",
+        None,
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "cli-returning-dberr-state", Some(&device_auth_id))
+            .await;
+
+    let identity = IdentityResult {
+        email: "cli-returning-dberr@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    // Error page renders 200 OK (not 303 SEE_OTHER), with no redirect and no
+    // session cookie — under the bug this would be a redirect to
+    // `/enroll/keys` carrying a freshly minted session cookie.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "authenticator read error must fail closed with the error page, not a redirect"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect may be issued when the authenticator read fails"
+    );
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "a failed callback must not mint a session cookie with a degraded authenticator binding"
+    );
+
+    // The waiting device authorization is untouched: the IdP sign-in alone
+    // never releases the CLI, and a fail-closed read must not advance the
+    // row either.
+    let request = crate::db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+        .await
+        .expect("device auth lookup")
+        .expect("device auth exists");
+    assert!(
+        matches!(request.state, crate::db::DeviceAuthState::Pending),
+        "device auth must remain Pending when the callback fails closed"
+    );
+
+    // No spurious login/approval audit events: under the bug a returning
+    // user's direct-browser LoginSuccess would be skipped silently, but in
+    // the CLI flow nothing should be recorded at all from the failed read.
+    let approvals = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        approvals.is_empty(),
+        "no approval may be recorded when the callback fails closed"
+    );
+    let logins = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        logins.is_empty(),
+        "no login_success may be recorded when the callback fails closed"
+    );
+}
+
+#[tokio::test]
+async fn test_direct_browser_returning_user_fails_closed_on_authenticator_read_error() {
+    // Direct-browser sign-in by a returning user (no device_auth_id in the
+    // OIDC state). The authenticator read populates the session's
+    // authenticator binding and gates the `LoginSuccess` audit event (the
+    // `else if authenticator_id.is_some()` branch). A transient DB read
+    // error must fail closed rather than silently minting a session with
+    // `authenticator_id = None` — which would skip the returning user's
+    // `LoginSuccess` event (logging it as a first-time enrollee would be)
+    // and redirect to `/enroll/keys`. `set_find_remaining_successes(0)`
+    // faults the next `find_all`, which is the authenticator read; every
+    // other step in the path uses point lookups or writes.
+    let state = build_test_app_state(Vec::new(), |store| {
+        store.set_find_remaining_successes(0);
+    })
+    .await;
+    let user = create_test_user(&state.store, "direct-returning-dberr@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    // No device_auth_id: this is a direct browser sign-in, not a CLI flow.
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "direct-returning-dberr-state", None).await;
+
+    let identity = IdentityResult {
+        email: "direct-returning-dberr@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "authenticator read error must fail closed with the error page, not a redirect"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect may be issued when the authenticator read fails"
+    );
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "a failed callback must not mint a session cookie with a degraded authenticator binding"
+    );
+
+    // A returning user's direct-browser sign-in records `LoginSuccess`
+    // only when the authenticator read succeeds (the
+    // `else if authenticator_id.is_some()` branch). Under the bug the read
+    // would be swallowed to `None`, skipping the event AND redirecting to
+    // `/enroll/keys`; under the fix the callback fails closed before the
+    // branch, so nothing is recorded either way — but crucially no
+    // session is minted. Assert no spurious login is logged.
+    let logins = audit_events_for(&state, "login_success", &user.id).await;
+    assert!(
+        logins.is_empty(),
+        "no login_success may be recorded when the callback fails closed"
     );
 }
 

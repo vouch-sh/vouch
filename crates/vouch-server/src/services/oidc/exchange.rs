@@ -433,12 +433,45 @@ pub(crate) async fn exchange_token(
                 "User account is deactivated",
             ));
         }
+        // Temporal policy gate for the actor principal: evaluate only
+        // `logout_invalidates_exchange`, not the full `evaluate_exchange_policies`
+        // set. The other ExchangeToken policies reason about the *request*
+        // (IP consistency, step-up recency) or the *subject's* history (rate
+        // limit), so applying them to the actor would ban cross-IP delegations
+        // and require the actor to have logged in within 15m. Only
+        // `logout_invalidates_exchange` — "a token issued before logout being
+        // exchanged for credentials" — maps onto the actor, closing the
+        // temporal half of #550 that the structural `user.active` mirroring
+        // left open. A browser-only logout records `Logout` but deletes only
+        // the cookie session row, so the actor's access-token row — and the
+        // `Logout` audit event — survive `get_session_by_token_hash` and the
+        // `active` check.
+        if let Some(ref actor_org_id) = actor_user.org_id {
+            crate::services::policy::evaluate_actor_logout_policy(
+                state,
+                actor_org_id,
+                &actor_user.id,
+                &actor_user.email,
+                arrival,
+            )
+            .await
+            // RFC 8693 §2.2.2: an actor token "unacceptable based on policy"
+            // MUST be reported with the `invalid_request` error code. The
+            // policy engine answers access_denied, so remap here, preserving
+            // the policy name and remediation in the description.
+            .map_err(|e| match e {
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::AccessDenied,
+                    description,
+                } => ServiceError::oauth(OAuthErrorCode::InvalidRequest, description),
+                other => other,
+            })?;
+        }
         let actor_user_id = actor_user.id.clone();
         let actor_email = actor_decoded
             .email()
             .map(str::to_string)
             .unwrap_or(actor_user.email);
-
         // Preserve the existing actor chain from the subject token (if any)
         // to correctly track multi-hop delegation. The new actor wraps the
         // existing chain from the subject token's `act` claim.

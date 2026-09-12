@@ -144,14 +144,29 @@ pub(crate) async fn create_application_form(
         );
     }
 
-    // All input validated — now fetch org_id from DB (only needed for org-scoped apps).
-    // A lookup failure must not fall through to `None`: for an
-    // organization-scoped application that persists a NULL org_id, creating an
-    // app detached from the org that should own it.
-    let user_org_id = if auth.has_org {
+    // All input validated — now fetch org_id from DB. Only organization-scoped
+    // apps need it, and a missing user or missing `org_id` must reject rather
+    // than fall through to `None`: an organization-scoped application
+    // persisted with a NULL `org_id` is detached from its owning org and
+    // unmanageable (every management endpoint gates on `client.user_id ==
+    // caller`, and a concurrent `delete_user` between the extractor's
+    // `load_active_user` read and this second `get_user_by_id` read is the one
+    // path that returns `Ok(None)` here). Mirrors `load_active_user_for_scope`
+    // in the JSON API path, which makes the existence and org-membership
+    // decisions on the same load the `org_id` comes from.
+    let user_org_id = if access_scope == AccessScope::Organization {
         match db::get_user_by_id(&state.store, user_id).await {
-            Ok(Some(user)) => user.org_id,
-            Ok(None) => None,
+            Ok(Some(user)) if user.org_id.is_some() => user.org_id,
+            Ok(Some(_)) | Ok(None) => {
+                tracing::error!(
+                    "User {user_id} missing or has no org_id for org-scoped app creation"
+                );
+                return error_page(
+                    Tr::new("apps-error-title-error"),
+                    Tr::new("apps-error-create-failed"),
+                    "/applications/new",
+                );
+            }
             Err(e) => {
                 tracing::error!("Failed to load user {user_id} for app org scoping: {e}");
                 return error_page(
@@ -165,11 +180,10 @@ pub(crate) async fn create_application_form(
         None
     };
 
-    let org_id = if access_scope == AccessScope::Organization {
-        user_org_id.as_deref()
-    } else {
-        None
-    };
+    // `user_org_id` is `Some` only for organization-scoped apps (and is
+    // guaranteed non-`None` there by the rejection above), so `as_deref()`
+    // yields the org for org-scoped apps and `None` otherwise.
+    let org_id = user_org_id.as_deref();
 
     // Create the application with FAPI settings included at creation time
     let (client, client_id) = match db::create_oauth_client(
@@ -402,13 +416,25 @@ pub(crate) async fn update_application_form(
         );
     }
 
-    // Get user's org_id for org-scoped apps. A lookup failure must not fall
-    // through to `None`: for an organization-scoped application that persists
-    // a NULL org_id, silently detaching it from the org that owns it.
-    let user_org_id = if auth.has_org {
+    // Get the user's org_id for org-scoped apps. Only organization-scoped
+    // updates need it, and a missing user or missing `org_id` must reject
+    // rather than fall through to `None`: a NULL `org_id` would silently
+    // detach an existing org-scoped app from its owning org — and for a
+    // concurrent `delete_user` between the extractor's `load_active_user` read
+    // and this second `get_user_by_id` read, that is the only path that
+    // returns `Ok(None)` here. Mirrors the create path and
+    // `load_active_user_for_scope` in the JSON API path, which makes the
+    // existence and org-membership decisions on the same load the `org_id`
+    // comes from.
+    let user_org_id = if access_scope == Some(AccessScope::Organization) {
         match db::get_user_by_id(&state.store, user_id).await {
-            Ok(Some(user)) => user.org_id,
-            Ok(None) => None,
+            Ok(Some(user)) if user.org_id.is_some() => user.org_id,
+            Ok(Some(_)) | Ok(None) => {
+                tracing::error!(
+                    "User {user_id} missing or has no org_id for org-scoped app update"
+                );
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
             Err(e) => {
                 tracing::error!("Failed to load user {user_id} for app org scoping: {e}");
                 return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -418,12 +444,10 @@ pub(crate) async fn update_application_form(
         None
     };
 
-    // Set org_id only for organization-scoped apps
-    let org_id = if access_scope == Some(AccessScope::Organization) {
-        user_org_id.as_deref()
-    } else {
-        None
-    };
+    // `user_org_id` is `Some` only for organization-scoped updates (and is
+    // guaranteed non-`None` there by the rejection above), so `as_deref()`
+    // yields the org for org-scoped updates and `None` otherwise.
+    let org_id = user_org_id.as_deref();
 
     // FAPI rules that depend on the existing client record
     if let Err(e) = validate_update_fapi(&validated, &client) {
@@ -744,8 +768,12 @@ pub(crate) async fn delete_secret_form(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use axum::http::StatusCode;
 
+    use crate::db::store::GetUserByIdTestHook;
     use crate::test_utils::*;
 
     // Web handlers use Path<String> (not ValidPath<ValidUuid>) so that invalid
@@ -1429,6 +1457,391 @@ mod tests {
             secrets.len(),
             2,
             "the new secret row must be persisted alongside the seeded one: {secrets:?}"
+        );
+    }
+
+    // ========================================================================
+    // Org-scoped app creation: the owner's `org_id` must come from the same
+    // `get_user_by_id` load the existence decision is made on. A concurrent
+    // `delete_user` between the extractor's `load_active_user` read and the
+    // handler's second `get_user_by_id` read used to let `Ok(None)` fall
+    // through to `None`, persisting an organization-scoped client with a NULL
+    // `org_id` — detached from its owning org and permanently unmanageable
+    // (every management endpoint gates on `client.user_id == caller`, and the
+    // owner is gone). For a confidential client the secret kept minting
+    // `client_credentials` tokens that introspection reported `active: true`.
+    // ========================================================================
+
+    /// The `get_user_by_id_test_hook` is inactive while the target user id is
+    /// unset, so the `get_user_by_id` calls made by `create_test_user_in_org`
+    /// and `create_test_session_with`'s `resolve_session_snapshot` during
+    /// setup run for real and never short-circuit. Once the test sets the
+    /// target, the hook forces `Ok(None)` on every subsequent read for that
+    /// user after the first — the first being the `SignedInSession`
+    /// extractor's `load_active_user`, which must still find the user and
+    /// let the request through to the handler.
+    fn install_user_vanish_hook(
+        target: Arc<Mutex<Option<String>>>,
+    ) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: GetUserByIdTestHook = Arc::new(move |uid: &str| {
+            let guard = target.lock().expect("hook target lock poisoned");
+            if guard.as_deref() != Some(uid) {
+                return false;
+            }
+            drop(guard);
+            // 0 = extractor's `load_active_user` (must read the real user);
+            // >=1 = the handler's second read and any later read — force the
+            // "user vanished mid-request" outcome (`Ok(None)`) there.
+            let n = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            n >= 1
+        });
+        (calls, hook)
+    }
+
+    /// Regression: creating an organization-scoped OAuth application while the
+    /// owning user is deleted mid-request must be rejected — not persisted
+    /// with a NULL `org_id`. The forced `Ok(None)` lands on the handler's
+    /// read (the 2nd `get_user_by_id` for the user; the 1st is the
+    /// extractor's `load_active_user`), and the post-request call count must
+    /// be exactly 2 to prove the rejection came from the handler, not a
+    /// too-early fire that the extractor caught.
+    #[tokio::test]
+    async fn test_web_create_org_scoped_rejects_when_user_vanishes_mid_request() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_user_vanish_hook(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_user_by_id_test_hook(hook);
+        })
+        .await;
+
+        let org = create_test_org(&state.store, "race-create.example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "race-create@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        // Activate the hook only now — every `get_user_by_id` during setup
+        // ran with the target unset and so was a no-op.
+        *target.lock().expect("activate hook") = Some(user.id.clone());
+
+        // Submit a confidential, organization-scoped application. The bug
+        // minted and rendered a `vouch_` secret here and persisted a client
+        // with `org_id = NULL`.
+        let form_body = "name=Zombie+Guard&application_type=web&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&access_scope=organization";
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/new",
+            form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "no client secret should be minted when the owner vanishes mid-request: {status} {body}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expected exactly two get_user_by_id calls (extractor + handler); \
+             the forced Ok(None) must land on the handler's read, got {status} {body}"
+        );
+        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+            .await
+            .expect("db query ok");
+        assert!(
+            clients.is_empty(),
+            "no org-scoped client must be persisted when the owner vanishes mid-request, got {clients:?}"
+        );
+    }
+
+    /// No regression: an organization-scoped create whose owner is present
+    /// must still succeed and persist the client attached to the owner's org
+    /// (a non-NULL `org_id`).
+    #[tokio::test]
+    async fn test_web_create_org_scoped_succeeds_and_persists_org_id() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "org-create-happy.example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "org-create@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        let form_body = "name=Tethered+App&application_type=web&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&access_scope=organization";
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/new",
+            form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "happy-path org create should succeed: {status}: {body}"
+        );
+        assert!(
+            body.contains("vouch_"),
+            "the freshly minted secret should render on success: {body}"
+        );
+
+        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            clients.len(),
+            1,
+            "exactly one client should be persisted: {clients:?}"
+        );
+        let client = clients.first().expect("exactly one client asserted above");
+        assert_eq!(client.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(
+            client.org_id.as_deref(),
+            Some(org.id.as_str()),
+            "the client must be attached to the owner's org, not NULL: {client:?}"
+        );
+    }
+
+    /// Regression: updating an existing organization-scoped application while
+    /// the owner is deleted mid-request must reject (500) and leave the
+    /// client's `org_id` attached to its org. The bug wiped a non-NULL
+    /// `org_id` to NULL on this path.
+    #[tokio::test]
+    async fn test_web_update_org_scoped_rejects_when_user_vanishes_mid_request() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_user_vanish_hook(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_user_by_id_test_hook(hook);
+        })
+        .await;
+
+        let org = create_test_org(&state.store, "race-update.example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "race-update@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        // Seed an existing org-scoped client owned by the user, attached to
+        // the org — the record the buggy update wiped to `org_id = NULL`.
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                name: "Tethered".to_string(),
+                access_scope: crate::db::AccessScope::Organization,
+                org_id: Some(org.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        *target.lock().expect("activate hook") = Some(user.id.clone());
+
+        let form_body = "name=Tethered+Renamed&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&access_scope=organization";
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "org-scoped update with a vanished owner must reject with 500, got {status}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the forced Ok(None) must land on the handler's read (extractor + handler = 2 calls)"
+        );
+
+        // The client must be untouched: name unchanged and still attached
+        // to the org (the bug wiped `org_id` to NULL here).
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(
+            record.name, "Tethered",
+            "a rejected update must not rename the client"
+        );
+        assert_eq!(record.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(
+            record.org_id.as_deref(),
+            Some(org.id.as_str()),
+            "a rejected update must not wipe the client's org_id to NULL: {record:?}"
+        );
+    }
+
+    /// No regression: an organization-scoped update whose owner is present
+    /// must still apply (rename) and keep the client attached to its org.
+    #[tokio::test]
+    async fn test_web_update_org_scoped_succeeds_and_preserves_org_id() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "org-update-happy.example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "org-update@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                name: "Tethered".to_string(),
+                access_scope: crate::db::AccessScope::Organization,
+                org_id: Some(org.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let form_body = "name=Tethered+Renamed&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&access_scope=organization";
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "happy-path org update should redirect: {status}"
+        );
+
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(record.name, "Tethered Renamed", "the rename must apply");
+        assert_eq!(record.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(
+            record.org_id.as_deref(),
+            Some(org.id.as_str()),
+            "the update must keep the client attached to its org: {record:?}"
+        );
+    }
+
+    /// Negative control: with the vanish hook installed, a *personal*-scoped
+    /// create must still succeed — the fix only reads the user for
+    /// organization-scoped apps (`if access_scope == AccessScope::Organization`),
+    /// so the handler never issues the second `get_user_by_id` for a personal
+    /// app, the hook never fires past the extractor, and the create proceeds
+    /// normally. Pins that the gating is correct and the hook does not
+    /// over-fire on the personal path.
+    #[tokio::test]
+    async fn test_web_create_personal_scoped_unaffected_by_vanish_hook() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_user_vanish_hook(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_user_by_id_test_hook(hook);
+        })
+        .await;
+
+        // A user with no org: personal scope is the only valid choice.
+        let user = create_test_user(&state.store, "personal-hook@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        *target.lock().expect("activate hook") = Some(user.id.clone());
+
+        let form_body = "name=Lone+App&application_type=web&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&access_scope=personal";
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/new",
+            form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "personal create must succeed with the vanish hook installed: {status}: {body}"
+        );
+        assert!(
+            body.contains("vouch_"),
+            "the personal create must mint and render a secret: {body}"
+        );
+        // Only the extractor's `load_active_user` calls `get_user_by_id` for
+        // a personal create — the handler does not. The hook's counter must
+        // show exactly one call, so the hook never forced `Ok(None)`.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "personal create must not trigger the handler's second get_user_by_id: {body}"
+        );
+
+        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            clients.len(),
+            1,
+            "the personal client must be persisted: {clients:?}"
+        );
+        let client = clients.first().expect("one personal client asserted above");
+        assert_eq!(client.access_scope, crate::db::AccessScope::Personal);
+        assert!(
+            client.org_id.is_none(),
+            "a personal client has no org_id, not a NULL-by-race org_id: {client:?}"
         );
     }
 }

@@ -2030,3 +2030,182 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
     // that the legitimate issuance is untouched).
     assert!(!first_token.is_empty());
 }
+
+// ========================================================================
+// RFC 6749 §5.2 `unauthorized_client` — grant_types enforcement across the
+// token-exchange (RFC 8693) and fido2-assertion grants.
+//
+// The `client_credentials` handler rejects a client whose registered
+// `grant_types` does not include `client_credentials`. `handle_token_exchange_grant`
+// and `handle_fido2_assertion_grant` authenticate the client too, and must
+// perform the equivalent check — otherwise a client registered for
+// `authorization_code` only (the dynamic-registration default when `grant_types`
+// is omitted, `registration.rs`) could exercise those grants. These tests pin
+// the fix: a client restricted to `["authorization_code"]` MUST receive HTTP 401
+// `unauthorized_client` for both grants, while the registered `authorization_code`
+// grant keeps working (no regression).
+// ========================================================================
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_token_exchange_for_unauthorized_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-te@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    // Restrict the client to authorization_code only — the dynamic-registration
+    // default when `grant_types` is omitted. token-exchange is NOT authorized.
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Seed an access token via the registered authorization_code grant (which
+    // is not gated by `is_authorized_for_grant`) to use as the exchange
+    // `subject_token`. This also proves the registered grant still works.
+    let seed_code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let seed_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let seed_body = format!(
+        "grant_type=authorization_code&code={seed_code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={seed_assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (seed_status, seed_resp) = http_post_form(&app, "/oauth/token", &seed_body, &[]).await;
+    assert_eq!(
+        seed_status,
+        StatusCode::OK,
+        "seed authorization_code exchange must succeed: {seed_resp}"
+    );
+    let seed_json: serde_json::Value = serde_json::from_str(&seed_resp).expect("Valid JSON");
+    let subject_token = seed_json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Attempt token-exchange with the authenticated-but-unauthorized client.
+    // RFC 8693 §2.2.2 routes errors to RFC 6749 §5.2, whose `unauthorized_client`
+    // is exactly "the authenticated client is not authorized to use this grant type."
+    let exchange_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let exchange_body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={exchange_assertion}"
+    );
+    let (exchange_status, exchange_resp) =
+        http_post_form(&app, "/oauth/token", &exchange_body, &[]).await;
+    assert_eq!(
+        exchange_status,
+        StatusCode::UNAUTHORIZED,
+        "token_exchange must be rejected for a client not registered for it: {exchange_resp}"
+    );
+    let exchange_json: serde_json::Value =
+        serde_json::from_str(&exchange_resp).expect("Valid JSON");
+    assert_eq!(
+        exchange_json["error"], "unauthorized_client",
+        "token_exchange must return unauthorized_client: {exchange_resp}"
+    );
+
+    // Control: client_credentials is enforced the same way — the same
+    // restricted client must also be rejected there.
+    let cc_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let cc_body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={cc_assertion}"
+    );
+    let (cc_status, cc_resp) = http_post_form(&app, "/oauth/token", &cc_body, &[]).await;
+    assert_eq!(
+        cc_status,
+        StatusCode::UNAUTHORIZED,
+        "client_credentials should reject a client not registered for it: {cc_resp}"
+    );
+    let cc_json: serde_json::Value = serde_json::from_str(&cc_resp).expect("Valid JSON");
+    assert_eq!(
+        cc_json["error"], "unauthorized_client",
+        "client_credentials should return unauthorized_client: {cc_resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_fido2_assertion_for_unauthorized_client() {
+    // The fido2-assertion grant requires a real WebAuthn signature, which unit
+    // tests cannot fabricate. The point of THIS test is solely the grant_types
+    // authorization gate, which runs AFTER client auth but BEFORE the WebAuthn
+    // assertion is examined — so a garbage assertion never reaches
+    // `exchange_fido2_assertion`. A client restricted to `["authorization_code"]`
+    // MUST be rejected with `unauthorized_client` (not `invalid_grant`).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-fido2@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let client_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    // Garbage FIDO2 assertion — irrelevant: the grant_types gate rejects first.
+    let garbage_assertion = URL_SAFE_NO_PAD.encode(b"{}");
+
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+         &assertion={garbage_assertion}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={client_assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "fido2_assertion must be rejected for a client not registered for it: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "fido2_assertion must return unauthorized_client, not invalid_grant: {resp}"
+    );
+
+    // Control: register the client for fido2_assertion and the same request
+    // MUST pass the grant_types gate (then fail on the garbage assertion with
+    // `invalid_grant`), proving the gate — not client auth — is what rejected.
+    enable_grant_types(
+        &state.store,
+        &client.client_id,
+        &["urn:ietf:params:oauth:grant-type:fido2-assertion"],
+    )
+    .await;
+    let client_assertion_2 =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body_2 = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+         &assertion={garbage_assertion}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={client_assertion_2}"
+    );
+    let (status_2, resp_2) = http_post_form(&app, "/oauth/token", &body_2, &[]).await;
+    assert_ne!(
+        status_2,
+        StatusCode::UNAUTHORIZED,
+        "fido2_assertion with the grant registered must pass the grant_types gate: {resp_2}"
+    );
+    let json_2: serde_json::Value = serde_json::from_str(&resp_2).expect("Valid JSON");
+    assert_ne!(
+        json_2["error"], "unauthorized_client",
+        "authorized fido2 client must not be rejected as unauthorized_client: {resp_2}"
+    );
+}

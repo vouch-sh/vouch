@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
-use crate::crypto::webauthn_verify::AuthTime;
+use crate::crypto::webauthn_verify::{self, AuthTime};
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType, Domain};
 use crate::impl_template_response;
@@ -951,10 +951,28 @@ pub(crate) async fn complete_enrollment_after_identity(
         }
     };
 
-    // Get authenticator (if any) for session claims
-    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
-        .await
-        .unwrap_or_default();
+    // Get authenticator (if any) for session claims. Fail closed: a transient
+    // DB error here is indistinguishable from "user has zero authenticators"
+    // under a `.unwrap_or_default()`, yet it silently degrades the session's
+    // authenticator binding (`authenticator_id`, `hardware_aaguid`) and
+    // misroutes a returning CLI user to `/enroll/keys` instead of `/login` —
+    // the same hazard the `org_domain` block below fails closed for, and every
+    // other production call site of `get_authenticators_for_user` propagates
+    // the error. Read paths are not wrapped in `with_dsql_retry!`, so the `Err`
+    // escapes with no retry; log and return the session-failed error page so
+    // the user restarts rather than receiving a silently degraded session.
+    let existing_auths = match db::get_authenticators_for_user(&state.store, &user.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to read authenticators for session claims: {e}");
+            return ErrorTemplate {
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-failed").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
     let existing_authenticator = existing_auths.first();
     let authenticator_id = existing_authenticator.map(|a| a.id.clone());
     let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
@@ -1529,6 +1547,29 @@ pub(crate) async fn browser_register_complete(
         &state.config().allowed_aaguids,
     )?;
 
+    // Extract the verified `authData.signCount` (WebAuthn L2 §7.1 step 23)
+    // so the credential's stored signature counter is initialized to it
+    // rather than a hardcoded `0`. `finish_passkey_registration` below
+    // yields a `Passkey` whose `webauthn-rs` 0.5.5 API does not surface the
+    // registration counter (the `cred` field is `pub(crate)`), so the
+    // server re-parses the same authData bytes the verifier consumes
+    // below. This performs no cryptographic work — only a CBOR+authData
+    // read of the 4-byte big-endian signCount at byte offset 33 — so a
+    // malformed attestation that fails here would also fail
+    // `finish_passkey_registration`; the extracted value is used only
+    // after that verification succeeds, in `create_authenticator` below.
+    let sign_count = webauthn_verify::extract_sign_count(req.attestation_object.as_bytes())
+        .map_err(|e| {
+            tracing::warn!("Failed to extract signCount from registration authData: {e}");
+            ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_attestation",
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
+            )
+        })?;
+
     // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
     let credential_id_bytes = req.credential_id.as_bytes().to_vec();
@@ -1605,6 +1646,11 @@ pub(crate) async fn browser_register_complete(
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
             attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23), re-parsed
+            // above from the same attestation object
+            // `finish_passkey_registration` verified.
+            counter: sign_count,
         },
     )
     .await?;

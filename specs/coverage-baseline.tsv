@@ -851,8 +851,6 @@ rfc4253#9#9feb5824	MUST NOT	Either party MAY initiate the re-exchange, but roles
 rfc4253#9#e6684f2b	SHOULD	It is RECOMMENDED that the keys be changed after each gigabyte of transmitted data or after each hour of connection time, whichever comes sooner.
 rfc4514#1#b5e187ce	SHOULD	Section 2 details the RECOMMENDED algorithm for converting a DN from its ASN.1 structured representation to a string.
 rfc4514#1#f7d75506	MUST	While other documents may define other algorithms for converting a DN from its ASN.1 structured representation to a string, all algorithms MUST produce strings 
-rfc4514#2#da69d549	MUST	Other documents may describe other algorithms for converting a distinguished name to a string, but only strings that conform to the grammar defined in Section 3
-rfc4514#2#fe9bbbfc	SHOULD	This section defines the RECOMMENDED algorithm for converting a distinguished name from an ASN.1-structured representation to a UTF-8 [RFC3629] encoded Unicode 
 rfc4514#2.3#eb364a2b	SHOULD	However, implementations SHOULD provide a mechanism to allow their knowledge of registered short names to be updated.
 rfc4514#3#10bc3561	MUST	Implementations MUST recognize AttributeType name strings (descriptors) listed in the following table, but MAY recognize other name strings.
 rfc4514#3#b8ea25a2	SHOULD	However, as there is no requirement that alternative DN string representations be recognized (and, if so, how), implementations SHOULD only generate DN strings 
@@ -1776,8 +1774,6 @@ rfc7643#10.3.1#8bf90464	MUST	An RFC is REQUIRED for the registration of new valu
 rfc7643#10.3.1#d175cedd	MUST	An RFC specifying one or more new schema URIs MUST include the completed registration templates, which MAY be expanded with additional information.
 rfc7643#10.3.1#ebe74f17	MUST	Registration of new "core" schemas (e.g., in the namespace "urn:ietf:params:scim:schemas:core") and "API" schemas (e.g., in the namespace "urn:ietf:params:scim:
 rfc7643#10.3.1#f8744a01	MUST	An RFC is also REQUIRED for registration of SCIM schema URIs that modify SCIM schema previously documented in an existing RFC.
-rfc7643#2.1#1997f848	MUST	Attribute names MUST conform to the following ABNF rules:
-rfc7643#2.1#43bb637c	MUST	SCIM resources are represented in JSON [RFC7159] format and MUST specify schema via the "schemas" attribute per Section 3.
 rfc7643#2.3#601b7094	SHOULD NOT	SCIM extensions SHOULD NOT introduce new data types.
 rfc7643#2.3.4#ca7ec281	MUST NOT	The JSON format is defined in Section 6 of [RFC7159], with the additional constraint that the value MUST NOT contain fractional or exponent parts.
 rfc7643#2.3.5#8fd469d8	MUST	The attribute value MUST be encoded as a valid xsd:dateTime as specified in Section 3.3.7 of [XML-Schema] and MUST include both a date and a time.
@@ -1873,9 +1869,6 @@ rfc7644#3.1#03d52a21	SHOULD NOT	Similarly, a SCIM client SHOULD NOT expect a ser
 rfc7644#3.1#89b119b9	MUST	SCIM responses SHALL reflect resource state as interpreted by the SCIM service provider.
 rfc7644#3.1#bebc5fa9	MUST	As with a SCIM resource, a SCIM message is a JSON object [RFC7159] that contains a "schemas" attribute with a URI whose namespace prefix MUST begin with "urn:ie
 rfc7644#3.1#d032bc2d	MUST NOT	As SCIM protocol messages are fixed and defined by SCIM specifications and registered extensions, SCIM message schemas using the above prefix URN SHALL NOT be d
-rfc7644#3.10#b569e446	SHOULD	Clients MAY omit core schema attribute URN prefixes but SHOULD fully qualify extended attributes with the associated schema extension URN to avoid naming confli
-rfc7644#3.10#d397ae67	SHOULD	o A service provider that does NOT support this feature SHOULD respond with HTTP status code 501 (Not Implemented).
-rfc7644#3.10#eecd0bf6	MUST	In any response, the HTTP "Location" header MUST be the permanent location of the aliased resource associated with the authenticated subject.
 rfc7644#3.13#456137c0	SHOULD	When omitted, service providers SHOULD perform the operation using the most recent SCIM protocol version supported by the service provider.
 rfc7644#3.13#c444c334	MUST	If specified, the version identifier MUST appear in the URL path immediately preceding the resource endpoint and conform to the following scheme: the character 
 rfc7644#3.13#dad06db6	MUST	When specified, service providers MUST perform the operation using the desired version or reject the request.

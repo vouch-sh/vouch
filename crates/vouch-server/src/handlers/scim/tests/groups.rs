@@ -857,6 +857,93 @@ async fn test_scim_patch_group_remove_member() {
     );
 }
 
+#[tokio::test]
+async fn test_scim_patch_group_remove_member_uppercase_eq() {
+    // RFC 7643 §2.1 makes ABNF `compareOp` tokens case-insensitive, so a
+    // PATCH remove with `members[value EQ "user-id"]` (operator in
+    // non-lowercase casing) must remove the member exactly as the
+    // lowercase `eq` form does. Previously `parse_member_filter` only
+    // matched the literal lowercase `value eq "` needle and silently
+    // no-op'd, leaving the membership intact while returning 200 OK.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(
+        &state.store,
+        "test-patch-remove-member-upper-eq",
+        "test-org",
+    )
+    .await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"upper-eq@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create group with that user as a member
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamUE","members":[{{"value":"{}"}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH remove using the capitalised operator — RFC-mandated equivalent
+    // of the lowercase form exercised by test_scim_patch_group_remove_member.
+    let patch_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"remove","path":"members[value EQ \"{}\"]"}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(patch_body),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "uppercase-EQ remove must return 200: {body}"
+    );
+
+    // Verify the member is gone — the fix routes the capitalised operator
+    // through the same deletion path as the lowercase form.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let has_member = group
+        .get("members")
+        .and_then(|m| m.as_array())
+        .is_some_and(|arr| arr.iter().any(|m| m["value"] == user_id));
+    assert!(
+        !has_member,
+        "capitalised-operator remove must delete the member, not silently no-op"
+    );
+}
+
 // ========================================================================
 // RFC 7644 — Group CRUD Negative Tests
 // ========================================================================

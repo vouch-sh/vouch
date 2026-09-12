@@ -296,6 +296,24 @@ pub struct RegistrationResponse {
     pub software_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_bound_access_tokens: Option<bool>,
+    /// RFC 8705 §3: certificate-bound access tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// RFC 8705 §2.1.2: certificate subject DN for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 §2.1.2: SAN DNS name for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 §2.1.2: SAN URI for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 §2.1.2: SAN IP for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 §2.1.2: SAN email for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_email: Option<String>,
     /// OIDC: Algorithm used for signing ID tokens.
     pub id_token_signed_response_alg: String,
     /// JARM: signing algorithm for authorization responses.
@@ -352,6 +370,18 @@ impl std::fmt::Debug for RegistrationResponse {
             .field("software_id", &self.software_id)
             .field("software_version", &self.software_version)
             .field("dpop_bound_access_tokens", &self.dpop_bound_access_tokens)
+            .field(
+                "tls_client_certificate_bound_access_tokens",
+                &self.tls_client_certificate_bound_access_tokens,
+            )
+            .field(
+                "tls_client_auth_subject_dn",
+                &self.tls_client_auth_subject_dn,
+            )
+            .field("tls_client_auth_san_dns", &self.tls_client_auth_san_dns)
+            .field("tls_client_auth_san_uri", &self.tls_client_auth_san_uri)
+            .field("tls_client_auth_san_ip", &self.tls_client_auth_san_ip)
+            .field("tls_client_auth_san_email", &self.tls_client_auth_san_email)
             .field(
                 "id_token_signed_response_alg",
                 &self.id_token_signed_response_alg,
@@ -664,6 +694,12 @@ pub async fn register_client(
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
+        tls_client_certificate_bound_access_tokens: if cert_bound { Some(true) } else { None },
+        tls_client_auth_subject_dn: request.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: request.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: request.tls_client_auth_san_uri,
+        tls_client_auth_san_ip: request.tls_client_auth_san_ip,
+        tls_client_auth_san_email: request.tls_client_auth_san_email,
         id_token_signed_response_alg: id_token_alg.to_string(),
         authorization_signed_response_alg: algs.authorization.map(|a| a.to_string()),
         introspection_signed_response_alg: algs.introspection.map(|a| a.to_string()),
@@ -2099,6 +2135,18 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         } else {
             None
         },
+        tls_client_certificate_bound_access_tokens: if client
+            .tls_client_certificate_bound_access_tokens
+        {
+            Some(true)
+        } else {
+            None
+        },
+        tls_client_auth_subject_dn: client.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: client.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: client.tls_client_auth_san_uri,
+        tls_client_auth_san_ip: client.tls_client_auth_san_ip,
+        tls_client_auth_san_email: client.tls_client_auth_san_email,
         id_token_signed_response_alg: client.id_token_signed_response_alg.to_string(),
         authorization_signed_response_alg: client
             .authorization_signed_response_alg

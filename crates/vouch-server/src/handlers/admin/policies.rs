@@ -198,10 +198,25 @@ pub(crate) async fn toggle_preconfigured_policy(
     )
     .await?;
 
-    // Single read of active slugs — fixes TOCTOU from old handler
-    let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+    // Single read of the posture config that captures the document id and
+    // version alongside the active slugs. The previous flow read the slugs
+    // here and then called the blind `set_preconfigured_active` helper, which
+    // re-reads the doc internally and writes it back unconditionally
+    // (`store.update`): two concurrent admin toggles on the same org each read
+    // the same stale slug list, each mutate their own copy, and the second
+    // write silently overwrites the first — one toggle is lost while both
+    // requests succeed and log audit events. Capturing the version here and
+    // compare-and-update-ing makes a concurrent toggle surface as a 409 the
+    // admin re-reads and re-issues, instead of a silent lost update (cf.
+    // `update_custom_policy`, which uses `store.modify` to the same end).
+    let config = db::get_preconfigured_active_with_version(&state.store, &org_id)
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
+
+    let mut active_slugs = config
+        .as_ref()
+        .map(|c| c.active_slugs.clone())
+        .unwrap_or_default();
 
     let already_active = active_slugs.iter().any(|s| s == &slug);
 
@@ -227,9 +242,39 @@ pub(crate) async fn toggle_preconfigured_policy(
         active_slugs.push(slug.clone());
     }
 
-    db::set_preconfigured_active(&state.store, &org_id, active_slugs)
+    // Optimistic-concurrency write: guard on the version captured above so a
+    // concurrent toggle cannot silently clobber this one. The first-time
+    // activation (no config doc yet) inserts.
+    let applied = match config.as_ref() {
+        Some(cfg) => db::compare_and_set_preconfigured_active(
+            &state.store,
+            &cfg.doc_id,
+            cfg.version,
+            &org_id,
+            active_slugs,
+        )
         .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?;
+        .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?,
+        // First activation for this org: there is no version to guard on, so
+        // the deterministic document ID is the serialization point. A
+        // concurrent first activation returns `false` here for the same
+        // reason a lost compare-and-update does, and takes the same path.
+        None => db::create_preconfigured_active(&state.store, &org_id, active_slugs)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to create posture config: {e}")))?,
+    };
+
+    if !applied {
+        // A concurrent toggle won the version race and persisted its change.
+        // Refuse rather than overwrite it; the admin re-reads the page and
+        // re-issues the toggle against the current state. No audit event is
+        // recorded — the toggle did not persist (see the custom-path analog
+        // in `toggle_custom_policy`, which returns 404 + no audit event when
+        // `update_custom_policy` loses the OCC race).
+        return Err(ServiceError::Conflict(format!(
+            "The posture policy configuration changed concurrently; please retry the '{slug}' toggle."
+        )));
+    }
 
     let action = if already_active {
         "disabled"
@@ -1232,6 +1277,197 @@ mod tests {
             status,
             StatusCode::NOT_FOUND,
             "Unknown preconfigured slug must return 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_preconfigured_activates_and_logs_audit_event() {
+        // Happy path: activating a preconfigured policy on an org with no
+        // prior config takes the insert branch, persists the slug, and logs
+        // exactly one `admin_policy_toggle` audit event.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/firewall/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "successful toggle must redirect"
+        );
+
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            slugs.iter().any(|s| s == "firewall"),
+            "firewall must be active after the toggle: {slugs:?}"
+        );
+
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly one audit event must follow a successful toggle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_preconfigured_deactivates_and_logs_audit_event() {
+        // Happy path: toggling an already-active slug removes it and logs one
+        // audit event. Covers the `Some(doc)` + already_active → retain branch.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        db::set_preconfigured_active(&state.store, &org_id, vec!["firewall".to_string()])
+            .await
+            .expect("seed active");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/firewall/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "deactivate must redirect");
+
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            !slugs.iter().any(|s| s == "firewall"),
+            "firewall must be deactivated: {slugs:?}"
+        );
+
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly one audit event must follow a successful deactivation"
+        );
+    }
+
+    /// Regression: two concurrent admin toggles on the same org previously
+    /// each read the same stale slug list, each mutated their own copy, and
+    /// the blind `store.update` made the second write silently overwrite the
+    /// first — one toggle was lost while both requests returned a success
+    /// redirect and logged an audit event.
+    ///
+    /// The handler now captures the document version and writes via
+    /// `compare_and_set_preconfigured_active` (a single-shot
+    /// `compare_and_update`), so a concurrent toggle surfaces as a `409
+    /// Conflict` and the earlier write survives. This deterministically
+    /// reproduces the race using the `compare_and_update` test seam: the hook
+    /// fires inside `compare_and_update` right before the guarded `UPDATE`
+    /// and commits a concurrent admin's activation of `firewall` through a
+    /// hookless writer (`store.update`, which does not re-enter the hook),
+    /// bumping the config's version. The handler's guarded `UPDATE` (with the
+    /// stale version) then matches zero rows → `Ok(false)` → `409`.
+    #[tokio::test]
+    async fn test_toggle_preconfigured_concurrent_toggle_returns_conflict() {
+        use crate::db::documents::posture_policy::PostureConfigDoc;
+
+        let (app, state) = test_app_with_modify_hook(|store| {
+            let writer = store.clone();
+            store.set_compare_and_update_test_hook(Arc::new(move |doc_id: &str| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                Box::pin(async move {
+                    // Only act on the posture-config document; `get::<T>`
+                    // filters by `doc_type`, so any other `compare_and_update`
+                    // (none in this test, but defensively) returns `None`.
+                    let Some(doc) = writer.get::<PostureConfigDoc>(&doc_id).await.expect("read")
+                    else {
+                        return;
+                    };
+                    // Simulate a concurrent admin activating `firewall` on top
+                    // of the current slugs. `store.update` is the blind path
+                    // that does NOT fire the `compare_and_update` hook, so
+                    // there is no recursion.
+                    let mut data = doc.data;
+                    if !data.active_slugs.iter().any(|s| s == "firewall") {
+                        data.active_slugs.push("firewall".to_string());
+                    }
+                    writer
+                        .update(&doc_id, &data)
+                        .await
+                        .expect("concurrent toggle");
+                })
+            }));
+        })
+        .await;
+
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        // Start from `disk_encryption` active so the handler reads a
+        // non-empty list and toggles `screen_lock` on top of it — the exact
+        // interleaving from the bug report (Request A adds screen_lock while a
+        // concurrent request adds firewall).
+        db::set_preconfigured_active(&state.store, &org_id, vec!["disk_encryption".to_string()])
+            .await
+            .expect("seed");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/screen_lock/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a concurrent toggle must surface as 409, not a silent overwrite: {body}"
+        );
+        assert!(
+            body.contains("conflict"),
+            "the 409 body must carry the conflict code: {body}"
+        );
+
+        // No audit event for the losing (rejected) toggle.
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after, before,
+            "no audit event must be logged when the toggle did not persist"
+        );
+
+        // The concurrent winner's write survives; the rejected toggle's slug
+        // does not. Before the fix the handler's blind write would have
+        // clobbered the list with `["disk_encryption", "screen_lock"]`,
+        // silently losing the concurrent `firewall` activation.
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            slugs.iter().any(|s| s == "firewall"),
+            "the concurrent winner's slug must survive: {slugs:?}"
+        );
+        assert!(
+            !slugs.iter().any(|s| s == "screen_lock"),
+            "the rejected toggle's slug must NOT persist: {slugs:?}"
+        );
+        assert!(
+            slugs.iter().any(|s| s == "disk_encryption"),
+            "the pre-existing slug must survive: {slugs:?}"
         );
     }
 

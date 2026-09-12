@@ -77,6 +77,259 @@ async fn preconfigured_active_overwrites_previous() {
 }
 
 // ============================================================================
+// Preconfigured policy activation — optimistic-concurrency (OCC) update
+// ============================================================================
+//
+// The admin toggle handler reads the slugs, mutates one, and writes the list
+// back. To close the lost-update race where two concurrent toggles each derive
+// from a stale read and the second write silently clobbers the first, the
+// write is a single-shot `compare_and_update` guarded by the version captured
+// at the read. These tests pin the OCC primitive directly: a matching version
+// applies (and bumps the version), a stale version is rejected WITHOUT
+// overwriting the concurrent winner, and the full-replace semantics the blind
+// helper relies on are preserved.
+
+#[tokio::test]
+async fn get_preconfigured_active_with_version_returns_none_for_new_org() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "cfg-version-none.example").await;
+
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read config");
+    assert!(cfg.is_none(), "no config exists for a brand-new org");
+}
+
+#[tokio::test]
+async fn get_preconfigured_active_with_version_returns_id_version_and_slugs() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "cfg-version-roundtrip.example").await;
+
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string(), "firewall".to_string()],
+    )
+    .await
+    .expect("seed");
+
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("config exists");
+    assert!(!cfg.doc_id.is_empty(), "must expose the document id");
+    assert_eq!(cfg.version, 1, "freshly inserted doc is at version 1");
+    assert_eq!(cfg.active_slugs, vec!["disk-encryption", "firewall"]);
+}
+
+#[tokio::test]
+async fn create_preconfigured_active_inserts_first_config() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "create-cfg.example").await;
+
+    db::create_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["screen-lock".to_string()],
+    )
+    .await
+    .expect("create");
+
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("config exists");
+    assert_eq!(cfg.version, 1);
+    assert_eq!(cfg.active_slugs, vec!["screen-lock"]);
+}
+
+#[tokio::test]
+async fn concurrent_first_activation_creates_one_config_not_two() {
+    // There is at most one PostureConfigDoc per org, but `org_id` is an
+    // ordinary index, so nothing at the storage layer rejects a second one.
+    // Two first activations racing each other both read no config and both
+    // insert; the deterministic document ID is what makes the loser collide
+    // on the primary key instead of creating a duplicate that
+    // `get_posture_config`'s `find_one` would then resolve arbitrarily.
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "concurrent-first.example").await;
+
+    let first = db::create_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string()],
+    )
+    .await
+    .expect("first create");
+    let second = db::create_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["firewall".to_string()],
+    )
+    .await
+    .expect("second create must report the collision, not fail");
+
+    assert!(first, "the first activation creates the config");
+    assert!(
+        !second,
+        "the second must report that it lost, so the handler re-reads instead of \
+         silently writing a duplicate"
+    );
+
+    // The loser's slugs were not applied, and exactly one config exists: a
+    // duplicate would leave the winner's value reachable only by chance.
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("config exists");
+    assert_eq!(cfg.active_slugs, vec!["disk-encryption"]);
+    assert_eq!(cfg.version, 1, "the losing insert must not have bumped it");
+}
+
+#[tokio::test]
+async fn compare_and_set_applies_when_version_matches_and_bumps_version() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "cas-match.example").await;
+
+    // Seed at version 1 via the blind helper (authoritative full-replace).
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string()],
+    )
+    .await
+    .expect("seed");
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+
+    let applied = db::compare_and_set_preconfigured_active(
+        &harness.state.store,
+        &cfg.doc_id,
+        cfg.version,
+        &org_id,
+        vec!["disk-encryption".to_string(), "firewall".to_string()],
+    )
+    .await
+    .expect("cas");
+    assert!(applied, "a matching version must apply");
+
+    let after = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(after.version, 2, "version must bump on apply");
+    assert_eq!(after.active_slugs, vec!["disk-encryption", "firewall"]);
+}
+
+#[tokio::test]
+async fn compare_and_set_rejects_stale_version_without_overwriting_winner() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "cas-stale.example").await;
+
+    // Seed at version 1.
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string()],
+    )
+    .await
+    .expect("seed");
+    let stale = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+
+    // A concurrent admin's toggle commits first (version 1 → 2), e.g.
+    // activating `screen-lock`. The blind helper re-reads and writes the
+    // current version, simulating a writer that won the race.
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string(), "screen-lock".to_string()],
+    )
+    .await
+    .expect("concurrent winner");
+    let after_winner = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(after_winner.version, 2);
+    assert_eq!(
+        after_winner.active_slugs,
+        vec!["disk-encryption", "screen-lock"]
+    );
+
+    // The first reader now attempts its CAS with the stale version 1. Before
+    // the fix this was a blind `store.update` that would have silently
+    // overwritten the winner's `screen-lock` with `["disk-encryption",
+    // "firewall"]`. It must instead be rejected and leave the winner intact.
+    let applied = db::compare_and_set_preconfigured_active(
+        &harness.state.store,
+        &stale.doc_id,
+        stale.version,
+        &org_id,
+        vec!["disk-encryption".to_string(), "firewall".to_string()],
+    )
+    .await
+    .expect("cas");
+    assert!(!applied, "a stale version must not apply");
+
+    let final_state = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(
+        final_state.version, 2,
+        "a rejected CAS must not bump the version"
+    );
+    assert_eq!(
+        final_state.active_slugs,
+        vec!["disk-encryption", "screen-lock"],
+        "a rejected CAS must not overwrite the concurrent winner"
+    );
+}
+
+#[tokio::test]
+async fn compare_and_set_preserves_full_replace_semantics_on_sequential_calls() {
+    // Mirrors `preconfigured_active_overwrites_previous` but through the OCC
+    // path: sequential (non-concurrent) calls never conflict, so the second
+    // call's list replaces the first outright — confirming the OCC guard did
+    // not turn full-replace into a merge.
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "cas-sequential.example").await;
+
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["first".to_string(), "second".to_string()],
+    )
+    .await
+    .expect("seed first");
+    let first = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("exists");
+
+    let applied = db::compare_and_set_preconfigured_active(
+        &harness.state.store,
+        &first.doc_id,
+        first.version,
+        &org_id,
+        vec!["third".to_string()],
+    )
+    .await
+    .expect("cas");
+    assert!(applied, "sequential call must not conflict");
+
+    let slugs = db::get_active_preconfigured_slugs(&harness.state.store, &org_id)
+        .await
+        .expect("get slugs");
+    assert_eq!(slugs, vec!["third"], "second call must replace, not merge");
+}
+
+// ============================================================================
 // Custom posture policies
 // ============================================================================
 

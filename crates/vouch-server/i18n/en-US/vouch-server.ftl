@@ -1100,6 +1100,7 @@ audit-event-enrollment = User enrolled their first hardware key
 audit-event-logout = User logged out (including RFC 7009 token revocation)
 audit-event-key-registered = Additional hardware key registered (`vouch register`)
 audit-event-key-removed = Hardware key removed
+audit-event-key-renamed = Hardware key renamed
 audit-event-device-auth-approved = Browser approved a CLI device-authorization request
 audit-event-key-registration-replay = Replayed key-registration link rejected (possible attack)
 audit-event-identity-bound = Upstream IdP identity (issuer + subject) bound to an account on its first IdP login; `data.idp_issuer` names the issuer

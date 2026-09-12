@@ -102,8 +102,63 @@ fn canonicalize_node(
     let mut sorted_ns: Vec<(String, String)> = ns_to_render.into_iter().collect();
     sorted_ns.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Step 3: Handle default namespace undeclaration (`xmlns=""`).
+    //
+    // Per exc-c14n §3 point 4 / §3.1 step 3.3.1, `xmlns=""` is emitted on this
+    // element iff ALL of the following hold:
+    //   1. the default namespace is visibly utilized by this element (i.e. it
+    //      is rendered with no prefix) OR the `#default` token is present in
+    //      InclusiveNamespaces PrefixList. The "no prefix" restriction is the
+    //      special case exc-c14n adds *only* when `#default` is absent; when
+    //      `#default` is present the ordinary Canonical XML 1.0 `xmlns=""`
+    //      rules apply and the gate is bypassed -- so a *prefixed* element
+    //      that explicitly undeclares an ancestor-rendered non-empty default
+    //      namespace still renders `xmlns=""` on itself.
+    //   2. the element has no namespace node declaring a value for the default
+    //      namespace (i.e. its in-scope default is empty), and
+    //   3. the nearest output ancestor rendered a non-empty default namespace
+    //      (`ns_rendered[""]` is non-empty).
+    //
+    // The undeclaration is inserted into `sorted_ns` (empty prefix sorts before
+    // every other prefix) rather than appended after the emission loop, so an
+    // element that emits both `xmlns=""` and one or more `xmlns:foo`
+    // declarations on the same start tag matches libxml2/xmlsec1 byte-for-byte.
+    let elem_default_ns = node.default_namespace().unwrap_or("");
+    let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
+
+    // Condition 1: the element visibly utilizes the default namespace iff it
+    // is rendered with no prefix. This mirrors `node_qualified_name` exactly
+    // so the gate agrees with the emitted tag name: an element with no
+    // namespace, the xml namespace, or whose prefix resolves to "" is emitted
+    // unprefixed and therefore visibly uses the default namespace. Per
+    // §3.1 3.3.1 cond. 1, `#default` in InclusiveNamespaces PrefixList forces
+    // visibly-utilizes regardless of prefix.
+    let elem_ns_uri = node.tag_name().namespace().unwrap_or("");
+    let default_in_prefixlist = inclusive_prefixes.contains(&"#default");
+    let elem_uses_default_ns = elem_ns_uri.is_empty()
+        || elem_ns_uri == "http://www.w3.org/XML/1998/namespace"
+        || find_prefix_for_uri(node, elem_ns_uri).is_none_or(str::is_empty)
+        || default_in_prefixlist;
+
+    // Undeclare if: the element visibly utilizes the default namespace, its
+    // in-scope default is empty, an output ancestor rendered a non-empty
+    // default, and we haven't already emitted a default-namespace declaration
+    // on this element (which happens when it explicitly declares xmlns="uri").
+    let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
+    if elem_uses_default_ns
+        && !already_emitted_default
+        && elem_default_ns.is_empty()
+        && !ancestor_default_ns.is_empty()
+    {
+        sorted_ns.push((String::new(), String::new()));
+        sorted_ns.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
     for (prefix, uri) in &sorted_ns {
         if prefix.is_empty() {
+            // Renders both a real default-namespace declaration
+            // (`xmlns="uri"`, uri non-empty) and the `xmlns=""` undeclaration
+            // (uri empty) inserted by the Step 3 logic above.
             output.push_str(" xmlns=\"");
             output.push_str(uri);
             output.push('"');
@@ -115,43 +170,6 @@ fn canonicalize_node(
             output.push('"');
         }
         new_rendered_ns.insert(prefix.clone(), uri.clone());
-    }
-
-    // Step 3: Handle default namespace undeclaration.
-    // Per exc-c14n §3 point 4, `xmlns=""` is emitted only when ALL of:
-    //   1. the element visibly utilizes the default namespace (no prefix),
-    //   2. it has no default namespace node in the node-set, and
-    //   3. the nearest output ancestor that visibly utilizes the default
-    //      namespace has a default namespace node in the node-set.
-    // The original code checked only (2) and (3) and so wrongly emitted
-    // `xmlns=""` on prefixed elements, which then poisoned `rendered_ns[""]`
-    // and suppressed the `xmlns=""` that (1) requires on the nearest
-    // unprefixed descendant.
-    let elem_default_ns = node.default_namespace().unwrap_or("");
-    let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
-
-    // Condition 1: the element visibly utilizes the default namespace iff it
-    // is rendered with no prefix. This mirrors `node_qualified_name` exactly
-    // so the gate agrees with the emitted tag name: an element with no
-    // namespace, the xml namespace, or whose prefix resolves to "" is emitted
-    // unprefixed and therefore visibly uses the default namespace.
-    let elem_ns_uri = node.tag_name().namespace().unwrap_or("");
-    let elem_uses_default_ns = elem_ns_uri.is_empty()
-        || elem_ns_uri == "http://www.w3.org/XML/1998/namespace"
-        || find_prefix_for_uri(node, elem_ns_uri).is_none_or(str::is_empty);
-
-    // Undeclare if: the element visibly utilizes the default namespace, its
-    // in-scope default is empty, an output ancestor rendered a non-empty
-    // default, and we haven't already emitted xmlns="" on this element
-    // (which happens when it explicitly declares xmlns="uri").
-    let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
-    if elem_uses_default_ns
-        && !already_emitted_default
-        && elem_default_ns.is_empty()
-        && !ancestor_default_ns.is_empty()
-    {
-        output.push_str(" xmlns=\"\"");
-        new_rendered_ns.insert(String::new(), String::new());
     }
 
     // Step 5-6: Collect and sort attributes.
@@ -742,20 +760,97 @@ mod tests {
         );
     }
 
-    // exc-c14n §3 point 4 cond. 1 + §4 (InclusiveNamespaces #default): the no-prefix gate matches the
-    // reference for both the #default-absent and #default-present cases; #default forces the
-    // default *declaration* but never places the xmlns="" *undeclaration* on a prefixed element.
+    // exc-c14n §3 point 4 cond. 1 + §4 (InclusiveNamespaces #default): when `#default` is
+    // NOT in the PrefixList the "no prefix" gate applies and `xmlns=""` lands on the nearest
+    // unprefixed descendant. When `#default` IS in the PrefixList, §3.1 step 3.3.1 cond. 1
+    // bypasses the gate, so a *prefixed* element that explicitly undeclares an ancestor-rendered
+    // non-empty default namespace renders `xmlns=""` on itself -- matching libxml2/xmlsec1
+    // (the engine every mainstream SAML IdP uses) byte-for-byte. Reference form below was
+    // verified against `xmllint --exc-c14n` with `inclusive_prefixes=["#default"]`.
     #[test]
-    fn prefixed_xmlns_undeclaration_with_inclusive_default_still_gates() {
+    fn prefixed_xmlns_undeclaration_with_inclusive_default_emits_on_declaring_element() {
         let xml = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#;
         let without = c14n(xml, "root", &[]);
         let with_default = c14n(xml, "root", &["#default"]);
-        // #default does not change the placement of xmlns="" (still on <leaf>).
+
+        // No #default: the "no prefix" gate keeps xmlns="" off the prefixed <b:mid>;
+        // it lands on the nearest unprefixed descendant <leaf>.
         assert_eq!(
-            with_default,
+            without,
             r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><leaf xmlns="">text</leaf></b:mid></root>"#
         );
-        assert_eq!(with_default, without);
+
+        // With #default: the gate is bypassed and xmlns="" is emitted on <b:mid> itself,
+        // sorted before xmlns:b (empty prefix sorts first) -- exactly as libxml2 produces.
+        assert_eq!(
+            with_default,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><leaf>text</leaf></b:mid></root>"#
+        );
+
+        // #default changes the placement of xmlns="" (the old code asserted equality here
+        // and so locked in the bug; this inequality guards against any regression of the gate).
+        assert_ne!(with_default, without);
+    }
+
+    // exc-c14n §3.1 3.3.1 cond. 1 (deeper shape): with `#default` the undeclaration is emitted
+    // on the prefixed declaring element even when that element has a deeper unprefixed
+    // descendant that itself re-undeclares a redeclared default. Verified against
+    // `xmllint --exc-c14n` with `inclusive_prefixes=["#default"]`.
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_inclusive_default_deeper_shape() {
+        let xml = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><b:inner xmlns="urn:i"><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#;
+        let without = c14n(xml, "root", &[]);
+        let with_default = c14n(xml, "root", &["#default"]);
+
+        // No #default: xmlns="" is deferred from <b:mid> to the nearest unprefixed descendant.
+        // <b:inner> is prefixed (inherits xmlns:b) and declares xmlns="urn:i", but that
+        // declaration is not visibly utilized by b:inner itself, so it is dropped by exc-c14n;
+        // the rendered default at <leaf> is still urn:a, which <leaf> then undeclares.
+        assert_eq!(
+            without,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><b:inner><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#
+        );
+
+        // With #default: xmlns="" is emitted on <b:mid> (sorted first), xmlns="urn:i" is now
+        // visibly utilized on <b:inner> (forced by #default) so it is rendered there, and
+        // <leaf> then undeclares urn:i. Matches libxml2 byte-for-byte.
+        assert_eq!(
+            with_default,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><b:inner xmlns="urn:i"><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#
+        );
+        assert_ne!(with_default, without);
+    }
+
+    // XML Signature §4.4.1: the #default-corrected canonical form is a stable fixed point
+    // (canonicalizing canonical output changes nothing), guarding against a re-canonicalization
+    // drift for the bug-trigger shape under the production PrefixList.
+    #[test]
+    fn idempotency_prefixed_xmlns_undeclaration_with_inclusive_default() {
+        let input = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#;
+        let doc1 = roxmltree::Document::parse(input).unwrap();
+        let root1 = doc1
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root element");
+        let first = exclusive_c14n(root1, &["#default"]);
+
+        let doc2 = roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
+        let root2 = doc2
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root in re-parsed c14n output");
+        let second = exclusive_c14n(root2, &["#default"]);
+
+        assert_eq!(
+            first, second,
+            "Idempotency failed for #default input: {input}"
+        );
+        assert_eq!(
+            first,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><leaf>text</leaf></b:mid></root>"#
+        );
     }
 
     // XML Signature §4.4.1: canonicalizing canonical output changes nothing, including for the

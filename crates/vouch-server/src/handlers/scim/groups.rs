@@ -762,15 +762,102 @@ pub(crate) fn db_group_to_scim(
 }
 
 /// Parse members filter path like "members[value eq \"user-id\"]".
+///
+/// RFC 7643 §2.1 makes ABNF strings — including the `compareOp` token
+/// (`eq`) and the attribute name (`value`) — case-insensitive, so a
+/// path such as `members[value EQ "user-id"]` must be accepted.
+///
+/// The needle is pure ASCII, so it is matched ASCII-case-insensitively
+/// against `path` itself. Case-folding the input and mapping the offset back
+/// is what this must not do: Unicode lowercasing preserves neither byte
+/// length (`ß` → `ss`) nor character count (`İ` U+0130 → two chars), so an
+/// offset measured in the folded copy can land mid-value in the original and
+/// truncate the extracted id. Matching in place needs no remap at all, and
+/// the resulting byte offset is always a character boundary because every
+/// matched byte is ASCII. Slicing the value out of `path` preserves its case.
 fn parse_member_filter(path: &str) -> Option<String> {
-    // Simple parser for members[value eq "user-id"]
-    if let Some(start) = path.find("value eq \"") {
-        let start_idx = start.saturating_add(10);
-        if let Some(rest) = path.get(start_idx..)
-            && let Some(end) = rest.find('"')
-        {
-            return rest.get(..end).map(String::from);
-        }
+    let needle = b"value eq \"";
+    let start = path
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))?
+        .saturating_add(needle.len());
+
+    let rest = path.get(start..)?;
+    let end = rest.find('"')?;
+    rest.get(..end).map(String::from)
+}
+
+#[cfg(test)]
+mod parse_member_filter_tests {
+    use super::parse_member_filter;
+
+    #[test]
+    fn lowercase_eq_matches() {
+        assert_eq!(
+            parse_member_filter(r#"members[value eq "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
     }
-    None
+
+    #[test]
+    fn uppercase_eq_matches() {
+        // RFC 7643 §2.1: ABNF `compareOp` tokens are case-insensitive, so
+        // `EQ` must parse identically to `eq` — the regression this fixes.
+        assert_eq!(
+            parse_member_filter(r#"members[value EQ "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn uppercase_value_attribute_matches() {
+        // RFC 7644 §3.10: attribute names are case-insensitive.
+        assert_eq!(
+            parse_member_filter(r#"members[VALUE eq "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+        assert_eq!(
+            parse_member_filter(r#"members[Value EQ "abc-123"]"#),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn preserves_value_case() {
+        // The extracted id is sliced from the original (non-lowercased)
+        // path, so its case is preserved verbatim.
+        assert_eq!(
+            parse_member_filter(r#"members[value EQ "AbCdEf"]"#),
+            Some("AbCdEf".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_members_path_returns_none() {
+        assert_eq!(parse_member_filter("members"), None);
+        assert_eq!(parse_member_filter("members[]"), None);
+    }
+
+    #[test]
+    fn value_survives_length_changing_case_folding() {
+        // Matching happens on the original path, so a character whose
+        // lowercase form is a different byte length (`ß` -> `ss`) or a
+        // different character count (`İ` U+0130 -> two chars) cannot shift
+        // the extracted id. Folding the path first and remapping the offset
+        // truncated the value to "ictim-user-id" for the U+0130 case.
+        assert_eq!(
+            parse_member_filter("members[\u{0130} value eq \"victim-user-id\"]"),
+            Some("victim-user-id".to_string())
+        );
+        assert_eq!(
+            parse_member_filter("members[\u{00DF} value EQ \"victim-user-id\"]"),
+            Some("victim-user-id".to_string())
+        );
+        // Non-ASCII inside the value itself is returned verbatim.
+        assert_eq!(
+            parse_member_filter("members[value eq \"İstanbul-user\"]"),
+            Some("İstanbul-user".to_string())
+        );
+    }
 }

@@ -793,6 +793,82 @@ pub(crate) async fn evaluate_exchange_policies(
     .await
 }
 
+/// Evaluate the `logout_invalidates_exchange` policy for an RFC 8693
+/// token-exchange *actor* token's user.
+///
+/// Of the four ExchangeToken policies, only `logout_invalidates_exchange`
+/// maps meaningfully onto the actor principal. `exchange_ip_consistency`
+/// and `token_exchange_step_up` reason about the *request* environment
+/// (the caller's IP and the caller's recent login), and
+/// `exchange_rate_limit` counts `ExchangeToken` responses keyed on the
+/// *subject's* `user_id` — none should gate the actor.
+/// `logout_invalidates_exchange`, by contrast, checks whether the actor's
+/// own `Logout` audit event has occurred since the actor's last `Login`,
+/// which is exactly "a token issued before logout being exchanged for
+/// credentials" — the case the policy exists to stop.
+///
+/// This closes the temporal half of the #550 "mirroring" gap: the
+/// structural `user.active` check was mirrored onto the actor path, but
+/// the temporal `logout_invalidates_exchange` gate was wired only to the
+/// subject's `user_id`, so a still-signed, still-row-backed access token
+/// belonging to a browser-logged-out user was accepted as the
+/// `actor_token`.
+///
+/// Composes only the base permits with `logout_invalidates_exchange` —
+/// not the org's full active set — so the other ExchangeToken forbids
+/// never fire against the actor principal. The policy is evaluated with
+/// the `ExchangeToken` decision kind (the Cedar action the forbid scopes
+/// itself to), but its `input` fields are left empty because the rule
+/// only reasons over `Login`/`Logout` history, never `context.input`.
+///
+/// # Errors
+///
+/// Returns `AccessDenied` when the policy denies, or `Internal` when the
+/// engine is unavailable (fail-closed). The exchange caller remaps
+/// `AccessDenied` to `invalid_request` per RFC 8693 §2.2.2: an actor
+/// token "unacceptable based on policy" MUST be reported with the
+/// `invalid_request` error code.
+pub(crate) async fn evaluate_actor_logout_policy(
+    state: &crate::AppState,
+    org_id: &str,
+    user_id: &str,
+    user_email: &str,
+    arrival: ArrivalTime,
+) -> ServiceResult<()> {
+    let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
+    if !active_slugs
+        .iter()
+        .any(|s| s == PreconfiguredSlug::LogoutInvalidatesExchange.as_str())
+    {
+        return Ok(());
+    }
+    let actor_slugs = vec![
+        PreconfiguredSlug::LogoutInvalidatesExchange
+            .as_str()
+            .to_string(),
+    ];
+    authorize_decision(
+        state,
+        DecisionRequest {
+            org_id,
+            user_id,
+            user_email,
+            kind: DecisionKind::ExchangeToken {
+                ip: None,
+                client_id: "",
+                audience: None,
+            },
+            os: None,
+        },
+        &actor_slugs,
+        &[],
+        arrival,
+    )
+    .await
+}
+
 /// Extract `DevicePosture` from the `authorization_details` value, the
 /// entry whose `type` is `device_posture`.
 ///

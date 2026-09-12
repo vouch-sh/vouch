@@ -1351,3 +1351,173 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
         "Error redirect must echo state parameter: {error_location}"
     );
 }
+
+/// Wait until the wall clock crosses into a fresh integer second and return
+/// that second.
+///
+/// Lets a boundary test fire rapid requests at the start of a known second
+/// `N` with nearly a whole second of slack before the next rollover. The
+/// pending-resume `max_age` divergence with the direct path is exactly the
+/// sub-second interval `(max_age, max_age + 1)`, so landing both authorize
+/// requests inside second `N` is what puts the resume in that window.
+async fn wait_for_fresh_second() -> i64 {
+    let prev = jiff::Timestamp::now().as_second();
+    loop {
+        let s = jiff::Timestamp::now().as_second();
+        if s != prev {
+            return s;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_completion_rejects_session_just_over_max_age() {
+    // Regression for the pending-resume (`complete_pending_auth`) `max_age`
+    // truncation. The resume path compared `arrival.as_second() - auth_time`
+    // (whole-second truncation) where the direct path compares
+    // `arrival.timestamp() - auth_time` at full precision. Truncation floors
+    // the measured age by up to 1 second, so a session whose true age is in
+    // `(max_age, max_age + 1)` was *accepted* by the resume path — issuing an
+    // authorization code where the direct path would have forced
+    // re-authentication (OIDC Core 3.1.2.1).
+    //
+    // This test constructs that exact window. With `max_age = 1`, forge
+    // `auth_time = N - 1` and complete the pending authorization within
+    // integer second `N`. Then, for the resume's arrival `(N + frac)`:
+    //
+    //   truncated age = N - (N - 1) = 1             -> `1 > 1` false (bug: accept)
+    //   full-precision age = (N + frac) - (N - 1)  -> `1 + frac > 1` (fix: reject)
+    //
+    // The guard `auth_time < pending.created_at.as_second()` holds because the
+    // pending record is stored at second `N` (the pre-login direct-path
+    // request, also at `(N + frac) - (N - 1) = 1 + frac > 1`, re-authenticates
+    // and stores it). Syncing to the start of a fresh second gives both
+    // requests ~1s of slack to stay inside second `N`; the attempt is retried
+    // only when a boundary slip is detected, so the assertions run solely when
+    // the resume is provably inside the divergence window — the test cannot
+    // false-fail with the fix and cannot silently accept under the bug.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-boundary@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-boundary";
+
+    const MAX_AGE: i64 = 1;
+    const MAX_ATTEMPTS: u32 = 5;
+
+    let mut landed = false;
+    for _ in 0..MAX_ATTEMPTS {
+        // Land at the start of a fresh integer second N. auth_time = N - 1
+        // makes the session's true age `max_age + sub-second` at this instant.
+        let n = wait_for_fresh_second().await;
+        let auth_time = n - MAX_AGE;
+
+        let session = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::Verified {
+                    auth_time: Some(auth_time),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Pre-login (direct) path: elapsed = (N + frac) - (N - 1) = 1 + frac > 1,
+        // so it re-authenticates and stores a pending record at second N.
+        let response = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={}&code_challenge_method=S256&max_age={MAX_AGE}&state={}",
+                client.client_id,
+                urlencoding::encode("https://example.com/callback"),
+                challenge,
+                state_param,
+            ),
+            &[("Cookie", &format!("__Host-vouch_session={session}"))],
+        )
+        .await;
+
+        let Some(pending_id) = pending_id_from_login_redirect(&response) else {
+            // Should not happen (the direct path re-auths whenever the true
+            // age exceeds max_age), but stay robust to a boundary slip by
+            // retrying on a fresh second.
+            continue;
+        };
+
+        // Resume within the same integer second N. Guard the attempt: only
+        // assert when the resume's arrival is provably inside second N, so a
+        // boundary slip retries instead of invalidating the comparison.
+        let before = jiff::Timestamp::now().as_second();
+        let completion = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?pending_auth={}",
+                urlencoding::encode(&pending_id)
+            ),
+            &[("Cookie", &format!("__Host-vouch_session={session}"))],
+        )
+        .await;
+        let after = jiff::Timestamp::now().as_second();
+        if before != n || after != n {
+            // The resume's arrival fell outside second N; the truncated and
+            // full-precision comparisons may agree there. Retry on a fresh
+            // second to put the resume back in the divergence window.
+            continue;
+        }
+
+        assert!(
+            completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+            "completion must redirect, got {} body: {}",
+            completion.status,
+            completion.body
+        );
+
+        let location = completion
+            .headers
+            .get("Location")
+            .expect("completion must have Location header")
+            .to_str()
+            .expect("Valid UTF-8");
+
+        assert!(
+            location.contains("error=login_required"),
+            "a session whose true age exceeds max_age must be rejected on the \
+             pending-resume path: {location}"
+        );
+        assert!(
+            !location.contains("code="),
+            "the pending-resume path must NOT issue a code for a session just \
+             over max_age: {location}"
+        );
+        assert!(
+            location.contains(&format!("state={state_param}")),
+            "error redirect must echo state parameter: {location}"
+        );
+        landed = true;
+        break;
+    }
+
+    assert!(
+        landed,
+        "could not land both authorize requests inside the same integer second \
+         after {MAX_ATTEMPTS} attempts"
+    );
+}
+
+/// Extract the `pending_auth` id from a `/login?pending_auth=<id>` redirect,
+/// or `None` if the response is not such a redirect.
+fn pending_id_from_login_redirect(response: &HttpResponse) -> Option<String> {
+    let location = response.headers.get("Location")?.to_str().ok()?;
+    let id = location.strip_prefix("/login?pending_auth=")?;
+    Some(urlencoding::decode(id).ok()?.into_owned())
+}

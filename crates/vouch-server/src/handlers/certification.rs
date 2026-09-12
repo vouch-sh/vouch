@@ -370,6 +370,11 @@ async fn get_or_create_cert_authenticator(
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            // Synthetic test authenticator with dummy keys — never used
+            // for WebAuthn assertion, so its signature counter is
+            // irrelevant. `0` matches the counter-less authenticator
+            // class (WebAuthn L2 §6.3.2 step 10 third branch).
+            counter: 0,
         },
     )
     .await

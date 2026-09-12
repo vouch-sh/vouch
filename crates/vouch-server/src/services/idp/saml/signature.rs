@@ -333,15 +333,22 @@ pub(super) fn find_element_by_id<'a, 'input>(
 
 /// Extract the `InclusiveNamespaces PrefixList` from a transform or c14n method node.
 ///
-/// Returns an empty vec if no `<ec:InclusiveNamespaces PrefixList="...">` child
+/// Returns an empty vec if no `<ec:InclusiveNamespaces PrefixList="...">` element
 /// is present. Splits the `PrefixList` attribute on whitespace.
+///
+/// Searches the node's descendants (not just direct children) so that the
+/// `InclusiveNamespaces` element is found regardless of its placement:
+///   - a direct child of `<ds:CanonicalizationMethod>` (for the SignedInfo c14n), or
+///   - nested inside the exc-c14n `<ds:Transform>` under `<ds:Transforms>` (for the
+///     signed-element c14n, the standard Azure AD/Entra placement, per XML-DSig
+///     where `InclusiveNamespaces` is a child of the c14n `Transform`).
 fn extract_inclusive_prefixes(parent: Option<roxmltree::Node<'_, '_>>) -> Vec<String> {
     let Some(parent) = parent else {
         return Vec::new();
     };
-    for child in parent.children() {
-        if child.has_tag_name((NS_EC, "InclusiveNamespaces"))
-            && let Some(prefix_list) = child.attribute("PrefixList")
+    for desc in parent.descendants() {
+        if desc.has_tag_name((NS_EC, "InclusiveNamespaces"))
+            && let Some(prefix_list) = desc.attribute("PrefixList")
         {
             return prefix_list.split_whitespace().map(str::to_string).collect();
         }
@@ -849,6 +856,50 @@ mod tests {
         let transform = doc.root().children().find(|n| n.is_element()).unwrap();
         let prefixes = extract_inclusive_prefixes(Some(transform));
         assert!(prefixes.is_empty());
+    }
+
+    // XML Signature §4.4.3.4 + exc-c14n §3.1: in the standard XML-DSig placement, the
+    // `InclusiveNamespaces` element is a child of the exc-c14n `<ds:Transform>` inside
+    // `<ds:Transforms>`, not a direct child of `<ds:Transforms>`. This is the placement
+    // Azure AD/Entra and xmlsec1 use (`PrefixList="#default saml ds xs xsi"`).
+    // `verify_xml_signature` extracts the signed-element prefix list by calling
+    // `extract_inclusive_prefixes` with the `<ds:Transforms>` node, so the search MUST
+    // descend into the nested exc-c14n `<ds:Transform>` to find `#default`. The old
+    // direct-children-only search silently returned `[]`, forwarding an empty prefix
+    // list to `exclusive_c14n` and producing `SignatureError::DigestMismatch` against
+    // any IdP that signs with `#default` (fail-closed auth outage).
+    #[test]
+    fn extract_inclusive_prefixes_finds_nested_in_transform() {
+        let xml = r##"<ds:Transforms xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                          xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#">
+  <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+  <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">
+    <ec:InclusiveNamespaces PrefixList="#default saml ds xs xsi"/>
+  </ds:Transform>
+</ds:Transforms>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let transforms = doc.root().children().find(|n| n.is_element()).unwrap();
+        let prefixes = extract_inclusive_prefixes(Some(transforms));
+        assert_eq!(
+            prefixes,
+            vec!["#default", "saml", "ds", "xs", "xsi"],
+            "must find the InclusiveNamespaces nested inside the exc-c14n <ds:Transform>"
+        );
+    }
+
+    // Verify the same extraction works when called on the `<ds:CanonicalizationMethod>`
+    // (used for the SignedInfo c14n), where `InclusiveNamespaces` IS a direct child.
+    #[test]
+    fn extract_inclusive_prefixes_from_canonicalization_method() {
+        let xml = r##"<ds:CanonicalizationMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                         xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#"
+                         Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">
+  <ec:InclusiveNamespaces PrefixList="#default saml"/>
+</ds:CanonicalizationMethod>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let method = doc.root().children().find(|n| n.is_element()).unwrap();
+        let prefixes = extract_inclusive_prefixes(Some(method));
+        assert_eq!(prefixes, vec!["#default", "saml"]);
     }
 
     // =========================================================================
