@@ -692,3 +692,125 @@ async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
         .expect("delete for client-primary again");
     assert_eq!(deleted_again, 0, "re-deleting an empty index is a no-op");
 }
+
+// ============================================================================
+// Last-admin floor (#1285)
+// ============================================================================
+
+/// Create an org with `n` active admins; returns (org_id, admin_ids).
+async fn org_with_admins(store: &DocumentStore, domain: &str, n: usize) -> (String, Vec<String>) {
+    let org = crate::db::organizations::create_organization(store, domain, Some("Floor Org"), None)
+        .await
+        .expect("create org");
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let (id, _) = upsert_user_with_org(
+            store,
+            &format!("admin{i}@{domain}"),
+            Some(&format!("Admin {i}")),
+            Some(&org.id),
+            true,
+        )
+        .await
+        .expect("create admin");
+        ids.push(id);
+    }
+    (org.id, ids)
+}
+
+#[tokio::test]
+async fn test_demote_refuses_the_last_admin() {
+    let (store, _audit) = test_db().await;
+    let (_org_id, admins) = org_with_admins(&store, "last-admin-demote.example", 2).await;
+
+    // Two admins: demoting one is fine.
+    assert!(
+        demote_or_deactivate_member(
+            &store,
+            admins.get(1).expect("second admin"),
+            MemberDowngrade::Demote
+        )
+        .await
+        .expect("first demote succeeds")
+    );
+
+    // One left: demoting them would leave the org unadministrable.
+    let err = demote_or_deactivate_member(
+        &store,
+        admins.first().expect("first admin"),
+        MemberDowngrade::Demote,
+    )
+    .await
+    .expect_err("demoting the last admin must be refused");
+    assert!(
+        matches!(err, MemberDowngradeError::LastAdmin),
+        "got {err:?}"
+    );
+
+    let still_admin = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(
+        still_admin.is_org_admin,
+        "the refused demote must not apply"
+    );
+}
+
+#[tokio::test]
+async fn test_deactivate_refuses_the_last_admin() {
+    let (store, _audit) = test_db().await;
+    let (_org_id, admins) = org_with_admins(&store, "last-admin-deactivate.example", 1).await;
+
+    let err = demote_or_deactivate_member(
+        &store,
+        admins.first().expect("first admin"),
+        MemberDowngrade::Deactivate,
+    )
+    .await
+    .expect_err("deactivating the last admin must be refused");
+    assert!(
+        matches!(err, MemberDowngradeError::LastAdmin),
+        "got {err:?}"
+    );
+
+    let still_active = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(still_active.active, "the refused deactivate must not apply");
+    assert!(still_active.is_org_admin);
+}
+
+#[tokio::test]
+async fn test_floor_does_not_block_non_admin_members() {
+    let (store, _audit) = test_db().await;
+    let (org_id, _admins) = org_with_admins(&store, "floor-nonadmin.example", 1).await;
+    let (member_id, _) = upsert_user_with_org(
+        &store,
+        "member@floor-nonadmin.example",
+        Some("Member"),
+        Some(&org_id),
+        false,
+    )
+    .await
+    .expect("create member");
+
+    // The floor counts admins, so a plain member is unaffected by it even
+    // though the org has exactly one admin.
+    assert!(
+        demote_or_deactivate_member(&store, &member_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivating a non-admin is always allowed")
+    );
+}
+
+#[tokio::test]
+async fn test_downgrade_reports_missing_member() {
+    let (store, _audit) = test_db().await;
+    assert!(
+        !demote_or_deactivate_member(&store, "no-such-user", MemberDowngrade::Demote)
+            .await
+            .expect("a missing member is not an error")
+    );
+}
