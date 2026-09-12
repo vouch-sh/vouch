@@ -885,6 +885,179 @@ async fn test_rfc7592_put_omitting_signed_response_algs_clears_them() {
     );
 }
 
+/// RFC 7592 §3 (GET) uses the same response format as RFC 7591 §3.2.1, so the
+/// five RFC 8705 §2.1.2 certificate-subject parameters registered by
+/// `register_fully_specified_client` must be readable back via GET.
+#[tokio::test]
+async fn test_rfc7592_get_response_echoes_rfc8705_identity() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+    // RFC 8705 §2.1.2: each registered certificate-subject parameter is echoed.
+    assert_eq!(
+        stored["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "GET must echo the registered subject DN: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_dns"].as_str(),
+        Some("original.example.com"),
+        "GET must echo the registered san_dns: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_uri"].as_str(),
+        Some("https://original.example.com/id"),
+        "GET must echo the registered san_uri: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "GET must echo the registered san_ip: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_email"].as_str(),
+        Some("original@example.com"),
+        "GET must echo the registered san_email: {stored}"
+    );
+    // The cert-bound flag was not registered, so it is omitted (None), as is
+    // the unrelated DPoP flag.
+    for field in [
+        "tls_client_certificate_bound_access_tokens",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {stored}"
+        );
+    }
+}
+
+/// RFC 7592 §3 (GET) must echo RFC 8705 §3's `tls_client_certificate_bound_
+/// access_tokens` for a cert-bound client, so a client can read back that its
+/// access tokens are certificate-bound.
+#[tokio::test]
+async fn test_rfc7592_get_response_echoes_tls_certificate_bound_flag() {
+    let (app, _state) = test_app().await;
+
+    let cert_der = make_test_cert_der("rfc7592-cert-bound-get-echo");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Cert-Bound GET Echo Client",
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "tls_client_certificate_bound_access_tokens": true,
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [x5c_b64]}]
+        }
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "cert-bound registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // The RFC 7591 registration response already echoes the flag.
+    assert_eq!(
+        json["tls_client_certificate_bound_access_tokens"], true,
+        "registration response must echo the cert-bound flag: {json}"
+    );
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+    // RFC 7592 §3 GET echoes the stored cert-bound flag.
+    assert_eq!(
+        stored["tls_client_certificate_bound_access_tokens"], true,
+        "GET must echo the stored cert-bound flag: {stored}"
+    );
+    // The five RFC 8705 §2.1.2 parameters were not registered, so they're absent.
+    for field in [
+        "tls_client_auth_subject_dn",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {stored}"
+        );
+    }
+}
+
+/// RFC 7592 §2.2 (PUT) uses the same response format as RFC 7591 §3.2.1, so an
+/// updated RFC 8705 §2.1.2 certificate-subject parameter must be echoed in the
+/// PUT response and persisted to a subsequent GET.
+#[tokio::test]
+async fn test_rfc7592_put_response_echoes_rfc8705_identity() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    // Restate the registered certificate-subject parameters, rotating san_dns,
+    // so the PUT response and the subsequent GET must both reflect the change.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "tls_client_auth_subject_dn": "CN=original.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com",
+        "tls_client_auth_san_uri": "https://original.example.com/id",
+        "tls_client_auth_san_ip": "198.51.100.1",
+        "tls_client_auth_san_email": "original@example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §2.1.2: the updated value is echoed in the PUT response.
+    assert_eq!(
+        json["tls_client_auth_san_dns"].as_str(),
+        Some("rotated.example.com"),
+        "PUT response must echo the updated san_dns: {json}"
+    );
+    // The restated parameters echo their registered values.
+    assert_eq!(
+        json["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "PUT response must echo the restated subject DN: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_uri"].as_str(),
+        Some("https://original.example.com/id"),
+        "PUT response must echo the restated san_uri: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "PUT response must echo the restated san_ip: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_email"].as_str(),
+        Some("original@example.com"),
+        "PUT response must echo the restated san_email: {json}"
+    );
+
+    // Persisted, not just echoed: a subsequent GET reflects the PUT.
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["tls_client_auth_san_dns"].as_str(),
+        Some("rotated.example.com"),
+        "GET must reflect the PUT-updated san_dns: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "GET must reflect the restated subject DN: {stored}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7592_put_omitting_id_token_alg_keeps_the_registered_one() {
     // A server with an RSA key defaults new registrations to RS256 (OIDC Core
