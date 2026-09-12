@@ -560,7 +560,7 @@ async fn auto_release_via_domain_removal_cancels_rotation_state() {
     age_next_keys(&state, &org.id).await;
     rotate_org_keys(&state, &org.id, ADMIN).await.unwrap();
 
-    db::remove_additional_domain(&state.store, &org.id, "beta.org")
+    db::remove_additional_domain(&state.store, &state.session_cache, &org.id, "beta.org")
         .await
         .unwrap();
 

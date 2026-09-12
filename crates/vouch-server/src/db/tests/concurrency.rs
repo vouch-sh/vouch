@@ -377,9 +377,11 @@ async fn test_remove_additional_domain_concurrent() {
     let store_b = store.clone();
     let org_a = org.id.clone();
     let org_b = org.id.clone();
+    let cache_a = SessionCache::new(100, 30);
+    let cache_b = SessionCache::new(100, 30);
     let (result_a, result_b) = tokio::join!(
-        async move { remove_additional_domain(&store_a, &org_a, "extra-remove.com").await },
-        async move { remove_additional_domain(&store_b, &org_b, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_a, &cache_a, &org_a, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_b, &cache_b, &org_b, "extra-remove.com").await },
     );
 
     for (label, r) in [("a", &result_a), ("b", &result_b)] {

@@ -5,6 +5,7 @@
 //! the field existed.
 #![expect(
     clippy::expect_used,
+    clippy::unwrap_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
@@ -13,7 +14,7 @@ use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, OrganizationDoc,
 };
 use crate::db::documents::user::UserDoc;
-use crate::test_utils::test_domain;
+use crate::test_utils::{test_arrival, test_domain};
 use secrecy::SecretString;
 
 /// A `UserDoc` with `org_id` set but `org_domain` absent, as every doc
@@ -328,4 +329,193 @@ async fn test_get_user_org_domain_backfill_write_error_does_not_fail_the_caller(
         .expect("get user")
         .expect("user exists");
     assert_eq!(after.data.org_domain, None);
+}
+
+/// Regression: removing a verified additional domain must evict the
+/// in-process `SessionCache` for every affected user, not just delete their
+/// DB session rows. Without the companion `invalidate_for_user` a DB-deleted
+/// session keeps validating as a `Hit` until the cache TTL elapses, deferring
+/// the forced re-authentication the removal is meant to trigger.
+///
+/// Mirrors the contract every other production `delete_sessions_for_user`
+/// caller follows (`revoke_user_access`, `revoke_token`, `revoke_tokens_api`,
+/// `delete_oauth_client_and_revoke_sessions`).
+#[tokio::test]
+async fn remove_additional_domain_invalidates_session_cache_for_matching_users() {
+    use crate::db::sessions::get_session_by_token_hash;
+
+    let (store, _audit) = test_db().await;
+
+    // Org with a verified *additional* domain "added.example.com".
+    let org = store
+        .insert(&OrganizationDoc {
+            domain: "primary.example.com".to_string(),
+            name: None,
+            created_by_user_id: None,
+            additional_domains: vec![AdditionalDomain {
+                domain: "added.example.com".to_string(),
+                verification_token: SecretString::from("txt-token"),
+                added_at: jiff::Timestamp::now(),
+                added_by_user_id: "admin".to_string(),
+                added_by_email: "admin@primary.example.com".to_string(),
+                consecutive_failures: 0,
+                state: AdditionalDomainState::Verified {
+                    verified_at: jiff::Timestamp::now(),
+                    last_checked_at: None,
+                },
+            }],
+            subdomain: None,
+        })
+        .await
+        .expect("insert org");
+
+    // User whose email matches the additional domain — exactly the set
+    // `revoke_sessions_for_domain_users` targets.
+    let victim = enroll_user_with_org(
+        &store,
+        "victim@added.example.com",
+        None,
+        Some(&test_domain("added.example.com")),
+        None,
+    )
+    .await
+    .expect("enroll victim user");
+
+    // A peer on the primary domain: not matched, so their sessions and cache
+    // entries must survive the per-user invalidation — the fix must not
+    // over-invalidate.
+    let peer = enroll_user_with_org(
+        &store,
+        "peer@primary.example.com",
+        None,
+        Some(&test_domain("primary.example.com")),
+        None,
+    )
+    .await
+    .expect("enroll peer user");
+
+    let far_future: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let victim_hash = "hash-domain-repro-victim";
+    let peer_hash = "hash-domain-repro-peer";
+
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &victim.id,
+            user_email: "victim@added.example.com",
+            token_hash: victim_hash,
+            authenticator_id: None,
+            expires_at: far_future,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create victim session");
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &peer.id,
+            user_email: "peer@primary.example.com",
+            token_hash: peer_hash,
+            authenticator_id: None,
+            expires_at: far_future,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create peer session");
+
+    // The same instance that ran a prior request seeds the cache as a `Hit`
+    // for both users — a DB-miss-turned-Hit, the way the hot path does.
+    let cache = SessionCache::new(10_000, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, victim_hash, test_arrival())
+            .await
+            .expect("seed victim lookup")
+            .is_some(),
+        "victim session must exist in DB before seeding"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, peer_hash, test_arrival())
+            .await
+            .expect("seed peer lookup")
+            .is_some(),
+        "peer session must exist in DB before seeding"
+    );
+
+    // Production path: remove the additional domain. The fix pairs each
+    // per-user DB delete with `invalidate_for_user` on this same instance.
+    let summary = remove_additional_domain(&store, &cache, &org.id, "added.example.com")
+        .await
+        .expect("remove additional domain")
+        .expect("domain was attached");
+    assert_eq!(
+        summary.revoked_user_count, 1,
+        "one matching user's sessions revoked"
+    );
+
+    let now = jiff::Timestamp::now();
+
+    // The victim's session row is gone from the DB.
+    assert!(
+        get_session_by_token_hash(&store, victim_hash, now)
+            .await
+            .expect("db lookup after removal")
+            .is_none(),
+        "the victim's session row MUST be deleted from the DB"
+    );
+    // The fix: the victim's stale cache Hit is evicted, so this instance no
+    // longer serves the revoked session. Before the fix this returned Some.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, victim_hash, test_arrival())
+            .await
+            .expect("victim cache lookup after removal")
+            .is_none(),
+        "the victim's stale cache Hit must be evicted by remove_additional_domain"
+    );
+
+    // The peer is unaffected in both layers: DB row survives, and the
+    // per-user invalidation left their cache Hit in place.
+    assert!(
+        get_session_by_token_hash(&store, peer_hash, now)
+            .await
+            .expect("peer db lookup after removal")
+            .is_some(),
+        "the non-matching peer's session row MUST survive"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, peer_hash, test_arrival())
+            .await
+            .expect("peer cache lookup after removal")
+            .is_some(),
+        "the non-matching peer's cache Hit MUST survive per-user invalidation"
+    );
+
+    // Membership (org_id) is intentionally not changed by domain removal.
+    let victim_after = store
+        .get::<UserDoc>(&victim.id)
+        .await
+        .expect("get victim")
+        .expect("victim exists");
+    assert_eq!(victim_after.data.org_id, Some(org.id.clone()));
+    let peer_after = store
+        .get::<UserDoc>(&peer.id)
+        .await
+        .expect("get peer")
+        .expect("peer exists");
+    assert_eq!(peer_after.data.org_id, Some(org.id.clone()));
 }

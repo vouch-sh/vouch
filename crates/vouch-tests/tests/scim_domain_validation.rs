@@ -428,6 +428,7 @@ async fn user_creation_rejected_after_domain_removed() {
     // must see the removal and reject with 400.
     vouch_server::db::remove_additional_domain(
         &harness.state.store,
+        &harness.state.session_cache,
         &org.id,
         "toctou-removed-alt.example.com",
     )
@@ -489,6 +490,7 @@ async fn user_creation_succeeds_then_domain_removed() {
     // of existing membership, not creation of new membership).
     vouch_server::db::remove_additional_domain(
         &harness.state.store,
+        &harness.state.session_cache,
         &org.id,
         "toctou-happy-alt.example.com",
     )
