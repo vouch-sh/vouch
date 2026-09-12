@@ -14,11 +14,20 @@ default_stages: [pre-commit]
 # quote can be verified with sha256 — trailing-whitespace, end-of-file-fixer, and
 # mixed-line-ending would auto-fix that fidelity away. Spec text also carries
 # example PEM private-key blocks that trip detect-private-key.
+#
+# The two detail-*rules skills are generated on the Detail side and written here
+# by `detail rules pull`, which emits files without a trailing newline. The
+# hygiene hooks "fix" that on commit and the next pull reverts it, so every sync
+# carries unrelated whitespace churn. They are excluded for the same reason as
+# specs/: the upstream tool owns the bytes. `detail-triage` is repo-owned and
+# stays covered.
 exclude: |
   (?x)^(
     crates/vouch-server/static/css/output\.css|
     crates/vouch-server/data/.*\.mmdb|
-    specs/.*
+    specs/.*|
+    \.claude/skills/detail-rules/.*|
+    \.claude/skills/detail-create-rules/.*
   )$
 
 repos:

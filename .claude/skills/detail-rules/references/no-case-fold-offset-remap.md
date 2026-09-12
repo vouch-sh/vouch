@@ -11,10 +11,10 @@ Unicode case conversion (`to_lowercase()` / `to_uppercase()`) is not length-pres
 
 The defect pattern has two sub-forms:
 
-**Sub-form A — byte-offset remap (incorrect):**
+**Sub-form A — byte-offset remap (incorrect):**  
 Call `to_lowercase()`, run `find()` on the result to get a byte position, then use that byte position to index into the original string.
 
-**Sub-form B — char-count remap (also incorrect, subtler):**
+**Sub-form B — char-count remap (also incorrect, subtler):**  
 Call `to_lowercase()`, run `find()` to get a byte position in the folded string, convert that to a `chars().count()`, then call `char_indices().nth(count)` on the original string to recover a byte position. This was the form introduced in this repo as the "fix" for sub-form A; it still fails for U+0130 because one codepoint in the original maps to two codepoints in the folded copy, so the count diverges.
 
 **The only safe strategies are:**
