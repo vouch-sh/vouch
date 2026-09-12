@@ -17,11 +17,23 @@
 //! When no `WWW-Authenticate` header is present, we insert a minimal
 //! `Bearer` challenge with only the `resource_metadata` parameter.
 //!
-//! Scope: apply ONLY to protected-resource sub-routers (credential
-//! issuance, userinfo, introspect, register, keys, admin API, SCIM,
-//! applications). Do not apply to authorization-server metadata or
-//! pure UI routes — those aren't OAuth protected resources and 401s
-//! there have different semantics.
+//! Scope: apply ONLY to sub-routers whose 401 responses warrant a
+//! `resource_metadata` pointer — i.e. routes that carry RFC 6750
+//! Bearer tokens (credential issuance, userinfo, introspect, register,
+//! keys, admin API, SCIM, applications). Do not apply to authorization-
+//! server metadata or pure UI routes — those aren't OAuth protected
+//! resources and 401s there have different semantics.
+//!
+//! "Carries RFC 6750 Bearer transport" is a broader predicate than "is
+//! an RFC 6749/9728 OAuth 2.0 protected resource". The per-resource
+//! metadata document allowlist
+//! ([`crate::services::oidc::protected_resource::PROTECTED_RESOURCE_PREFIXES`])
+//! uses the stricter definition and deliberately excludes `/scim/v2/*`:
+//! its tokens are admin-minted opaque credentials (not AS-issued access
+//! tokens), so no `authorization_servers` entry is truthful for it.
+//! This middleware still applies to SCIM so its 401s point clients at
+//! the *root* metadata document (a deployment-wide overview), not a
+//! per-resource SCIM document.
 
 use crate::AppState;
 use axum::{
