@@ -165,7 +165,10 @@ pub(crate) async fn demote_member(
         ));
     }
 
-    let updated = db::update_user_admin_status(&state.store, &target_id, false).await?;
+    let updated =
+        db::demote_or_deactivate_member(&state.store, &target_id, db::MemberDowngrade::Demote)
+            .await
+            .map_err(last_admin_error)?;
     if !updated {
         return Err(member_gone());
     }
@@ -221,12 +224,23 @@ pub(crate) async fn deactivate_member(
         &target_id,
         "User deactivated by admin",
         &admin.id,
-        || db::update_user_active_status(&state.store, &target_id, false),
+        // The last-admin floor is enforced inside this write, so it can only
+        // fail after revocation has run. That is the same shape as any other
+        // persist failure here: the member keeps `active = true` and their
+        // credentials are revoked but re-obtainable, so the organization
+        // still has its admin and the operation is retryable.
+        || {
+            db::demote_or_deactivate_member(
+                &state.store,
+                &target_id,
+                db::MemberDowngrade::Deactivate,
+            )
+        },
     )
     .await
     .map_err(|e| match e {
         crate::services::auth::DeactivationError::Revoke(err) => err,
-        crate::services::auth::DeactivationError::Persist(err) => ServiceError::from(err),
+        crate::services::auth::DeactivationError::Persist(err) => last_admin_error(err),
     })?;
     if !updated {
         return Err(member_gone());
@@ -472,6 +486,25 @@ pub(crate) async fn remove_member(
 /// mutation. The DB layer reported no document to change, so returning an
 /// error (instead of logging an audit event and redirecting with success)
 /// keeps the audit log truthful.
+/// Map a member-downgrade failure onto its wire response.
+///
+/// `LastAdmin` is the caller's mistake, not a fault: an organization with no
+/// admin cannot be administered back into shape, so the request is refused
+/// with a 400 the admin can act on. Everything else keeps its usual mapping.
+fn last_admin_error(err: db::MemberDowngradeError) -> ServiceError {
+    match err {
+        db::MemberDowngradeError::LastAdmin => ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "last_admin",
+            "Cannot remove the organization's only remaining admin",
+        ),
+        db::MemberDowngradeError::OccConflict => ServiceError::Internal(
+            "Organization changed during member update; please retry".to_string(),
+        ),
+        db::MemberDowngradeError::Other(e) => ServiceError::from(e),
+    }
+}
+
 fn member_gone() -> ServiceError {
     ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
 }
@@ -1773,14 +1806,18 @@ mod tests {
         // admin's read and the update produced a success redirect plus a
         // fraudulent audit event. The modify hook deletes the target's doc
         // on the first OCC attempt, deterministically forcing the miss.
+        //
+        // Covers the two actions that still write through `store.modify`.
+        // `demote` and `deactivate` now read the member and write it inside
+        // one transaction (the last-admin floor has to count admins and write
+        // atomically), so there is no window between the read and the write
+        // for a delete to land in — the race this test forces cannot occur on
+        // those paths. Their equivalent contract, that a missing member
+        // yields `Ok(false)` rather than a phantom success, is pinned by
+        // `db::tests::users_and_sessions::test_downgrade_reports_missing_member`.
         use std::sync::{Arc, Mutex};
 
-        for (action, kind) in [
-            ("promote", "admin_promote"),
-            ("demote", "admin_demote"),
-            ("deactivate", "admin_deactivate"),
-            ("activate", "admin_activate"),
-        ] {
+        for (action, kind) in [("promote", "admin_promote"), ("activate", "admin_activate")] {
             let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let slot = Arc::clone(&target_slot);
             let (app, state) = test_app_with_modify_hook(move |store| {

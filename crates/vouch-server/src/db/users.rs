@@ -264,6 +264,133 @@ async fn org_admin_successor(
     Ok(admin_ids.into_iter().next())
 }
 
+/// The member change being applied by [`demote_or_deactivate_member`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberDowngrade {
+    /// Clear `is_org_admin`, leaving the account active.
+    Demote,
+    /// Clear `active`, which also removes the account from the admin count.
+    Deactivate,
+}
+
+/// Failure modes of [`demote_or_deactivate_member`].
+#[derive(Debug, thiserror::Error)]
+pub enum MemberDowngradeError {
+    /// The change would leave the organization with no active admin.
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization row while this change was
+    /// counting admins.
+    #[error("organization changed during member downgrade")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for MemberDowngradeError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Demote or deactivate an org member, refusing to remove the last admin.
+///
+/// Returns `Ok(false)` when the target no longer exists.
+///
+/// "At least one active admin per organization" is a cross-row invariant: it
+/// is a property of the member set, not of any single user document. The
+/// handlers' own "cannot demote yourself" check enforces it only by accident
+/// — it holds for one request at a time, and two admins who downgrade *each
+/// other* simultaneously both pass it, because neither request can see the
+/// other. Each write then lands on a different user document, so per-document
+/// optimistic concurrency never notices, and the organization is left with no
+/// admin and no way back in.
+///
+/// So the admin count and the write share one transaction, and the
+/// organization row is version-bumped to serialize them (CLAUDE.md rule 10).
+/// The org row is what concurrent downgrades collide on; DSQL is OCC-only and
+/// has no `SELECT … FOR UPDATE`, so forcing writers onto one row is what makes
+/// the guard atomic on every backend. The version is captured *before* the
+/// member scan for the reason spelled out in [`delete_user`]: read afterwards,
+/// it would already carry a sibling's bump and the compare-and-update would
+/// wrongly succeed.
+///
+/// # Errors
+///
+/// [`MemberDowngradeError::LastAdmin`] when the target is the organization's
+/// only remaining active admin, and [`MemberDowngradeError::OccConflict`] when
+/// a concurrent change to the organization won the race — retried by
+/// `with_dsql_retry!`, which re-runs the count against the committed state.
+pub async fn demote_or_deactivate_member(
+    store: &DocumentStore,
+    user_id: &str,
+    change: MemberDowngrade,
+) -> std::result::Result<bool, MemberDowngradeError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        let org_id = user_doc.data.org_id.clone();
+
+        // Version first, then the predicate read it must guard.
+        let org_doc = match org_id.as_deref() {
+            Some(id) => {
+                tx.get::<super::documents::organization::OrganizationDoc>(id)
+                    .await?
+            }
+            None => None,
+        };
+
+        // Only a change that removes an *active admin* can breach the floor.
+        // Demoting a plain member, or deactivating one, cannot.
+        let removes_an_admin = user_doc.data.is_org_admin && user_doc.data.active;
+        if removes_an_admin && let Some(id) = org_id.as_deref() {
+            let members = tx.find_all::<UserDoc>("org_id", id).await?;
+            let other_admins = members
+                .iter()
+                .filter(|m| m.data.is_org_admin && m.data.active && m.id != user_id)
+                .count();
+            if other_admins == 0 {
+                return Err(MemberDowngradeError::LastAdmin);
+            }
+        }
+
+        let mut updated = user_doc.data.clone();
+        match change {
+            MemberDowngrade::Demote => updated.is_org_admin = false,
+            MemberDowngrade::Deactivate => updated.active = false,
+        }
+        // Guard the user row on the version this transaction read, so a
+        // concurrent edit to the same member is not overwritten blindly.
+        if !tx
+            .compare_and_update(user_id, user_doc.version, &updated)
+            .await?
+        {
+            return Err(MemberDowngradeError::OccConflict);
+        }
+
+        if let Some(id) = org_id.as_deref()
+            && let Some(org_doc) = org_doc
+        {
+            let won = tx
+                .compare_and_update(id, org_doc.version, &org_doc.data)
+                .await?;
+            if !won {
+                return Err(MemberDowngradeError::OccConflict);
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    })
+}
+
 /// Delete a user and all associated data atomically.
 ///
 /// Wraps all cascade deletes in a single transaction so that a partial
@@ -358,6 +485,22 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // overwritten with the stale doc: the cascade fails with a retryable
         // `VersionConflict` and the entry-point `with_dsql_retry!` re-runs
         // it from a fresh read.
+        // Capture the org row's version *before* the member scan that chooses
+        // the successor. The scan is the predicate read this guard exists to
+        // serialize, so the version has to be the one the scan saw. Reading it
+        // afterwards defeats the guard: under PostgreSQL READ COMMITTED every
+        // statement takes a fresh snapshot, so a sibling delete that committed
+        // between the scan and the version read yields the already-bumped
+        // version here, the compare-and-update below matches, and both
+        // transactions commit having each chosen the other as successor.
+        let org_doc = match org_id.as_deref() {
+            Some(id) => {
+                tx.get::<super::documents::organization::OrganizationDoc>(id)
+                    .await?
+            }
+            None => None,
+        };
+
         let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
         tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
             d.user_id = match (d.access_scope, successor.as_deref()) {
@@ -387,9 +530,7 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // administrative action, so serializing per organization costs
         // little.
         if let Some(ref org_id) = org_id
-            && let Some(org_doc) = tx
-                .get::<super::documents::organization::OrganizationDoc>(org_id)
-                .await?
+            && let Some(org_doc) = org_doc
         {
             let won = tx
                 .compare_and_update(org_id, org_doc.version, &org_doc.data)
