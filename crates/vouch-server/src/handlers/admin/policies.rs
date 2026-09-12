@@ -255,14 +255,13 @@ pub(crate) async fn toggle_preconfigured_policy(
         )
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?,
-        None => {
-            db::create_preconfigured_active(&state.store, &org_id, active_slugs)
-                .await
-                .map_err(|e| {
-                    ServiceError::Internal(format!("Failed to create posture config: {e}"))
-                })?;
-            true
-        }
+        // First activation for this org: there is no version to guard on, so
+        // the deterministic document ID is the serialization point. A
+        // concurrent first activation returns `false` here for the same
+        // reason a lost compare-and-update does, and takes the same path.
+        None => db::create_preconfigured_active(&state.store, &org_id, active_slugs)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to create posture config: {e}")))?,
     };
 
     if !applied {

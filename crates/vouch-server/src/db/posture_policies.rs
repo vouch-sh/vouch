@@ -61,6 +61,23 @@ pub(super) async fn get_posture_config(
     store.find_one::<PostureConfigDoc>("org_id", org_id).await
 }
 
+/// Document ID of an org's posture config, derived from the org ID.
+///
+/// `PostureConfigDoc` is "at most one per org", but `org_id` is an ordinary
+/// index rather than a unique one, so two concurrent first activations both
+/// read no config and both insert. Deriving the primary key from `org_id`
+/// makes that collide: exactly one insert commits and the other observes a
+/// unique violation, on every backend. Same construction as
+/// `deterministic_challenge_state_id` and `deterministic_domain_claim_id`.
+fn deterministic_posture_config_id(org_id: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"posture_config\0");
+    ctx.update(org_id.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Set which preconfigured policy slugs are active for an org.
 ///
 /// Creates the config document if it doesn't exist, or updates it.
@@ -93,7 +110,9 @@ pub async fn set_preconfigured_active(
                 org_id: org_id.to_string(),
                 active_slugs,
             };
-            store.insert(&doc).await?;
+            store
+                .insert_with_id(&deterministic_posture_config_id(org_id), &doc)
+                .await?;
         }
     }
 
@@ -167,19 +186,33 @@ pub async fn compare_and_set_preconfigured_active(
 
 /// Create the posture config document for an org (first activation).
 ///
-/// Inserts a new `PostureConfigDoc` with `active_slugs` and returns. Use
+/// Inserts a new `PostureConfigDoc` with `active_slugs`. Use
 /// [`compare_and_set_preconfigured_active`] once a config already exists.
+///
+/// Returns `Ok(true)` when this call created the document, and `Ok(false)`
+/// when a concurrent first activation created it first. The ID is derived
+/// from `org_id`, so the loser collides on the primary key rather than
+/// inserting a second config for the same org — the version guard on the
+/// update path cannot help here, there being no version to read yet. The
+/// caller treats `false` exactly like a lost compare-and-update: re-read and
+/// re-issue against the config that now exists.
 pub async fn create_preconfigured_active(
     store: &DocumentStore,
     org_id: &str,
     active_slugs: Vec<String>,
-) -> Result<()> {
+) -> Result<bool> {
     let doc = PostureConfigDoc {
         org_id: org_id.to_string(),
         active_slugs,
     };
-    store.insert(&doc).await?;
-    Ok(())
+    match store
+        .insert_with_id(&deterministic_posture_config_id(org_id), &doc)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) if super::pool::is_unique_violation(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Get the list of active preconfigured slugs for an org.

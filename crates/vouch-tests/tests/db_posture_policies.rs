@@ -144,6 +144,49 @@ async fn create_preconfigured_active_inserts_first_config() {
 }
 
 #[tokio::test]
+async fn concurrent_first_activation_creates_one_config_not_two() {
+    // There is at most one PostureConfigDoc per org, but `org_id` is an
+    // ordinary index, so nothing at the storage layer rejects a second one.
+    // Two first activations racing each other both read no config and both
+    // insert; the deterministic document ID is what makes the loser collide
+    // on the primary key instead of creating a duplicate that
+    // `get_posture_config`'s `find_one` would then resolve arbitrarily.
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "concurrent-first.example").await;
+
+    let first = db::create_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["disk-encryption".to_string()],
+    )
+    .await
+    .expect("first create");
+    let second = db::create_preconfigured_active(
+        &harness.state.store,
+        &org_id,
+        vec!["firewall".to_string()],
+    )
+    .await
+    .expect("second create must report the collision, not fail");
+
+    assert!(first, "the first activation creates the config");
+    assert!(
+        !second,
+        "the second must report that it lost, so the handler re-reads instead of \
+         silently writing a duplicate"
+    );
+
+    // The loser's slugs were not applied, and exactly one config exists: a
+    // duplicate would leave the winner's value reachable only by chance.
+    let cfg = db::get_preconfigured_active_with_version(&harness.state.store, &org_id)
+        .await
+        .expect("read")
+        .expect("config exists");
+    assert_eq!(cfg.active_slugs, vec!["disk-encryption"]);
+    assert_eq!(cfg.version, 1, "the losing insert must not have bumped it");
+}
+
+#[tokio::test]
 async fn compare_and_set_applies_when_version_matches_and_bumps_version() {
     let harness = TestHarness::new().await;
     let org_id = fresh_org_id(&harness, "cas-match.example").await;
