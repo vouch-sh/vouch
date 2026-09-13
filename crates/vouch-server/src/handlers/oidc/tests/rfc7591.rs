@@ -303,6 +303,7 @@ async fn test_rfc7591_register_service_account() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "CI Pipeline"
     });
 
@@ -363,6 +364,7 @@ async fn test_rfc7591_response_cache_headers() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Cache Test"
     });
 
@@ -400,6 +402,7 @@ async fn test_rfc7591_response_content_type() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Content Type Test"
     });
 
@@ -695,6 +698,7 @@ async fn test_rfc7591_response_includes_issued_at_and_client_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Issued At Test"
     });
 
@@ -927,6 +931,7 @@ async fn test_rfc7591_rejects_both_jwks_and_jwks_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "jwks": {"keys": [{"kty": "RSA", "n": "abc", "e": "AQAB"}]},
         "jwks_uri": "https://example.com/.well-known/jwks.json"
     });
@@ -974,6 +979,7 @@ async fn test_rfc7591_rejects_private_key_jwt_without_jwks() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "token_endpoint_auth_method": "private_key_jwt"
     });
 
@@ -997,6 +1003,7 @@ async fn test_rfc7591_rejects_invalid_contact_email() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "contacts": ["not-an-email"]
     });
 
@@ -1020,6 +1027,7 @@ async fn test_rfc7591_rejects_http_client_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_uri": "http://example.com"
     });
 
@@ -1043,6 +1051,7 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "client_secret_basic"
     });
@@ -1856,6 +1865,7 @@ async fn test_rfc7591_ignores_unknown_fields() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Unknown Fields Test",
         "future_extension_field": "should be ignored",
         "another_unknown_123": {"nested": true},

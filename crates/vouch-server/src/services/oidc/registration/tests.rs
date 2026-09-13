@@ -1102,19 +1102,46 @@ fn test_validate_grant_and_response_types_auth_code_without_code_response() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
-// RFC 7591 §2.1: client_credentials registers with no response type.
+// RFC 7591 §2 Table 1 pairs `client_credentials` with a response_types value
+// of "(none)", and the surrounding text requires the implication to hold "vice
+// versa" — so a client_credentials-only client registers with no response
+// type, and sends `"response_types": []` to say so.
 #[test]
 fn test_validate_grant_and_response_types_client_credentials_valid() {
-    let mut req =
-        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    let mut req = make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec![]));
     let result = validate_grant_and_response_types(&mut req);
-    let validated = result.expect("client_credentials + code must be valid");
+    let validated = result.expect("client_credentials with no response type must be valid");
     assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Absent);
     assert!(
         validated
             .grant_types
             .contains(&"client_credentials".to_string())
     );
+    assert!(
+        validated.response_types.is_empty(),
+        "an empty response_types must survive validation, not be defaulted to ['code']"
+    );
+}
+
+// RFC 7591 §2: "a server supporting these fields SHOULD take steps to ensure
+// that a client cannot register itself into an inconsistent state." Declaring
+// `code` while declaring no grant that can redeem one is that state, and it is
+// the half that lets a client hold a redirect_uri it can never use.
+#[test]
+fn test_validate_grant_and_response_types_rejects_code_without_authorization_code_grant() {
+    let mut req =
+        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    assert_oauth_error(
+        validate_grant_and_response_types(&mut req),
+        OAuthErrorCode::InvalidClientMetadata,
+    );
+
+    // The default is consistent with itself: omitting both fields yields
+    // `authorization_code` + `code`, which pairs.
+    let mut both_absent = make_request_with_grant_response(None, None);
+    let validated = validate_grant_and_response_types(&mut both_absent)
+        .expect("the two RFC 7591 §2 defaults must pair");
+    assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Present);
 }
 
 // RFC 7591 §2: token_endpoint_auth_method is client metadata.

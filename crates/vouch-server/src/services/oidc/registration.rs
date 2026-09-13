@@ -1194,11 +1194,32 @@ fn validate_grant_and_response_types(
     } else {
         AuthorizationCodeGrant::Absent
     };
+    // RFC 7591 §2: the two fields "are related in that the 'grant_types'
+    // available to a client influence the 'response_types' that the client is
+    // allowed to use, and vice versa", and a server supporting them "SHOULD
+    // take steps to ensure that a client cannot register itself into an
+    // inconsistent state". Table 1 pairs `authorization_code` with `code`, so
+    // the implication is checked in both directions — an unpaired
+    // `response_types: ["code"]` is the half that lets a client hold a
+    // redirect_uri it can never redeem a code against.
+    //
+    // Note the asymmetry in what an omitted field means: `grant_types`
+    // defaults to `["authorization_code"]` and `response_types` to `["code"]`,
+    // so the two defaults are consistent with each other. A client that wants
+    // neither — a machine-to-machine client using only `client_credentials` —
+    // has to say so by sending `"response_types": []`.
     let has_code_response = response_types.iter().any(|r| r == "code");
     if auth_code_grant == AuthorizationCodeGrant::Present && !has_code_response {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "grant_types includes 'authorization_code' but response_types is missing 'code'",
+        ));
+    }
+    if has_code_response && auth_code_grant == AuthorizationCodeGrant::Absent {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "response_types includes 'code' but grant_types is missing 'authorization_code'; \
+             send \"response_types\": [] for a client that does not use the authorization code flow",
         ));
     }
 

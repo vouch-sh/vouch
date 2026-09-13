@@ -695,6 +695,10 @@ async fn resolve_non_jwt_auth(
 }
 
 /// Handle authorization code grant.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 6749 §4.1.3 authorization-code grant: authenticate, authorize the grant, bind, exchange"
+)]
 async fn handle_authorization_code_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -812,6 +816,30 @@ async fn handle_authorization_code_grant(
             .into_response();
         }
     };
+
+    // RFC 6749 §5.2 `unauthorized_client`: "The authenticated client is not
+    // authorized to use this authorization grant type." Placed before
+    // `exchange_authorization_code` so an unauthorized client cannot burn the
+    // single-use code, matching where the device-code grant gates. Mirrors the
+    // checks the other four grant handlers perform, keeping the interpretation
+    // of `grant_types` consistent across every grant handler that
+    // authenticates a client.
+    //
+    // A registration that omitted `grant_types` is authorized here:
+    // `is_authorized_for_grant` reads a stored `None` as RFC 7591 §2's default
+    // of `["authorization_code"]`, so this gate rejects only a client whose
+    // explicit list leaves `authorization_code` out.
+    if !authenticated_client
+        .client
+        .is_authorized_for_grant(OAuthGrantType::AuthorizationCode.as_str())
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::UnauthorizedClient,
+            "Client is not authorized for authorization_code grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
 
     // RFC 8705 Section 2: Validate mTLS client auth for JWT-authenticated clients
     // that are also registered for mTLS (e.g., FAPI clients using both).
