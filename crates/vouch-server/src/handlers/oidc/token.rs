@@ -695,6 +695,10 @@ async fn resolve_non_jwt_auth(
 }
 
 /// Handle authorization code grant.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 6749 §4.1 authorization-code grant: authenticate, authorize grant, bind, exchange"
+)]
 async fn handle_authorization_code_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -812,6 +816,30 @@ async fn handle_authorization_code_grant(
             .into_response();
         }
     };
+
+    // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated, so a
+    // bad credential already mapped to `invalid_client` above. Now confirm the
+    // authenticated client is registered (RFC 7591 §2 `grant_types`) for the
+    // authorization_code grant before the single-use code is exchanged — so a
+    // client registered for `client_credentials` only cannot redeem an
+    // authorization code and receive user-context tokens. Mirrors the checks
+    // `exchange_client_credentials`, `handle_token_exchange_grant`, and
+    // `handle_fido2_assertion_grant` perform, keeping the interpretation of
+    // `grant_types` consistent across every grant handler that authenticates a
+    // client. The response omits the `WWW-Authenticate` challenge —
+    // `unauthorized_client` is a grant-authorization failure, not a
+    // client-authentication failure (matching `handle_fido2_assertion_grant`).
+    if !authenticated_client
+        .client
+        .is_authorized_for_grant(OAuthGrantType::AuthorizationCode.as_str())
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::UnauthorizedClient,
+            "Client is not authorized for authorization_code grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
 
     // RFC 8705 Section 2: Validate mTLS client auth for JWT-authenticated clients
     // that are also registered for mTLS (e.g., FAPI clients using both).

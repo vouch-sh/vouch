@@ -2209,3 +2209,103 @@ async fn test_grant_types_enforcement_rejects_fido2_assertion_for_unauthorized_c
         "authorized fido2 client must not be rejected as unauthorized_client: {resp_2}"
     );
 }
+
+// ========================================================================
+// grant_types enforcement: authorization_code grant.
+//
+// The token-exchange and fido2-assertion tests above pin the guard for the
+// grants `handle_token_exchange_grant`/`handle_fido2_assertion_grant` run.
+// `handle_authorization_code_grant` authenticates the client too but commit
+// 45b8de2 omitted its `is_authorized_for_grant` guard — so a client registered
+// for `client_credentials` only could redeem an authorization code and receive
+// user-context tokens, violating RFC 6749 §5.2 `unauthorized_client`. This
+// test pins the fix: a client restricted to `["client_credentials"]` MUST
+// receive HTTP 401 `unauthorized_client` when attempting
+// `grant_type=authorization_code`, while the same flow registered for
+// `authorization_code` keeps working (no regression).
+// ========================================================================
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_authorization_code_for_m2m_only_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-authcode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Restrict the client to client_credentials only — NOT authorized for
+    // authorization_code.
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Mint an authorization code (issue_code calls issue_authorization_code
+    // directly, bypassing /authorize which also lacks a grant_types check).
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "authorization_code must be rejected with unauthorized_client for a \
+         client_credentials-only client (RFC 6749 §5.2): {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "expected unauthorized_client: {resp}"
+    );
+
+    // Control: register the client for authorization_code and the same request
+    // MUST succeed, proving the gate — not client auth — is what rejected, and
+    // that the registered authorization_code grant has no regression.
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+    let code_2 = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion_2 =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body_2 = format!(
+        "grant_type=authorization_code&code={code_2}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion_2}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (status_2, resp_2) = http_post_form(&app, "/oauth/token", &body_2, &[]).await;
+    assert_eq!(
+        status_2,
+        StatusCode::OK,
+        "authorization_code with the grant registered must succeed: {resp_2}"
+    );
+    let json_2: serde_json::Value = serde_json::from_str(&resp_2).expect("Valid JSON");
+    assert!(
+        json_2.get("access_token").is_some(),
+        "authorized authorization_code client must receive an access_token: {resp_2}"
+    );
+}
