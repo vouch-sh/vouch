@@ -181,32 +181,36 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// falls back to exact string comparison.
 ///
 /// Before parsing, whitespace adjacent to a *structural* separator is
-/// stripped: immediately after an RDN-separator comma, and on both sides of
-/// the `=` that separates each attribute type from its value. `x509-cert`
-/// 0.2.5's `RdnSequence::from_str` splits RDNs on a bare `,` and locates the
-/// attribute type with `s.find('=')` without trimming either side, so a
-/// leading space on the next attribute-type name (e.g. `CN=foo, O=Acme`) or a
-/// space padding the `=` (e.g. `O = Acme`) breaks the parse and the caller
-/// falls back to exact equality — which always rejects, since the cert-side
-/// `Name::to_string` rendering joins RDNs with a bare comma and emits a bare
-/// `=`. Stripping separator-adjacent whitespace makes both of the renderings
-/// an operator is likely to paste in canonicalize identically to
-/// `O=Acme,CN=foo`:
+/// stripped. RFC 4514 gives three: the `,` between RDNs (§2.1), the `+`
+/// between the attributes of a multi-valued RDN (§2.2), and the `=` that
+/// separates each attribute type from its value (§2.3). `x509-cert` 0.2.5's
+/// `RdnSequence::from_str` splits on a bare `,` and `+` and locates the
+/// attribute type with `s.find('=')` without trimming any side, so a leading
+/// space on the next attribute-type name (e.g. `CN=foo, O=Acme`) or a space
+/// padding the `=` (e.g. `O = Acme`) breaks the parse and the caller falls
+/// back to exact equality — which always rejects, since the cert-side
+/// `Name::to_string` rendering emits every separator bare. Stripping
+/// separator-adjacent whitespace makes the renderings an operator is likely
+/// to paste canonicalize identically to `O=Acme,CN=foo`:
 ///
 /// - `O=Acme, CN=foo` — comma-space, bare `=`. This is what `openssl x509
 ///   -noout -subject` prints by default (verified against OpenSSL 3.6.4), and
 ///   what `-text` shows on the `Subject:` line.
+/// - `CN=foo + O=Acme, DC=example` — a multi-valued RDN in that same default
+///   output. OpenSSL pads `+` on both sides even when it leaves `=` bare, so
+///   this is not a `-nameopt` variant an operator has to opt into.
 /// - `O = Acme, CN = foo` — `=` padded on both sides. This is the `oneline`
 ///   name format, which the operator gets by passing `-nameopt oneline`
 ///   explicitly; it is *not* the default for `-subject`.
 ///
 /// The `=`-padded form is handled because it is a plausible paste, not
-/// because any command emits it by default.
+/// because any command emits it by default. The `+`-padded form is what the
+/// default command emits.
 ///
-/// Only a *structural* comma separates RDNs, and only the *first* unescaped
-/// `=` in an RDN is the type/value separator (a later `=` belongs to the
-/// value). RFC 4514 §2.4 lets a comma appear inside an attribute value when
-/// escaped with a backslash, and §4 gives
+/// Only an *unescaped* `,` or `+` is structural, and only the *first*
+/// unescaped `=` in an RDN is the type/value separator (a later `=` belongs
+/// to the value). RFC 4514 §2.4 lets either separator appear inside an
+/// attribute value when escaped with a backslash, and §4 gives
 /// `CN=James \"Jim\" Smith\, III,DC=example,DC=net` as a valid DN. Stripping
 /// whitespace after every comma or around every `=` would rewrite
 /// `Smith\, III` to `Smith\,III` (changing the value rather than the
@@ -214,28 +218,68 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// stripped around *unescaped* separators — while still in the
 /// attribute-type region (before the RDN's first unescaped `=`) or
 /// immediately after that `=`. Interior value whitespace, and whitespace
-/// around a value-internal `=`, is significant and preserved.
+/// around a value-internal `=`, is significant and preserved. So is a
+/// trailing space the value escaped (`CN=foo\ `), which is why the padding
+/// strip measures from the last escaped-or-non-whitespace character rather
+/// than trimming whatever whitespace it finds at the end.
 fn canonicalize_dn(dn: &str) -> Option<String> {
     use std::str::FromStr as _;
+    let rdns = x509_cert::name::RdnSequence::from_str(&normalize_dn_spacing(dn)).ok()?;
+    let der = der::Encode::to_der(&rdns).ok()?;
+    let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
+    Some(rdns.to_string())
+}
+
+/// The canonical form of `dn` with its RDN sequence order reversed, or `None`
+/// when `dn` does not parse.
+///
+/// Diagnostic only — never part of a match decision. OpenSSL's default
+/// `x509 -noout -subject`, its `-text` output, and `-nameopt oneline` all print
+/// RDNs in DER order, while RFC 4514 §2.1 specifies the string representation
+/// "starting with the last element of the sequence and moving backwards toward
+/// the first" — the order `-nameopt rfc2253` emits and the one `Name::to_string`
+/// produces here. A registered `tls_client_auth_subject_dn` that matches the
+/// certificate only after this reversal is a paste of the wrong rendering, and
+/// naming that in the log is more useful to the operator than a bare mismatch.
+fn canonicalize_dn_rdn_reversed(dn: &str) -> Option<String> {
+    use std::str::FromStr as _;
+    let mut rdns = x509_cert::name::RdnSequence::from_str(&normalize_dn_spacing(dn)).ok()?;
+    rdns.0.reverse();
+    canonicalize_dn(&rdns.to_string())
+}
+
+/// Strip whitespace adjacent to the RFC 4514 structural separators, leaving
+/// value-significant whitespace intact. See [`canonicalize_dn`] for why each
+/// form is tolerated and which ones are not.
+fn normalize_dn_spacing(dn: &str) -> String {
     let mut normalized = String::with_capacity(dn.len());
     let mut escaped = false;
     // `in_value` is `false` while we are still in the attribute-type region of
     // the current RDN (before its first unescaped `=`). Whitespace there is
     // separator-adjacent formatting and is stripped so `O = Acme, CN = foo`
-    // reduces to `O=Acme,CN=foo`; an unescaped `,` returns us here for the
-    // next RDN. A later `=` already lives in the value and does not reset
-    // this flag, so whitespace around a value-internal `=` is preserved.
+    // reduces to `O=Acme,CN=foo`; an unescaped `,` or `+` returns us here for
+    // the next attribute type. A later `=` already lives in the value and does
+    // not reset this flag, so whitespace around a value-internal `=` is
+    // preserved.
     let mut in_value = false;
     // `after_eq` is set immediately after the RDN's type/value separator `=`
     // so the leading whitespace of the value (e.g. the `= Acme` padding) is
     // stripped until the first non-whitespace value character. Interior value
     // whitespace after that character is preserved.
     let mut after_eq = false;
+    // Length of `normalized` up to and including the last character that may
+    // not be trailing padding: everything except an unescaped whitespace
+    // character inside a value. Truncating here at a separator strips the
+    // `foo + O` padding without touching an escaped trailing space (`CN=foo\ `),
+    // whose backslash advanced this mark past it. Interior whitespace survives
+    // because the next value character advances the mark beyond it.
+    let mut value_end = 0;
     for c in dn.chars() {
         if (!in_value || after_eq) && c.is_whitespace() {
             continue;
         }
         after_eq = false;
+        let was_escaped = escaped;
         if escaped {
             escaped = false;
         } else if c == '\\' {
@@ -244,17 +288,24 @@ fn canonicalize_dn(dn: &str) -> Option<String> {
             // First unescaped `=` in this RDN — the type/value separator.
             in_value = true;
             after_eq = true;
-        } else if c == ',' {
-            // Structural comma ends this RDN; the next one starts in its
-            // attribute-type region.
+        } else if c == ',' || c == '+' {
+            // Structural separators: `,` ends the RDN, `+` ends one attribute
+            // of a multi-valued RDN (RFC 4514 §2.2). Both return us to an
+            // attribute-type region, so drop the padding the preceding value
+            // accumulated — OpenSSL renders `CN=foo+O=Acme` as
+            // `CN=foo + O=Acme` by default, and pads `=` too under
+            // `-nameopt oneline`.
+            normalized.truncate(value_end);
             in_value = false;
         }
         normalized.push(c);
+        if was_escaped || !c.is_whitespace() {
+            value_end = normalized.len();
+        }
     }
-    let rdns = x509_cert::name::RdnSequence::from_str(&normalized).ok()?;
-    let der = der::Encode::to_der(&rdns).ok()?;
-    let rdns = x509_cert::name::RdnSequence::from_der(&der).ok()?;
-    Some(rdns.to_string())
+    // The final RDN has no separator to trigger the truncation above.
+    normalized.truncate(value_end);
+    normalized
 }
 
 /// Verify `tls_client_auth` — match certificate against registered
@@ -286,6 +337,25 @@ pub(crate) fn verify_tls_client_auth(
         };
         if matches {
             return Ok(());
+        }
+        // The registered value names the right attributes in the wrong
+        // sequence order: RFC 8705 §2.1.2 defines the field as "A string
+        // representation -- as defined in [RFC4514]", and RFC 4514 §2.1 orders
+        // that representation "starting with the last element of the sequence
+        // and moving backwards toward the first". OpenSSL prints the opposite
+        // order unless asked for `-nameopt rfc2253`, so this is the paste an
+        // operator is most likely to have made, and the one a bare "subject
+        // mismatch" is least likely to explain.
+        if let Some(reversed) = canonicalize_dn_rdn_reversed(expected)
+            && canonicalize_dn(found) == Some(reversed)
+        {
+            tracing::warn!(
+                "tls_client_auth_subject_dn matches the certificate only with its \
+                 RDN order reversed. OpenSSL's default `x509 -noout -subject` \
+                 prints RDNs in DER order; RFC 8705 requires the RFC 4514 string \
+                 representation, which reverses them. Re-register using \
+                 `openssl x509 -noout -subject -nameopt rfc2253` output: {found}"
+            );
         }
         return Err(MtlsError::SubjectMismatch {
             expected: expected.to_string(),
@@ -768,6 +838,65 @@ mod tests {
             .build::<p256::ecdsa::DerSignature>()
             .expect("build cert");
         cert.to_der().expect("DER encode")
+    }
+
+    /// Which `openssl x509 -noout -subject` renderings authenticate, pinned
+    /// against the literal strings OpenSSL 3.6.4 emits.
+    ///
+    /// RFC 8705 §2.1.2 defines `tls_client_auth_subject_dn` as "A string
+    /// representation -- as defined in [RFC4514] -- of the expected subject
+    /// distinguished name", and RFC 4514 §2.1 orders that representation
+    /// "starting with the last element of the sequence and moving backwards
+    /// toward the first". OpenSSL emits that order only under
+    /// `-nameopt rfc2253`; its default output, its `-text` output, and
+    /// `-nameopt oneline` all print RDNs in DER order — the reverse.
+    ///
+    /// So a subject with two or more RDNs authenticates only from the
+    /// `rfc2253` rendering, and widening the whitespace tolerance cannot
+    /// change that: the attributes are in the wrong sequence, not the wrong
+    /// spacing. A subject that is a single (possibly multi-valued) RDN has no
+    /// sequence to reverse, so every rendering of it authenticates.
+    ///
+    /// Every other subject-DN test derives its input from the certificate's
+    /// own rendering, so the RDN order agrees by construction and an ordering
+    /// mismatch cannot surface. This one uses the real strings.
+    #[test]
+    fn test_verify_tls_client_auth_openssl_subject_renderings() {
+        // openssl req -x509 -subj '/O=MultiValTest+CN=foo'
+        let multi_valued = {
+            let mut set = der::asn1::SetOfVec::new();
+            for (oid, val) in [("2.5.4.10", "MultiValTest"), ("2.5.4.3", "foo")] {
+                let v = der::asn1::Utf8StringRef::new(val).expect("val");
+                set.insert(x509_cert::attr::AttributeTypeAndValue {
+                    oid: der::oid::ObjectIdentifier::new_unwrap(oid),
+                    value: der::asn1::Any::from(v),
+                })
+                .expect("insert attribute");
+            }
+            x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(set)])
+        };
+        // openssl req -x509 -subj '/O=Acme/CN=foo'
+        let two_rdn = make_rdn_sequence(&[("2.5.4.10", "Acme"), ("2.5.4.3", "foo")]);
+
+        for (subject, rendering, accepted) in [
+            // One RDN: no sequence order to get wrong, so all three work.
+            (&multi_valued, "CN=foo + O=MultiValTest", true), // default
+            (&multi_valued, "CN = foo + O = MultiValTest", true), // -nameopt oneline
+            (&multi_valued, "O=MultiValTest+CN=foo", true),   // -nameopt rfc2253
+            // Two RDNs: only the RFC 4514 order authenticates.
+            (&two_rdn, "O=Acme, CN=foo", false),     // default
+            (&two_rdn, "O = Acme, CN = foo", false), // -nameopt oneline
+            (&two_rdn, "CN=foo,O=Acme", true),       // -nameopt rfc2253
+        ] {
+            let der = make_self_signed_cert_with_subject(subject.clone());
+            let cert = parse_client_certificate(&der).expect("parse");
+            assert_eq!(
+                verify_tls_client_auth(&cert, Some(rendering), None, None, None, None).is_ok(),
+                accepted,
+                "`{rendering}` against subject {:?}",
+                cert.subject_dn
+            );
+        }
     }
 
     // =========================================================================
@@ -1382,6 +1511,71 @@ mod tests {
         assert!(
             spaced.contains(r"Doe\, John"),
             "escaped comma and its following space must survive: got {spaced}"
+        );
+    }
+
+    /// RFC 4514 §2.2: `+` separates the attributes of a multi-valued RDN, so
+    /// it is structural and its padding is not significant. OpenSSL renders a
+    /// multi-valued subject as `CN=foo + O=Acme` in its *default*
+    /// `x509 -noout -subject` output — verified against OpenSSL 3.6.4 — so an
+    /// operator copying that output must reach the same canonical form as the
+    /// `-nameopt rfc2253` rendering, which writes a bare `+`.
+    #[test]
+    fn test_canonicalize_dn_multi_valued_rdn_space_insensitive() {
+        let bare = canonicalize_dn("O=Acme+CN=foo,DC=example").expect("rfc2253 form parses");
+
+        for spaced in [
+            // `x509 -noout -subject` default: bare `=`, padded `+` and `,`.
+            "CN=foo + O=Acme, DC=example",
+            // `-nameopt oneline`: every separator padded.
+            "CN = foo + O = Acme, DC = example",
+            // Padding on only one side of the `+`.
+            "CN=foo +O=Acme,DC=example",
+            "CN=foo+ O=Acme,DC=example",
+        ] {
+            assert_eq!(
+                canonicalize_dn(spaced).as_deref(),
+                Some(bare.as_str()),
+                "`{spaced}` must canonicalize to the bare-`+` form"
+            );
+        }
+    }
+
+    /// RFC 4514 §2.4 escapes `+` inside a value the same way it escapes `,`.
+    /// An escaped `+` is part of the value, so neither the padding strip nor
+    /// the return to the attribute-type region may fire after it.
+    #[test]
+    fn test_canonicalize_dn_preserves_escaped_plus() {
+        let escaped = canonicalize_dn(r"CN=Ben \+ Jerry,DC=example").expect("escaped `+` parses");
+        assert!(
+            escaped.contains(r"Ben \+ Jerry"),
+            "an escaped `+` and the spaces around it belong to the value: got {escaped}"
+        );
+
+        let structural = canonicalize_dn("CN=Ben+O=Jerry,DC=example").expect("structural `+`");
+        assert_ne!(
+            escaped, structural,
+            "an escaped `+` must not collapse into a multi-valued RDN"
+        );
+    }
+
+    /// RFC 4514 §2.4 lets a value end in an escaped space (`CN=foo\ `). The
+    /// padding strip runs at every structural separator and at the end of the
+    /// string, so it must measure from the last *escaped-or-non-whitespace*
+    /// character — a plain trailing-whitespace trim would eat the space and
+    /// leave a dangling backslash.
+    #[test]
+    fn test_canonicalize_dn_preserves_escaped_trailing_space() {
+        let mid = canonicalize_dn(r"CN=foo\ ,DC=example").expect("escaped trailing space parses");
+        assert!(
+            mid.contains(r"foo\ "),
+            "escaped trailing space must survive the separator strip: got {mid}"
+        );
+
+        let last = canonicalize_dn(r"DC=example,CN=foo\ ").expect("escaped space at end parses");
+        assert!(
+            last.ends_with(r"foo\ "),
+            "escaped trailing space must survive the end-of-string strip: got {last}"
         );
     }
 
