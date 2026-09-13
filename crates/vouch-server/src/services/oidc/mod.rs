@@ -52,12 +52,21 @@
 //! - [`org_keys`] - Per-organization issuer signing keys and operator rotation
 //! - [`mtls`] - mTLS client authentication (crate-local)
 
+/// The authorization-code flow's `response_type` (RFC 6749 §4.1.1), and the
+/// counterpart [`vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE`] is
+/// paired with in RFC 7591 §2 Table 1. Registration checks that pairing in
+/// both directions, so the two sides of it are named the same way.
+///
+/// Not to be confused with the `code` *query parameter* the authorization
+/// endpoint returns in a redirect, which happens to share the spelling.
+pub(crate) const RESPONSE_TYPE_CODE: &str = "code";
+
 /// Every accepted `response_type`. The authorize-endpoint validator,
 /// registration validation, and discovery's `response_types_supported`
 /// all read this list, so an advertised type cannot be unacceptable and
 /// vice versa. Vouch issues only authorization codes (RFC 6749 §4.1.1);
 /// implicit and hybrid response types are not supported.
-pub(crate) const SUPPORTED_RESPONSE_TYPES: &[&str] = &["code"];
+pub(crate) const SUPPORTED_RESPONSE_TYPES: &[&str] = &[RESPONSE_TYPE_CODE];
 
 pub mod authorization;
 pub mod authorization_details;

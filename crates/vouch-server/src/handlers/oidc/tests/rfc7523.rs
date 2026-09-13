@@ -2032,18 +2032,23 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
 }
 
 // ========================================================================
-// RFC 6749 §5.2 `unauthorized_client` — grant_types enforcement across the
-// token-exchange (RFC 8693) and fido2-assertion grants.
+// RFC 6749 §5.2 `unauthorized_client` — grant_types enforcement across every
+// grant handler that authenticates a client.
 //
-// The `client_credentials` handler rejects a client whose registered
-// `grant_types` does not include `client_credentials`. `handle_token_exchange_grant`
-// and `handle_fido2_assertion_grant` authenticate the client too, and must
-// perform the equivalent check — otherwise a client registered for
-// `authorization_code` only (the dynamic-registration default when `grant_types`
-// is omitted, `registration.rs`) could exercise those grants. These tests pin
-// the fix: a client restricted to `["authorization_code"]` MUST receive HTTP 401
-// `unauthorized_client` for both grants, while the registered `authorization_code`
-// grant keeps working (no regression).
+// RFC 6749 §5.2 defines the code as "The authenticated client is not
+// authorized to use this authorization grant type", and RFC 7591 §2 describes
+// `grant_types` as the grants "that the client can use at the token endpoint".
+// Neither document imposes a MUST on the server to enforce the list, so what
+// these tests pin is a local invariant rather than a conformance requirement:
+// every handler that resolves an authenticated client consults
+// `is_authorized_for_grant` before issuing anything.
+//
+// All five are covered — `client_credentials` in `exchange_client_credentials`,
+// `device_code` in `handlers/device.rs`, and token-exchange, fido2-assertion,
+// and authorization_code here. A client restricted to a list that omits the
+// grant it requests MUST receive HTTP 401 `unauthorized_client`, and each test
+// pairs that with a control proving the gate — not client authentication — is
+// what rejected.
 // ========================================================================
 
 #[tokio::test]
@@ -2059,9 +2064,9 @@ async fn test_grant_types_enforcement_rejects_token_exchange_for_unauthorized_cl
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
 
-    // Seed an access token via the registered authorization_code grant (which
-    // is not gated by `is_authorized_for_grant`) to use as the exchange
-    // `subject_token`. This also proves the registered grant still works.
+    // Seed an access token via the authorization_code grant — which this client
+    // *is* registered for — to use as the exchange `subject_token`. This also
+    // proves the registered grant still works.
     let seed_code = issue_code(
         &state,
         &user,
@@ -2207,5 +2212,131 @@ async fn test_grant_types_enforcement_rejects_fido2_assertion_for_unauthorized_c
     assert_ne!(
         json_2["error"], "unauthorized_client",
         "authorized fido2 client must not be rejected as unauthorized_client: {resp_2}"
+    );
+}
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_authorization_code_for_unauthorized_client() {
+    // `handle_authorization_code_grant` was the one handler that authenticated
+    // a client without consulting `grant_types`, so an operator who scoped a
+    // client to machine-to-machine use could still redeem an authorization code
+    // with it and receive user-context tokens.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-authcode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    // Restrict the client to client_credentials — authorization_code is NOT
+    // authorized. The code itself is minted directly, so this exercises the
+    // token endpoint's gate rather than /authorize's.
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let redeem = |code: String, assertion: String| {
+        format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={assertion}",
+            urlencoding::encode("https://example.com/callback")
+        )
+    };
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let (status, resp) = http_post_form(&app, "/oauth/token", &redeem(code, assertion), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "authorization_code must be rejected for a client_credentials-only client: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "expected unauthorized_client, not invalid_grant: {resp}"
+    );
+
+    // Control: register the grant and the same exchange succeeds, proving the
+    // gate — not client auth, the code, or PKCE — is what rejected above. A
+    // fresh code is needed because the gate runs before the code is consumed,
+    // which is the point: an unauthorized client cannot burn a single-use code.
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+    let code_2 = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion_2 =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let (status_2, resp_2) =
+        http_post_form(&app, "/oauth/token", &redeem(code_2, assertion_2), &[]).await;
+    assert_eq!(
+        status_2,
+        StatusCode::OK,
+        "authorization_code must still work once registered: {resp_2}"
+    );
+}
+
+/// A registration that omitted `grant_types` must keep working: RFC 7591 §2
+/// fixes the default at `["authorization_code"]`, so the new gate has nothing
+/// to reject. This is what makes the guard safe to add where #1330's
+/// device-code gate was not — there, the same default meant an absent list
+/// authorized nothing.
+#[tokio::test]
+async fn test_authorization_code_allowed_when_grant_types_absent() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-absent@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Clear the stored list entirely, the shape a manually-managed row has.
+    state
+        .store
+        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&client.client_id, |d| {
+            d.grant_types = None;
+        })
+        .await
+        .expect("clear grant_types");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an absent grant_types list defaults to authorization_code (RFC 7591 §2): {resp}"
     );
 }
