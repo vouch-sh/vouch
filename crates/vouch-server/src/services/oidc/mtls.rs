@@ -181,17 +181,22 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// falls back to exact string comparison.
 ///
 /// Before parsing, whitespace adjacent to a *structural* separator is
-/// stripped: immediately after an RDN-separator comma, and on both sides of
-/// the `=` that separates each attribute type from its value. `x509-cert`
-/// 0.2.5's `RdnSequence::from_str` splits RDNs on a bare `,` and locates the
-/// attribute type with `s.find('=')` without trimming either side, so a
-/// leading space on the next attribute-type name (e.g. `CN=foo, O=Acme`) or a
-/// space padding the `=` (e.g. `O = Acme`) breaks the parse and the caller
-/// falls back to exact equality — which always rejects, since the cert-side
-/// `Name::to_string` rendering joins RDNs with a bare comma and emits a bare
-/// `=`. Stripping separator-adjacent whitespace makes both of the renderings
-/// an operator is likely to paste in canonicalize identically to
-/// `O=Acme,CN=foo`:
+/// stripped. The RFC 4514 structural separators are the RDN-separator comma
+/// (§2.2), the multi-valued-RDN separator `+` (§2.2), and the type/value
+/// separator `=` (§2.3); whitespace is stripped immediately after an
+/// unescaped `,` or `+`, on both sides of the `=` that starts each attribute
+/// value, and immediately *before* an unescaped `,` or `+` (the separator
+/// padding OpenSSL's `-nameopt oneline` emits around all three). `x509-cert`
+/// 0.2.5's `RdnSequence::from_str` splits RDNs on a bare `,`, splits a
+/// multi-valued RDN on a bare `+`, and locates the attribute type with
+/// `s.find('=')` — all without trimming either side — so a leading space on
+/// the next attribute-type name (e.g. `CN=foo, O=Acme`, or the `O` after a
+/// spaced `+` in `CN=foo + O=Acme`) or a space padding the `=` (e.g.
+/// `O = Acme`) breaks the parse and the caller falls back to exact equality,
+/// which always rejects since the cert-side `Name::to_string` rendering joins
+/// RDNs/ATVs with a bare `,`/`+` and emits a bare `=`. Stripping
+/// separator-adjacent whitespace makes each rendering an operator is likely
+/// to paste canonicalize identically to `O=Acme,CN=foo`:
 ///
 /// - `O=Acme, CN=foo` — comma-space, bare `=`. This is what `openssl x509
 ///   -noout -subject` prints by default (verified against OpenSSL 3.6.4), and
@@ -199,22 +204,32 @@ fn parse_ip_bytes(bytes: &[u8]) -> Option<std::net::IpAddr> {
 /// - `O = Acme, CN = foo` — `=` padded on both sides. This is the `oneline`
 ///   name format, which the operator gets by passing `-nameopt oneline`
 ///   explicitly; it is *not* the default for `-subject`.
+/// - `CN = foo + O = MultiValTest` — a multi-valued RDN with the `+` padded on
+///   both sides, also produced by `-nameopt oneline` (the `oneline` format
+///   pads all three structural separators with spaces on both sides).
 ///
-/// The `=`-padded form is handled because it is a plausible paste, not
-/// because any command emits it by default.
+/// The `=`- and `+`-padded forms are handled because they are plausible
+/// pastes, not because any command emits them by default.
 ///
-/// Only a *structural* comma separates RDNs, and only the *first* unescaped
-/// `=` in an RDN is the type/value separator (a later `=` belongs to the
-/// value). RFC 4514 §2.4 lets a comma appear inside an attribute value when
-/// escaped with a backslash, and §4 gives
+/// Only a *structural* `,`/`+` separates RDNs/ATVs, and only the *first*
+/// unescaped `=` in an RDN is the type/value separator (a later `=` belongs
+/// to the value). RFC 4514 §2.4 lets a `,` or `+` appear inside an attribute
+/// value when escaped with a backslash, and §4 gives
 /// `CN=James \"Jim\" Smith\, III,DC=example,DC=net` as a valid DN. Stripping
-/// whitespace after every comma or around every `=` would rewrite
+/// whitespace after every `,`/`+` or around every `=` would rewrite
 /// `Smith\, III` to `Smith\,III` (changing the value rather than the
 /// separator spacing), so the escape state is tracked and whitespace is only
 /// stripped around *unescaped* separators — while still in the
 /// attribute-type region (before the RDN's first unescaped `=`) or
-/// immediately after that `=`. Interior value whitespace, and whitespace
-/// around a value-internal `=`, is significant and preserved.
+/// immediately after that `=`. Likewise the whitespace stripped *before* an
+/// unescaped `,`/`+` is only the *unescaped* trailing whitespace of the
+/// preceding value: an escaped trailing space (`\ `, the RFC 4514 canonical
+/// rendering of a value that ends in a space) is a significant value
+/// character, not separator padding, and is preserved — so a value ending in
+/// a space can never be collapsed with a value containing the separator
+/// character. Interior value whitespace, whitespace around a value-internal
+/// `=`, and whitespace around an escaped separator, is significant and
+/// preserved.
 fn canonicalize_dn(dn: &str) -> Option<String> {
     use std::str::FromStr as _;
     let mut normalized = String::with_capacity(dn.len());
@@ -222,32 +237,63 @@ fn canonicalize_dn(dn: &str) -> Option<String> {
     // `in_value` is `false` while we are still in the attribute-type region of
     // the current RDN (before its first unescaped `=`). Whitespace there is
     // separator-adjacent formatting and is stripped so `O = Acme, CN = foo`
-    // reduces to `O=Acme,CN=foo`; an unescaped `,` returns us here for the
-    // next RDN. A later `=` already lives in the value and does not reset
-    // this flag, so whitespace around a value-internal `=` is preserved.
+    // reduces to `O=Acme,CN=foo`; an unescaped `,` or `+` returns us here for
+    // the next RDN/ATV. A later `=` already lives in the value and does not
+    // reset this flag, so whitespace around a value-internal `=` is preserved.
     let mut in_value = false;
     // `after_eq` is set immediately after the RDN's type/value separator `=`
     // so the leading whitespace of the value (e.g. the `= Acme` padding) is
     // stripped until the first non-whitespace value character. Interior value
     // whitespace after that character is preserved.
     let mut after_eq = false;
+    // `trailing_ws_start` is `Some(len)` when the unescaped trailing
+    // whitespace run at the end of `normalized` began at byte `len` (i.e.
+    // everything from `len` to the current end is droppable separator
+    // padding on the left side of a following `,`/`+`). It is set to `None`
+    // by every solid character — including an escape backslash and the
+    // escaped character that follows it — so an escaped trailing space
+    // `\ ` (a significant value character, RFC 4514 §2.4) is *not* treated
+    // as padding and is preserved. On hitting an unescaped `,`/`+` the run
+    // is dropped via `truncate`; the `(!in_value || after_eq)` skip above
+    // removes the padding on the right side of the separator.
+    let mut trailing_ws_start: Option<usize> = None;
     for c in dn.chars() {
         if (!in_value || after_eq) && c.is_whitespace() {
             continue;
         }
         after_eq = false;
         if escaped {
+            // An escaped character is a solid value character even if it is
+            // whitespace, so it does not start a strip-able trailing-ws run.
             escaped = false;
+            trailing_ws_start = None;
         } else if c == '\\' {
             escaped = true;
+            trailing_ws_start = None;
         } else if c == '=' && !in_value {
             // First unescaped `=` in this RDN — the type/value separator.
             in_value = true;
             after_eq = true;
-        } else if c == ',' {
-            // Structural comma ends this RDN; the next one starts in its
-            // attribute-type region.
+            trailing_ws_start = None;
+        } else if c == ',' || c == '+' {
+            // Structural separator (RDN or multi-valued-RDN). Drop the
+            // unescaped trailing whitespace of the preceding value — the
+            // separator padding on the left side — and return to the
+            // attribute-type region for the next attribute.
+            if let Some(start) = trailing_ws_start {
+                normalized.truncate(start);
+            }
+            trailing_ws_start = None;
             in_value = false;
+        } else if in_value && c.is_whitespace() {
+            // Unescaped trailing whitespace inside a value: remember where
+            // the run began so a following structural separator can drop it
+            // as padding. Mark only the first char of the run.
+            if trailing_ws_start.is_none() {
+                trailing_ws_start = Some(normalized.len());
+            }
+        } else {
+            trailing_ws_start = None;
         }
         normalized.push(c);
     }
@@ -1626,6 +1672,313 @@ mod tests {
             verify_tls_client_auth(&cert, Some("CN = foo, O = Acme"), None, None, None, None)
                 .is_err(),
             "a `=`-spaced DN with a different RDN order must mismatch"
+        );
+    }
+
+    // =========================================================================
+    // canonicalize_dn — multi-valued-RDN `+` separator (RFC 4514 §2.2)
+    // =========================================================================
+
+    // Regression for the `+`-separator-adjacent whitespace bug. OpenSSL's
+    // `-nameopt oneline` pads *all three* RFC 4514 structural separators
+    // (`,`, `+`, `=`) with spaces on both sides, so a multi-valued-RDN
+    // subject renders as `CN = foo + O = MultiValTest`. The prior state
+    // machine reset `in_value` only on `,`, so the space after `+` survived
+    // into the next attribute-type name (`" O"`) and broke the parse, while
+    // the space before `+` survived in the preceding value and diverged on
+    // round-trip. Both halves must be stripped so the `oneline` rendering of
+    // a multi-valued-RDN cert authenticates, the same way the `,`-separated
+    // `oneline` rendering already does.
+
+    /// A multi-valued-RDN DN with whitespace around the `+` (the OpenSSL
+    /// `-nameopt oneline` rendering) must canonicalize to the same bare-`+`
+    /// form the cert-side `Name::to_string` emits, regardless of how the
+    /// spaces are distributed around the `+` and the `=`.
+    #[test]
+    fn test_canonicalize_dn_multivalued_rdn_oneline_spacing() {
+        // Cert-side canonical form: bare `+`, bare `=`.
+        let bare = canonicalize_dn("CN=foo+O=MultiValTest").expect("bare `+` parses");
+
+        // A multi-valued RDN is a SET (RFC 5280 §4.1.2.4), so the DER
+        // round-trip canonicalizes ATV order by OID value — the rfc2253
+        // ordering `O=...+CN=...` round-trips to the same OID-sorted form as
+        // `CN=...+O=...`, which is why an operator may register either
+        // ordering and still match the cert.
+        assert_eq!(
+            canonicalize_dn("O=MultiValTest+CN=foo").expect("rfc2253 order parses"),
+            bare,
+            "rfc2253 attribute ordering round-trips to the same OID-sorted canonical form"
+        );
+
+        // The verbatim `-nameopt oneline` output — `+` and `=` padded on
+        // both sides — must canonicalize to the cert-side bare-`+` form.
+        let oneline = canonicalize_dn("CN = foo + O = MultiValTest")
+            .expect("OpenSSL `oneline` multi-valued RDN must parse");
+        assert_eq!(
+            oneline, bare,
+            "OpenSSL `oneline` output must canonicalize to the cert-side bare-`+` form"
+        );
+
+        // Every distribution of spaces around the `+` (and around `=`) must
+        // reduce to the same canonical form. Pre-`+` coverage is the bug
+        // half B; post-`+` coverage is bug half A.
+        for spaced in [
+            "CN=foo + O=MultiValTest",
+            "CN=foo +O=MultiValTest",
+            "CN=foo+ O=MultiValTest",
+            "CN=foo+O=MultiValTest",
+            "CN = foo+O = MultiValTest",
+            "CN = foo + O = MultiValTest",
+            "CN  =  foo  +  O  =  MultiValTest",
+            "cn = foo + o = MultiValTest",
+        ] {
+            assert_eq!(
+                canonicalize_dn(spaced).expect("spaced `+` variant must parse"),
+                bare,
+                "`+`-spacing/case variant {spaced:?} must canonicalize to the bare-`+` form"
+            );
+        }
+    }
+
+    /// An escaped `+` (`\+`, RFC 4514 §2.4 permits `+` inside a value when
+    /// escaped) is a value character, not a multi-valued-RDN separator. The
+    /// escape guard precedes the separator branch, so `\+` must survive
+    /// canonicalization exactly, and must NOT be split into two ATVs.
+    #[test]
+    fn test_canonicalize_dn_escaped_plus_not_treated_as_separator() {
+        let escaped =
+            canonicalize_dn(r"CN=foo\+bar,O=Acme").expect("escaped `+` in value must parse");
+        assert!(
+            escaped.contains(r"\+"),
+            "escaped `+` must survive canonicalization unchanged: got {escaped}"
+        );
+        // The escaped `+` keeps `foo+bar` as one attribute value, so the
+        // first RDN is `CN=foo\+bar` and the second is `O=Acme` — NOT a
+        // three-ATV multi-valued RDN. The unescaped `CN=foo+bar` form has
+        // no `=` in the `bar` ATV and does not parse at all.
+        assert_eq!(
+            escaped, r"CN=foo\+bar,O=Acme",
+            "escaped `+` must preserve the single-ATV value: got {escaped}"
+        );
+        assert!(
+            canonicalize_dn("CN=foo+bar").is_none(),
+            "unescaped `+` without an `=` in the second ATV must not parse"
+        );
+    }
+
+    /// An escaped trailing space in a value (`\ `, the RFC 4514 canonical
+    /// rendering of a value that ends in a space) immediately before a
+    /// structural separator is a significant value character, NOT separator
+    /// padding, and must be preserved. The fix strips only *unescaped*
+    /// trailing whitespace before a separator, so a value ending in a space
+    /// cannot be collapsed with a value containing the separator character
+    /// (a `\ `-vs-`\,` split that would otherwise be a false match).
+    #[test]
+    fn test_canonicalize_dn_preserves_escaped_trailing_space_before_separator() {
+        // `foo\ ` — value `foo ` (trailing space, escaped). The space before
+        // the structural `,` is escaped, so it must survive.
+        let trailing_space = canonicalize_dn(r"CN=foo\ ,O=Acme")
+            .expect("escaped trailing space before separator must parse");
+        assert!(
+            trailing_space.contains(r"\ "),
+            "escaped trailing space must be preserved: got {trailing_space}"
+        );
+
+        // `foo\,` — value `foo,` (literal comma, escaped). A different value.
+        let escaped_comma = canonicalize_dn(r"CN=foo\,O=Acme")
+            .expect("escaped comma (no trailing space) must parse");
+        assert!(
+            escaped_comma.contains(r"\,"),
+            "escaped comma must be preserved: got {escaped_comma}"
+        );
+
+        // The two are distinct values and must NOT canonicalize equal: a
+        // value ending in a space is not the same as a value containing a
+        // comma. (A `while pop()` style strip would collapse both to
+        // `CN=foo\,O=Acme` — a false match this test guards against.)
+        assert_ne!(
+            trailing_space, escaped_comma,
+            "escaped trailing space and escaped comma must stay distinct"
+        );
+
+        // Unescaped trailing whitespace before a separator IS separator
+        // padding and is stripped, so the unspaced value `foo` is recovered.
+        let stripped =
+            canonicalize_dn("CN=foo ,O=Acme").expect("unescaped trailing space stripped");
+        let tight = canonicalize_dn("CN=foo,O=Acme").expect("tight form");
+        assert_eq!(
+            stripped, tight,
+            "unescaped trailing whitespace before a separator must be stripped"
+        );
+    }
+
+    // =========================================================================
+    // verify_tls_client_auth — multi-valued-RDN subject DN (end-to-end)
+    // =========================================================================
+
+    // Build an `RdnSequence` whose single `RelativeDistinguishedName` holds
+    // every given `(OID, value)` pair as a separate `AttributeTypeAndValue`
+    // — a multi-valued RDN (RFC 5280 §4.1.2.4), which `Name::to_string`
+    // renders by joining the ATVs with a bare `+` (RFC 4514 §2.2).
+    // `make_rdn_sequence` instead emits one ATV per RDN, so it cannot reach
+    // the `+`-separator path through `canonicalize_dn`.
+    fn make_multivalued_rdn_sequence(rdns: &[(&str, &str)]) -> x509_cert::name::RdnSequence {
+        let mut set = der::asn1::SetOfVec::new();
+        for (oid, val) in rdns {
+            let oid = der::oid::ObjectIdentifier::new_unwrap(oid);
+            let v = der::asn1::Utf8StringRef::new(val).expect("val");
+            let atv = x509_cert::attr::AttributeTypeAndValue {
+                oid,
+                value: der::asn1::Any::from(v),
+            };
+            set.insert(atv).expect("insert multi-valued ATV");
+        }
+        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(set)])
+    }
+
+    /// A multi-valued-RDN cert rendered `CN=foo+O=MultiValTest` must
+    /// authenticate against the verbatim `-nameopt oneline` output
+    /// `CN = foo + O = MultiValTest` and against every `+`/`=`-spacing and
+    /// attribute-type-case variant of it. Before the fix the spaced `+` form
+    /// returned `SubjectMismatch`.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_multivalued_rdn_oneline_nameopt() {
+        // Single multi-valued RDN: CN=foo + O=MultiValTest.
+        let subject =
+            make_multivalued_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "MultiValTest")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let rendered = cert.subject_dn.as_deref().expect("subject DN");
+
+        // Lock in the fixture rendering: x509-cert joins the multi-valued
+        // RDN's ATVs with a bare `+` and no spacing (CN sorts before O by
+        // OID value 2.5.4.3 < 2.5.4.10). A future `Display` change must fail
+        // here rather than silently weaken the assertions.
+        assert_eq!(
+            rendered, "CN=foo+O=MultiValTest",
+            "fixture: cert renders bare-`+` multi-valued RDN"
+        );
+
+        // The verbatim `openssl x509 -noout -subject -nameopt oneline` output
+        // (minus the `subject=` prefix) — must authenticate. This is the
+        // form the existing `oneline` test (mtls.rs) already anchors for
+        // `,`/`=`; `oneline` pads `+` the same way.
+        let openssl_oneline = "CN = foo + O = MultiValTest";
+        assert_ne!(
+            rendered, openssl_oneline,
+            "precondition: cert rendering differs from the `oneline` form by spacing"
+        );
+        assert!(
+            verify_tls_client_auth(&cert, Some(openssl_oneline), None, None, None, None).is_ok(),
+            "OpenSSL `oneline` multi-valued-RDN output must authenticate against the matching cert"
+        );
+
+        // Variants that differ only by `+`/`=`-spacing or attribute-type case
+        // (value case preserved) must also authenticate.
+        for registered in [
+            "CN=foo + O=MultiValTest",
+            "CN=foo +O=MultiValTest",
+            "CN=foo+ O=MultiValTest",
+            "CN = foo+O = MultiValTest",
+            "CN  =  foo  +  O  =  MultiValTest",
+            "cn = foo + o = MultiValTest",
+            // rfc2253 attribute ordering within the multi-valued RDN (a set,
+            // so order is canonical and the cert renders one way; the
+            // registered form reversed must still canonicalize equal).
+            "O=MultiValTest+CN=foo",
+            "O = MultiValTest + CN = foo",
+        ] {
+            assert!(
+                verify_tls_client_auth(&cert, Some(registered), None, None, None, None).is_ok(),
+                "multi-valued-RDN `+`/`=`-spacing/case variant {registered:?} must authenticate"
+            );
+        }
+
+        // The bare-`+` cert-side rendering itself authenticates.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN=foo+O=MultiValTest"), None, None, None, None)
+                .is_ok(),
+            "bare-`+` multi-valued-RDN form must authenticate"
+        );
+    }
+
+    /// `+`-spacing tolerance must not make a genuinely different
+    /// multi-valued-RDN DN match: a different attribute value, a different
+    /// RDN composition, and a single-RDN-vs-multi-valued-RDN difference must
+    /// all still be rejected — including when the registered value uses the
+    /// spaced-`+` rendering the fix now tolerates.
+    #[test]
+    fn test_verify_tls_client_auth_subject_dn_multivalued_rdn_still_rejects_mismatch() {
+        let subject =
+            make_multivalued_rdn_sequence(&[("2.5.4.3", "foo"), ("2.5.4.10", "MultiValTest")]);
+        let cert_der = make_self_signed_cert_with_subject(subject);
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // Different CN value, spaced-`+` rendering.
+        assert!(
+            verify_tls_client_auth(
+                &cert,
+                Some("CN = bar + O = MultiValTest"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
+            "a multi-valued-RDN DN with a different CN value must mismatch"
+        );
+        // Different O value.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN = foo + O = Other"), None, None, None, None)
+                .is_err(),
+            "a multi-valued-RDN DN with a different O value must mismatch"
+        );
+        // Different attribute (OU instead of O) — different RDN composition.
+        assert!(
+            verify_tls_client_auth(
+                &cert,
+                Some("CN = foo + OU = MultiValTest"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
+            "a multi-valued-RDN DN with a different attribute type must mismatch"
+        );
+        // Single-RDN registration (no `+`) vs a multi-valued-RDN cert.
+        assert!(
+            verify_tls_client_auth(&cert, Some("CN=foo"), None, None, None, None).is_err(),
+            "a single-RDN registration must not match a multi-valued-RDN cert"
+        );
+        // Two-RDN registration (`,` between CN and O) vs a single multi-valued
+        // RDN: `CN=foo,O=MultiValTest` is structurally different from
+        // `CN=foo+O=MultiValTest`.
+        assert!(
+            verify_tls_client_auth(
+                &cert,
+                Some("CN = foo, O = MultiValTest"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
+            "a `,`-separated two-RDN registration must not match a `+`-joined multi-valued-RDN cert"
+        );
+        // A `,`-separated registration with the spaced-`+` looking form must
+        // also still reject (cannot cross the `,` vs `+` structural divide).
+        assert!(
+            verify_tls_client_auth(
+                &cert,
+                Some("CN = foo + O = MultiValTest, O = Extra"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_err(),
+            "a DN with extra RDNs must not match the single multi-valued-RDN cert"
         );
     }
 }
