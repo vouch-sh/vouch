@@ -1116,8 +1116,8 @@ setup-aws-wizard-invalid-role-arn = That doesn't look like an IAM role ARN (expe
 setup-aws-wizard-invalid-idc-arn = That doesn't look like an Identity Center application ARN (expected arn:PARTITION:sso::ACCOUNT:application/...). Try again.
 setup-aws-wizard-err-input = Input error: { $reason }
 setup-aws-profile-already-exists =
-    Profile [{ $profile }] already exists in ~/.aws/config.
-    To update it, edit ~/.aws/config directly.
+    Profile [{ $profile }] already exists in { $config_path }.
+    To update it, edit { $config_path } directly.
 
 # Full output block when an existing { -product } profile already targets the
 # requested role. Shell command sits inside the block as literal text so the

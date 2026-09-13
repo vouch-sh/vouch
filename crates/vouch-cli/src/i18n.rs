@@ -357,4 +357,42 @@ mod tests {
         );
         assert!(no.contains("No"), "false should pick [false], got {no:?}");
     }
+
+    /// Regression for the `--profile` already-exists branch under
+    /// `AWS_CONFIG_FILE`: the message must name the resolved config file, not
+    /// a hardcoded `~/.aws/config`. Mirrors the sibling
+    /// `setup-aws-added-profile-block` fix (commit fc375fbb) and pins the same
+    /// contract for the already-exists branch.
+    #[test]
+    fn setup_aws_already_exists_names_resolved_config_path() {
+        let rendered = crate::tr_args!(
+            "setup-aws-profile-already-exists",
+            profile = "testprofile",
+            config_path = "/tmp/alt-config.ini".to_string(),
+        );
+        assert!(
+            rendered.contains("/tmp/alt-config.ini"),
+            "already-exists message should name the resolved config path, got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("~/.aws/config"),
+            "already-exists message must not hardcode ~/.aws/config, got {rendered:?}"
+        );
+
+        // Default path still renders cleanly (no leftover placeholder).
+        let default_rendered = crate::tr_args!(
+            "setup-aws-profile-already-exists",
+            profile = "testprofile",
+            config_path = "/home/alice/.aws/config".to_string(),
+        );
+        assert!(
+            default_rendered.contains("/home/alice/.aws/config"),
+            "already-exists message should name the default config path, got {default_rendered:?}"
+        );
+        assert!(
+            !default_rendered.contains("{ $config_path }")
+                && !default_rendered.contains("{config_path}"),
+            "placeable must be substituted, got {default_rendered:?}"
+        );
+    }
 }
