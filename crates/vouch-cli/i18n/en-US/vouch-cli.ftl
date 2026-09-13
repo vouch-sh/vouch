@@ -768,11 +768,11 @@ aws-err-not-configured =
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
 aws-err-no-vouch-profile =
-    No { -product } AWS profile found in ~/.aws/config.
+    No { -product } AWS profile found in { $config_path }.
     Run '{ -cmd } setup aws --role <role-arn>' first.
 
 aws-err-ambiguous-profile =
-    Multiple { -product } AWS profiles found in ~/.aws/config; refusing to guess which account you meant:
+    Multiple { -product } AWS profiles found in { $config_path }; refusing to guess which account you meant:
     { $listing }
     Set AWS_PROFILE, or name the account with { $override_hint }.
 
@@ -785,7 +785,7 @@ aws-override-hint-role = --role
 aws-override-hint-profile-or-role = --profile or --role
 
 aws-err-profile-not-found =
-    AWS profile '{ $profile }' not found in ~/.aws/config.
+    AWS profile '{ $profile }' not found in { $config_path }.
     Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>' to create it.
 
 aws-err-profile-not-managed =
@@ -1116,8 +1116,8 @@ setup-aws-wizard-invalid-role-arn = That doesn't look like an IAM role ARN (expe
 setup-aws-wizard-invalid-idc-arn = That doesn't look like an Identity Center application ARN (expected arn:PARTITION:sso::ACCOUNT:application/...). Try again.
 setup-aws-wizard-err-input = Input error: { $reason }
 setup-aws-profile-already-exists =
-    Profile [{ $profile }] already exists in ~/.aws/config.
-    To update it, edit ~/.aws/config directly.
+    Profile [{ $profile }] already exists in { $config_path }.
+    To update it, edit { $config_path } directly.
 
 # Full output block when an existing { -product } profile already targets the
 # requested role. Shell command sits inside the block as literal text so the
