@@ -357,4 +357,54 @@ mod tests {
         );
         assert!(no.contains("No"), "false should pick [false], got {no:?}");
     }
+
+    /// Every message that names the AWS config file names the *resolved* one.
+    ///
+    /// `AwsConfig::default_path` honors `AWS_CONFIG_FILE`, so each of these
+    /// messages is rendered after a lookup against a path that may not be
+    /// `~/.aws/config`. A message that hardcodes the default sends the operator
+    /// to a file that does not contain the profile it just told them about.
+    ///
+    /// The compile-time `i18n_embed_fl::fl!` check inside `tr_args!` is what
+    /// keeps the call sites supplying the value — removing the argument at any
+    /// of the four is a build error. What it cannot check is the *message*: a
+    /// future edit could reintroduce a literal path alongside the placeable.
+    /// That is what this test covers.
+    #[test]
+    fn aws_config_path_messages_name_the_resolved_file() {
+        let path = "/tmp/alt-config.ini";
+        let rendered = [
+            crate::tr_args!(
+                "setup-aws-profile-already-exists",
+                profile = "testprofile",
+                config_path = path.to_string(),
+            ),
+            crate::tr_args!("aws-err-no-vouch-profile", config_path = path.to_string()),
+            crate::tr_args!(
+                "aws-err-ambiguous-profile",
+                listing = "\n  a  arn:aws:iam::1:role/r\n".to_string(),
+                override_hint = "--profile".to_string(),
+                config_path = path.to_string(),
+            ),
+            crate::tr_args!(
+                "aws-err-profile-not-found",
+                profile = "testprofile",
+                config_path = path.to_string(),
+            ),
+        ];
+        for message in &rendered {
+            assert!(
+                message.contains(path),
+                "message must name the resolved config path, got {message:?}"
+            );
+            assert!(
+                !message.contains("~/.aws/config"),
+                "message must not hardcode ~/.aws/config, got {message:?}"
+            );
+            assert!(
+                !message.contains("$config_path"),
+                "placeable must be substituted, got {message:?}"
+            );
+        }
+    }
 }

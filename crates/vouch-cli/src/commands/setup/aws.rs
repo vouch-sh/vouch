@@ -426,7 +426,11 @@ fn write_sts_profile(
     let profile_name = match profile_name_hint {
         Some(p) => {
             if config.profile_exists(p) {
-                tr_println!("setup-aws-profile-already-exists", profile = p);
+                tr_println!(
+                    "setup-aws-profile-already-exists",
+                    profile = p,
+                    config_path = config.path().display().to_string(),
+                );
                 return Ok(());
             }
             p.to_string()

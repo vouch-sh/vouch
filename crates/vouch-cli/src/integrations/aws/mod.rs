@@ -98,7 +98,11 @@ pub(crate) fn select_vouch_profile(
     }
 
     match config.vouch_profiles_with_role().as_slice() {
-        [] => Err(CliError::ConfigError(tr!("aws-err-no-vouch-profile")).into()),
+        [] => Err(CliError::ConfigError(tr_args!(
+            "aws-err-no-vouch-profile",
+            config_path = config.path().display().to_string(),
+        ))
+        .into()),
         [only] => Ok(only.clone()),
         candidates => {
             let width = candidates.iter().map(|p| p.name.len()).max().unwrap_or(0);
@@ -116,6 +120,7 @@ pub(crate) fn select_vouch_profile(
                 "aws-err-ambiguous-profile",
                 listing = listing,
                 override_hint = accepts.hint(),
+                config_path = config.path().display().to_string(),
             ))
             .into())
         }
@@ -125,9 +130,12 @@ pub(crate) fn select_vouch_profile(
 /// Look up a specific profile by name and extract the role it targets.
 fn named_vouch_profile(config: &AwsConfig, name: &str) -> anyhow::Result<VouchProfile> {
     let Some(profile) = config.get_profile(name) else {
-        return Err(
-            CliError::ConfigError(tr_args!("aws-err-profile-not-found", profile = name)).into(),
-        );
+        return Err(CliError::ConfigError(tr_args!(
+            "aws-err-profile-not-found",
+            profile = name,
+            config_path = config.path().display().to_string(),
+        ))
+        .into());
     };
 
     let Some(credential_process) = profile.credential_process else {
