@@ -433,16 +433,26 @@ async fn run_fapi_login_with_nonce(
 
 /// Ensure the FAPI client is registered, registering on demand if needed.
 ///
-/// Validates the stored registration in two ways before using it:
+/// Validates the stored registration in three ways before using it:
 /// 1. **Key match**: the current FAPI key's `kid` must match the stored
 ///    `dpop_key_id`. If the key changed (keychain reset, re-enrollment),
 ///    the old registration is useless.
 /// 2. **Server check**: calls the RFC 7592 management endpoint to confirm
 ///    the client still exists on the server (handles DB resets, revocation).
+/// 3. **Grant staleness**: the server-stored `grant_types` must match the
+///    running CLI's declared grants; when stale (e.g. an upgrade added
+///    `token-exchange`), the registration is repaired in place via RFC 7592
+///    PUT before reuse, so already-enrolled clients converge instead of
+///    failing at the server's `unauthorized_client` gate.
 ///
-/// If either check fails, clears FAPI config and re-registers.
+/// If a re-registration is required, clears FAPI config and re-registers.
 ///
 /// Returns the `client_id` on success.
+#[expect(
+    clippy::too_many_lines,
+    reason = "registration state machine: key/URI match, grant staleness \
+              repair (RFC 7592 PUT), and the 24-hour liveness cache"
+)]
 async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) -> Result<String> {
     let base_url = client.base_url().to_string();
 
@@ -475,53 +485,166 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                          server {base_url}, re-registering"
                     );
                 } else {
-                    // Check 2b: skip server check if verified recently
-                    // (within 24 hours). Saves one HTTP round-trip.
-                    if recently_verified(config.registration_verified_at()) {
-                        tracing::debug!(
-                            "Registration verified recently, skipping \
-                             server check"
-                        );
-                        return Ok(id.to_string());
-                    }
+                    // Check 3: are the server-stored grant_types current?
+                    //
+                    // The CLI authenticates as this one registered client for
+                    // every grant it exercises, and the server re-reads the
+                    // stored `grant_types` at every token request (RFC 6749
+                    // §5.2 `unauthorized_client` gate). When the running CLI's
+                    // declared grants change — e.g. an upgrade adds
+                    // `token-exchange` — an already-enrolled client's stored
+                    // grants must be repaired in place via RFC 7592 PUT, or
+                    // WIF credential commands keep failing with HTTP 401
+                    // `unauthorized_client` (the bug left by `d3ad2063`, which
+                    // only reached the POST create-new-client path). A `None`
+                    // stamp (config that predates the stamp, or cleared by
+                    // `clear_fapi`) is stale, so the first login after an
+                    // upgrade repairs every already-enrolled client.
+                    let grants_stale = vouch_cli::fapi::registration::grant_types_stale(
+                        config.grant_types_version(),
+                    );
 
-                    // Check 3: is the registration still active?
-                    match vouch_cli::fapi::registration::is_client_registered(
-                        client.raw_client(),
-                        uri,
-                        token.expose_secret(),
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            // Cache the verification timestamp; cache write
-                            // failures are non-fatal — next login revalidates.
-                            let now = jiff::Timestamp::now().to_string();
-                            let _cached = Config::modify(|cfg| {
-                                cfg.set_server_url(&base_url);
-                                cfg.set_registration_verified_at(&now);
-                            });
-                            return Ok(id.to_string());
+                    if grants_stale {
+                        // Repair path: contact the server — bypass the
+                        // `recently_verified` fast path, since staleness
+                        // outranks the liveness cache — and update the
+                        // registration in place via RFC 7592 PUT, keeping
+                        // the same client_id.
+                        match vouch_cli::fapi::registration::is_client_registered(
+                            client.raw_client(),
+                            uri,
+                            token.expose_secret(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                match vouch_cli::fapi::registration::update_fapi_client(
+                                    client.raw_client(),
+                                    uri,
+                                    token.expose_secret(),
+                                    fapi_key,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let now = jiff::Timestamp::now().to_string();
+                                        let version = vouch_cli::fapi::registration::registered_grant_types_version();
+                                        let _repair = Config::modify(|cfg| {
+                                            cfg.set_server_url(&base_url);
+                                            cfg.set_client_id(&result.client_id);
+                                            if let Some(ref rat) = result.registration_access_token
+                                            {
+                                                cfg.set_registration_access_token(
+                                                    rat.expose_secret(),
+                                                );
+                                            }
+                                            if let Some(ref new_uri) =
+                                                result.registration_client_uri
+                                            {
+                                                cfg.set_registration_client_uri(new_uri);
+                                            }
+                                            cfg.set_dpop_key_id(&result.dpop_key_id);
+                                            cfg.set_grant_types_version(&version);
+                                            cfg.set_registration_verified_at(&now);
+                                        });
+                                        tracing::info!(
+                                            "Repaired FAPI client grant_types via \
+                                             RFC 7592 PUT: client_id={}",
+                                            result.client_id
+                                        );
+                                        return Ok(id.to_string());
+                                    }
+                                    Err(e) => {
+                                        // PUT failed — the cached client_id is
+                                        // still usable for grants the server
+                                        // already authorizes (e.g. device_code),
+                                        // so don't block login. `verified_at`
+                                        // is intentionally NOT bumped, so the
+                                        // staleness re-check runs again on the
+                                        // next login and the repair is retried.
+                                        tracing::warn!(
+                                            "Failed to repair FAPI grant_types for \
+                                             client {id} via RFC 7592 PUT: {e:#}; \
+                                             deferring repair to next login"
+                                        );
+                                        return Ok(id.to_string());
+                                    }
+                                }
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    "Client {id} no longer registered, \
+                                     re-registering"
+                                );
+                                // fall through to fresh POST below.
+                            }
+                            Err(e) => {
+                                // Network error — trust the stored client_id;
+                                // login will fail with a clearer error at the
+                                // challenge step, and the staleness re-check
+                                // retries the repair on the next login.
+                                tracing::debug!("Could not validate registration: {e}");
+                                return Ok(id.to_string());
+                            }
                         }
-                        Ok(false) => {
+                    } else {
+                        // Grants current — existing liveness flow with the
+                        // 24-hour `recently_verified` fast path (saves one
+                        // HTTP round-trip).
+                        if recently_verified(config.registration_verified_at()) {
                             tracing::debug!(
-                                "Client {id} no longer registered, \
-                                 re-registering"
+                                "Registration verified recently, skipping \
+                                 server check"
                             );
-                        }
-                        Err(e) => {
-                            // Network error — trust the stored
-                            // client_id; login will fail with a
-                            // clearer error at the challenge step.
-                            tracing::debug!("Could not validate registration: {e}");
                             return Ok(id.to_string());
+                        }
+
+                        match vouch_cli::fapi::registration::is_client_registered(
+                            client.raw_client(),
+                            uri,
+                            token.expose_secret(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                // Cache the verification timestamp; cache write
+                                // failures are non-fatal — next login revalidates.
+                                let now = jiff::Timestamp::now().to_string();
+                                let _verified = Config::modify(|cfg| {
+                                    cfg.set_server_url(&base_url);
+                                    cfg.set_registration_verified_at(&now);
+                                });
+                                return Ok(id.to_string());
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    "Client {id} no longer registered, \
+                                     re-registering"
+                                );
+                                // fall through to fresh POST below.
+                            }
+                            Err(e) => {
+                                tracing::debug!("Could not validate registration: {e}");
+                                return Ok(id.to_string());
+                            }
                         }
                     }
                 }
             } else {
-                // No RFC 7592 credentials (pre-7592 config) but key
-                // matches — trust the stored client_id.
-                return Ok(id.to_string());
+                // No RFC 7592 credentials (pre-7592 config) but key matches.
+                // If the stored grant_types are stale (CLI upgrade), repair by
+                // re-registering fresh — there is no registration_access_token
+                // to PUT, so a new client_id with the current grants is the
+                // only repair path. Otherwise trust the stored client_id.
+                if vouch_cli::fapi::registration::grant_types_stale(config.grant_types_version()) {
+                    tracing::debug!(
+                        "Pre-7592 FAPI config with stale grant_types; \
+                         re-registering"
+                    );
+                    // fall through to fresh POST below.
+                } else {
+                    return Ok(id.to_string());
+                }
             }
         }
     }
@@ -538,6 +661,8 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
     .await
     .context(tr!("err-failed-register-fapi-client"))?;
 
+    let grant_types_version = vouch_cli::fapi::registration::registered_grant_types_version();
+
     // Persist the registration to config.
     Config::modify(|config| {
         config.set_server_url(&base_url);
@@ -550,6 +675,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
             config.set_registration_client_uri(uri);
         }
         config.set_dpop_key_id(&result.dpop_key_id);
+        config.set_grant_types_version(&grant_types_version);
     })
     .context(tr!("err-failed-save-fapi-registration-config"))?;
 

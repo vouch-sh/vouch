@@ -215,6 +215,67 @@ async fn register_fapi_client_open(
                 .dpop_key_id()
                 .is_some_and(|stored_kid| stored_kid == key.kid());
             if key_matches {
+                // The cached client_id was registered with the current signing
+                // key, so server-side key verification still succeeds — but the
+                // server-stored `grant_types` may predate the running CLI's
+                // declared grants (e.g. an upgrade added `token-exchange`).
+                // When stale, repair the existing registration in place via
+                // RFC 7592 PUT (keeping the same client_id) rather than
+                // silently reusing one the server's `unauthorized_client`
+                // gate will reject for the new grant — the bug `d3ad2063`
+                // claimed to fix but only reached via the POST create-new
+                // client path.
+                if vouch_cli::fapi::registration::grant_types_stale(config.grant_types_version())
+                    && let Some(uri) = config.registration_client_uri()
+                    && let Some(token) = config.registration_access_token()
+                {
+                    match vouch_cli::fapi::registration::update_fapi_client(
+                        http_client,
+                        uri,
+                        token.expose_secret(),
+                        key,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let url = base_url.to_string();
+                            let version =
+                                vouch_cli::fapi::registration::registered_grant_types_version();
+                            if let Err(e) = Config::modify(|cfg| {
+                                cfg.set_server_url(&url);
+                                cfg.set_client_id(&result.client_id);
+                                if let Some(ref rat) = result.registration_access_token {
+                                    cfg.set_registration_access_token(rat.expose_secret());
+                                }
+                                if let Some(ref new_uri) = result.registration_client_uri {
+                                    cfg.set_registration_client_uri(new_uri);
+                                }
+                                cfg.set_dpop_key_id(&result.dpop_key_id);
+                                cfg.set_grant_types_version(&version);
+                            }) {
+                                tracing::warn!("Failed to save repaired FAPI registration: {e}");
+                            }
+                            tracing::info!(
+                                "Repaired FAPI client grant_types via RFC 7592 \
+                                 PUT: client_id={}",
+                                result.client_id
+                            );
+                            return Ok(result.client_id);
+                        }
+                        Err(e) => {
+                            // PUT failed (transient network / 5xx, or the
+                            // server rejected the update). Reuse the cached
+                            // client_id so enrollment can proceed with the
+                            // grants the server already authorizes; the next
+                            // `vouch login` retries the repair.
+                            tracing::warn!(
+                                "Failed to repair FAPI grant_types for client \
+                                 {id} via RFC 7592 PUT: {e:#}; using cached client_id"
+                            );
+                            // fall through to reuse the cached client_id.
+                        }
+                    }
+                }
                 tracing::debug!("FAPI client already registered: client_id={id}");
                 return Ok(id.to_string());
             }
@@ -239,6 +300,7 @@ async fn register_fapi_client_open(
 
     // Save registration results to config.
     let url = base_url.to_string();
+    let grant_types_version = vouch_cli::fapi::registration::registered_grant_types_version();
     if let Err(e) = Config::modify(|config| {
         config.set_server_url(&url);
         config.set_client_id(&result.client_id);
@@ -249,6 +311,7 @@ async fn register_fapi_client_open(
             config.set_registration_client_uri(uri);
         }
         config.set_dpop_key_id(&result.dpop_key_id);
+        config.set_grant_types_version(&grant_types_version);
     }) {
         tracing::warn!("Failed to save FAPI registration to config: {e}");
     }

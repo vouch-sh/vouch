@@ -113,6 +113,15 @@ pub(crate) struct ServerConfig {
     dpop_key_id: Option<String>,
     /// ISO 8601 timestamp of last successful registration verification.
     registration_verified_at: Option<String>,
+    /// Version stamp of the registered client's `grant_types` (RFC 7592):
+    /// the running CLI's `REGISTERED_GRANT_TYPES` digest at the last
+    /// successful POST (register) or PUT (update). A mismatch — including
+    /// `None` for a config that predates the stamp — marks the stored
+    /// registration stale and triggers an RFC 7592 PUT repair on the next
+    /// `vouch login` / `vouch enroll`, so an upgrade that adds a grant
+    /// converges already-enrolled clients in place instead of leaving them
+    /// broken at the server's `unauthorized_client` gate.
+    grant_types_version: Option<String>,
 }
 
 /// CodeArtifact configuration with named domain profiles.
@@ -298,6 +307,11 @@ struct ServerConfigFile {
     dpop_key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registration_verified_at: Option<String>,
+    /// Version stamp of the registered client's `grant_types` (RFC 7592);
+    /// `None` for a config that predates the stamp marks it stale and
+    /// triggers an RFC 7592 PUT repair on the next login / enroll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_types_version: Option<String>,
 }
 
 // =========================================================================
@@ -346,6 +360,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("registration_client_uri", &self.registration_client_uri)
             .field("dpop_key_id", &self.dpop_key_id)
             .field("registration_verified_at", &self.registration_verified_at)
+            .field("grant_types_version", &self.grant_types_version)
             .finish()
     }
 }
@@ -756,6 +771,28 @@ impl Config {
         }
     }
 
+    /// Get the version stamp of the registered client's `grant_types`.
+    ///
+    /// `None` means the config predates the stamp (or was cleared), which
+    /// the registration flow treats as stale to repair already-enrolled
+    /// clients after a CLI upgrade that added a grant.
+    #[must_use]
+    pub(crate) fn grant_types_version(&self) -> Option<&str> {
+        self.current()
+            .and_then(|s| s.grant_types_version.as_deref())
+    }
+
+    /// Set the version stamp of the registered client's `grant_types`.
+    ///
+    /// Stamped after every successful POST (register) or PUT (update) so the
+    /// next login's staleness check can short-circuit when the stored grants
+    /// are already current.
+    pub(crate) fn set_grant_types_version(&mut self, version: &str) {
+        if let Some(sc) = self.current_mut() {
+            sc.grant_types_version = Some(version.to_string());
+        }
+    }
+
     /// Clear all FAPI 2.0 dynamic registration fields for the
     /// current server.
     pub(crate) fn clear_fapi(&mut self) {
@@ -765,6 +802,7 @@ impl Config {
             sc.registration_client_uri = None;
             sc.dpop_key_id = None;
             sc.registration_verified_at = None;
+            sc.grant_types_version = None;
         }
     }
 }
@@ -797,6 +835,7 @@ impl From<ConfigFile> for Config {
                 registration_client_uri: std::mem::take(&mut file.registration_client_uri),
                 dpop_key_id: std::mem::take(&mut file.dpop_key_id),
                 registration_verified_at: None, // field did not exist in legacy format
+                grant_types_version: None,      // field did not exist in legacy format
             };
             current_server = Some(hostname.clone());
             servers.insert(hostname, sc);
@@ -850,6 +889,7 @@ impl From<ServerConfigFile> for ServerConfig {
             registration_client_uri: scf.registration_client_uri.take(),
             dpop_key_id: scf.dpop_key_id.take(),
             registration_verified_at: scf.registration_verified_at.take(),
+            grant_types_version: scf.grant_types_version.take(),
         }
     }
 }
@@ -903,6 +943,7 @@ impl From<&ServerConfig> for ServerConfigFile {
             registration_client_uri: sc.registration_client_uri.clone(),
             dpop_key_id: sc.dpop_key_id.clone(),
             registration_verified_at: sc.registration_verified_at.clone(),
+            grant_types_version: sc.grant_types_version.clone(),
         }
     }
 }

@@ -36,5 +36,7 @@ vouch-httpsig = { workspace = true }
 vouch-server = { path = "../vouch-server", features = ["test-utils"] }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
+reqwest = { workspace = true }
 urlencoding = { workspace = true }

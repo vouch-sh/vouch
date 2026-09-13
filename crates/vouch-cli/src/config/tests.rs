@@ -430,6 +430,7 @@ fn test_clear_fapi() {
     config.set_dpop_key_id("k1");
     config.set_registration_access_token("t1");
     config.set_registration_client_uri("https://example.com/reg");
+    config.set_grant_types_version("device_code,fido2-assertion");
 
     config.clear_fapi();
 
@@ -437,6 +438,113 @@ fn test_clear_fapi() {
     assert!(config.dpop_key_id().is_none());
     assert!(config.registration_access_token().is_none());
     assert!(config.registration_client_uri().is_none());
+    assert!(
+        config.grant_types_version().is_none(),
+        "clear_fapi must clear grant_types_version so the next login treats \
+         the registration as stale and repairs it via RFC 7592 PUT"
+    );
+}
+
+#[test]
+fn test_grant_types_version_round_trip() {
+    let mut config = Config::default();
+    config.set_server_url("https://us.vouch.sh");
+    // Default is None — stale relative to any running CLI.
+    assert!(config.grant_types_version().is_none());
+
+    let stamp = "device_code,fido2-assertion,token-exchange";
+    config.set_grant_types_version(stamp);
+    assert_eq!(config.grant_types_version(), Some(stamp));
+
+    // Serialize to ConfigFile and back.
+    let file = ConfigFile::from(&config);
+    let json = serde_json::to_string_pretty(&file).unwrap();
+    // The field is serialized (it is non-empty).
+    assert!(
+        json.contains("\"grant_types_version\""),
+        "grant_types_version must serialize when set: {json}"
+    );
+    let file2: ConfigFile = serde_json::from_str(&json).unwrap();
+    let config2 = Config::from(file2);
+    assert_eq!(
+        config2.grant_types_version(),
+        Some(stamp),
+        "grant_types_version must round-trip through ConfigFile"
+    );
+}
+
+#[test]
+fn test_grant_types_version_absent_in_old_config_is_none() {
+    // A config written by an older CLI (no grant_types_version field) must
+    // deserialize to None. None is treated as stale by the registration
+    // flow, so already-enrolled clients are repaired on the next login.
+    let json = r#"{
+        "current_server": "us.vouch.sh",
+        "servers": {
+            "us.vouch.sh": {
+                "server_url": "https://us.vouch.sh",
+                "client_id": "old-cid",
+                "dpop_key_id": "old-kid",
+                "registration_access_token": "old-rat",
+                "registration_client_uri": "https://us.vouch.sh/reg/old-cid",
+                "registration_verified_at": "2026-01-01T00:00:00Z"
+            }
+        }
+    }"#;
+
+    let file: ConfigFile = serde_json::from_str(json).unwrap();
+    let config = Config::from(file);
+
+    assert_eq!(config.client_id(), Some("old-cid"));
+    assert!(
+        config.grant_types_version().is_none(),
+        "a config without grant_types_version must deserialize to None \
+         (forward-compatible), so the upgrade-path repair fires"
+    );
+}
+
+#[test]
+fn test_server_config_debug_includes_grant_types_version() {
+    let mut config = Config::default();
+    config.set_server_url("https://example.com");
+    config.set_grant_types_version("device_code,token-exchange");
+
+    let sc = config
+        .servers
+        .get("example.com")
+        .expect("server entry exists");
+    let sc_debug = format!("{sc:?}");
+    assert!(
+        sc_debug.contains("grant_types_version"),
+        "ServerConfig Debug must include grant_types_version for diagnostics: {sc_debug}"
+    );
+    assert!(
+        sc_debug.contains("device_code,token-exchange"),
+        "ServerConfig Debug must show the stamp value: {sc_debug}"
+    );
+}
+
+#[test]
+fn test_legacy_flat_config_migrates_grant_types_version_none() {
+    // Legacy flat-format config has no grant_types_version; migration must
+    // produce None (stale → repaired on next login), not fail to deserialize.
+    let json = r#"{
+        "server_url": "https://vouch.example.com",
+        "token": "legacy-token",
+        "client_id": "legacy-cid",
+        "registration_access_token": "legacy-rat",
+        "registration_client_uri": "https://vouch.example.com/reg/123",
+        "dpop_key_id": "legacy-kid"
+    }"#;
+
+    let file: ConfigFile = serde_json::from_str(json).unwrap();
+    let config = Config::from(file);
+
+    assert_eq!(config.client_id(), Some("legacy-cid"));
+    assert!(
+        config.grant_types_version().is_none(),
+        "legacy migration must yield grant_types_version = None (stale)"
+    );
 }
 
 #[test]

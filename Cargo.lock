@@ -7676,6 +7676,7 @@ name = "vouch-tests"
 version = "2026.9.4"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
@@ -7684,6 +7685,7 @@ dependencies = [
  "http 1.5.0",
  "jiff",
  "proptest",
+ "reqwest",
  "rustls",
  "secrecy",
  "serde",
