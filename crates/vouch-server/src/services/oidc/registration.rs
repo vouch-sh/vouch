@@ -1165,7 +1165,7 @@ fn validate_grant_and_response_types(
     let response_types = request
         .response_types
         .take()
-        .unwrap_or_else(|| vec!["code".to_string()]);
+        .unwrap_or_else(|| vec![super::RESPONSE_TYPE_CODE.to_string()]);
     let auth_method_str = request
         .token_endpoint_auth_method
         .take()
@@ -1208,7 +1208,9 @@ fn validate_grant_and_response_types(
     // so the two defaults are consistent with each other. A client that wants
     // neither — a machine-to-machine client using only `client_credentials` —
     // has to say so by sending `"response_types": []`.
-    let has_code_response = response_types.iter().any(|r| r == "code");
+    let has_code_response = response_types
+        .iter()
+        .any(|r| r == super::RESPONSE_TYPE_CODE);
     if auth_code_grant == AuthorizationCodeGrant::Present && !has_code_response {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,

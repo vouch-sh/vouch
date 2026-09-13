@@ -1655,7 +1655,7 @@ async fn store_pending_and_redirect(
     let pending_params = CreatePendingOAuthParams {
         client_id: validated.client_id(),
         redirect_uri: validated.redirect_uri(),
-        response_type: "code",
+        response_type: crate::services::oidc::RESPONSE_TYPE_CODE,
         state: validated.state(),
         scope: Some(&scope_str),
         nonce: validated.nonce(),
