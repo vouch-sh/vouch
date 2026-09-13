@@ -400,6 +400,104 @@ const USER_ATTRIBUTES: &[Attribute<UserPatch>] = &[
     },
 ];
 
+/// Map a SCIM PATCH persist error onto its wire response.
+///
+/// Records the "access revoked, persisted false" audit row when the
+/// deactivating PATCH's revocation has already committed
+/// (`patched.deactivated`), so operators see that the user's sessions
+/// and SSH certificates were withdrawn even though the `active = false`
+/// write then failed. The audit row carries `lastAdmin` / `occConflict`
+/// flags so the refusal path is distinguishable from a transient fault.
+///
+/// The three error variants map as follows:
+/// - [`db::ScimUserPersistError::LastAdmin`] — 400 `invalidValue`; the
+///   floor (#1285) refused the deactivation because the user is the
+///   org's only remaining active admin. Not a fault.
+/// - [`db::ScimUserPersistError::OccConflict`] — 503 with `Retry-After`,
+///   matching the transient-backpressure mapping `create_scim_user`
+///   uses when the OCC retry budget on the org row is exhausted.
+/// - [`db::ScimUserPersistError::Other`] — keep the existing fallbacks:
+///   a NUL-byte index value is a 400 `invalidValue`; everything else is
+///   a 500.
+async fn patch_user_persist_error_response(
+    state: &std::sync::Arc<crate::AppState>,
+    auth: &super::ScimAuth,
+    user_id: &str,
+    patched: &UserPatch,
+    err: db::ScimUserPersistError,
+) -> Response {
+    let last_admin = matches!(err, db::ScimUserPersistError::LastAdmin);
+    let occ_conflict = matches!(err, db::ScimUserPersistError::OccConflict);
+    if patched.deactivated {
+        // `revoke_then_persist` already withdrew the user's sessions and
+        // SSH certificates; that committed change gets its audit row even
+        // though the `active = false` write then failed.
+        db::record_scim_audit(
+            &state.audit,
+            "update",
+            "User",
+            user_id,
+            Some(&auth.token_id),
+            Some(
+                &serde_json::json!({
+                    "active": patched.active,
+                    "deactivated": true,
+                    "accessRevoked": true,
+                    "persisted": false,
+                    "lastAdmin": last_admin,
+                    "occConflict": occ_conflict,
+                })
+                .to_string(),
+            ),
+            auth.org_domain.as_deref(),
+        )
+        .await;
+    }
+    match err {
+        db::ScimUserPersistError::LastAdmin => {
+            tracing::info!(
+                org_id = %auth.org_id,
+                user_id = %user_id,
+                "Refused SCIM deactivation: organization would be left with no active admin"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    ScimError::new(400, "Cannot remove the organization's only remaining admin")
+                        .with_type("invalidValue"),
+                ),
+            )
+                .into_response()
+        }
+        db::ScimUserPersistError::OccConflict => {
+            tracing::warn!(
+                org_id = %auth.org_id,
+                "SCIM user update exhausted OCC retries (concurrent admin churn)"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(ScimError::new(
+                    503,
+                    "Concurrent modification, retry the request",
+                )),
+            )
+                .into_response()
+        }
+        db::ScimUserPersistError::Other(e) => {
+            if let Some(resp) = super::invalid_index_value_response(&e) {
+                return resp.into_response();
+            }
+            tracing::error!("Failed to update user: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to update user")),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// PATCH /scim/v2/Users/:id (RFC 7644 Section 3.5.2).
 ///
 /// Modifies a User resource using SCIM PATCH operations (add, replace,
@@ -474,15 +572,39 @@ pub(crate) async fn patch_user(
     // would be left inactive with live SSH certificates, and the deactivation
     // transition gate would never re-fire revocation on retry (#1116). A
     // non-deactivating PATCH just persists its field changes.
-    let persist = || {
-        db::update_scim_user(
-            &state.store,
-            &id,
-            &auth.org_id,
-            patched.name.as_deref(),
-            patched.external_id.as_deref(),
-            patched.active,
-        )
+    //
+    // For the deactivating branch, `persist` routes through
+    // `deactivate_scim_user_with_admin_floor`: the PATCH analog of
+    // `demote_or_deactivate_member`'s `Deactivate` branch — a single
+    // transaction captures the org row's version, counts other active admins,
+    // refuses with `ScimUserPersistError::LastAdmin` when the target is the
+    // last admin, then writes `active = false` and bumps the org row. The
+    // floor is gated on `patched.deactivated` (the net true→false transition,
+    // computed below), so a no-op PATCH (`active=true` on a still-active user)
+    // or a re-activation (`active=true` on a deactivated user) falls through
+    // the unfloored `update_scim_user` branch.
+    let persist = || async {
+        if patched.deactivated {
+            db::deactivate_scim_user_with_admin_floor(
+                &state.store,
+                &id,
+                &auth.org_id,
+                patched.name.as_deref(),
+                patched.external_id.as_deref(),
+            )
+            .await
+        } else {
+            db::update_scim_user(
+                &state.store,
+                &id,
+                &auth.org_id,
+                patched.name.as_deref(),
+                patched.external_id.as_deref(),
+                patched.active,
+            )
+            .await
+            .map_err(db::ScimUserPersistError::Other)
+        }
     };
     let result = if patched.deactivated {
         tracing::info!(
@@ -519,38 +641,7 @@ pub(crate) async fn patch_user(
                 .into_response();
         }
         Err(crate::services::auth::DeactivationError::Persist(e)) => {
-            if patched.deactivated {
-                // `revoke_then_persist` already withdrew the user's sessions
-                // and SSH certificates; that committed change gets its audit
-                // row even though the `active = false` write then failed.
-                db::record_scim_audit(
-                    &state.audit,
-                    "update",
-                    "User",
-                    &id,
-                    Some(&auth.token_id),
-                    Some(
-                        &serde_json::json!({
-                            "active": patched.active,
-                            "deactivated": true,
-                            "accessRevoked": true,
-                            "persisted": false
-                        })
-                        .to_string(),
-                    ),
-                    auth.org_domain.as_deref(),
-                )
-                .await;
-            }
-            if let Some(resp) = super::invalid_index_value_response(&e) {
-                return resp.into_response();
-            }
-            tracing::error!("Failed to update user: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ScimError::new(500, "Failed to update user")),
-            )
-                .into_response();
+            return patch_user_persist_error_response(&state, &auth, &id, &patched, e).await;
         }
     }
 
@@ -654,7 +745,14 @@ pub(crate) async fn delete_user(
     // concurrent request deleted it). Surface a 404 and skip the audit event
     // rather than reporting a successful delete — and logging a fraudulent
     // audit entry — for a change that never happened.
-    match db::delete_user(&state.store, &id).await {
+    //
+    // The delete goes through `remove_org_member` (not raw `delete_user`) so
+    // the last-admin floor (#1285) — already enforced for `demote` /
+    // `deactivate` via `demote_or_deactivate_member` — covers the same
+    // surface here. An IdP's last-admin `DELETE` is refused with 400
+    // `invalidValue` rather than silently draining the org to zero admins;
+    // the primitive `delete_user` stays unfloored for the cascade tests.
+    match db::remove_org_member(&state.store, &id).await {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -663,7 +761,66 @@ pub(crate) async fn delete_user(
             )
                 .into_response();
         }
-        Err(e) => {
+        Err(db::RemoveMemberError::LastAdmin) => {
+            // The revocation above already committed; record an audit row so
+            // operators see that access was withdrawn but the user was not
+            // deleted.
+            db::record_scim_audit(
+                &state.audit,
+                "delete",
+                "User",
+                &id,
+                Some(&auth.token_id),
+                Some(
+                    &serde_json::json!({"accessRevoked": true, "deleted": false, "lastAdmin": true})
+                        .to_string(),
+                ),
+                auth.org_domain.as_deref(),
+            )
+            .await;
+            tracing::info!(
+                org_id = %auth.org_id,
+                user_id = %id,
+                "Refused SCIM delete: organization would be left with no active admin"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    ScimError::new(400, "Cannot remove the organization's only remaining admin")
+                        .with_type("invalidValue"),
+                ),
+            )
+                .into_response();
+        }
+        Err(db::RemoveMemberError::OccConflict) => {
+            db::record_scim_audit(
+                &state.audit,
+                "delete",
+                "User",
+                &id,
+                Some(&auth.token_id),
+                Some(
+                    &serde_json::json!({"accessRevoked": true, "deleted": false, "lastAdmin": false})
+                        .to_string(),
+                ),
+                auth.org_domain.as_deref(),
+            )
+            .await;
+            tracing::warn!(
+                org_id = %auth.org_id,
+                "SCIM delete exhausted OCC retries (concurrent admin churn)"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(ScimError::new(
+                    503,
+                    "Concurrent modification, retry the request",
+                )),
+            )
+                .into_response();
+        }
+        Err(db::RemoveMemberError::Other(e)) => {
             // Access was already revoked above; that committed change gets
             // its audit row even though the delete itself failed.
             db::record_scim_audit(

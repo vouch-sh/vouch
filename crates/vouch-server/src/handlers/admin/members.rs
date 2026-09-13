@@ -438,7 +438,11 @@ pub(crate) async fn remove_member(
 
     // Withdraw access before deleting. Certificate revocation in particular
     // must happen first: delete_user destroys the issued cert records, which
-    // would make those certificates permanently unrevocable.
+    // would make those certificates permanently unrevocable. When the floor
+    // below refuses (the target is the last admin), revocation has already
+    // committed — the member keeps `active` and `is_org_admin`, and their
+    // credentials are revoked but re-obtainable. This mirrors the shape
+    // `deactivate_member` documents via `revoke_then_persist` (#1116).
     crate::services::auth::revoke_user_access(
         &state,
         &target_id,
@@ -447,11 +451,19 @@ pub(crate) async fn remove_member(
     )
     .await?;
 
-    let deleted = db::delete_user(&state.store, &target_id)
+    let deleted = db::remove_org_member(&state.store, &target_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete user: {e}");
-            ServiceError::Internal("Failed to delete user".to_string())
+        .map_err(|e| match e {
+            db::RemoveMemberError::LastAdmin => {
+                last_admin_error(db::MemberDowngradeError::LastAdmin)
+            }
+            db::RemoveMemberError::OccConflict => ServiceError::Internal(
+                "Organization changed during member removal; please retry".to_string(),
+            ),
+            db::RemoveMemberError::Other(e) => {
+                tracing::error!("Failed to remove member: {e}");
+                ServiceError::Internal("Failed to remove member".to_string())
+            }
         })?;
     if !deleted {
         return Err(member_gone());
@@ -1086,6 +1098,109 @@ mod tests {
             .await
             .unwrap();
         assert!(deleted.is_none(), "User should be deleted");
+    }
+
+    // ---- Last-admin floor: `remove_member` routes through `remove_org_member`
+    // (#1285, closing the asymmetry `9ea5a36a` left behind). Removing the
+    // organization's only remaining active admin must be refused with the
+    // same 400 "Cannot remove the organization's only remaining admin"
+    // mapping `demote_member` and `deactivate_member` already use.
+    // ----
+
+    #[tokio::test]
+    async fn test_admin_cannot_remove_last_admin() {
+        // `remove_member` routes through `remove_org_member` (the last-admin
+        // floor #1285 — closing the asymmetry `9ea5a36a` left between
+        // `demote`/`deactivate` and `delete`). Removing the org's only
+        // remaining active admin must be refused with `LastAdmin`, the
+        // same shape `demote_member` / `deactivate_member` enforce through
+        // `demote_or_deactivate_member`.
+        //
+        // Driving the floor through the HTTP handler sequentially is
+        // blocked by the sibling `self_action` guard: when only one
+        // admin remains, that admin *is* the target they would have to
+        // remove, and "Cannot remove yourself" fires first. The
+        // concurrent race (two admins each removing the other
+        // simultaneously — the only HTTP-shaped way to reach the floor
+        // through the admin UI) requires true task scheduling that
+        // `tower::ServiceExt::oneshot` does not reproduce, so this test
+        // drives the floor through the same primitive the handler calls
+        // (mirroring how `demote_member`'s 400 path is the same
+        // primitive tested in `db/tests/users_and_sessions.rs`). The
+        // handler just maps `LastAdmin` through the existing
+        // `last_admin_error` helper.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "last-admin-remove.example").await;
+
+        let admin1 = create_test_user_in_org(
+            &state.store,
+            "admin1@last-admin-remove.example",
+            &org.id,
+            true,
+        )
+        .await;
+        let admin2 = create_test_user_in_org(
+            &state.store,
+            "admin2@last-admin-remove.example",
+            &org.id,
+            true,
+        )
+        .await;
+
+        let auth_id = create_test_authenticator(&state.store, &admin1.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin1.id,
+                email: &admin1.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = admin_cookie(&token);
+
+        // Remove admin2 through the handler — fine; the org still has admin1.
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/remove", admin2.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "removing the second-to-last admin should succeed"
+        );
+        assert!(
+            crate::db::get_user_by_id(&state.store, &admin2.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "admin2 should be deleted"
+        );
+
+        // admin1 is now the only active admin. Removing them must be
+        // refused with `LastAdmin` (the handler's `remove_org_member`
+        // call surfaces this through `last_admin_error` as 400
+        // "Cannot remove the organization's only remaining admin").
+        let err = crate::db::remove_org_member(&state.store, &admin1.id)
+            .await
+            .expect_err("removing the last admin must be refused");
+        assert!(
+            matches!(err, crate::db::RemoveMemberError::LastAdmin),
+            "got {err:?}"
+        );
+
+        let still_admin = crate::db::get_user_by_id(&state.store, &admin1.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            still_admin.active && still_admin.is_org_admin,
+            "the refused remove must leave the admin intact and admin-flagged"
+        );
     }
 
     // ---- No raw email in audit `data` payloads (member-management events) ----

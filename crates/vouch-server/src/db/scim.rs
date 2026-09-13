@@ -892,6 +892,159 @@ pub async fn update_scim_user(
     Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Failure modes of [`deactivate_scim_user_with_admin_floor`] — the
+/// last-admin-floored wrapper around [`update_scim_user`] for the
+/// active→inactive transition. Mirrors the shape of
+/// [`super::users::RemoveMemberError`] and [`super::users::MemberDowngradeError`]:
+/// [`Self::LastAdmin`] is the caller's mistake (a refused change, not
+/// retried); [`Self::OccConflict`] is the cross-row serialization point
+/// retrying the whole block; [`Self::Other`] is an unexpected fault.
+#[derive(Debug, thiserror::Error)]
+pub enum ScimUserPersistError {
+    /// The change would leave the organization with no active admin
+    /// (#1285's "at least one active admin per organization" invariant).
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization row while this
+    /// update was counting admins; retried by `with_dsql_retry!`.
+    #[error("organization changed during SCIM user update")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for ScimUserPersistError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Deactivate the user via SCIM, refusing the change when the target is
+/// the organization's only remaining active admin.
+///
+/// This is the SCIM-PATCH analog of [`super::users::demote_or_deactivate_member`]'s
+/// `Deactivate` branch: a single transaction captures the org row's
+/// version *before* the member scan, counts other active admins, refuses
+/// with [`ScimUserPersistError::LastAdmin`] when the count is zero, then
+/// writes `active = false` (alongside any `name` / `external_id` carried
+/// by the same PATCH) and version-bumps the org row. The floor and the
+/// write share one transaction and one org-row version-bump (the #1283
+/// lesson), so concurrent `deactivate_scim_user_with_admin_floor`
+/// calls — or one of these and a concurrent `demote_or_deactivate_member`
+/// / `remove_org_member` — collide on the org row: the loser's OCC
+/// retry re-runs against the committed state and re-evaluates the floor.
+///
+/// Returns `Ok(true)` on a successful deactivate, `Ok(false)` if the
+/// user doesn't exist or belongs to a different org (mirroring
+/// [`update_scim_user`]'s "missing / cross-org → not-found" semantics;
+/// see that function's `found` / `applied` comment), and an
+/// [`ScimUserPersistError`] otherwise. The handler calls this only when
+/// the PATCH's net effect deactivates an active user (`patched.deactivated`),
+/// so this function writes `active = false` unconditionally;
+/// non-deactivating PATCHes (name / external-id changes, a no-op
+/// active=true on an already-active user, or a re-activation
+/// active=false → true) still go through [`update_scim_user`] and have
+/// no floor.
+///
+/// Org ownership is re-evaluated inside the transaction on every OCC
+/// retry (mirror of [`update_scim_user`]'s closure re-check): a
+/// concurrent org migration that lands between the read and the
+/// `compare_and_update` makes the CAS lose, `with_dsql_retry!`
+/// re-runs the block, the new read sees the migrated `org_id`, the
+/// pre-check below skips the floor and the write, and the function
+/// returns `Ok(false)` — never silently success.
+pub async fn deactivate_scim_user_with_admin_floor(
+    store: &DocumentStore,
+    user_id: &str,
+    org_id: &str,
+    name: Option<&str>,
+    external_id: Option<&str>,
+) -> std::result::Result<bool, ScimUserPersistError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        // Org-scope pre-check mirrors `update_scim_user`: a user
+        // belonging to another org (or no org) is treated as
+        // not-found rather than as a candidate for the floor.
+        if user_doc.data.org_id.as_deref() != Some(org_id) {
+            return Ok(false);
+        }
+
+        // Only a write that *takes an active admin out of the org's
+        // admin set* can breach the floor. Reaching this function means
+        // the caller already determined `patched.deactivated` (the
+        // user was active before the PATCH and is inactive after), so
+        // for an active admin this is exactly the count + rank
+        // `demote_or_deactivate_member` runs for its `Deactivate`
+        // branch. (`name` / `external_id` are written alongside but do
+        // not affect the floor.)
+        let target_org_id = user_doc.data.org_id.clone();
+
+        // Capture the org row's version BEFORE any member scan (#1283 +
+        // #1285 — `demote_or_deactivate_member` and `remove_org_member`
+        // do this for the same reason). The version guards both the
+        // floor count below and the org-row bump at the end.
+        let org_doc = match target_org_id.as_deref() {
+            Some(id) => tx.get::<OrganizationDoc>(id).await?,
+            None => None,
+        };
+
+        let removes_an_admin = user_doc.data.is_org_admin && user_doc.data.active;
+        if removes_an_admin && let Some(id) = target_org_id.as_deref() {
+            let members = tx.find_all::<UserDoc>("org_id", id).await?;
+            let other_admins = members
+                .iter()
+                .filter(|m| m.data.is_org_admin && m.data.active && m.id != user_id)
+                .count();
+            if other_admins == 0 {
+                return Err(ScimUserPersistError::LastAdmin);
+            }
+        }
+
+        // Apply the deactivation (and any sibling `name` / `external_id`
+        // carried by the same PATCH — same as `update_scim_user`). The
+        // user-row write is guarded by the version this transaction
+        // read, so a concurrent edit to the same member is not
+        // overwritten blindly: a lost CAS surfaces as `OccConflict` and
+        // the entry-point `with_dsql_retry!` re-runs the whole block
+        // against fresh state.
+        let mut updated = user_doc.data.clone();
+        updated.name = name.map(String::from);
+        updated.external_id = external_id.map(String::from);
+        updated.active = false;
+        if !tx
+            .compare_and_update(user_id, user_doc.version, &updated)
+            .await?
+        {
+            return Err(ScimUserPersistError::OccConflict);
+        }
+
+        // Bump the org row to serialize concurrent floor checks (#1285).
+        // The same captured version makes the loser re-evaluate the
+        // count against the committed state.
+        if let Some(id) = target_org_id.as_deref()
+            && let Some(org_doc) = org_doc
+        {
+            let won = tx
+                .compare_and_update(id, org_doc.version, &org_doc.data)
+                .await?;
+            if !won {
+                return Err(ScimUserPersistError::OccConflict);
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    })
+}
+
 // ============================================================================
 // SCIM Filter Parsing (RFC 7644 Section 3.4.2)
 // ============================================================================

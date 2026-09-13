@@ -814,3 +814,143 @@ async fn test_downgrade_reports_missing_member() {
             .expect("a missing member is not an error")
     );
 }
+
+// ============================================================================
+// Last-admin floor for `remove_org_member` (#1285 closing the asymmetry
+// `9ea5a36a` left between `demote`/`deactivate` (floored) and `delete`
+// (unfloored) — see `db::users::remove_org_member`).
+// ============================================================================
+
+#[tokio::test]
+async fn test_remove_org_member_refuses_the_last_admin() {
+    let (store, _audit) = test_db().await;
+    let (_org_id, admins) = org_with_admins(&store, "last-admin-remove.example", 2).await;
+
+    // Two admins: removing one is fine.
+    assert!(
+        remove_org_member(&store, admins.get(1).expect("second admin"))
+            .await
+            .expect("first remove succeeds")
+    );
+
+    // One left: removing them would leave the org unadministrable.
+    let err = remove_org_member(&store, admins.first().expect("first admin"))
+        .await
+        .expect_err("removing the last admin must be refused");
+    assert!(matches!(err, RemoveMemberError::LastAdmin), "got {err:?}");
+
+    let still_admin = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(
+        still_admin.is_org_admin && still_admin.active,
+        "the refused remove must not apply; user must remain an active admin"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_org_member_floor_does_not_block_non_admin_members() {
+    let (store, _audit) = test_db().await;
+    let (org_id, _admins) = org_with_admins(&store, "remove-floor-nonadmin.example", 1).await;
+    let (member_id, _) = upsert_user_with_org(
+        &store,
+        "member@remove-floor-nonadmin.example",
+        Some("Member"),
+        Some(&org_id),
+        false,
+    )
+    .await
+    .expect("create member");
+
+    // The floor counts admins, so a plain member is unaffected by it
+    // even though the org has exactly one admin.
+    assert!(
+        remove_org_member(&store, &member_id)
+            .await
+            .expect("removing a non-admin is always allowed")
+    );
+    assert!(
+        get_user_by_id(&store, &member_id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "the non-admin must be deleted"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_org_member_can_remove_a_deactivated_admin() {
+    // A deactivated admin is no longer in the active-admin count, so
+    // `remove_org_member` permits deleting them even when the org has
+    // exactly one *active* admin remaining (mirrors `demote_or_deactivate_member`'s
+    // `removes_an_admin = is_org_admin && active` gate).
+    let (store, _audit) = test_db().await;
+    let (org_id, admins) = org_with_admins(&store, "remove-deactivated-admin.example", 1).await;
+    let (deactivated_admin_id, _) = upsert_user_with_org(
+        &store,
+        "deactivated@remove-deactivated-admin.example",
+        Some("Deactivated"),
+        Some(&org_id),
+        true,
+    )
+    .await
+    .expect("create deactivated admin");
+    update_user_active_status(&store, &deactivated_admin_id, false)
+        .await
+        .expect("deactivate");
+
+    // Org has one active admin (admins[0]). Removing the deactivated
+    // admin must not trigger the floor — the floor counts active admins.
+    assert!(
+        remove_org_member(&store, &deactivated_admin_id)
+            .await
+            .expect("removing a deactivated admin is always allowed"),
+        "deactivated admin removal must succeed"
+    );
+    // The remaining active admin survives.
+    let remaining = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(
+        remaining.is_org_admin && remaining.active,
+        "the org's only active admin must survive"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_org_member_reports_missing_member() {
+    let (store, _audit) = test_db().await;
+    assert!(
+        !remove_org_member(&store, "no-such-user")
+            .await
+            .expect("a missing member is not an error"),
+        "removing a missing member reports Ok(false)"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_org_member_allows_orgless_user_delete() {
+    // A user with no org cannot breach "at least one active admin per
+    // organization" — there is no organization to admin. The floor
+    // must skip and let the delete proceed.
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "orgless@remove-org.example", Some("Orgless"))
+        .await
+        .expect("create orgless user");
+
+    assert!(
+        remove_org_member(&store, &user_id)
+            .await
+            .expect("removing an orgless user succeeds"),
+        "ok=true when the user is deleted"
+    );
+    assert!(
+        get_user_by_id(&store, &user_id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "the orgless user must be deleted"
+    );
+}

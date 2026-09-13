@@ -1305,3 +1305,465 @@ async fn test_scim_delete_user_returns_404_when_target_vanishes_mid_delete() {
             .join(", ")
     );
 }
+
+// ========================================================================
+// Last-admin floor for SCIM DELETE / PATCH active=false (#1285).
+//
+// Closes the asymmetry `9ea5a36a` (#1326) left between demote/deactivate
+// (floored via `demote_or_deactivate_member`) and delete / SCIM
+// deactivation (unfloored). A single `UsersWrite`-scoped SCIM bearer
+// token previously could sequentially DELETE every admin in an org or
+// `PATCH active=false` every admin down to zero. Now both surfaces
+// route through a last-admin floor — `db::remove_org_member` for DELETE
+// and `db::deactivate_scim_user_with_admin_floor` for PATCH active=false
+// — and the last admin's removal / deactivation is refused with
+// 400 `invalidValue` (`last_admin`).
+// ========================================================================
+
+/// Regression test for #1285's SCIM `DELETE` drain surface: a single
+/// `UsersWrite`-scoped SCIM bearer token that sequentially `DELETE`s
+/// every admin must be refused on the *last* admin. Pre-fix, the last
+/// admin's `DELETE` returned 204 and the org was left with zero active
+/// admins and no in-app recovery path; post-fix, the floor returns
+/// 400 `invalidValue` (`last_admin`).
+#[tokio::test]
+async fn test_scim_delete_refuses_last_admin() {
+    use crate::db::documents::user::UserDoc;
+
+    let (app, state) = test_app().await;
+    let store = &state.store;
+
+    let token = create_test_scim_token(store, "test-drain-fix", "drain-fix").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create two admins via SCIM POST, promote both via direct DB.
+    let (status_a, body_a) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"a@drain-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_a, StatusCode::CREATED, "create admin a: {body_a}");
+    let id_a = serde_json::from_str::<serde_json::Value>(&body_a).expect("valid json")["id"]
+        .as_str()
+        .expect("user id a")
+        .to_string();
+
+    let (status_b, body_b) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"b@drain-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_b, StatusCode::CREATED, "create admin b: {body_b}");
+    let id_b = serde_json::from_str::<serde_json::Value>(&body_b).expect("valid json")["id"]
+        .as_str()
+        .expect("user id b")
+        .to_string();
+
+    crate::db::update_user_admin_status(store, &id_a, true)
+        .await
+        .expect("promote a");
+    crate::db::update_user_admin_status(store, &id_b, true)
+        .await
+        .expect("promote b");
+
+    // First admin DELETE: succeeds (the other admin survives).
+    let (status_del_a, body_del_a) = http_request(
+        &app,
+        "DELETE",
+        &format!("/scim/v2/Users/{id_a}"),
+        None,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status_del_a,
+        StatusCode::NO_CONTENT,
+        "first admin delete: {body_del_a}"
+    );
+
+    // Second admin DELETE: must be refused with 400 invalidValue.
+    let (status_del_b, body_del_b) = http_request(
+        &app,
+        "DELETE",
+        &format!("/scim/v2/Users/{id_b}"),
+        None,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_ne!(
+        status_del_b,
+        StatusCode::NO_CONTENT,
+        "last admin delete via SCIM must be refused (not 204); body: {body_del_b}"
+    );
+    assert_eq!(
+        status_del_b,
+        StatusCode::BAD_REQUEST,
+        "last admin delete must be 400 invalidValue; got {status_del_b}: {body_del_b}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body_del_b).expect("Valid JSON");
+    assert_eq!(err["status"], "400");
+    assert_eq!(err["scimType"], "invalidValue");
+
+    // The last admin survives.
+    let users = store
+        .find_all::<UserDoc>("org_id", "drain-fix")
+        .await
+        .expect("list users");
+    let admins = users
+        .iter()
+        .filter(|u| u.data.is_org_admin && u.data.active)
+        .count();
+    assert_eq!(
+        admins, 1,
+        "SCIM drain must leave exactly one active admin; \
+         the floor prevents the second-to-last delete from clearing the org"
+    );
+
+    // The refused delete records its audit row so operators see that the
+    // access revocation committed but the user was not deleted.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let refused_delete_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"delete\"") && e.data.contains(&id_b))
+        .collect();
+    assert!(
+        !refused_delete_events.is_empty(),
+        "the refused SCIM delete must record an audit row marked accessRevoked=true, \
+         deleted=false, lastAdmin=true; got {}",
+        refused_delete_events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let audit_details = refused_delete_events
+        .iter()
+        .find_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+        .and_then(|v| {
+            v.get("details")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
+        .expect("audit row carries a details string");
+    let audit_json: serde_json::Value =
+        serde_json::from_str(&audit_details).expect("details is JSON");
+    assert_eq!(audit_json["accessRevoked"].as_bool(), Some(true));
+    assert_eq!(audit_json["deleted"].as_bool(), Some(false));
+    assert_eq!(audit_json["lastAdmin"].as_bool(), Some(true));
+}
+
+/// Regression test for #1285's SCIM `PATCH active=false` surface: a
+/// single `UsersWrite`-scoped SCIM token that sequentially `PATCH`es
+/// every admin `active=false` must be refused on the last admin. Pre-fix,
+/// the last admin's PATCH returned 200 and the org was left with zero
+/// active admins (though all the users remained); post-fix, the floor
+/// returns 400 `invalidValue` (`last_admin`).
+#[tokio::test]
+async fn test_scim_patch_active_false_refuses_last_admin() {
+    use crate::db::documents::user::UserDoc;
+
+    let (app, state) = test_app().await;
+    let store = &state.store;
+
+    let token = create_test_scim_token(store, "test-patch-drain-fix", "patch-drain-fix").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status_a, body_a) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"a@patch-drain-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_a, StatusCode::CREATED, "create admin a: {body_a}");
+    let id_a = serde_json::from_str::<serde_json::Value>(&body_a).expect("valid json")["id"]
+        .as_str()
+        .expect("user id a")
+        .to_string();
+
+    let (status_b, body_b) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"b@patch-drain-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_b, StatusCode::CREATED, "create admin b: {body_b}");
+    let id_b = serde_json::from_str::<serde_json::Value>(&body_b).expect("valid json")["id"]
+        .as_str()
+        .expect("user id b")
+        .to_string();
+
+    crate::db::update_user_admin_status(store, &id_a, true)
+        .await
+        .expect("promote a");
+    crate::db::update_user_admin_status(store, &id_b, true)
+        .await
+        .expect("promote b");
+
+    let patch_body = r#"{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"active","value":false}]}"#;
+
+    let (s_patch_a, body_patch_a) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{id_a}"),
+        Some(patch_body.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        s_patch_a,
+        StatusCode::OK,
+        "first admin patch: {body_patch_a}"
+    );
+
+    let (s_patch_b, body_patch_b) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{id_b}"),
+        Some(patch_body.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_ne!(
+        s_patch_b,
+        StatusCode::OK,
+        "last admin PATCH active=false must be refused (not 200); body: {body_patch_b}"
+    );
+    assert_eq!(
+        s_patch_b,
+        StatusCode::BAD_REQUEST,
+        "last admin PATCH must be 400 invalidValue; got {s_patch_b}: {body_patch_b}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body_patch_b).expect("Valid JSON");
+    assert_eq!(err["status"], "400");
+    assert_eq!(err["scimType"], "invalidValue");
+
+    // The last admin survives and stays active+admin.
+    let users = store
+        .find_all::<UserDoc>("org_id", "patch-drain-fix")
+        .await
+        .expect("list users");
+    let admins = users
+        .iter()
+        .filter(|u| u.data.is_org_admin && u.data.active)
+        .count();
+    assert_eq!(admins, 1, "the floor must keep one active admin");
+
+    let surviving = users
+        .iter()
+        .find(|u| u.id == id_b)
+        .expect("admin b survives the refused PATCH");
+    assert!(
+        surviving.data.active,
+        "the refused PATCH must not have flipped `active` to false"
+    );
+    assert!(
+        surviving.data.is_org_admin,
+        "the refused PATCH must not have flipped `is_org_admin` to false"
+    );
+}
+
+/// SCIM PATCH `active=true` reactivation must not be blocked by the
+/// floor. The floor only fires on the active→inactive transition for
+/// an active admin; a re-activation on an inactive admin (whose
+/// `is_org_admin` flag stays true) goes through the unfloored
+/// `update_scim_user` path. This pins that property end-to-end so the
+/// `last_admin` floor does not regress the recovery-by-re-activation
+/// path the bug report called out as self-reversible.
+#[tokio::test]
+async fn test_scim_patch_active_true_reactivates_inactive_admin() {
+    use crate::db::documents::user::UserDoc;
+
+    let (app, state) = test_app().await;
+    let store = &state.store;
+
+    let token = create_test_scim_token(store, "test-reactivate-fix", "reactivate-fix").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Two admins: admin_a (the future survivor) and admin_b (the target).
+    let (status_a, body_a) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"a@reactivate-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_a, StatusCode::CREATED, "create admin a: {body_a}");
+    let id_a = serde_json::from_str::<serde_json::Value>(&body_a).expect("valid json")["id"]
+        .as_str()
+        .expect("user id a")
+        .to_string();
+
+    let (status_b, body_b) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"b@reactivate-fix.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_b, StatusCode::CREATED, "create admin b: {body_b}");
+    let id_b = serde_json::from_str::<serde_json::Value>(&body_b).expect("valid json")["id"]
+        .as_str()
+        .expect("user id b")
+        .to_string();
+
+    crate::db::update_user_admin_status(store, &id_a, true)
+        .await
+        .expect("promote a");
+    crate::db::update_user_admin_status(store, &id_b, true)
+        .await
+        .expect("promote b");
+
+    // Deactivate admin_a (the floor check: b is an active admin, so the
+    // floor count excludes a; other_admins=1; floor passes).
+    let patch_off = r#"{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"active","value":false}]}"#;
+    let (s_off, body_off) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{id_a}"),
+        Some(patch_off.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(s_off, StatusCode::OK, "first admin patch off: {body_off}");
+
+    // Now admin_a is inactive but still `is_org_admin=true`. admin_b is
+    // the only ACTIVE admin. Re-activating admin_a via PATCH active=true
+    // has the net transition false→true (no deactivation), so the floor
+    // does not apply: it must succeed and leave admin_a an active admin.
+    let patch_on = r#"{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"active","value":true}]}"#;
+    let (s_on, body_on) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{id_a}"),
+        Some(patch_on.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(s_on, StatusCode::OK, "reactivation patch: {body_on}");
+
+    let users = store
+        .find_all::<UserDoc>("org_id", "reactivate-fix")
+        .await
+        .expect("list users");
+    let admins = users
+        .iter()
+        .filter(|u| u.data.is_org_admin && u.data.active)
+        .count();
+    assert_eq!(admins, 2, "both admins are active again after reactivation");
+
+    let re_admin = store
+        .get::<UserDoc>(&id_a)
+        .await
+        .expect("get user a")
+        .expect("user a exists");
+    assert!(
+        re_admin.data.is_org_admin,
+        "PATCH active=true must not touch is_org_admin (still true)"
+    );
+    assert!(re_admin.data.active, "PATCH active=true must reactivate");
+}
+
+/// Companion to `test_scim_delete_refuses_last_admin`: a non-admin's
+/// last-in-the-org SCIM `DELETE` must NOT be refused — the floor only
+/// guards the *active admin* count. Deleting a previously-deactivated
+/// admin is fine even when the org has exactly one *active* admin
+/// remaining (mirrors the demote/deactivate floor's gate).
+#[tokio::test]
+async fn test_scim_delete_deactivated_admin_does_not_trigger_floor() {
+    use crate::db::documents::user::UserDoc;
+
+    let (app, state) = test_app().await;
+    let store = &state.store;
+
+    let token = create_test_scim_token(store, "test-delete-deactivated", "del-deactivated").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status_a, body_a) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"a@del-deactivated.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_a, StatusCode::CREATED, "create admin a: {body_a}");
+    let id_a = serde_json::from_str::<serde_json::Value>(&body_a).expect("valid json")["id"]
+        .as_str()
+        .expect("user id a")
+        .to_string();
+
+    let (status_b, body_b) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"b@del-deactivated.example.com","active":true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status_b, StatusCode::CREATED, "create admin b: {body_b}");
+    let id_b = serde_json::from_str::<serde_json::Value>(&body_b).expect("valid json")["id"]
+        .as_str()
+        .expect("user id b")
+        .to_string();
+
+    crate::db::update_user_admin_status(store, &id_a, true)
+        .await
+        .expect("promote a");
+    crate::db::update_user_admin_status(store, &id_b, true)
+        .await
+        .expect("promote b");
+    // Deactivate admin_b; then the org has one ACTIVE admin (a).
+    crate::db::update_user_active_status(store, &id_b, false)
+        .await
+        .expect("deactivate b");
+
+    // DELETE admin_b (deactivated): must succeed (floor doesn't count
+    // inactive admins).
+    let (status, body) = http_request(
+        &app,
+        "DELETE",
+        &format!("/scim/v2/Users/{id_b}"),
+        None,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "deleting a deactivated admin must succeed; got {status}: {body}"
+    );
+
+    // The remaining admin survives (and is still the only active admin).
+    let users = store
+        .find_all::<UserDoc>("org_id", "del-deactivated")
+        .await
+        .expect("list users");
+    let admins = users
+        .iter()
+        .filter(|u| u.data.is_org_admin && u.data.active)
+        .count();
+    assert_eq!(admins, 1, "the floor must keep one active admin");
+}

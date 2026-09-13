@@ -1785,3 +1785,71 @@ async fn test_mutual_admin_demote_concurrent() {
         "at least one admin must survive; results a={result_a:?} b={result_b:?}"
     );
 }
+
+/// #1285 (extended) — Closing the delete-drain asymmetry `9ea5a36a` (#1326)
+/// left between `demote`/`deactivate` (floored) and `delete` (unfloored):
+/// `remove_org_member` floors the admin-UI `remove_member` and SCIM
+/// `DELETE /scim/v2/Users/{id}` paths, so two admins removed at the same
+/// time can no longer leave the organization with zero admins.
+///
+/// Both writes go through one transaction that version-bumps the org row,
+/// so the loser re-runs the floor count against the committed state and
+/// finds itself removing the last active admin — exactly the property
+/// `test_mutual_admin_demote_concurrent` pins for the demote primitive.
+#[tokio::test]
+async fn test_mutual_admin_remove_concurrent() {
+    use crate::db::users::{remove_org_member, upsert_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "mutual-remove.com", Some("Mutual"), None)
+        .await
+        .expect("create org");
+    let (admin_a, _) = upsert_user_with_org(
+        &store,
+        "a@mutual-remove.com",
+        Some("A"),
+        Some(&org.id),
+        true,
+    )
+    .await
+    .expect("create admin a");
+    let (admin_b, _) = upsert_user_with_org(
+        &store,
+        "b@mutual-remove.com",
+        Some("B"),
+        Some(&org.id),
+        true,
+    )
+    .await
+    .expect("create admin b");
+
+    let (store_a, store_b) = (store.clone(), store.clone());
+    let (target_a, target_b) = (admin_b.clone(), admin_a.clone());
+    let (result_a, result_b) = tokio::join!(
+        async move { remove_org_member(&store_a, &target_a).await },
+        async move { remove_org_member(&store_b, &target_b).await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} must not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+
+    let members = crate::db::get_users_by_org_paginated(&store, &org.id, None, 100)
+        .await
+        .expect("list members")
+        .0;
+    let remaining = members
+        .iter()
+        .filter(|m| m.is_org_admin && m.active)
+        .count();
+    assert!(
+        remaining >= 1,
+        "at least one admin must survive; results a={result_a:?} b={result_b:?}"
+    );
+}

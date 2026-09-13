@@ -237,6 +237,38 @@ impl super::pool::RetryableError for DeleteUserError {
     }
 }
 
+/// Failure modes of [`remove_org_member`] (the last-admin-floored wrapper
+/// around [`delete_user`]).
+///
+/// Mirrors [`MemberDowngradeError`]: [`Self::LastAdmin`] is the caller's
+/// mistake (a refused change, not retried); [`Self::OccConflict`] is the
+/// cross-row serialization point retrying the whole block; [`Self::Other`]
+/// is an unexpected fault.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveMemberError {
+    /// The change would leave the organization with no active admin
+    /// (#1285's "at least one active admin per organization" invariant).
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization row while this
+    /// delete was choosing a successor for the user's org-scoped
+    /// applications; retried by `with_dsql_retry!`.
+    #[error("organization changed during delete")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for RemoveMemberError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
 /// Pick the org admin that inherits a departing user's org-scoped
 /// applications.
 ///
@@ -391,12 +423,107 @@ pub async fn demote_or_deactivate_member(
     })
 }
 
+/// Run the cascade-delete body of [`delete_user`] inside an existing
+/// transaction `tx`.
+///
+/// `org_id` is the user's `org_id` (cloned from the user doc the caller
+/// read outside this helper, so the caller's pre-conditions — the
+/// existence check and, for [`remove_org_member`], the last-admin floor
+/// count — operate on the same row the cascade deletes). `org_doc` is
+/// the organization row's pre-scan version captured by the caller BEFORE
+/// any member scan, so the version guards both the caller's floor count
+/// and this helper's successor scan (the #1283 lesson — read afterwards,
+/// the version would already carry a sibling's bump and the
+/// `compare_and_update` below would wrongly succeed).
+///
+/// Performs steps 1–7 of [`delete_user`]: delete sessions and enrollment
+/// sessions; cascade-delete each authenticator with its `device_auth`
+/// refs (see [`super::authenticators::delete_authenticator`]); delete SSH
+/// issued cert records and token exchanges; reassign org-scoped OAuth
+/// clients to a surviving active admin and unlink the rest (see
+/// [`org_admin_successor`]); version-bump the org row to serialize
+/// concurrent deletions within the organization (#1283); delete the user.
+///
+/// The helper does NOT begin or commit its own transaction and does NOT
+/// install the `delete_test_hook`: the caller wraps it — and any
+/// pre-conditions like the floor — in one transaction inside its own
+/// [`crate::with_dsql_retry!`] loop.
+async fn delete_user_cascade_in_tx(
+    tx: &mut super::store::StoreTransaction<'_>,
+    user_id: &str,
+    org_id: &Option<String>,
+    org_doc: Option<&Document<super::documents::organization::OrganizationDoc>>,
+) -> std::result::Result<(), DeleteUserError> {
+    use super::documents::authenticator::AuthenticatorDoc;
+    use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
+    use super::documents::oauth::{AccessScope, OAuthClientDoc, TokenExchangeDoc};
+    use super::documents::session::SessionDoc;
+
+    // 1. Delete sessions
+    tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
+
+    // 2. Delete enrollment sessions
+    tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
+        .await?;
+
+    // 3. Cascade-delete each authenticator (clears device_auth references,
+    //    removes the authenticator doc). The helper also issues a session
+    //    delete-by-index per authenticator; that is redundant here because
+    //    step 1 already removed all the user's sessions, but the duplicate
+    //    no-op delete is cheap and keeps the cascade logic in one place.
+    let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
+    for auth in &authenticators {
+        super::authenticators::delete_authenticator(tx, &auth.id).await?;
+    }
+
+    // 4. Delete SSH issued certificate records
+    tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
+        .await?;
+
+    // 5. Delete token exchanges
+    tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
+        .await?;
+
+    // 6. Reassign org-scoped OAuth clients; unlink the rest. See
+    //    [`delete_user`] for the design notes.
+    let successor = org_admin_successor(tx, org_id.as_deref(), user_id).await?;
+    tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
+        d.user_id = match (d.access_scope, successor.as_deref()) {
+            (AccessScope::Organization, Some(admin_id)) => Some(admin_id.to_string()),
+            _ => None,
+        };
+    })
+    .await?;
+
+    // Serialize deletions within an organization on the org row: choosing
+    // a successor reads the org's members (a predicate read that
+    // concurrent transactions do not conflict on under READ COMMITTED),
+    // so two admins deleted at once would each pick the other. Writing
+    // the org row with the same captured version makes the loser retry
+    // and re-pick against the committed state.
+    if let Some(org_id) = org_id.as_deref()
+        && let Some(org_doc) = org_doc
+    {
+        let won = tx
+            .compare_and_update(org_id, org_doc.version, &org_doc.data)
+            .await?;
+        if !won {
+            return Err(DeleteUserError::OccConflict);
+        }
+    }
+
+    // 7. Delete the user
+    tx.delete(user_id).await?;
+
+    Ok(())
+}
+
 /// Delete a user and all associated data atomically.
 ///
 /// Wraps all cascade deletes in a single transaction so that a partial
 /// failure leaves no orphaned records.
 ///
-/// Steps performed:
+/// Steps performed (via [`delete_user_cascade_in_tx`]):
 /// 1. Delete sessions
 /// 2. Delete enrollment sessions
 /// 3. Delete authenticators (and their related device_auth refs)
@@ -414,13 +541,17 @@ pub async fn demote_or_deactivate_member(
 /// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
 /// user with `user_id` was found — callers surface the latter as a 404 and
 /// must not record a deletion audit event.
+///
+/// # Last-admin floor
+///
+/// [`delete_user`] is the **unfloored** primitive. Admin-UI `remove_member`
+/// and SCIM `DELETE /scim/v2/Users/{id}` route through [`remove_org_member`]
+/// instead, which adds the "at least one active admin per organization"
+/// invariant (#1285) around this primitive's cascade. Callers that retain a
+/// direct call to [`delete_user`] do so precisely because they want the
+/// primitive contract — e.g. the cascade tests exercise the cascade, not
+/// the floor.
 pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, DeleteUserError> {
-    use super::documents::authenticator::AuthenticatorDoc;
-    use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
-    use super::documents::oauth::OAuthClientDoc;
-    use super::documents::oauth::TokenExchangeDoc;
-    use super::documents::session::SessionDoc;
-
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
@@ -441,58 +572,11 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         };
         let org_id = user_doc.data.org_id.clone();
 
-        // 1. Delete sessions
-        tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
-
-        // 2. Delete enrollment sessions
-        tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
-            .await?;
-
-        // 3. Cascade-delete each authenticator (clears device_auth references,
-        //    removes the authenticator doc). The helper also issues a session
-        //    delete-by-index per authenticator; that is redundant here because
-        //    step 1 already removed all the user's sessions, but the duplicate
-        //    no-op delete is cheap and keeps the cascade logic in one place.
-        let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
-        for auth in &authenticators {
-            super::authenticators::delete_authenticator(&mut tx, &auth.id).await?;
-        }
-
-        // 4. Delete SSH issued certificate records
-        tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
-            .await?;
-
-        // 5. Delete token exchanges
-        tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
-            .await?;
-
-        // 6. Reassign org-scoped OAuth clients; unlink the rest.
-        //
-        // Application management is creator-only: every check compares the
-        // caller against `Some(client.user_id)`. Clearing `user_id` therefore
-        // strands an organization's applications permanently — no one can
-        // rotate their secrets, update redirect URIs, or delete them. An
-        // org-scoped application belongs to the organization rather than to
-        // the individual, so it transfers to an active org admin, keeping it
-        // both manageable and discoverable in that admin's normal list.
-        // Personal and public applications have no other legitimate owner
-        // and are unlinked.
-        // The client doc's version is the serialization point for all
-        // secret-set mutations (`update_oauth_client`,
-        // `update_oauth_client_registration` write via `compare_and_update`).
-        // `update_by_index` guards each write with the version it read, so a
-        // client update committed between this read and the write is never
-        // overwritten with the stale doc: the cascade fails with a retryable
-        // `VersionConflict` and the entry-point `with_dsql_retry!` re-runs
-        // it from a fresh read.
-        // Capture the org row's version *before* the member scan that chooses
-        // the successor. The scan is the predicate read this guard exists to
-        // serialize, so the version has to be the one the scan saw. Reading it
-        // afterwards defeats the guard: under PostgreSQL READ COMMITTED every
-        // statement takes a fresh snapshot, so a sibling delete that committed
-        // between the scan and the version read yields the already-bumped
-        // version here, the compare-and-update below matches, and both
-        // transactions commit having each chosen the other as successor.
+        // Capture the org row's version *before* the member scan that
+        // chooses the successor (the #1283 lesson — see
+        // [`delete_user_cascade_in_tx`]). The scan is the predicate read
+        // this guard exists to serialize, so the version has to be the
+        // one the scan saw.
         let org_doc = match org_id.as_deref() {
             Some(id) => {
                 tx.get::<super::documents::organization::OrganizationDoc>(id)
@@ -501,47 +585,108 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
             None => None,
         };
 
-        let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = match (d.access_scope, successor.as_deref()) {
-                (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
-                    Some(admin_id.to_string())
-                }
-                _ => None,
-            };
-        })
-        .await?;
+        delete_user_cascade_in_tx(&mut tx, user_id, &org_id, org_doc.as_ref()).await?;
 
-        // Serialize deletions within an organization on the org row.
-        //
-        // Choosing a successor reads the org's members, and a predicate read
-        // is exactly what concurrent transactions do not conflict on under
-        // READ COMMITTED. Two admins deleted at once would each pick the
-        // other — both reads predate both deletions — and the applications
-        // would land on a user row that no longer exists. Writing the org
-        // row makes those transactions collide: the loser retries, re-reads
-        // members without the winner, and picks someone who still exists.
-        // Enrollment claims its admin slot against the same row for the same
-        // reason.
-        //
-        // Every delete of a member of an org takes this write, not only the
-        // ones that transfer: the user being deleted may itself be the
-        // successor a concurrent delete just chose. Deleting a user is a rare
-        // administrative action, so serializing per organization costs
-        // little.
-        if let Some(ref org_id) = org_id
-            && let Some(org_doc) = org_doc
-        {
-            let won = tx
-                .compare_and_update(org_id, org_doc.version, &org_doc.data)
-                .await?;
-            if !won {
-                return Err(DeleteUserError::OccConflict);
+        tx.commit().await?;
+        Ok(true)
+    })
+}
+
+/// Remove an org member (delete the user with cascade), refusing to
+/// remove the organization's only remaining active admin.
+///
+/// Wraps the [`delete_user`] cascade in one transaction with the same
+/// "at least one active admin per organization" floor (#1285) that
+/// [`demote_or_deactivate_member`] enforces for demote/deactivate. The
+/// floor and the cascade share one transaction and one org-row
+/// version-bump (the #1283 lesson), so concurrent `remove_org_member`
+/// calls — or a concurrent `remove_org_member` and a concurrent
+/// `demote_or_deactivate_member` — collide on the org row: the loser's
+/// OCC retry re-runs against the committed state and re-evaluates the
+/// floor. Blocking the last admin's delete here closes the asymmetry
+/// `9ea5a36a` (#1326) left between `demote`/`deactivate` (floored) and
+/// `delete` (unfloored), which previously let a single `UsersWrite`-scoped
+/// SCIM bearer token sequentially `DELETE` every admin in an org down to
+/// zero — or the admin-UI `remove_member` handler to do the same.
+///
+/// Returns `Ok(false)` when the target no longer exists; callers surface
+/// that as a 404 and skip the audit event (mirroring [`delete_user`]).
+///
+/// # Errors
+///
+/// [`RemoveMemberError::LastAdmin`] when the target is the organization's
+/// only remaining active admin, and [`RemoveMemberError::OccConflict`]
+/// when a concurrent change to the organization won the race — retried by
+/// `with_dsql_retry!`, which re-runs the count against the committed
+/// state.
+///
+/// # Revocation ordering
+///
+/// Each handler that reaches this primitive (`remove_member` in the
+/// admin UI and the SCIM `DELETE /scim/v2/Users/{id}` handler) revokes
+/// the user's live credentials *before* calling it — `delete_user`'s
+/// cascade destroys the issued SSH cert records, which would otherwise
+/// make those certificates permanently unrevocable. When the floor then
+/// refuses with [`Self::LastAdmin`], revocation has already committed.
+/// That is the same shape `deactivate_member` already documents: the
+/// member keeps `active = true` and `is_org_admin = true`, and their
+/// credentials (sessions, SSH certificates, the GitHub refresh token)
+/// are revoked but re-obtainable through re-authentication — the
+/// organization keeps its admin and the operation is retryable. The
+/// alternative (deleting the user before revoking) is worse: a revoke
+/// failure would leave live SSH certificates for a deleted user, which
+/// `delete_user`'s cascade has just made permanently unrevocable.
+pub async fn remove_org_member(
+    store: &DocumentStore,
+    user_id: &str,
+) -> std::result::Result<bool, RemoveMemberError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+
+        // The same `delete_test_hook` seam `delete_user` uses: handler
+        // tests now reach this primitive through the SCIM DELETE handler,
+        // so the race-with-vanish test needs the hook to fire here too.
+        #[cfg(test)]
+        store.run_delete_test_hook(user_id).await;
+
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        let org_id = user_doc.data.org_id.clone();
+
+        // Capture the org row's version BEFORE any member scan (#1283 +
+        // #1285 — see [`delete_user_cascade_in_tx`]). The version guards
+        // both the floor count below and the cascade's successor scan.
+        let org_doc = match org_id.as_deref() {
+            Some(id) => {
+                tx.get::<super::documents::organization::OrganizationDoc>(id)
+                    .await?
+            }
+            None => None,
+        };
+
+        // Floor: only a *remove that takes an active admin out of the
+        // org's admin set* can breach "at least one active admin per
+        // organization". Deleting a plain member, a deactivated admin, or
+        // a user with no org cannot.
+        let removes_an_admin = user_doc.data.is_org_admin && user_doc.data.active;
+        if removes_an_admin && let Some(id) = org_id.as_deref() {
+            let members = tx.find_all::<UserDoc>("org_id", id).await?;
+            let other_admins = members
+                .iter()
+                .filter(|m| m.data.is_org_admin && m.data.active && m.id != user_id)
+                .count();
+            if other_admins == 0 {
+                return Err(RemoveMemberError::LastAdmin);
             }
         }
 
-        // 7. Delete the user
-        tx.delete(user_id).await?;
+        delete_user_cascade_in_tx(&mut tx, user_id, &org_id, org_doc.as_ref())
+            .await
+            .map_err(|e| match e {
+                DeleteUserError::OccConflict => RemoveMemberError::OccConflict,
+                DeleteUserError::Other(e) => RemoveMemberError::Other(e),
+            })?;
 
         tx.commit().await?;
         Ok(true)
