@@ -1450,29 +1450,34 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
 
 /// Regression: `try_consume_device_auth`'s `transition` closure must re-stamp
 /// `now = Timestamp::now()` on every retry attempt. `transition` re-reads and
-/// re-evaluates the closure against the fresh row on each OCC retry (backoff
-/// ~100/200/400 ms), so a single entry-time `now` is stale on retry: when a
-/// benign concurrent version bump (a poll) forces a retry that lands after
-/// `expires_at`, a stale `now` would make the `data.expires_at <= now`
-/// precondition pass against a row that is already expired in wall-clock —
-/// redeeming an expired code and back-dating `consumed_at` to before
-/// `expires_at`.
+/// re-evaluates the closure against the fresh row on each OCC retry, so a
+/// single entry-time `now` is stale on retry: when a benign concurrent
+/// version bump (a poll) forces a retry that lands after `expires_at`, a
+/// stale `now` would make the `data.expires_at <= now` precondition pass
+/// against a row that is already expired in wall-clock — redeeming an
+/// expired code and back-dating `consumed_at` to before `expires_at`.
+///
+/// The racing writer runs inside attempt 0, after the entry-time clock read
+/// and before the retry's fresh one, and sets `expires_at` to its own clock
+/// reading. Ordering alone therefore places the expiry strictly between the
+/// two reads: the entry-time `now` predates it, the retry's `now` postdates
+/// it. No timing margin is involved.
 ///
 /// This test pins the FIXED behavior: the per-attempt re-stamp makes the
-/// retry reject an already-expired code with `ClaimError::AlreadyConsumed`,
+/// retry reject the now-expired code with `ClaimError::AlreadyConsumed`,
 /// leaves the row `Authorized`, and never stamps `consumed_at`. On the buggy
 /// code (entry-time `now` reused on retry) this test fails — the expired code
 /// is consumed and `consumed_at` is back-dated before `expires_at`.
 #[tokio::test]
 async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
     use crate::db::claim::ClaimError;
+    use crate::db::documents::device_auth::DeviceAuthRequestDoc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
 
     let (store, _audit) = test_db().await;
 
     let expires_at = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_millis(300))
+        .checked_add(jiff::SignedDuration::from_mins(5))
         .unwrap();
     let device_code_hash = "stale-now-hash";
     let id = create_device_auth_request(&store, device_code_hash, "STALE-NOW", None, expires_at, 5)
@@ -1531,20 +1536,20 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
                 .await
                 .expect("hook poll must not error");
             assert!(allowed, "hook poll must clear the rate-limit gate");
+            // Expire the code at this instant: after the consume's
+            // entry-time clock read, before its retry re-reads the clock.
+            let expired = writer
+                .modify::<DeviceAuthRequestDoc, _>(&poll_id, |data| {
+                    data.expires_at = jiff::Timestamp::now();
+                })
+                .await
+                .expect("hook expiry write must not error");
+            assert!(expired, "hook expiry write must find the row");
         })
     }));
 
-    // Sleep until ~50 ms before expiry: `now` is captured BEFORE expiry
-    // (pre-check passes), but the first retry backoff (~100 ms) lands AFTER
-    // expiry — the exact window the stale-now bug fires in.
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let wall_before = jiff::Timestamp::now();
     let result = try_consume_device_auth(&hooked, device_code_hash).await;
-    let wall_after = jiff::Timestamp::now();
 
-    assert!(wall_before < expires_at, "consume started before expiry");
-    assert!(wall_after > expires_at, "consume finished after expiry");
     // The racing poll ran exactly once, so attempt 0's CAS legitimately lost
     // and the closure re-ran on attempt 1 against the bumped row — i.e. the
     // retry path was actually exercised.

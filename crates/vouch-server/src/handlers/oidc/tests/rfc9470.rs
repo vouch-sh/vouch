@@ -1251,25 +1251,27 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
+    // Mint the session already 5 seconds old (well past max_age=1); both
+    // max_age checks compare this auth_time against the request's arrival.
     let session = create_test_session_with(
         &state,
         TestSessionSpec {
             user_id: &user.id,
             email: &user.email,
             auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second() - 5),
+            },
             ..Default::default()
         },
     )
     .await;
 
-    // Age the session so it is at least 2 seconds old (well past max_age=1).
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
     let state_param = "maxage-stale-reject";
 
-    // max_age=1 with a 2-second-old session: pre-login check (age >= max_age)
+    // max_age=1 with a 5-second-old session: pre-login check (age >= max_age)
     // triggers re-auth and stores a pending auth record carrying max_age=1.
     let response = http_get_full(
         &app,

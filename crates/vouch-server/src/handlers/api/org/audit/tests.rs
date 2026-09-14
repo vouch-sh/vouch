@@ -709,10 +709,21 @@ async fn ocsf_export_shows_entity_delete_after_application_api_delete() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // Wait out the export's 30s read-after-write lag window so the just-written
-    // event becomes visible to the audit endpoint (a real poller polls after
-    // this interval; 36s gives a 6s margin past the 30s cutoff).
-    tokio::time::sleep(std::time::Duration::from_secs(36)).await;
+    // The handler stamped the row at `now`, which the export's 30s
+    // read-after-write lag window holds back. Move the row behind the window
+    // rather than waiting it out; the write path above is the part under test.
+    let old = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().minutes(5))
+        .expect("valid timestamp");
+    let backdated = state
+        .audit
+        .backdate_events_for_test(old)
+        .await
+        .expect("backdate events");
+    assert!(
+        backdated >= 1,
+        "the API delete must have written an audit row"
+    );
 
     // Read the OCSF export as an org-scoped audit consumer.
     let token = create_test_audit_token(&state.store, "poller", &org.id).await;
