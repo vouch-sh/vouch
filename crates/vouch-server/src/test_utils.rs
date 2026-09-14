@@ -1532,6 +1532,9 @@ pub struct TestClientSpec {
     pub dpop_bound_access_tokens: bool,
     /// Allowed grant types override. Default: `None`.
     pub grant_types: Option<Vec<String>>,
+    /// Registered `response_types`. Default: `None` (the authorization
+    /// endpoint treats an absent list as "defaults apply").
+    pub response_types: Option<Vec<String>>,
     /// FAPI security profile. Default: `None` (→ FapiProfile::None).
     pub fapi_profile: Option<crate::db::FapiProfile>,
     /// ID-token signing algorithm. Default: `JwsAlgorithm::Rs256`.
@@ -1596,6 +1599,7 @@ impl Default for TestClientSpec {
             // so grant-exercising tests do not silently hit the §5.2
             // `unauthorized_client` check. Restrict explicitly to test denial.
             grant_types: Some(all_supported_grant_types()),
+            response_types: Option::None,
             fapi_profile: Option::None,
             id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: Option::None,
@@ -1677,7 +1681,7 @@ pub async fn create_test_client(
                 Option::None
             },
             grant_types: spec.grant_types.as_deref(),
-            response_types: Option::None,
+            response_types: spec.response_types.as_deref(),
             software_id: Option::None,
             software_version: Option::None,
             registration_source: RegistrationSource::Manual,

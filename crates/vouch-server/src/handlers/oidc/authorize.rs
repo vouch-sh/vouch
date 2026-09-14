@@ -322,21 +322,18 @@ impl ResolvedClient {
         .await
     }
 
-    /// RFC 7591 §2: a client's registered `response_types` determine what it
-    /// is "allowed to use". `/authorize` only issues the `code` response
-    /// type, so a client whose registered `response_types` is `Some` and
-    /// excludes `"code"` cannot use this endpoint at all — reject it with a
-    /// redirect-based `unauthorized_client` error rather than surfacing a
-    /// code the token endpoint will refuse to redeem.
+    /// RFC 7591 §2 defines `response_types` as the "response type strings
+    /// that the client can use at the authorization endpoint". `/authorize`
+    /// only issues `code`, so a client whose registered list is `Some` and
+    /// excludes `"code"` cannot use this endpoint at all; it is refused with
+    /// a redirect-based `unauthorized_client` error (RFC 6749 §4.1.2.1)
+    /// rather than handed a code the token endpoint's `grant_types` gate
+    /// will refuse to redeem.
     ///
     /// `None` means "all defaults apply" — the same convention
     /// [`crate::db::OAuthClient::is_authorized_for_grant`] uses for an absent
     /// `grant_types` — so admin-registered clients with no explicit
     /// `response_types` (the common case) are unaffected.
-    ///
-    /// This mirrors the per-client grant-type gate the token endpoint already
-    /// enforces (commit a8bae30a), closing the issuance side so the three
-    /// layers — registration, authorize, token — consult the same contract.
     #[expect(
         clippy::result_large_err,
         reason = "Err is an HTTP Response; size is acceptable in error path"

@@ -1789,20 +1789,12 @@ async fn test_pending_auth_without_session_returns_to_login_and_preserves_pendin
 // ========================================================================
 // RFC 7591 §2 — per-client `response_types` enforcement at /oauth/authorize
 //
-// Commit a8bae30a ("fix(oidc): enforce grant_types for the authorization_code
-// grant") added per-client grant-type gates at the *token* endpoint and a
-// `response_types`↔`grant_types` pairing rule at *registration*, but the
-// issuance side — `/oauth/authorize` — kept validating `response_type` against
-// the global `SUPPORTED_RESPONSE_TYPES` list only. A client registered with
-// `response_types: []` could still drive an authenticated user through
-// `/oauth/authorize?response_type=code&…` and receive a 302 with `code=`, an
-// unredeemable code the token endpoint then refuses.
-//
-// These tests pin the fix: an unauthenticated open-registration client with no
-// `code` response type is rejected at `/authorize` with an
-// `unauthorized_client` redirect (RFC 7591 §2 "allowed to use" + RFC 6749
-// §4.1.2.1 error), while a legitimately registered code client still receives
-// a code (no regression).
+// RFC 7591 §2 defines `response_types` as the "response type strings that
+// the client can use at the authorization endpoint". A client registered
+// with `response_types: []` is refused at `/authorize` with an
+// `unauthorized_client` redirect (RFC 6749 §4.1.2.1) instead of being handed
+// a code the token endpoint's `grant_types` gate would refuse; a client
+// registered for `code` still receives one.
 // ========================================================================
 
 /// A client registered (via open registration, no Bearer token) with
