@@ -16,7 +16,6 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use vouch_common::protocol;
 
 /// Maximum number of active (non-revoked, non-expired) secrets per OAuth client.
 ///
@@ -224,14 +223,21 @@ impl OAuthClient {
     /// Whether the client is registered (RFC 7591 §2 `grant_types`) for the
     /// grant whose `grant_type` wire value is `grant`.
     ///
-    /// A stored `None` means the registration omitted `grant_types`, and
-    /// RFC 7591 §2 fixes what that means — "If omitted, the default behavior
-    /// is that the client will use only the `authorization_code` Grant Type."
-    /// So `None` is the default list, not the empty one: it authorizes
-    /// `authorization_code` and nothing else. Dynamic registration
-    /// materializes that default when the field is absent
-    /// (`services/oidc/registration.rs`), so `None` only reaches here for a
-    /// manually-managed row, which the spec still entitles to the default.
+    /// A stored `None` is resolved from the client's `application_type` via
+    /// [`OAuthClientType::default_grant_types`], not from RFC 7591 §2's
+    /// registration default.
+    ///
+    /// RFC 7591 §2 fixes what an omitted `grant_types` means for a *dynamic
+    /// registration* — "If omitted, the default behavior is that the client
+    /// will use only the `authorization_code` Grant Type" — and
+    /// `register_client` materializes exactly that when the field is absent
+    /// (`services/oidc/registration.rs`). Because registration always writes
+    /// the field, a stored `None` can only be a self-service application,
+    /// whose creation form has no grant-types input at all. Applying the
+    /// registration default to it read a choice the operator was never
+    /// offered, and left every self-service Native application unable to use
+    /// the device flow and every Service application unable to use client
+    /// credentials.
     ///
     /// Callers pass the
     /// [`crate::services::oidc::grant_type::OAuthGrantType::as_str`] wire value
@@ -243,7 +249,7 @@ impl OAuthClient {
     pub fn is_authorized_for_grant(&self, grant: &str) -> bool {
         match self.grant_types.as_ref() {
             Some(gts) => gts.iter().any(|g| g == grant),
-            None => grant == protocol::GRANT_TYPE_AUTHORIZATION_CODE,
+            None => self.application_type.default_grant_types().contains(&grant),
         }
     }
 }
@@ -2100,33 +2106,76 @@ pub async fn validate_oauth_client_credentials(
 mod tests {
     use super::*;
 
-    /// RFC 7591 §2 `grant_types`: "If omitted, the default behavior is that
-    /// the client will use only the `authorization_code` Grant Type." A
-    /// stored `None` is therefore the default list, not the empty one — it
-    /// authorizes `authorization_code` and rejects every other grant.
+    /// A stored `None` resolves from the client's `application_type`, not from
+    /// RFC 7591 §2's registration default.
+    ///
+    /// Registration always writes the field (`register_client` materializes
+    /// the RFC 7591 §2 default when it is omitted), so `None` can only be a
+    /// self-service application — and its creation form has no grant-types
+    /// input. Resolving those rows as `["authorization_code"]` left every
+    /// Native application unable to use the device flow and every Service
+    /// application unable to use client credentials.
     #[tokio::test]
-    async fn test_absent_grant_types_defaults_to_authorization_code() {
+    async fn test_absent_grant_types_resolve_from_application_type() {
         let store = test_store().await;
-        // `create_client_and_secret` registers with `grant_types: None`, which
-        // is exactly the absent-field row this test is about.
-        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+        // `create_client_and_secret` registers a Web client with
+        // `grant_types: None` — exactly the absent-field row this is about.
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
         assert!(
             client.grant_types.is_none(),
             "fixture precondition: the stored row has no grant_types"
         );
 
-        assert!(
-            client.is_authorized_for_grant("authorization_code"),
-            "RFC 7591 §2: omitted grant_types defaults to authorization_code"
-        );
-        for other in [
-            "client_credentials",
-            "urn:ietf:params:oauth:grant-type:device_code",
-            "urn:ietf:params:oauth:grant-type:token-exchange",
-        ] {
+        // Web and SPA: the code grant and nothing else.
+        for app_type in [OAuthClientType::Web, OAuthClientType::Spa] {
+            client.application_type = app_type;
             assert!(
-                !client.is_authorized_for_grant(other),
-                "the default list is authorization_code ONLY; {other} must be rejected"
+                client.is_authorized_for_grant("authorization_code"),
+                "{app_type:?} must keep the code grant"
+            );
+            for other in [
+                "client_credentials",
+                "urn:ietf:params:oauth:grant-type:device_code",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ] {
+                assert!(
+                    !client.is_authorized_for_grant(other),
+                    "{app_type:?} must reject {other}"
+                );
+            }
+        }
+
+        // Native: an installed app uses the code grant when a browser is
+        // available and RFC 8628 when one is not.
+        client.application_type = OAuthClientType::Native;
+        assert!(client.is_authorized_for_grant("authorization_code"));
+        assert!(
+            client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:device_code"),
+            "a Native application must be able to run the device flow"
+        );
+        assert!(!client.is_authorized_for_grant("client_credentials"));
+
+        // Service: machine-to-machine, so no user-present grant.
+        client.application_type = OAuthClientType::Service;
+        assert!(
+            client.is_authorized_for_grant("client_credentials"),
+            "a Service application must be able to use client credentials"
+        );
+        assert!(!client.is_authorized_for_grant("authorization_code"));
+        assert!(!client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:device_code"));
+
+        // No application type grants token exchange by default — the CLI
+        // declares it explicitly at registration.
+        for app_type in [
+            OAuthClientType::Web,
+            OAuthClientType::Spa,
+            OAuthClientType::Native,
+            OAuthClientType::Service,
+        ] {
+            client.application_type = app_type;
+            assert!(
+                !client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:token-exchange"),
+                "{app_type:?} must not get token exchange without declaring it"
             );
         }
     }

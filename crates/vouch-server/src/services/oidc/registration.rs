@@ -1593,7 +1593,7 @@ fn determine_client_type(
     let has_client_credentials_only = grant_types.len() == 1
         && grant_types
             .first()
-            .is_some_and(|g| g == "client_credentials");
+            .is_some_and(|g| g == vouch_common::protocol::GRANT_TYPE_CLIENT_CREDENTIALS);
     let is_public = auth_method == TokenEndpointAuthMethod::None;
     // RFC 8252 §7: a native app receives its redirect either on the loopback
     // interface or through a private-use URI scheme, so either shape is the
