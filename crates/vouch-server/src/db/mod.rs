@@ -151,7 +151,7 @@ pub use documents::oauth::{
 // Re-export OAuth domain types and functions
 pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
-    ClientKeys, ClientKeysError, CreateOAuthClientParams, JwkEntry, JwkSet, KeyType,
+    ClientKeys, ClientKeysError, ClientType, CreateOAuthClientParams, JwkEntry, JwkSet, KeyType,
     MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient, OAuthClientSecret,
     OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain, RedirectUriError,
     UpdateClientRegistrationParams, UpdateOAuthClientParams, client_keys_to_stored,

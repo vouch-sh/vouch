@@ -30,12 +30,13 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
+use super::validated_client::ValidatedOAuthClient;
 
 /// Parameters for exchanging an authorization code for tokens (RFC 6749 Section 4.1.3).
 ///
 /// The handler runs all client authentication (JWT, mTLS, secret, public-client
 /// validation) BEFORE calling `exchange_authorization_code`, then passes the
-/// fully-resolved [`AuthenticatedClient`] here. The exchange function only
+/// [`ValidatedOAuthClient`] here. The exchange function only
 /// re-checks that the authenticated client matches the auth code's recorded
 /// client_id — it never runs an authentication step of its own.
 #[derive(Debug)]
@@ -49,17 +50,13 @@ pub struct AuthCodeExchangeParams<'a> {
     /// authentication method (`client_secret_basic`/`client_secret_post`,
     /// `private_key_jwt`, `tls_client_auth`/`self_signed_tls_client_auth`,
     /// or public-client validation) succeeded. The handler runs all
-    /// authentication so that `exchange_authorization_code` receives a
-    /// fully-resolved `AuthenticatedClient` and never re-runs an auth
-    /// step. `None` only when the handler was unable to determine the
-    /// client — exchange treats that as invalid_client.
-    pub authenticated_client: Option<&'a AuthenticatedClient>,
+    /// authentication and the grant check so that `exchange_authorization_code`
+    /// never re-runs either.
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
     pub binding: TokenBinding<'a>,
-    /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
-    pub client_id: &'a str,
     /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
@@ -111,15 +108,6 @@ impl std::fmt::Debug for AuthCodeExchangeResult {
             .field("authorization_details", &self.authorization_details)
             .finish()
     }
-}
-
-/// Authenticated client information.
-#[derive(Debug)]
-pub struct AuthenticatedClient {
-    /// The OAuth client record.
-    pub client: OAuthClient,
-    /// Whether this is a public client (no secret required).
-    pub is_public: bool,
 }
 
 /// Witness that an OAuth client successfully authenticated via
@@ -317,7 +305,7 @@ pub(crate) async fn exchange_authorization_code(
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code =
-        decode_authorization_code(state, params.code, params.client_id, arrival).await?;
+        decode_authorization_code(state, params.code, &params.client.client_id, arrival).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // This MUST happen before any other validation to ensure codes are always
@@ -329,8 +317,8 @@ pub(crate) async fn exchange_authorization_code(
 
     let user = load_and_validate_grant_subject(state, &auth_code).await?;
 
-    let authenticated_client = params.authenticated_client;
-    verify_client_matches_code(authenticated_client, &auth_code)?;
+    let client = params.client;
+    verify_client_matches_code(client, &auth_code)?;
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -404,7 +392,8 @@ pub(crate) async fn exchange_authorization_code(
     // so this is written before the fallible ID-token signing below: a
     // signing failure must not leave a persisted access token with no
     // `TokenIssued` event.
-    if let Some(auth_client) = authenticated_client {
+    {
+        let auth_client = client;
         // The user-org half of `resolve_event_org_domain`'s "prefer user,
         // fall back to client" rule was already resolved above for the
         // session claims, so it's reused here rather than re-derived; the
@@ -414,14 +403,14 @@ pub(crate) async fn exchange_authorization_code(
         let audit_org_domain = db::resolve_event_org_domain(
             &state.store,
             org_domain.as_deref(),
-            auth_client.client.org_id.as_deref(),
+            auth_client.org_id.as_deref(),
         )
         .await;
         db::record_oauth_event(
             &state.audit,
             &state.store,
             &db::RecordOAuthEventParams {
-                oauth_client_id: &auth_client.client.id,
+                oauth_client_id: &auth_client.id,
                 event_type: db::OAuthEventType::TokenIssued,
                 user_id: Some(&auth_code.user_id),
                 ip_address: None,
@@ -437,10 +426,7 @@ pub(crate) async fn exchange_authorization_code(
         .await;
     }
 
-    // Extract the per-client ID token signing algorithm.
-    // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
-    let id_token_alg =
-        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
+    let id_token_alg = client.id_token_signed_response_alg.as_str();
 
     // Generate ID token (with at_hash computed from the access token).
     // `arrival` is threaded here so the ID token's `exp`/`iat` share the
@@ -532,15 +518,13 @@ async fn load_and_validate_grant_subject(
 /// Returns `invalid_grant` on client mismatch and `invalid_request` when a
 /// required PKCE challenge is absent.
 fn verify_client_matches_code(
-    authenticated_client: Option<&AuthenticatedClient>,
+    client: &ValidatedOAuthClient,
     auth_code: &AuthorizationCode,
 ) -> ServiceResult<()> {
-    if let Some(client) = authenticated_client
-        && client.client.client_id != auth_code.client_id
-    {
+    if client.client_id != auth_code.client_id {
         tracing::warn!(
             "Client ID mismatch: token request from {} but code was issued to {}",
-            client.client.client_id,
+            client.client_id,
             auth_code.client_id
         );
         return Err(ServiceError::oauth(
@@ -548,18 +532,17 @@ fn verify_client_matches_code(
             "Client ID mismatch",
         ));
     }
-    if let Some(client) = authenticated_client {
-        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
-        if pkce_required && auth_code.code_challenge.is_none() {
-            tracing::warn!(
-                "Client {} requires PKCE but no code_challenge was present",
-                client.client.client_id
-            );
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "PKCE required for this client type",
-            ));
-        }
+    let pkce_required = client.client_type() == crate::db::ClientType::Public
+        || client.application_type.requires_pkce();
+    if pkce_required && auth_code.code_challenge.is_none() {
+        tracing::warn!(
+            "Client {} requires PKCE but no code_challenge was present",
+            client.client_id
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "PKCE required for this client type",
+        ));
     }
     Ok(())
 }
@@ -843,7 +826,7 @@ pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
     arrival: ArrivalTime,
-) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
+) -> Result<(OAuthClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
         .await?
@@ -854,8 +837,9 @@ pub async fn authenticate_client(
         return Err(ClientAuthError::InvalidClient);
     }
 
-    // Determine if this client type requires a secret
-    let requires_secret = client.application_type.requires_secret();
+    // RFC 6749 §2.1: a confidential client must present the credential it
+    // registered; a public one has none to present.
+    let is_confidential = client.client_type() == crate::db::ClientType::Confidential;
 
     // RFC 8705: mTLS clients authenticate via certificate, not secret.
     // When a confidential client uses tls_client_auth or self_signed_tls_client_auth,
@@ -866,22 +850,16 @@ pub async fn authenticate_client(
             | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
     );
 
-    if requires_secret && is_mtls_auth {
+    if is_confidential && is_mtls_auth {
         // mTLS client — skip secret validation, return as confidential.
         // The certificate will be validated by authenticate_client_mtls().
         if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
-        return Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
-            None,
-        ));
+        return Ok((client, None));
     }
 
-    if requires_secret {
+    if is_confidential {
         // FAPI 2.0 Security Profile §5.3.2.1 item 6: the authorization server
         // "shall authenticate clients using one of the following methods:
         // MTLS as specified in Section 2 of [RFC8705], or private_key_jwt as
@@ -927,13 +905,7 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
-            Some(ClientSecretVerification { _private: () }),
-        ))
+        Ok((client, Some(ClientSecretVerification { _private: () })))
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
@@ -941,13 +913,7 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok((
-            AuthenticatedClient {
-                client,
-                is_public: true,
-            },
-            None,
-        ))
+        Ok((client, None))
     }
 }
 
@@ -2027,6 +1993,55 @@ mod tests {
     /// A secret-based confidential client authenticates successfully even
     /// when the observational `last_used_at` UPDATE fails — the write is
     /// swallowed at the service layer, matching the public/mTLS/private_key_jwt
+    // RFC 8252 §8.4: a native app may be provisioned a per-instance secret
+    // through dynamic registration; RFC 7591 §2 makes the registered
+    // `token_endpoint_auth_method`, not `application_type`, what says whether
+    // the client is public. A native client registered with a secret is held
+    // to it.
+    #[tokio::test]
+    async fn test_authenticate_client_native_client_with_secret_is_confidential() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "native-secret@example.com").await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1/cb".to_string()],
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let arrival = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now());
+
+        let without_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        assert!(
+            matches!(
+                authenticate_client(&state, &without_secret, arrival).await,
+                Err(ClientAuthError::SecretRequired)
+            ),
+            "a native client registered with a secret must present it"
+        );
+
+        let with_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+        let (auth, verification) = authenticate_client(&state, &with_secret, arrival)
+            .await
+            .expect("the registered secret authenticates the client");
+        assert_eq!(auth.client_type(), crate::db::ClientType::Confidential);
+        assert!(verification.is_some());
+    }
+
     /// branches.
     #[tokio::test]
     async fn test_authenticate_client_secret_swallows_last_used_failure() {
@@ -2060,8 +2075,9 @@ mod tests {
             "secret-based auth must not fail when only the last_used_at write fails: {result:?}"
         );
         let (auth, verification) = result.expect("checked Ok above");
-        assert!(
-            !auth.is_public,
+        assert_eq!(
+            auth.client_type(),
+            crate::db::ClientType::Confidential,
             "secret-based client is confidential, not public"
         );
         assert!(
@@ -2463,74 +2479,59 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // verify_client_matches_code
-    // =========================================================================
-
-    // RFC 6749 §4.1.3: a code issued without a client imposes no client binding.
-    #[test]
-    fn test_verify_client_matches_code_no_client_ok() {
-        let auth_code = make_auth_code("");
-        assert!(verify_client_matches_code(None, &auth_code).is_ok());
-    }
-
     // RFC 6749 §4.1.3: the code must be redeemed by the client it was issued to.
     #[test]
     fn test_verify_client_matches_code_matching_confidential_client_ok() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
-        };
+        let client = ValidatedOAuthClient::for_test(make_mtls_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            None,
+        ));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             ..make_auth_code("")
         };
         // Service client, not public: PKCE is not required.
-        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+        assert!(verify_client_matches_code(&client, &auth_code).is_ok());
     }
 
     // RFC 6749 §4.1.3: another client may not redeem the code.
     #[test]
     fn test_verify_client_matches_code_rejects_client_id_mismatch() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
-        };
+        let client = ValidatedOAuthClient::for_test(make_mtls_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            None,
+        ));
         // make_auth_code uses client_id "test", which differs from the client's.
         let auth_code = make_auth_code("");
-        let result = verify_client_matches_code(Some(&client), &auth_code);
+        let result = verify_client_matches_code(&client, &auth_code);
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     // RFC 7636 §4.6: a public client's code is redeemed with a verifier.
     #[test]
     fn test_verify_client_matches_code_public_client_requires_pkce() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
-        };
+        let client =
+            ValidatedOAuthClient::for_test(make_mtls_client(TokenEndpointAuthMethod::None, None));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             ..make_auth_code("")
         };
-        let result = verify_client_matches_code(Some(&client), &auth_code);
+        let result = verify_client_matches_code(&client, &auth_code);
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     // RFC 7636 §4.6: a public client presenting a verifier may redeem the code.
     #[test]
     fn test_verify_client_matches_code_public_client_with_pkce_ok() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
-        };
+        let client =
+            ValidatedOAuthClient::for_test(make_mtls_client(TokenEndpointAuthMethod::None, None));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             code_challenge: Some("a-code-challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             ..make_auth_code("")
         };
-        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+        assert!(verify_client_matches_code(&client, &auth_code).is_ok());
     }
 
     // =========================================================================

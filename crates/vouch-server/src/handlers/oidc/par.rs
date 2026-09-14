@@ -244,7 +244,7 @@ pub(crate) async fn par(
     let mtls_verification = if pending_jti.is_none()
         && secret_verification.is_none()
         && matches!(
-            authenticated_client.client.token_endpoint_auth_method,
+            authenticated_client.token_endpoint_auth_method,
             crate::db::TokenEndpointAuthMethod::TlsClientAuth
                 | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
         ) {
@@ -257,7 +257,7 @@ pub(crate) async fn par(
         };
         match crate::services::oidc::token::authenticate_client_mtls(
             &state,
-            &authenticated_client.client,
+            &authenticated_client,
             cert,
         )
         .await
@@ -278,13 +278,13 @@ pub(crate) async fn par(
     // token_endpoint_auth_method, so a stale secret on a client since
     // migrated to a FAPI method cannot pass the gate.
     let actual_method = super::client_auth::actual_auth_method(
-        authenticated_client.client.token_endpoint_auth_method,
+        authenticated_client.token_endpoint_auth_method,
         jwt_auth.is_some(),
         secret_verification.is_some(),
         mtls_verification.is_some(),
     );
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
-        &authenticated_client.client,
+        &authenticated_client,
         actual_method,
     ) {
         return par_error_response(
@@ -299,8 +299,7 @@ pub(crate) async fn par(
     // provided, reject the PAR request.  Use `invalid_request` per PAR-2.3:
     // the request itself is invalid (missing required parameter), not a
     // malformed request object.
-    if authenticated_client.client.require_signed_request_object == Some(true)
-        && params.request.is_none()
+    if authenticated_client.require_signed_request_object == Some(true) && params.request.is_none()
     {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
@@ -390,7 +389,7 @@ pub(crate) async fn par(
         let request_params = match validate_request_object(
             &state,
             request_jwt,
-            &authenticated_client.client,
+            &authenticated_client,
             None,
             arrival,
         )
@@ -404,7 +403,7 @@ pub(crate) async fn par(
         };
 
         // client_id from JWT must match the authenticated client
-        if request_params.client_id != authenticated_client.client.client_id {
+        if request_params.client_id != authenticated_client.client_id {
             return par_error_response(
                 OAuthErrorCode::InvalidRequestObject,
                 presentation,
@@ -426,7 +425,7 @@ pub(crate) async fn par(
     } else {
         let request_params = AuthorizeRequestParams {
             response_type: params.response_type.unwrap_or_default(),
-            client_id: authenticated_client.client.client_id.clone(),
+            client_id: authenticated_client.client_id.clone(),
             redirect_uri: params.redirect_uri.clone().unwrap_or_default(),
             scope: params.scope.clone(),
             state: params.state.clone(),
@@ -453,7 +452,7 @@ pub(crate) async fn par(
     };
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
+    if let Err(e) = require_pkce_for_client(&validated, &authenticated_client) {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
             presentation,
@@ -462,10 +461,7 @@ pub(crate) async fn par(
     }
 
     // Validate redirect_uri against registered URIs
-    if !authenticated_client
-        .client
-        .is_valid_redirect_uri(validated.redirect_uri())
-    {
+    if !authenticated_client.is_valid_redirect_uri(validated.redirect_uri()) {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
             presentation,
@@ -475,7 +471,7 @@ pub(crate) async fn par(
 
     // RFC 8707: Validate resource parameter against registered URIs
     if let Some(resource) = validated.resource()
-        && !authenticated_client.client.is_valid_resource_uri(resource)
+        && !authenticated_client.is_valid_resource_uri(resource)
     {
         return par_error_response(
             OAuthErrorCode::InvalidTarget,
@@ -581,12 +577,11 @@ pub(crate) async fn par(
     } else if let Some(v) = mtls_verification {
         ClientAuthProof::MutualTls(v)
     } else {
-        let witness = match crate::services::auth::NoClientAuth::for_public_client(
-            &authenticated_client.client,
-        ) {
-            Ok(w) => w,
-            Err(svc) => return svc.into_oauth_response().into_response(),
-        };
+        let witness =
+            match crate::services::auth::NoClientAuth::for_public_client(&authenticated_client) {
+                Ok(w) => w,
+                Err(svc) => return svc.into_oauth_response().into_response(),
+            };
         ClientAuthProof::NoAuth(witness)
     };
     let proof = ParCreationProof {

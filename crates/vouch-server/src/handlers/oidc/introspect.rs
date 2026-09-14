@@ -243,7 +243,7 @@ pub(crate) async fn introspect(
 
     let (authenticated_client, pending_jti) =
         match complete_client_auth(&state, auth, arrival).await {
-            Ok(Some(a)) => (a.client.client, a.pending_jti),
+            Ok(Some(a)) => (a.client, a.pending_jti),
             Ok(None) => {
                 // No credentials provided → 401 with the shared challenge.
                 return with_client_auth_challenge(

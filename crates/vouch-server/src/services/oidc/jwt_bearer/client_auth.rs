@@ -14,7 +14,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::claim::ClaimError;
 use crate::db::{self, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
-use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
+use crate::services::oidc::token::ClientAuthError;
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 
@@ -162,7 +162,7 @@ impl PendingJti {
 ///
 /// # Returns
 /// On success, returns:
-/// - `AuthenticatedClient` — the resolved OAuth client record;
+/// - `OAuthClient` — the resolved OAuth client record;
 /// - `PendingJti` — caller MUST `.commit()` it immediately before grant-state
 ///   persistence (`exchange_*` / `store_par_request`). If a later validator
 ///   returns a retryable error (notably DPoP `use_dpop_nonce`, RFC 9449 §4.3),
@@ -177,7 +177,7 @@ pub async fn authenticate_client_jwt(
     client_assertion: &str,
     client_id_hint: Option<&str>,
     arrival: ArrivalTime,
-) -> Result<(AuthenticatedClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
+) -> Result<(OAuthClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
         tracing::debug!("JWT assertion header parse failed: {e}");
@@ -314,14 +314,7 @@ pub async fn authenticate_client_jwt(
         client.client_id
     );
 
-    Ok((
-        AuthenticatedClient {
-            client,
-            is_public: false,
-        },
-        pending_jti,
-        JwtAuthSucceeded { _private: () },
-    ))
+    Ok((client, pending_jti, JwtAuthSucceeded { _private: () }))
 }
 
 /// RFC 7523 Section 3: For client authentication, `iss` and `sub` MUST both

@@ -1987,11 +1987,6 @@ rfc8252#8.10#41d1cae1	MUST	The native app MUST store the redirect URI used in th
 rfc8252#8.12#1dbf7504	MUST NOT	This best current practice requires that native apps MUST NOT use embedded user-agents to perform authorization requests and allows that authorization endpoints
 rfc8252#8.2#0ae73ded	SHOULD NOT	However, as the implicit flow cannot be protected by PKCE [RFC7636] (which is required in Section 8.1), the use of the Implicit Flow with native apps is NOT REC
 rfc8252#8.3#53880f7a	SHOULD NOT	While redirect URIs using localhost (i.e., "http://localhost:{port}/{path}") function similarly to loopback IP redirects described in Section 7.3, the use of lo
-rfc8252#8.4#072fec68	SHOULD	For private-use URI scheme-based redirects, authorization servers SHOULD enforce the requirement in Section 7.1 that clients use schemes that are reverse domain
-rfc8252#8.4#2910ef69	MUST	Authorization servers MUST record the client type in the client registration details in order to identify and process requests accordingly.
-rfc8252#8.4#42ceb57b	MUST	Authorization servers MUST require clients to register their complete redirect URI (including the path component) and reject authorization requests that specify
-rfc8252#8.4#d1c27b7e	MUST	Except when using a mechanism like Dynamic Client Registration [RFC7591] to provision per-instance secrets, native apps are classified as public clients, as def
-rfc8252#8.4#f2283544	SHOULD	At a minimum, any private-use URI scheme that doesn't contain a period character (".") SHOULD be rejected.
 rfc8252#8.5#308d1203	SHOULD NOT	For this reason, and those stated in Section 5.3.1 of [RFC6819], it is NOT RECOMMENDED for authorization servers to require client.
 rfc8252#8.5#4bb8b131	MUST	Authorization servers that still require a statically included shared secret for native app clients MUST treat the client as a public client (as defined by Sect
 rfc8252#8.6#03566363	SHOULD	This includes the case where the user has previously approved an authorization request for a given client id -- unless the identity of the client can be proven,

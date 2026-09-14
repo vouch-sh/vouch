@@ -9,7 +9,7 @@ use crate::arrival::ArrivalTime;
 use crate::error::{OAuthErrorCode, OAuthErrorResponse};
 use crate::services::oidc::{
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
-    token::{AuthenticatedClient, ClientCredentials, authenticate_client},
+    token::{ClientCredentials, authenticate_client},
 };
 use axum::{
     Json,
@@ -278,7 +278,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 
 /// Result of a successful `complete_client_auth` dispatch.
 pub(crate) struct ClientAuthOutcome {
-    pub(crate) client: AuthenticatedClient,
+    pub(crate) client: crate::db::OAuthClient,
     pub(crate) client_id: String,
     /// `Some` only for JWT-authenticated clients — caller must commit.
     pub(crate) pending_jti: Option<PendingJti>,
@@ -334,7 +334,7 @@ pub(crate) async fn complete_client_auth(
             .await
         {
             Ok((client, pending_jti, jwt_auth)) => {
-                let cid = client.client.client_id.clone();
+                let cid = client.client_id.clone();
                 Ok(Some(ClientAuthOutcome {
                     client,
                     client_id: cid,

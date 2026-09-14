@@ -13,6 +13,7 @@ use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::token::validate_dpop_if_present;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
@@ -112,12 +113,7 @@ pub(crate) async fn device_code(
         let client = client.ok_or_else(|| {
             ServiceError::oauth(OAuthErrorCode::InvalidClient, "Unknown client_id")
         })?;
-        if !client.is_authorized_for_grant(OAuthGrantType::DeviceCode.as_str()) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::UnauthorizedClient,
-                "Client is not authorized for device_code grant",
-            ));
-        }
+        ValidatedOAuthClient::for_grant(client, OAuthGrantType::DeviceCode)?;
     }
 
     // Generate codes
@@ -414,19 +410,23 @@ pub(crate) async fn device_token(
             // does not burn the single-use device code, matching the mTLS gate
             // below. The built-in CLI flow carries no `client_id` and is
             // unaffected: `oauth_client` is `None` and the guard is skipped.
-            if let Some(ref oc) = oauth_client
-                && !oc.is_authorized_for_grant(OAuthGrantType::DeviceCode.as_str())
+            let oauth_client = match oauth_client
+                .map(|c| ValidatedOAuthClient::for_grant(c, OAuthGrantType::DeviceCode))
+                .transpose()
             {
-                return Err(oauth_error(
-                    StatusCode::UNAUTHORIZED,
-                    OAuthError {
-                        error: OAuthErrorCode::UnauthorizedClient.as_str().to_string(),
-                        error_description: Some(
-                            "Client is not authorized for device_code grant".to_string(),
-                        ),
-                    },
-                ));
-            }
+                Ok(client) => client,
+                Err(_) => {
+                    return Err(oauth_error(
+                        StatusCode::UNAUTHORIZED,
+                        OAuthError {
+                            error: OAuthErrorCode::UnauthorizedClient.as_str().to_string(),
+                            error_description: Some(
+                                "Client is not authorized for device_code grant".to_string(),
+                            ),
+                        },
+                    ));
+                }
+            };
 
             // RFC 8705 §2 / parity with the authorization-code, client-credentials,
             // refresh-token, and PAR grants: a client registered with

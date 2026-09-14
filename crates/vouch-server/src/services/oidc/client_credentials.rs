@@ -11,13 +11,13 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
-use crate::db::{OAuthClient, SessionPurpose};
-use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::db::SessionPurpose;
+use crate::error::ServiceResult;
 use crate::services::auth::{
     CreateOAuthTokenParams, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::oidc::grant_type::OAuthGrantType;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use std::sync::Arc;
 
 /// Result of a client credentials grant exchange.
@@ -40,30 +40,14 @@ pub struct ClientCredentialsResult {
 /// * `requested_scope` - Optional scope requested by the client
 /// * `mtls_cert_thumbprint` - RFC 8705 certificate thumbprint for token binding (if applicable)
 ///
-/// # Errors
-/// Returns `unauthorized_client` if the client does not have the
-/// `client_credentials` grant type registered.
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
-    client: &OAuthClient,
+    client: &ValidatedOAuthClient,
     requested_scope: Option<&str>,
     binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
     arrival: ArrivalTime,
 ) -> ServiceResult<ClientCredentialsResult> {
-    // RFC 6749 §5.2 `unauthorized_client`: the authenticated client must be
-    // registered for the `client_credentials` grant type (RFC 7591 §2
-    // `grant_types`). The check mirrors `handle_token_exchange_grant` and
-    // `handle_fido2_assertion_grant`, which enforce the same field for their
-    // grants — keeping the interpretation of `grant_types` consistent across
-    // every grant handler that authenticates a client.
-    if !client.is_authorized_for_grant(OAuthGrantType::ClientCredentials.as_str()) {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::UnauthorizedClient,
-            "Client is not authorized for client_credentials grant",
-        ));
-    }
-
     // Filter out openid and email scopes — neither is meaningful without a user.
     let scope = requested_scope.map(|s| {
         let requested = ScopeSet::parse(s);
@@ -196,7 +180,7 @@ mod tests {
         let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(b"test-cert-der");
         let result = exchange_client_credentials(
             &state,
-            &client,
+            &ValidatedOAuthClient::for_test(client),
             None,
             TokenBinding::MutualTls(&thumbprint),
             TokenIssuanceProof {

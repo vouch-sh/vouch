@@ -26,7 +26,7 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
-use crate::services::oidc::token::AuthenticatedClient;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ pub struct Fido2AssertionParams<'a> {
     /// The base64url-encoded JSON assertion payload.
     pub assertion: &'a str,
     /// Authenticated client (via `private_key_jwt`).
-    pub client: &'a AuthenticatedClient,
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
     pub binding: TokenBinding<'a>,
     /// Requested scope.
@@ -371,7 +371,7 @@ pub(crate) async fn exchange_fido2_assertion(
             &user.id,
             &user.email,
             client_ip,
-            &params.client.client.client_id,
+            &params.client.client_id,
             ad_value.as_ref(),
             arrival,
         )
@@ -428,7 +428,7 @@ pub(crate) async fn exchange_fido2_assertion(
             user_id: &user.id,
             email: &user.email,
             authenticator_id: Some(&authenticator.id),
-            client_id: &params.client.client.client_id,
+            client_id: &params.client.client_id,
             scope: Some(scope.clone()),
             binding: params.binding,
             act: None,
@@ -464,14 +464,14 @@ pub(crate) async fn exchange_fido2_assertion(
     let audit_org_domain = db::resolve_event_org_domain(
         &state.store,
         org_domain.as_deref(),
-        params.client.client.org_id.as_deref(),
+        params.client.org_id.as_deref(),
     )
     .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
         &db::RecordOAuthEventParams {
-            oauth_client_id: &params.client.client.id,
+            oauth_client_id: &params.client.id,
             event_type: db::OAuthEventType::TokenIssued,
             user_id: Some(&user.id),
             ip_address: client_ip,
