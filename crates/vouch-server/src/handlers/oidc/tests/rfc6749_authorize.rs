@@ -1785,3 +1785,209 @@ async fn test_pending_auth_without_session_returns_to_login_and_preserves_pendin
         "the sessionless return must not spend the single-use pending id"
     );
 }
+
+// ========================================================================
+// RFC 7591 §2 — per-client `response_types` enforcement at /oauth/authorize
+//
+// RFC 7591 §2 defines `response_types` as the "response type strings that
+// the client can use at the authorization endpoint". A client registered
+// with `response_types: []` is refused at `/authorize` with an
+// `unauthorized_client` redirect (RFC 6749 §4.1.2.1) instead of being handed
+// a code the token endpoint's `grant_types` gate would refuse; a client
+// registered for `code` still receives one.
+// ========================================================================
+
+/// A client registered (via open registration, no Bearer token) with
+/// `response_types: []` and `grant_types: ["client_credentials"]` must NOT
+/// receive an authorization code from `/oauth/authorize`: it is not
+/// registered for the `code` response type (RFC 7591 §2).
+#[tokio::test]
+async fn test_authorize_rejects_code_for_client_not_registered_for_code_response_type() {
+    let (app, state) = test_app().await;
+
+    // Open (unauthenticated) registration of a machine-to-machine client that
+    // is explicitly NOT allowed to use the authorization code flow.
+    let reg_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_post",
+        "client_name": "M2M No Code"
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &reg_body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Open registration of a client_credentials-only client must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"]
+        .as_str()
+        .expect("client_id present")
+        .to_string();
+
+    // Sanity: the registered client is not authorized for the authorization
+    // code grant, so a code issued to it would be unredeemable at /oauth/token
+    // (the gate a8bae30a added). This is the inconsistency /authorize must not
+    // paper over.
+    let db_client = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("DB lookup")
+        .expect("Client must exist in DB");
+    assert!(
+        !db_client.is_authorized_for_grant(vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE),
+        "client_credentials-only client must not be authorized for the auth-code grant"
+    );
+
+    // An authenticated user session — the dangerous case, where a code would
+    // be issued if /authorize ignored the per-client response_types contract.
+    let user = create_test_user(&state.store, "authorize-no-code@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "teststate-no-code";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state={}",
+            client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    // RFC 6749 Section 4.1.2.1: redirect to the validated redirect_uri with an
+    // error (the redirect_uri is registered, so redirecting is safe).
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Client not registered for 'code' must redirect with an error, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // The error is reported to the registered redirect_uri.
+    assert!(
+        location.starts_with("https://example.com/callback"),
+        "Error must redirect to the registered redirect_uri: {location}"
+    );
+    assert!(
+        location.contains("error=unauthorized_client"),
+        "Redirect must include error=unauthorized_client (RFC 7591 §2 / RFC 6749 §4.1.2.1): {location}"
+    );
+    // The defining symptom of the bug — a `code=` parameter — must be absent.
+    assert!(
+        !location.contains("code="),
+        "An unregistered-for-code client must NOT receive a code: {location}"
+    );
+    // RFC 6749 Section 4.1.2.1: state must be echoed unchanged.
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+    // RFC 9207 Section 2: iss must be present even in error responses.
+    assert!(
+        location.contains("iss="),
+        "Error redirect must include iss parameter (RFC 9207): {location}"
+    );
+}
+
+/// A client registered (via open registration) legitimately for the `code`
+/// response type must still receive an authorization code — the per-client
+/// `response_types` gate must not over-reject a valid auth-code client.
+#[tokio::test]
+async fn test_authorize_issues_code_for_open_registered_code_client() {
+    let (app, state) = test_app().await;
+
+    let reg_body = serde_json::json!({
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Auth Code Client"
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &reg_body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Open registration of an auth-code client must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"]
+        .as_str()
+        .expect("client_id present")
+        .to_string();
+
+    let user = create_test_user(&state.store, "authorize-code-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "teststate-code-ok";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state={}",
+            client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "A registered code client must redirect with a code, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("code="),
+        "A registered code client must receive an authorization code: {location}"
+    );
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Redirect must echo state parameter unchanged: {location}"
+    );
+}
