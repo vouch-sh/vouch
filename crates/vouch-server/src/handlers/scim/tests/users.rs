@@ -1305,3 +1305,522 @@ async fn test_scim_delete_user_returns_404_when_target_vanishes_mid_delete() {
             .join(", ")
     );
 }
+
+/// Regression for the SCIM DELETE last-admin floor: deleting the only
+/// remaining active admin must refuse with a 400 *before* revoking their
+/// sessions and SSH certificates, not after.
+///
+/// `revoke_user_access` runs as separate committed transactions (delete
+/// sessions, invalidate cache, revoke credentials), so letting the floor
+/// fire inside `db::delete_user` (`LastAdminGuard::Enforce`, the
+/// authoritative in-transaction re-check) — as the SCIM DELETE handler
+/// did before this fix — destroys the admin's active sessions and live
+/// SSH certificates and then refuses the delete. The "at least one
+/// active admin per organization" invariant (CLAUDE.md rule 10) only
+/// protects the admin record, not credentials, so a `users:write` token
+/// cycling DELETEs against the sole admin left them logged out
+/// indefinitely with each retry, requiring an out-of-band token
+/// rotation. The advisory pre-check at the top of `delete_user` mirrors
+/// `patch_user`'s and refuses up front; the in-tx re-check is the
+/// authoritative floor.
+///
+/// `users:write` alone is the only scope the DELETE handler authorizes
+/// (handlers/scim/users.rs), so the test exercises that narrow scope to
+/// pin the actual attack vector.
+#[tokio::test]
+async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_revoking_access() {
+    use crate::db::documents::session::SessionDoc;
+
+    let (app, state) = test_app().await;
+
+    // Sole remaining active admin of an org. `create_test_org_admin`
+    // also stands up a session for them.
+    let (admin, _admin_session_token) = create_test_org_admin(&state).await;
+
+    // Live SSH certificate for the admin.
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_001,
+        &admin.id,
+        &admin.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+
+    // An attacker with only `users:write` — the sole scope the DELETE
+    // handler checks. No `users:read` is required to mount the harm.
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "attacker",
+        admin.org_id.as_deref().expect("admin has org"),
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    // Sanity: the admin is the sole active admin, has at least one live
+    // session, and no SSH cert has been revoked yet.
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+            .await
+            .expect("count admins"),
+        "setup: the org has exactly one active admin",
+    );
+    let session_count_before = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions");
+    assert!(
+        session_count_before >= 1,
+        "setup: the admin has at least one session",
+    );
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no SSH revocations yet",
+    );
+
+    // DELETE the admin via SCIM. The floor must refuse with the same
+    // plain 400 shape the `DeleteUserError::LastAdmin` arm returns.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", admin.id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "SCIM delete of the only remaining active admin must be 400: got {status}: {body}",
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+    assert!(
+        error["detail"].as_str().is_some_and(
+            |d| d.contains("Cannot delete the organization's only remaining active admin")
+        ),
+        "SCIM delete refusal detail must name the floor: body={body}",
+    );
+
+    // The admin record itself survives: `revoke_user_access` would have
+    // left `active`/`is_org_admin` untouched anyway, but more importantly
+    // the delete never ran — the in-tx guard never fired.
+    let admin_after = crate::db::get_user_by_id(&state.store, &admin.id)
+        .await
+        .expect("fetch admin after")
+        .expect("admin record still exists");
+    assert!(admin_after.active, "admin record still active");
+    assert!(admin_after.is_org_admin, "admin record still admin");
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+            .await
+            .expect("rerun floor"),
+        "admin still the sole active admin after the refused delete",
+    );
+
+    // Sessions must be intact — `revoke_user_access` would have called
+    // `delete_sessions_for_user`, but the pre-check short-circuited
+    // before that ran.
+    let session_count_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions after");
+    assert_eq!(
+        session_count_after, session_count_before,
+        "SCIM delete refusal must not delete any of the admin's sessions",
+    );
+
+    // The live SSH cert must remain live — no `SshRevokedCertDoc` rows
+    // may have been written by `revoke_user_credentials`.
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked after")
+            .is_empty(),
+        "SCIM delete refusal must not revoke the admin's SSH certificate",
+    );
+
+    // No `scim_operation` delete audit event: the existing 5xx arm logs
+    // an `accessRevoked: true` row precisely because revocation had
+    // already committed; the floor refusal must not write such a row.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let delete_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"delete\"") && e.data.contains(&admin.id))
+        .collect();
+    assert!(
+        delete_events.is_empty(),
+        "SCIM delete: no scim_operation delete audit event may be logged \
+         when the floor refused; got {}",
+        delete_events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    // The admin must still be discoverable by the same SCIM token — proof
+    // the existence-check (which the advisory pre-check sits between) and
+    // the GET-by-id path are unaffected.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{}", admin.id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    // `users:write` alone is not enough for GET (the GET path requires
+    // `users:read`), so this returns 403 — but that is the *only* allowed
+    // failure mode; a 404 would mean the admin record had been removed.
+    assert!(
+        status == StatusCode::OK || status == StatusCode::FORBIDDEN,
+        "admin record must still be reachable; got {status}: {body}",
+    );
+}
+
+/// A `UsersWrite`-scoped token must still succeed against a non-last
+/// admin: the floor only protects the *last* admin. Guards against the
+/// advisory pre-check becoming overly strict (false-positiving) and
+/// refusing unrelated non-last-admin deletes, and confirms the
+/// revoke-then-delete ordering is preserved on the happy path.
+#[tokio::test]
+async fn test_scim_delete_user_removes_a_non_last_active_admin() {
+    use crate::db::documents::session::SessionDoc;
+
+    let (app, state) = test_app().await;
+
+    // Two active admins in the same org. admin1 carries a session from
+    // `create_test_org_admin`; admin2 gets one explicitly.
+    let (admin1, _admin1_session_token) = create_test_org_admin(&state).await;
+    let admin2 = create_test_user_in_org(
+        &state.store,
+        "admin2@example.com",
+        admin1.org_id.as_deref().expect("admin1 has org"),
+        true,
+    )
+    .await;
+    let admin2_auth_id = create_test_authenticator(&state.store, &admin2.id).await;
+    let _admin2_session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin2.id,
+            email: &admin2.email,
+            auth_id: Some(&admin2_auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Both admins have live SSH certs. admin1's will be revoked by the
+    // delete; admin2's must remain live.
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_010,
+        &admin1.id,
+        &admin1.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin1 issuance");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_011,
+        &admin2.id,
+        &admin2.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin2 issuance");
+
+    // Default SCIM provisioning scopes (incl. `users:write`); the
+    // DELETE handler checks only `users:write`.
+    let token = create_test_scim_token(
+        &state.store,
+        "test-delete-non-last-admin",
+        admin1.org_id.as_deref().expect("admin1 has org"),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    // Sanity: each admin is *not* the last active one (the other
+    // still counts).
+    assert!(
+        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+            .await
+            .expect("count admins for admin1"),
+        "setup: admin1 has a second admin in the org",
+    );
+    assert!(
+        !crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            .await
+            .expect("count admins for admin2"),
+        "setup: admin2 has a second admin in the org",
+    );
+
+    // DELETE admin1 — the floor must not refuse, since admin2 remains.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", admin1.id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "SCIM delete of a non-last admin must succeed with 204: got {status}: {body}",
+    );
+
+    // admin1's user doc is gone.
+    assert!(
+        crate::db::get_user_by_id(&state.store, &admin1.id)
+            .await
+            .expect("fetch admin1 after")
+            .is_none(),
+        "admin1 user record must be gone after the delete",
+    );
+
+    // admin1's sessions were swept by `revoke_user_access` ahead of the
+    // delete (the floor did not refuse; the post-floor revocation ran).
+    let admin1_sessions_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin1.id)
+        .await
+        .expect("count admin1 sessions after");
+    assert_eq!(
+        admin1_sessions_after, 0,
+        "SCIM delete must revoke the deleted admin's sessions",
+    );
+
+    // admin1's cert is in the revocation list; admin2's is not.
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked after");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "exactly one cert revoked — the deleted admin's; got {}",
+        revoked
+            .iter()
+            .map(|r| r.serial.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    assert_eq!(
+        revoked[0].user_id, admin1.id,
+        "the revoked cert belonged to admin1",
+    );
+
+    // admin2 is now the sole remaining active admin.
+    let admin2_after = crate::db::get_user_by_id(&state.store, &admin2.id)
+        .await
+        .expect("fetch admin2 after")
+        .expect("admin2 record still exists");
+    assert!(admin2_after.active, "admin2 still active");
+    assert!(admin2_after.is_org_admin, "admin2 still admin");
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            .await
+            .expect("count admins after"),
+        "admin2 is now the last active admin",
+    );
+
+    // The successful delete was logged as a `scim_operation` audit event.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let delete_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"delete\"") && e.data.contains(&admin1.id))
+        .collect();
+    assert!(
+        !delete_events.is_empty(),
+        "SCIM delete must record a `scim_operation` audit event for the successful delete",
+    );
+}
+
+/// Mirror of the DELETE last-admin regression test for the PATCH
+/// deactivation path. The advisory pre-check at the top of `patch_user`
+/// (handlers/scim/users.rs:504) refuses a last-admin deactivation before
+/// `revoke_then_persist` runs — `revoke_then_persist` withdraws sessions
+/// and SSH certificates first by design, so letting the floor fire
+/// inside the persist step would log the admin out and then decline the
+/// write. This pins that pre-check, which has no handler-level coverage
+/// today: the existing PATCH deactivation tests target
+/// `db::create_scim_user` users (`is_org_admin: false`), so the floor
+/// never fires.
+#[tokio::test]
+async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_without_revoking_access()
+{
+    use crate::db::documents::session::SessionDoc;
+
+    let (app, state) = test_app().await;
+
+    // Sole remaining active admin of an org, with a session and a live
+    // SSH cert.
+    let (admin, _admin_session_token) = create_test_org_admin(&state).await;
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_020,
+        &admin.id,
+        &admin.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+
+    // `users:write` alone is all the PATCH handler checks; no
+    // `users:read` needed.
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "attacker",
+        admin.org_id.as_deref().expect("admin has org"),
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    // Sanity: the admin is the sole active admin, has a session, and no
+    // SSH cert has been revoked.
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+            .await
+            .expect("count admins"),
+        "setup: the org has exactly one active admin",
+    );
+    let session_count_before = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions");
+    assert!(
+        session_count_before >= 1,
+        "setup: the admin has at least one session",
+    );
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no SSH revocations yet",
+    );
+
+    // PATCH `active=false`. The floor must refuse with the PATCH-specific
+    // 400 (`mutability` scimType, see `last_admin_scim_error`).
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", admin.id),
+        Some(
+            r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#
+                .to_string(),
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "SCIM PATCH deactivation of the last active admin must be 400: got {status}: {body}",
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "mutability",
+        "PATCH last-admin refusal uses the PATCH-specific `mutability` scimType",
+    );
+    assert!(
+        error["detail"].as_str().is_some_and(
+            |d| d.contains("Cannot deactivate the organization's only remaining active admin")
+        ),
+        "SCIM PATCH refusal detail must name the floor: body={body}",
+    );
+
+    // The admin record is untouched: `active` is still true.
+    let admin_after = crate::db::get_user_by_id(&state.store, &admin.id)
+        .await
+        .expect("fetch admin after")
+        .expect("admin record still exists");
+    assert!(admin_after.active, "admin record still active");
+    assert!(admin_after.is_org_admin, "admin record still admin");
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+            .await
+            .expect("rerun floor"),
+        "admin still the sole active admin after the refused PATCH",
+    );
+
+    // Sessions and SSH cert must both remain live.
+    let session_count_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions after");
+    assert_eq!(
+        session_count_after, session_count_before,
+        "SCIM PATCH refusal must not delete any of the admin's sessions",
+    );
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked after")
+            .is_empty(),
+        "SCIM PATCH refusal must not revoke the admin's SSH certificate",
+    );
+
+    // No `scim_operation` PATCH audit event for a refusal that did not
+    // persist: a row claiming `accessRevoked: true` would be a fraudulent
+    // record of a side effect that never committed.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let update_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"update\"") && e.data.contains(&admin.id))
+        .collect();
+    assert!(
+        update_events.is_empty(),
+        "SCIM PATCH: no scim_operation update audit event may be logged \
+         when the floor refused; got {}",
+        update_events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+}
