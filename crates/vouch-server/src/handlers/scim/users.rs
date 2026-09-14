@@ -699,20 +699,12 @@ pub(crate) async fn delete_user(
         }
     };
 
-    // Refuse to delete the org's last active admin *before* revoking, not
-    // after — same advisory pre-check as `patch_user`. `revoke_user_access`
-    // withdraws sessions and SSH certificates in independent committed
-    // transactions, so letting the floor fire inside `delete_user` (the
-    // authoritative in-transaction re-check via `LastAdminGuard::Enforce`)
-    // would log the admin out and then decline the write, leaving the org
-    // with no recoverable admin. A `users:write`-scoped token has no
-    // requirement to be a second admin (RFC 7644 §3.6 lists no `scimType`
-    // for DELETE), so the floor is sequentially reachable here; refuse up
-    // front. This read is advisory — a concurrent promotion or demotion
-    // can still flip the answer between this read and the in-tx re-check.
-    // Losing that race costs the admin a session, not their role: the
-    // durable "every DELETE knocks the last admin offline" behavior the
-    // pre-check prevents is the bug this guard was added to fix.
+    // Refuse a last-admin delete *before* revoking, as `patch_user` does.
+    // `revoke_user_access` commits in its own transactions, so a floor that
+    // fires only inside `delete_user` would log the admin out and then
+    // decline the write. This read is advisory; the in-transaction
+    // `LastAdminGuard::Enforce` check below stays authoritative, and losing
+    // the race between the two costs the admin a session, not their role.
     match db::is_last_active_org_admin(&state.store, &id).await {
         Ok(true) => {
             return (
