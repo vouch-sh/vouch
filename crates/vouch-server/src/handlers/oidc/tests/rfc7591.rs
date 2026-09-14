@@ -321,6 +321,38 @@ async fn test_rfc7591_register_service_account() {
     assert!(grant_types.iter().any(|g| g == "client_credentials"));
 }
 
+/// RFC 7591 §2: a server supporting `grant_types`/`response_types` "SHOULD take
+/// steps to ensure that a client cannot register itself into an inconsistent
+/// state". Declaring `response_types: ["code"]` with no grant that can redeem
+/// a code is the state the reverse half of the consistency check (added by
+/// a8bae30a) refuses at registration. This guards that the fix's update-path
+/// legacy tolerance does NOT relax the registration direction.
+#[tokio::test]
+async fn test_rfc7591_rejects_code_response_without_authorization_code_grant() {
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a new `client_credentials` + `response_types: [\"code\"]` registration \
+         must be rejected by the reverse consistency check: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("response_types includes 'code'")),
+        "the rejection must come from the reverse consistency check: {body}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7591_register_echoes_metadata() {
     let (app, state) = test_app().await;

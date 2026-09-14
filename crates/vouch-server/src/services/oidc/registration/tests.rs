@@ -1882,3 +1882,198 @@ fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
     let alg = result.expect("ES256 must be accepted for FAPI userinfo");
     assert_eq!(alg, Some(JwsAlgorithm::Es256));
 }
+
+// =========================================================================
+// legacy_code_response_pair_restated / same_grant_set
+//
+// RFC 7592 §2.2 PUT tolerance for the pre-`a8bae30a` legacy state: a client
+// whose stored `grant_types` omits `authorization_code` and whose omitted
+// `response_types` was defaulted to `["code"]` and stored must be able to
+// restate its own read-back metadata on the management endpoint without
+// being rejected by the reverse consistency check (registration-time
+// `invalid_client_metadata`). See `restates_pre_a8bae30a_code_response_pair`.
+// =========================================================================
+
+fn stored(values: Vec<&str>) -> Vec<String> {
+    values.iter().map(|s| s.to_string()).collect()
+}
+
+// The running example: a `client_credentials`-only client the server issued
+// `response_types: ["code"]` for, restating that exact pair on a PUT.
+#[test]
+fn test_legacy_restated_client_credentials_code_pair_is_recognized() {
+    let request =
+        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    assert!(legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// RFC 7591 §2 places no ordering on `grant_types`; a client that reorders the
+// echoed array on read-back is still a faithful restatement.
+#[test]
+fn test_legacy_restated_is_order_insensitive() {
+    let request = make_request_with_grant_response(
+        Some(vec!["refresh_token", "client_credentials"]),
+        Some(vec!["code"]),
+    );
+    assert!(legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials", "refresh_token"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// Any non-`authorization_code` grant set the server defaulted to `["code"]` is
+// the legacy state, not only `client_credentials` — e.g. the `device_code`-
+// only client the bug report names as in-scope.
+#[test]
+fn test_legacy_restated_device_code_code_pair_is_recognized() {
+    let request = make_request_with_grant_response(
+        Some(vec!["urn:ietf:params:oauth:grant-type:device_code"]),
+        Some(vec!["code"]),
+    );
+    assert!(legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["urn:ietf:params:oauth:grant-type:device_code"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A consistent stored state (`authorization_code` + `["code"]`) is NOT the
+// legacy state: normalizing here would strip a working client's `["code"]`,
+// moving it out of the authorization-code flow silently.
+#[test]
+fn test_legacy_restated_rejects_consistent_auth_code_state() {
+    let request =
+        make_request_with_grant_response(Some(vec!["authorization_code"]), Some(vec!["code"]));
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["authorization_code"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A stored `["code"]` paired with a grant set that still includes
+// `authorization_code` (e.g. `["authorization_code", "client_credentials"]`)
+// is not the legacy state either — the reverse check passes it on its own.
+#[test]
+fn test_legacy_restated_rejects_when_auth_code_present_alongside_other_grants() {
+    let request = make_request_with_grant_response(
+        Some(vec!["authorization_code", "client_credentials"]),
+        Some(vec!["code"]),
+    );
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["authorization_code", "client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A stored `response_types` of `[]` (the state the server issues today) is
+// not the legacy `["code"]` default — no normalization is needed or correct.
+#[test]
+fn test_legacy_restated_rejects_when_stored_response_types_is_empty() {
+    let request =
+        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec![]),
+    ));
+}
+
+// The workaround a conforming client reaches after reading the server's error
+// message (`response_types: []`) is not a `["code"]` restatement, so it does
+// not need legacy tolerance — it passes the reverse check on its own.
+#[test]
+fn test_legacy_restated_rejects_workaround_empty_response_types() {
+    let request = make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec![]));
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A PUT that moves a client *into* the legacy state from a different grant set
+// is not a faithful restatement: the request's grant types differ from the
+// stored ones, so it must fall through to the reverse check and be rejected.
+#[test]
+fn test_legacy_restated_rejects_when_request_changes_grant_types() {
+    let request = make_request_with_grant_response(
+        Some(vec!["client_credentials", "refresh_token"]),
+        Some(vec!["code"]),
+    );
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A PUT that omits `response_types` is not an explicit `["code"]` restatement
+// — a conforming §2.2 client restates what the server echoed, so this is the
+// non-conforming case, and the legacy tolerance does not reach it.
+#[test]
+fn test_legacy_restated_rejects_when_request_omits_response_types() {
+    let request = make_request_with_grant_response(Some(vec!["client_credentials"]), None);
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// A PUT that omits `grant_types` is not a faithful restatement: the request
+// resolves to the `["authorization_code"]` default, which differs from the
+// stored non-`authorization_code` grant set.
+#[test]
+fn test_legacy_restated_rejects_when_request_omits_grant_types() {
+    let request = make_request_with_grant_response(None, Some(vec!["code"]));
+    assert!(!legacy_code_response_pair_restated(
+        &request,
+        &stored(vec!["client_credentials"]),
+        &stored(vec!["code"]),
+    ));
+}
+
+// =========================================================================
+// same_grant_set
+// =========================================================================
+
+#[test]
+fn test_same_grant_set_identical() {
+    assert!(same_grant_set(
+        &["a".to_string(), "b".to_string()],
+        &["a".to_string(), "b".to_string()],
+    ));
+}
+
+#[test]
+fn test_same_grant_set_reordered() {
+    assert!(same_grant_set(
+        &["b".to_string(), "a".to_string()],
+        &["a".to_string(), "b".to_string()],
+    ));
+}
+
+#[test]
+fn test_same_grant_set_different_length() {
+    assert!(!same_grant_set(
+        &["a".to_string()],
+        &["a".to_string(), "b".to_string()],
+    ));
+}
+
+#[test]
+fn test_same_grant_set_disjoint() {
+    assert!(!same_grant_set(&["a".to_string()], &["b".to_string()]));
+}
+
+#[test]
+fn test_same_grant_set_both_empty() {
+    assert!(same_grant_set(&[], &[]));
+}
