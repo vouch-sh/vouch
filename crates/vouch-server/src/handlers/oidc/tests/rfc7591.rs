@@ -2622,3 +2622,86 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         resp3.body
     );
 }
+
+// RFC 7591 §2 maps the OAuth client type onto registration: `"none": The
+// client is a public client as defined in OAuth 2.0, Section 2.1, and does
+// not have a client secret`. RFC 8252 §8.4: "Except when using a mechanism
+// like Dynamic Client Registration [RFC7591] to provision per-instance
+// secrets, native apps are classified as public clients", and servers "MUST
+// record the client type in the client registration details". So the method
+// a client registers is the method it is held to, whatever
+// `application_type` it declared: it is stored as requested, and a no-auth
+// proof exists only for `none`.
+#[tokio::test]
+async fn test_rfc7591_registered_auth_method_is_stored_and_enforced_as_requested() {
+    let (app, state) = test_app().await;
+    let jwks = serde_json::json!({ "keys": [{
+        "kty": "EC", "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+        "use": "sig", "alg": "ES256"
+    }]});
+    let mut registered = 0;
+    for declared in [None, Some("native"), Some("web")] {
+        for method in [
+            "none",
+            "client_secret_basic",
+            "client_secret_post",
+            "private_key_jwt",
+        ] {
+            let auth = bearer_token_unique(&state, &format!("{declared:?}-{method}")).await;
+            let mut body = serde_json::json!({
+                "redirect_uris": ["https://example.com/callback"],
+                "token_endpoint_auth_method": method,
+                "client_name": "Auth method probe",
+            });
+            if let Some(t) = declared {
+                body["application_type"] = serde_json::json!(t);
+            }
+            if method == "private_key_jwt" {
+                body["jwks"] = jwks.clone();
+            }
+            let (status, resp) = http_post_json(
+                &app,
+                "/oauth/register",
+                &body.to_string(),
+                &[("Authorization", &auth)],
+            )
+            .await;
+            if status != StatusCode::CREATED {
+                continue;
+            }
+            registered += 1;
+            let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+            let client_id = json["client_id"].as_str().expect("client_id");
+            let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
+                .await
+                .expect("lookup")
+                .expect("stored");
+            let expected: db::TokenEndpointAuthMethod = method.parse().expect("known method");
+            assert_eq!(
+                stored.token_endpoint_auth_method, expected,
+                "declared={declared:?}: the registered method must be stored as requested"
+            );
+            assert_eq!(
+                json.get("client_secret").is_some(),
+                matches!(
+                    expected,
+                    db::TokenEndpointAuthMethod::ClientSecretBasic
+                        | db::TokenEndpointAuthMethod::ClientSecretPost
+                ),
+                "declared={declared:?} method={method}: a secret is issued exactly for the \
+                 secret methods"
+            );
+            assert_eq!(
+                crate::services::auth::NoClientAuth::for_public_client(&stored).is_ok(),
+                expected == db::TokenEndpointAuthMethod::None,
+                "declared={declared:?} method={method}: a no-auth proof exists only for none"
+            );
+        }
+    }
+    assert!(
+        registered >= 8,
+        "expected most combinations to register, got {registered}"
+    );
+}

@@ -260,3 +260,63 @@ Two issues overstated their scope, and saying so is part of the fix:
   prune would have marked an unrelated RFC 4514 §2.3 SHOULD as covered. The
   actual problem was a wrong citation in the new test — the `+` separator is
   §2.2 — and correcting it made the ratchet pass with no prune at all.
+
+## 2026-09-14
+
+Issues #1363–#1365 (3), fix PRs #1366–#1368 (3), 1:1. Full record in
+`.local/detail-triage-2026-09-14.md`.
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-07 | 48 | 132 | 156 | 13 | 30 |
+| 2026-08 | 69 | 152 | 187 | 23 | 40 |
+| 2026-09 | 83 | 19 | 194 | **41** | 30 |
+
+Volume 24 → 8 → 5 → 3 over four days.
+
+**Self-caused: 3 of 3, and the stats script reports 0.** The blamed PRs
+(#1357, #1359) are human class fixes from yesterday's triage, not Detail fix
+PRs, so the "from fix PR" column misses them. Every finding is a defect in
+logic the class fix added:
+
+- #1363 — #1359 put `LastAdminGuard::Enforce` on SCIM DELETE but the advisory
+  pre-check it added to SCIM PATCH (for exactly this revoke-then-refuse
+  ordering) was not applied to DELETE.
+- #1364 — #1357's reverse `response_types` check runs on RFC 7592 PUT and
+  rejects a faithful restatement of the `["code"]` default the server itself
+  stored before #1357.
+- #1365 — #1357 gated `grant_types` at the token endpoint; `/oauth/authorize`
+  still never read `client.response_types`. Third batch of the
+  "contract consulted at one layer, not another" class (#1330 → #1353 →
+  #1365); after #1368 every issuance layer consults the pair, and the other
+  registered fields (`request_uris`, `require_signed_request_object`) were
+  already consulted.
+
+### The lesson: a class fix's own residue is next batch's volume
+
+Yesterday's record wrote down the #1363 mechanism ("a floor placed after
+`revoke_then_persist` logs the user out and then refuses — needs an advisory
+pre-check ahead of revocation") and applied it to one of the two paths with
+that ordering. Rule 6 (enumerate every code path that touches the invariant)
+has to be applied to the mechanism the fix *introduces*, not only the one the
+issue reported. Same for #1357: the reverse check was added to a validator
+shared with the update path, and the PR that added it did not ask what the
+second caller would do with it.
+
+### Review findings
+
+- #1366: correct; a narrating comment to trim.
+- #1367: correct semantics, two single-caller helpers plus a commit hash in a
+  function name for a population that no first-party client can be in (CLI
+  has sent `[]` since #96; self-service apps cannot PUT). Inline or won't-fix.
+- #1368: correct; JAR and `request_uri` `response_types: []` tests left "as a
+  follow-up" in the PR body — add before merge.
+
+### Decided
+
+All three Detail PRs merged after edits on their branches: #1366 with the
+comment trimmed; #1368 with JAR and `request_uri` tests added (each shown to
+fail with its gate removed) and a `response_types` axis on `TestClientSpec`;
+#1367 slimmed from three helpers to one inline condition with its test client
+built through the shared factory. A `GrantAuthorizedClient` newtype was
+approved as a separate PR, design first.

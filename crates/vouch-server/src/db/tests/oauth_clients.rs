@@ -201,43 +201,6 @@ async fn test_oauth_client_types() {
     }
 }
 
-/// Rows persisted before secretless client types were stored as public
-/// carry `client_secret_basic`; `normalize_stored_auth_method` reads them
-/// as `none`.
-#[tokio::test]
-async fn test_legacy_public_client_rows_read_as_auth_method_none() {
-    let (store, _audit) = test_db().await;
-
-    let (user_id, _) = upsert_user(&store, "legacy-public@example.com", None)
-        .await
-        .expect("Failed to create user");
-
-    for app_type in [OAuthClientType::Spa, OAuthClientType::Native] {
-        let client = create_test_client(
-            &store,
-            &user_id,
-            TestClientSpec {
-                name: format!("Legacy {app_type:?}"),
-                application_type: app_type,
-                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
-                with_secret: false,
-                ..TestClientSpec::default()
-            },
-        )
-        .await;
-
-        let loaded = get_oauth_client_by_client_id(&store, &client.client_id)
-            .await
-            .expect("Failed to get client")
-            .expect("Client should exist");
-        assert_eq!(
-            loaded.token_endpoint_auth_method,
-            TokenEndpointAuthMethod::None,
-            "{app_type:?} + client_secret_basic must normalize to none on read"
-        );
-    }
-}
-
 #[tokio::test]
 async fn test_oauth_client_list_for_user() {
     let (store, _audit) = test_db().await;
