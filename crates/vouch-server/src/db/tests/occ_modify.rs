@@ -715,12 +715,24 @@ async fn test_update_custom_policy_not_found_returns_none() {
 
 // ---- OCC applied-flag reset (uses the `modify` test seam) ----
 
-/// Regression: a concurrent org-ownership change landing between `modify`'s
-/// internal read and its compare-and-update must be reported as not-applied.
-/// Without the applied-flag reset at the top of each attempt, the stale
-/// `applied = true` from the failed first attempt leaks a false success.
+/// A SCIM update must never apply a cross-org write: if the target user does
+/// not belong to the caller's organization, nothing is mutated and the call
+/// reports not-applied.
+///
+/// The mechanism moved when the admin-count floor was added. `update_scim_user`
+/// now enforces "at least one active admin per organization" — a cross-row
+/// invariant — so it runs as one transaction that version-bumps the org row
+/// rather than as a `store.modify` loop, and the org check lives inside that
+/// transaction.
+///
+/// The mid-flight variant reduces to this one rather than needing its own
+/// case: moving the user to another org bumps their row's version, so the
+/// guarded `compare_and_update` loses, `with_dsql_retry!` re-runs the closure,
+/// and the re-read hits exactly the org mismatch asserted below. It is not
+/// driven here with a hook because a concurrent writer firing mid-transaction
+/// deadlocks against the open transaction on SQLite.
 #[tokio::test]
-async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
+async fn test_update_scim_user_cross_org_write_is_never_applied() {
     use crate::db::documents::user::UserDoc;
 
     let (store, _audit) = test_db().await;
@@ -736,37 +748,23 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
     .await
     .expect("create_scim_user");
 
-    // Hookless clone for the concurrent write: the hook must not re-enter
-    // itself when it writes through the store.
-    let writer = store.clone();
-    let mut hooked = store.clone();
-    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
-        let writer = writer.clone();
-        let doc_id = doc_id.to_string();
-        Box::pin(async move {
-            if attempt != 0 {
-                return;
-            }
-            // Concurrent writer: move the user to another org after modify's
-            // read (stale version captured) but before its CAS, so the first
-            // attempt loses the version race and the loop retries.
-            let doc = writer
-                .get::<UserDoc>(&doc_id)
-                .await
-                .expect("hook get")
-                .expect("hook doc must exist");
-            let mut data = doc.data;
-            data.org_id = Some("other-org".to_string());
-            writer.update(&doc_id, &data).await.expect("hook update");
-        })
-    }));
+    // The state a lost CAS leaves behind for the retry to observe: the user
+    // has moved to another org since the caller's request was authorized.
+    let doc = store
+        .get::<UserDoc>(&user.id)
+        .await
+        .expect("get")
+        .expect("must exist");
+    let mut moved = doc.data;
+    moved.org_id = Some("other-org".to_string());
+    store.update(&user.id, &moved).await.expect("move org");
 
-    let applied = update_scim_user(&hooked, &user.id, TEST_ORG_ID, Some("Hacked"), None, false)
+    let applied = update_scim_user(&store, &user.id, TEST_ORG_ID, Some("Hacked"), None, false)
         .await
         .expect("update_scim_user must not error");
     assert!(
         !applied,
-        "org changed mid-flight: update must report not-applied"
+        "user belongs to another org: update must report not-applied"
     );
 
     let after = store
@@ -777,7 +775,7 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
     assert_eq!(
         after.data.org_id.as_deref(),
         Some("other-org"),
-        "the concurrent org change must not be clobbered"
+        "the org change must not be clobbered"
     );
     assert_eq!(
         after.data.name.as_deref(),

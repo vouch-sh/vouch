@@ -22,6 +22,27 @@ use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::redact_email;
 
+/// The 400 returned when a SCIM write would leave the organization with no
+/// active admin.
+///
+/// RFC 7644 §3.12 Table 9 defines `mutability` as "The attempted modification
+/// is not compatible with the target attribute's mutability or **current
+/// state**", applicable to PUT and PATCH — which is exactly this: `active` is
+/// writable in general, but not on the organization's last active admin.
+fn last_admin_scim_error() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(
+            ScimError::new(
+                400,
+                "Cannot deactivate the organization's only remaining active admin",
+            )
+            .with_type("mutability"),
+        ),
+    )
+        .into_response()
+}
+
 /// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
 ///
 /// Returns a paginated list of User resources, with optional filtering.
@@ -405,6 +426,10 @@ const USER_ATTRIBUTES: &[Attribute<UserPatch>] = &[
 /// Modifies a User resource using SCIM PATCH operations (add, replace,
 /// remove) applied against [`USER_ATTRIBUTES`]. Deactivating a user
 /// invalidates all sessions and revokes SSH certificates.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 7644 §3.5.2 PATCH: authenticate, apply ops in order, guard the admin floor, revoke, persist"
+)]
 pub(crate) async fn patch_user(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -469,6 +494,28 @@ pub(crate) async fn patch_user(
     // (true→true, no transition) and must not destroy live credentials.
     patched.deactivated = user.active && !patched.active;
 
+    // Refuse a last-admin deactivation *before* revoking, not after.
+    // `revoke_then_persist` withdraws sessions and certificates first by
+    // design, so letting the floor fire inside the persist step would log the
+    // admin out and then decline the write. This read is advisory — the
+    // authoritative check is inside `update_scim_user`'s transaction, and a
+    // concurrent promotion or demotion can still flip the answer between the
+    // two. Losing that race costs the admin their session, not their role.
+    if patched.deactivated {
+        match db::is_last_active_org_admin(&state.store, &id).await {
+            Ok(true) => return last_admin_scim_error(),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!("Failed to count organization admins: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ScimError::new(500, "Failed to update user")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // A deactivation must revoke live credentials BEFORE the active=false write
     // commits: if the write landed first and revocation then failed, the user
     // would be left inactive with live SSH certificates, and the deactivation
@@ -518,6 +565,11 @@ pub(crate) async fn patch_user(
             )
                 .into_response();
         }
+        // The advisory pre-check above missed a race, so the authoritative
+        // count inside the transaction refused. Nothing was persisted.
+        Err(crate::services::auth::DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
+            return last_admin_scim_error();
+        }
         Err(crate::services::auth::DeactivationError::Persist(e)) => {
             if patched.deactivated {
                 // `revoke_then_persist` already withdrew the user's sessions
@@ -542,8 +594,26 @@ pub(crate) async fn patch_user(
                 )
                 .await;
             }
-            if let Some(resp) = super::invalid_index_value_response(&e) {
+            if let db::ScimUpdateError::Other(ref inner) = e
+                && let Some(resp) = super::invalid_index_value_response(inner)
+            {
                 return resp.into_response();
+            }
+            if matches!(e, db::ScimUpdateError::OccConflict) {
+                // The org doc serializes the admin-count guard, so bulk
+                // provisioning can exhaust the retry budget. Transient
+                // backpressure, not a fault — 503 with Retry-After, which
+                // IdP provisioners honor. Mirrors the create path.
+                tracing::warn!("SCIM user update exhausted OCC retries");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "1")],
+                    Json(ScimError::new(
+                        503,
+                        "Concurrent modification, retry the request",
+                    )),
+                )
+                    .into_response();
             }
             tracing::error!("Failed to update user: {e}");
             return (
@@ -654,12 +724,30 @@ pub(crate) async fn delete_user(
     // concurrent request deleted it). Surface a 404 and skip the audit event
     // rather than reporting a successful delete — and logging a fraudulent
     // audit entry — for a change that never happened.
-    match db::delete_user(&state.store, &id).await {
+    match db::delete_user(&state.store, &id, db::LastAdminGuard::Enforce).await {
         Ok(true) => {}
         Ok(false) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(ScimError::new(404, "User not found")),
+            )
+                .into_response();
+        }
+        // A `UsersWrite` token could otherwise delete every admin in sequence,
+        // leaving the organization with no way back in: `delete_user` keeps
+        // `organization.created_by_user_id` pointing at the deleted admin, and
+        // `enroll_user_with_org` only auto-promotes when that field is unset.
+        //
+        // RFC 7644 §3.6 does not describe refusing a delete, and Table 9 in
+        // §3.12 lists no `scimType` applicable to DELETE, so this is a plain
+        // 400 with a human-readable `detail`.
+        Err(db::DeleteUserError::LastAdmin) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(
+                    400,
+                    "Cannot delete the organization's only remaining active admin",
+                )),
             )
                 .into_response();
         }

@@ -220,6 +220,10 @@ pub async fn get_users_by_ids(
 /// Failure modes of [`delete_user`].
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteUserError {
+    /// The delete would leave the organization with no active admin, and the
+    /// caller asked for [`LastAdminGuard::Enforce`].
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
     /// Another transaction changed the organization row while this delete was
     /// choosing a successor for the user's org-scoped applications.
     #[error("organization changed during delete")]
@@ -232,9 +236,28 @@ impl super::pool::RetryableError for DeleteUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
+            Self::LastAdmin => false,
             Self::Other(e) => super::pool::is_retryable_db_error(e),
         }
     }
+}
+
+/// Whether [`delete_user`] honors "at least one active admin per organization".
+///
+/// There is no default. Every caller states its choice, because the bug this
+/// guards against is a floor that some paths take and others forget: demote
+/// and deactivate enforced it while both delete surfaces did not, and nothing
+/// in the signature made that visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastAdminGuard {
+    /// Refuse with [`DeleteUserError::LastAdmin`] when the target is the
+    /// organization's only active admin. Every request-serving path.
+    Enforce,
+    /// Delete regardless of the admin count. For paths with no organization
+    /// invariant to protect — chiefly tests exercising the org-scoped
+    /// application cascade's no-admin-remains branch, which `Enforce` makes
+    /// unreachable for an org's last admin.
+    Bypass,
 }
 
 /// Pick the org admin that inherits a departing user's org-scoped
@@ -257,11 +280,64 @@ async fn org_admin_successor(
     let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
     let mut admin_ids: Vec<String> = members
         .into_iter()
-        .filter(|m| m.data.is_org_admin && m.data.active && m.id != departing_user_id)
+        .filter(|m| is_other_active_admin(m, departing_user_id))
         .map(|m| m.id)
         .collect();
     admin_ids.sort();
     Ok(admin_ids.into_iter().next())
+}
+
+/// Whether `member` counts toward "at least one active admin per
+/// organization", ignoring the member the caller is about to change.
+///
+/// The single definition of what an admin *is* for this invariant. Choosing an
+/// application successor, the three writes that can breach the floor, and the
+/// advisory pre-check all read it here, so none of them can drift on, say,
+/// whether a deactivated admin still counts.
+fn is_other_active_admin(member: &Document<UserDoc>, excluding_user_id: &str) -> bool {
+    member.data.is_org_admin && member.data.active && member.id != excluding_user_id
+}
+
+/// How many *other* members of `org_id` are active admins.
+///
+/// The floor's predicate, shared by every write that can breach it —
+/// [`demote_or_deactivate_member`], [`delete_user`], and SCIM's `active=false`
+/// update. It takes the caller's transaction because the count is only
+/// meaningful alongside the organization-row version bump that serializes it.
+pub(super) async fn other_active_admins(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: &str,
+    excluding_user_id: &str,
+) -> Result<usize> {
+    let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
+    Ok(members
+        .iter()
+        .filter(|m| is_other_active_admin(m, excluding_user_id))
+        .count())
+}
+
+/// Whether `user_id` is the only active admin their organization has.
+///
+/// `false` when the user does not exist, has no organization, is not an active
+/// admin, or other active admins remain — i.e. when no floor can be breached.
+///
+/// Advisory only, and read outside any transaction. Callers that must revoke
+/// credentials *before* persisting a deactivation use this to refuse up front,
+/// so the common case does not withdraw a session and then decline the write.
+/// The authoritative check is [`other_active_admins`] inside the writing
+/// transaction; this one can be stale by the time that runs.
+pub async fn is_last_active_org_admin(store: &DocumentStore, user_id: &str) -> Result<bool> {
+    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(false);
+    };
+    if !doc.data.is_org_admin || !doc.data.active {
+        return Ok(false);
+    }
+    let Some(org_id) = doc.data.org_id.as_deref() else {
+        return Ok(false);
+    };
+    let members = store.find_all::<UserDoc>("org_id", org_id).await?;
+    Ok(!members.iter().any(|m| is_other_active_admin(m, user_id)))
 }
 
 /// The member change being applied by [`demote_or_deactivate_member`].
@@ -350,15 +426,11 @@ pub async fn demote_or_deactivate_member(
         // Only a change that removes an *active admin* can breach the floor.
         // Demoting a plain member, or deactivating one, cannot.
         let removes_an_admin = user_doc.data.is_org_admin && user_doc.data.active;
-        if removes_an_admin && let Some(id) = org_id.as_deref() {
-            let members = tx.find_all::<UserDoc>("org_id", id).await?;
-            let other_admins = members
-                .iter()
-                .filter(|m| m.data.is_org_admin && m.data.active && m.id != user_id)
-                .count();
-            if other_admins == 0 {
-                return Err(MemberDowngradeError::LastAdmin);
-            }
+        if removes_an_admin
+            && let Some(id) = org_id.as_deref()
+            && other_active_admins(&mut tx, id, user_id).await? == 0
+        {
+            return Err(MemberDowngradeError::LastAdmin);
         }
 
         let mut updated = user_doc.data.clone();
@@ -414,7 +486,19 @@ pub async fn demote_or_deactivate_member(
 /// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
 /// user with `user_id` was found — callers surface the latter as a 404 and
 /// must not record a deletion audit event.
-pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, DeleteUserError> {
+///
+/// # Errors
+///
+/// [`DeleteUserError::LastAdmin`] when `floor` is [`LastAdminGuard::Enforce`] and
+/// the target is the organization's only active admin. The count shares this
+/// transaction and the organization row's version bump, so it is atomic
+/// against a concurrent delete, demote, or deactivation of a sibling admin —
+/// the same serialization [`demote_or_deactivate_member`] relies on.
+pub async fn delete_user(
+    store: &DocumentStore,
+    user_id: &str,
+    floor: LastAdminGuard,
+) -> Result<bool, DeleteUserError> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
     use super::documents::oauth::OAuthClientDoc;
@@ -500,6 +584,24 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
             }
             None => None,
         };
+
+        // "At least one active admin per organization" — the same cross-row
+        // invariant `demote_or_deactivate_member` guards, checked here because
+        // deleting an admin removes them from the count just as demoting one
+        // does. It rides the org-row version captured above, so two admins
+        // deleting each other collide on that row and the loser retries
+        // against committed state instead of both succeeding.
+        //
+        // Only removing an *active admin* can breach the floor; deleting a
+        // plain member, or an already-deactivated admin, cannot.
+        if floor == LastAdminGuard::Enforce
+            && user_doc.data.is_org_admin
+            && user_doc.data.active
+            && let Some(id) = org_id.as_deref()
+            && other_active_admins(&mut tx, id, user_id).await? == 0
+        {
+            return Err(DeleteUserError::LastAdmin);
+        }
 
         let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
         tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
