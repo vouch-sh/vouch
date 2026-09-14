@@ -699,6 +699,34 @@ pub(crate) async fn delete_user(
         }
     };
 
+    // Refuse a last-admin delete *before* revoking, as `patch_user` does.
+    // `revoke_user_access` commits in its own transactions, so a floor that
+    // fires only inside `delete_user` would log the admin out and then
+    // decline the write. This read is advisory; the in-transaction
+    // `LastAdminGuard::Enforce` check below stays authoritative, and losing
+    // the race between the two costs the admin a session, not their role.
+    match db::is_last_active_org_admin(&state.store, &id).await {
+        Ok(true) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(
+                    400,
+                    "Cannot delete the organization's only remaining active admin",
+                )),
+            )
+                .into_response();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("Failed to count organization admins: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to delete user")),
+            )
+                .into_response();
+        }
+    }
+
     // Delete all sessions first (immediate invalidation)
     tracing::info!(
         "Deleting user {} ({}) via SCIM, invalidating sessions and revoking SSH certificates",

@@ -2972,3 +2972,132 @@ async fn test_rfc9101_request_uri_error_redirect_prefers_request_object_state_ov
         "error redirect must not echo the query's `state`; got: {location}",
     );
 }
+
+// ========================================================================
+// RFC 7591 §2 — registered `response_types` on the JAR paths
+//
+// RFC 7591 §2 defines `response_types` as the "response type strings that
+// the client can use at the authorization endpoint". The `request` and
+// `request_uri` paths resolve the client separately from the plain-query
+// path, so each is pinned: a client registered with `response_types: []`
+// is refused with an `unauthorized_client` redirect (RFC 6749 §4.1.2.1) that
+// echoes the Request Object's `state`, and no code is issued.
+// ========================================================================
+
+/// A JAR client with a custom `response_types` registration.
+async fn create_test_jar_client_with_response_types(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+    response_types: Vec<String>,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            response_types: Some(response_types),
+            ..Default::default()
+        },
+    )
+    .await;
+    (client, pkcs8_bytes)
+}
+
+fn assert_unauthorized_client_redirect(response: &HttpResponse) {
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "a client not registered for 'code' must redirect with an error, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.starts_with("https://example.com/callback"),
+        "error must go to the registered redirect_uri: {location}"
+    );
+    assert!(
+        location.contains("error=unauthorized_client"),
+        "RFC 6749 §4.1.2.1: expected error=unauthorized_client, got: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "must not issue an authorization code: {location}"
+    );
+    // RFC 9101 §6.3: the Request Object's parameters are the request's,
+    // including the `state` the error response echoes.
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some("jar-test-state"),
+        "error redirect must echo the Request Object's state: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_request_parameter_rejects_client_not_registered_for_code() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-no-code@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jar_client_with_response_types(&state.store, &user.id, vec![]).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request={}",
+            client.client_id,
+            urlencoding::encode(&request_jwt),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert_unauthorized_client_redirect(&response);
+}
+
+#[tokio::test]
+async fn test_rfc9101_request_uri_rejects_client_not_registered_for_code() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-no-code@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jar_client_with_response_types(&state.store, &user.id, vec![]).await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert_unauthorized_client_redirect(&response);
+}
