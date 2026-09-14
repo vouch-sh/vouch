@@ -199,3 +199,64 @@ that has had a follow-up commit pushed to it:
 
     gh api repos/vouch-sh/vouch/pulls/<n>/commits \
       --jq '.[] | "\(.sha[0:8]) \(.commit.verification.verified)"'
+
+### Outcome (four PRs, two issues closed without a fix)
+
+#1356 (#1350), #1357 (#1353), #1358 (#1354, superseding Detail's #1355), #1359
+(#1351). #1352 closed `wontfix` — WIF has no users, so the population an RFC
+7592 update path would repair is empty. #1355 closed as superseded.
+
+### The lesson that generalizes: verify against the real input, not a fixture
+
+Three consecutive batches produced a defect in `canonicalize_dn`. The `+` arm
+fixed this one's stated gap, but the scenario in the issue **still fails**, for
+a reason the issue never named: RDN *ordering*. OpenSSL's default
+`x509 -noout -subject` emits DER order; RFC 4514 §2.1 specifies the reverse
+("starting with the last element of the sequence and moving backwards toward
+the first"), which is what `-nameopt rfc2253` prints and what RFC 8705 §2.1.2
+requires the registered value to be.
+
+Every subject-DN test derived its input from the certificate's **own**
+rendering, so the order agreed by construction and the mismatch could never
+surface. Adding more cases in that shape would never have found it. Feeding
+one real `openssl` string did, in a minute.
+
+So: when a function exists to accept external input, at least one test must use
+input captured from the external producer verbatim. The new
+`test_verify_tls_client_auth_openssl_subject_renderings` pins the literal
+OpenSSL 3.6.4 strings and asserts acceptance in both directions.
+
+### Report the half you did not fix
+
+Two issues overstated their scope, and saying so is part of the fix:
+
+- **#1350's own example is still rejected**, deliberately — the paste is not an
+  RFC 4514 DN. The PR and an issue comment say that with the quote instead of
+  letting the close imply it works.
+- **#1351 lists three surfaces; only two are sequentially exploitable.** On the
+  admin UI the actor must be an active admin to pass authorization, so a second
+  always exists when the target is someone else. An HTTP test was written,
+  found to produce only 403, and deleted rather than shipped asserting the
+  wrong thing. The floor there guards the concurrent mutual-removal race,
+  covered at the db level instead.
+
+### Mechanism notes
+
+- **Let the test suite pick the guard value.** `delete_user` took a required
+  `LastAdminGuard` (one test deliberately deletes an org's sole admin to reach
+  the cascade's no-admin-remains branch). Setting all 12 call sites to
+  `Enforce` first and running showed 9 were unaffected; only 3 needed `Bypass`.
+  Guessing would have over-applied the bypass and silently weakened the tests.
+- **A `compare_and_update` seam on `StoreTransaction` deadlocks on SQLite** —
+  the hook's concurrent writer blocks against the open transaction. The
+  store-level seam works only because it fires before the transaction opens.
+  Reverted. Don't re-attempt without a different mechanism.
+- **A floor placed after `revoke_then_persist` logs the user out and then
+  refuses.** That helper revokes before persisting by design, so a cross-row
+  guard needs an advisory pre-check ahead of revocation, with the
+  in-transaction count still authoritative.
+- **Diagnose a ratchet failure before applying its suggested fix.** #1356's
+  first run failed `normative_coverage_does_not_regress`, and the prescribed
+  prune would have marked an unrelated RFC 4514 §2.3 SHOULD as covered. The
+  actual problem was a wrong citation in the new test — the `+` separator is
+  §2.2 — and correcting it made the ratchet pass with no prune at all.
