@@ -17,6 +17,7 @@ use crate::services::auth::{
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
@@ -224,8 +225,8 @@ pub struct TokenExchangeParams<'a> {
     pub scope: Option<&'a str>,
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
     pub requested_token_type: Option<RequestedTokenType>,
-    /// OAuth client_id of the requesting client.
-    pub client_id: &'a str,
+    /// The requesting client, checked for the token-exchange grant.
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound. The DPoP
     /// witness travels instead of its thumbprint so an exchanged token cannot
     /// be sender-constrained to a key that was never proven.
@@ -366,7 +367,7 @@ pub(crate) async fn exchange_token(
             &subject_user.id,
             &subject_user.email,
             params.client_ip,
-            params.client_id,
+            &params.client.client_id,
             params.audience,
             arrival,
         )
@@ -563,7 +564,7 @@ pub(crate) async fn exchange_token(
                 expires_in,
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
-                client_id: params.client_id,
+                client_id: &params.client.client_id,
             },
             arrival,
         )
@@ -612,7 +613,7 @@ pub(crate) async fn exchange_token(
             user_id: &subject_session.user_id,
             email: subject_email,
             authenticator_id,
-            client_id: params.client_id,
+            client_id: &params.client.client_id,
             scope: granted_scope.clone(),
             binding: params.binding,
             act: actor_claim,
@@ -685,7 +686,7 @@ pub(crate) async fn exchange_token(
                 ..Default::default()
             },
             &db::TokenExchangeDetails {
-                client_id: params.client_id.to_string(),
+                client_id: params.client.client_id.clone(),
                 audience: params.audience.map(String::from),
                 scope: scope_string.clone(),
                 issued_token_type: TokenType::AccessToken.as_urn().to_string(),

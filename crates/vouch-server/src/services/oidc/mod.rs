@@ -89,6 +89,7 @@ pub mod registration;
 pub mod resource;
 pub mod scope;
 pub mod token;
+pub mod validated_client;
 
 // Re-export commonly used types
 pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_client_access};
@@ -116,6 +117,6 @@ pub use registration::{
 pub use resource::ResourceUri;
 pub use scope::{OAuthScope, ScopeSet};
 pub use token::{
-    AuthCodeExchangeParams, AuthCodeExchangeResult, AuthenticatedClient, ClientAuthError,
-    ClientCredentials,
+    AuthCodeExchangeParams, AuthCodeExchangeResult, ClientAuthError, ClientCredentials,
 };
+pub use validated_client::{AuthorizeRejection, ValidatedOAuthClient};

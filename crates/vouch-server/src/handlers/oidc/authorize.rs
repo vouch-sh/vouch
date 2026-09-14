@@ -27,6 +27,7 @@ use crate::services::oidc::authorization::{
     require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::jar::{QueryParamHints, fetch_request_object, validate_request_object};
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use askama::Template;
 use axum::{
     extract::State,
@@ -145,8 +146,8 @@ pub(crate) use error_response::oauth_error_response;
 ///
 /// Both constructors return `Result<Self, Response>` where `Err` is always an
 /// error *page* response (never a redirect to an unvalidated URI).
-struct ResolvedClient {
-    client: OAuthClient,
+struct AuthorizeResponseTarget {
+    client: ValidatedOAuthClient,
     redirect_uri: String,
     response_mode: ResponseMode,
 }
@@ -178,7 +179,7 @@ struct ErrorTarget<'a> {
     response_mode: ResponseMode,
 }
 
-impl ResolvedClient {
+impl AuthorizeResponseTarget {
     /// Full Phase A pipeline: DB lookup + active check + redirect_uri validation.
     ///
     /// Used for Direct, PAR, and pending_auth flows.
@@ -196,17 +197,36 @@ impl ResolvedClient {
         oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
         let client = lookup_and_check_active(state, client_id).await?;
-
         let redirect_uri = resolve_redirect_uri(redirect_uri_param, &client)?;
+        Self::finish(
+            state,
+            client,
+            redirect_uri,
+            response_mode_param,
+            oauth_state,
+        )
+        .await
+    }
 
+    /// Shared tail of both constructors: the response mode, then the
+    /// client's registered `response_types`. Ordered so that each refusal
+    /// is rendered against the already-validated `redirect_uri` (RFC 6749
+    /// Section 4.1.2.1): an unusable mode goes back in the default `query`
+    /// encoding, and an unregistered response type in the mode just parsed.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Err is an HTTP Response; size is acceptable in error path"
+    )]
+    async fn finish(
+        state: &Arc<AppState>,
+        client: OAuthClient,
+        redirect_uri: String,
+        response_mode_param: Option<&str>,
+        oauth_state: Option<&str>,
+    ) -> Result<Self, Response> {
         let response_mode = match parse_response_mode(response_mode_param) {
             Ok(mode) => mode,
             Err(e) => {
-                // The requested mode is the one mechanism that cannot carry
-                // this answer, so the error goes back in the default `query`
-                // encoding. The redirect_uri is registered by now, so
-                // redirecting is safe and is what RFC 6749 Section 4.1.2.1
-                // asks for.
                 return Err(oauth_error_response(
                     state,
                     &client,
@@ -219,16 +239,31 @@ impl ResolvedClient {
                 .await);
             }
         };
-
-        let resolved = Self {
-            client,
-            redirect_uri,
-            response_mode,
-        };
-        resolved
-            .ensure_code_response_type_allowed(state, oauth_state)
-            .await?;
-        Ok(resolved)
+        match ValidatedOAuthClient::for_authorize(client) {
+            Ok(client) => Ok(Self {
+                client,
+                redirect_uri,
+                response_mode,
+            }),
+            Err(rejection) => {
+                let (code, description) = match &rejection.error {
+                    crate::error::ServiceError::OAuth { code, description } => {
+                        (*code, description.clone())
+                    }
+                    other => (OAuthErrorCode::ServerError, other.to_string()),
+                };
+                Err(oauth_error_response(
+                    state,
+                    &rejection.client,
+                    &redirect_uri,
+                    code,
+                    &description,
+                    oauth_state,
+                    response_mode,
+                )
+                .await)
+            }
+        }
     }
 
     /// Phase A using a pre-loaded client: validates redirect_uri only.
@@ -240,10 +275,12 @@ impl ResolvedClient {
         clippy::result_large_err,
         reason = "Err is an HTTP Response; size is acceptable in error path"
     )]
-    fn from_validated_client(
+    async fn from_validated_client(
+        state: &Arc<AppState>,
         client: OAuthClient,
         redirect_uri: String,
-        response_mode: ResponseMode,
+        response_mode_param: Option<&str>,
+        oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
         if !client.is_valid_redirect_uri(&redirect_uri) {
             tracing::warn!(
@@ -259,49 +296,19 @@ impl ResolvedClient {
             .into_response();
             return Err(resp);
         }
-        Ok(Self {
+        Self::finish(
+            state,
             client,
             redirect_uri,
-            response_mode,
-        })
-    }
-
-    /// Apply the `response_mode` a Request Object asked for.
-    ///
-    /// The Request Object flows validate the redirect_uri before they can
-    /// know the mode, so they build a `ResolvedClient` at the `code`
-    /// default first and narrow it here. Splitting it this way is what lets
-    /// an unrecognized mode be reported by redirect — RFC 6749 Section
-    /// 4.1.2.1 — instead of being silently replaced with `query`.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Err is an HTTP Response; size is acceptable in error path"
-    )]
-    async fn with_requested_response_mode(
-        self,
-        state: &Arc<AppState>,
-        requested: Option<&str>,
-        oauth_state: Option<&str>,
-    ) -> Result<Self, Response> {
-        match parse_response_mode(requested) {
-            Ok(response_mode) => Ok(Self {
-                response_mode,
-                ..self
-            }),
-            Err(e) => Err(self
-                .error_redirect(
-                    state,
-                    OAuthErrorCode::InvalidRequest,
-                    &e.oauth_description(),
-                    oauth_state,
-                )
-                .await),
-        }
+            response_mode_param,
+            oauth_state,
+        )
+        .await
     }
 
     /// Produce a redirect-based OAuth error using the validated redirect_uri.
     ///
-    /// This is the only path to produce a redirect error — the `ResolvedClient`
+    /// This is the only path to produce a redirect error — the `AuthorizeResponseTarget`
     /// guarantees the URI is safe to redirect to.
     async fn error_redirect(
         &self,
@@ -320,44 +327,6 @@ impl ResolvedClient {
             self.response_mode,
         )
         .await
-    }
-
-    /// RFC 7591 §2 defines `response_types` as the "response type strings
-    /// that the client can use at the authorization endpoint". `/authorize`
-    /// only issues `code`, so a client whose registered list is `Some` and
-    /// excludes `"code"` cannot use this endpoint at all; it is refused with
-    /// a redirect-based `unauthorized_client` error (RFC 6749 §4.1.2.1)
-    /// rather than handed a code the token endpoint's `grant_types` gate
-    /// will refuse to redeem.
-    ///
-    /// `None` means "all defaults apply" — the same convention
-    /// [`crate::db::OAuthClient::is_authorized_for_grant`] uses for an absent
-    /// `grant_types` — so admin-registered clients with no explicit
-    /// `response_types` (the common case) are unaffected.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Err is an HTTP Response; size is acceptable in error path"
-    )]
-    async fn ensure_code_response_type_allowed(
-        &self,
-        state: &Arc<AppState>,
-        oauth_state: Option<&str>,
-    ) -> Result<(), Response> {
-        if let Some(response_types) = self.client.response_types.as_ref()
-            && !response_types
-                .iter()
-                .any(|rt| rt == crate::services::oidc::RESPONSE_TYPE_CODE)
-        {
-            return Err(self
-                .error_redirect(
-                    state,
-                    OAuthErrorCode::UnauthorizedClient,
-                    "Client is not registered for the 'code' response type",
-                    oauth_state,
-                )
-                .await);
-        }
-        Ok(())
     }
 }
 
@@ -389,7 +358,7 @@ enum AuthFlowKind {
 async fn run_security_pipeline(
     state: &Arc<AppState>,
     validated: &ValidatedAuthRequest,
-    resolved: &ResolvedClient,
+    resolved: &AuthorizeResponseTarget,
     flow: &AuthFlowKind,
 ) -> Result<(), Response> {
     // PKCE: required for public clients and Native/SPA types (RFC 9700).
@@ -448,7 +417,7 @@ async fn run_security_pipeline(
 /// Called after Phase A + Phase B have both succeeded.
 async fn check_session_and_authorize(
     state: &Arc<AppState>,
-    resolved: &ResolvedClient,
+    resolved: &AuthorizeResponseTarget,
     validated: ValidatedAuthRequest,
     jar: &CookieJar,
     reauth_policy: ReauthPolicy,
@@ -696,7 +665,7 @@ async fn handle_direct_request(
     }
 
     // Phase A: client lookup + active + redirect_uri validation (errors → page).
-    let resolved = match ResolvedClient::resolve(
+    let resolved = match AuthorizeResponseTarget::resolve(
         state,
         &client_id,
         params.redirect_uri.as_deref(),
@@ -817,45 +786,26 @@ async fn handle_jar_request(
     //
     // The mode starts at the `code` default so that a redirect_uri is
     // registered before anything is redirected to it; the requested mode is
-    // resolved immediately below, once there is a `ResolvedClient` able to
+    // resolved immediately below, once there is a `AuthorizeResponseTarget` able to
     // report a rejection.
-    let resolved = match ResolvedClient::from_validated_client(
-        oauth_client,
-        redirect_uri,
-        ResponseMode::Query,
-    ) {
-        Ok(r) => r,
-        Err(resp) => return resp,
-    };
-
     // RFC 9101 Section 6.3: "The authorization server MUST only use the
     // parameters in the Request Object, even if the same parameter is
     // provided in the query parameter." That governs the `state` echoed back
     // on an error (RFC 6749 Section 4.1.2.1) as much as any other parameter.
     let oauth_state = request_params.state.clone();
 
-    let resolved = match resolved
-        .with_requested_response_mode(
-            state,
-            requested_response_mode.as_deref(),
-            oauth_state.as_deref(),
-        )
-        .await
+    let resolved = match AuthorizeResponseTarget::from_validated_client(
+        state,
+        oauth_client,
+        redirect_uri,
+        requested_response_mode.as_deref(),
+        oauth_state.as_deref(),
+    )
+    .await
     {
         Ok(r) => r,
         Err(resp) => return resp,
     };
-
-    // Phase A step 4: enforce the client's registered `response_types` now
-    // that the redirect_uri is validated and the response mode is resolved,
-    // so an `unauthorized_client` can be reported by redirect (RFC 6749
-    // Section 4.1.2.1). Same per-client gate as the Direct/PAR path above.
-    if let Err(resp) = resolved
-        .ensure_code_response_type_allowed(state, oauth_state.as_deref())
-        .await
-    {
-        return resp;
-    }
 
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
@@ -996,7 +946,7 @@ async fn handle_par_request(
 
     // Phase A: client lookup + active check + redirect_uri validation (errors → page).
     // Client lookup happens here (after PAR lookup) to catch deactivated clients.
-    let resolved = match ResolvedClient::resolve(
+    let resolved = match AuthorizeResponseTarget::resolve(
         state,
         &par.client_id,
         Some(&par.redirect_uri),
@@ -1050,7 +1000,7 @@ async fn handle_par_request(
     };
 
     // Overlay the PAR response_mode (resolve() used None above).
-    let resolved = ResolvedClient {
+    let resolved = AuthorizeResponseTarget {
         client: resolved.client,
         redirect_uri: resolved.redirect_uri,
         response_mode: par.response_mode,
@@ -1146,7 +1096,7 @@ async fn handle_request_uri_fetch(
 /// Performs: client lookup + active check, FAPI check, allowlist check,
 /// fetch JWT, validate JWT, redirect_uri validation.
 ///
-/// Returns `Ok((ResolvedClient, AuthorizeRequestParams))` on success,
+/// Returns `Ok((AuthorizeResponseTarget, AuthorizeRequestParams))` on success,
 /// or `Err(Response)` (always an error page) on failure.
 #[expect(
     clippy::result_large_err,
@@ -1158,7 +1108,7 @@ async fn fetch_and_resolve_request_uri(
     client_id: &str,
     query: &AuthorizeQuery,
     arrival: ArrivalTime,
-) -> Result<(ResolvedClient, AuthorizeRequestParams), Response> {
+) -> Result<(AuthorizeResponseTarget, AuthorizeRequestParams), Response> {
     // Step 1: client lookup + active check (errors → page).
     let oauth_client = lookup_and_check_active(state, client_id).await?;
 
@@ -1236,28 +1186,18 @@ async fn fetch_and_resolve_request_uri(
     };
 
     // Step 6: extract redirect_uri and validate against registered URIs, then
-    // apply the requested response_mode (see `with_requested_response_mode`).
+    // apply the requested response_mode and the registered response_types.
     let redirect_uri = request_params.redirect_uri.clone();
-    let resolved =
-        ResolvedClient::from_validated_client(oauth_client, redirect_uri, ResponseMode::Query)?;
-    let resolved = resolved
-        .with_requested_response_mode(
-            state,
-            request_params.response_mode.as_deref(),
-            // RFC 9101 Section 6.3: the Request Object's parameters are the
-            // request's, including the `state` an error response echoes.
-            request_params.state.as_deref(),
-        )
-        .await?;
-
-    // Step 7: enforce the client's registered `response_types` once the
-    // redirect_uri and response mode are resolved, so an
-    // `unauthorized_client` can be reported by redirect (RFC 6749 Section
-    // 4.1.2.1). Mirrors the gate `ResolvedClient::resolve` applies for the
-    // Direct/PAR flows.
-    resolved
-        .ensure_code_response_type_allowed(state, request_params.state.as_deref())
-        .await?;
+    let resolved = AuthorizeResponseTarget::from_validated_client(
+        state,
+        oauth_client,
+        redirect_uri,
+        request_params.response_mode.as_deref(),
+        // RFC 9101 Section 6.3: the Request Object's parameters are the
+        // request's, including the `state` an error response echoes.
+        request_params.state.as_deref(),
+    )
+    .await?;
 
     Ok((resolved, request_params))
 }
@@ -1306,7 +1246,7 @@ async fn handle_pending_auth(
     // Phase A: re-validate client active + redirect_uri (errors → page).
     // This guards against the client being deactivated or redirect_uri removed
     // between when the pending auth was stored and when the user completed login.
-    let resolved = match ResolvedClient::resolve(
+    let resolved = match AuthorizeResponseTarget::resolve(
         state,
         &pending.client_id,
         Some(&pending.redirect_uri),
@@ -1320,7 +1260,7 @@ async fn handle_pending_auth(
     };
 
     // Overlay the pending record's response_mode.
-    let resolved = ResolvedClient {
+    let resolved = AuthorizeResponseTarget {
         client: resolved.client,
         redirect_uri: resolved.redirect_uri,
         response_mode: pending.response_mode,
@@ -1419,7 +1359,7 @@ async fn handle_pending_auth(
 )]
 async fn complete_pending_auth(
     state: &Arc<AppState>,
-    resolved: &ResolvedClient,
+    resolved: &AuthorizeResponseTarget,
     pending: &db::PendingOAuthAuthorization,
     user: &User,
     session_auth_time: Option<i64>,
@@ -1758,7 +1698,7 @@ async fn store_pending_and_redirect(
         }
         Err(e) => {
             tracing::error!("Failed to create pending OAuth authorization: {}", e);
-            // The redirect_uri is validated by now (ResolvedClient was
+            // The redirect_uri is validated by now (AuthorizeResponseTarget was
             // constructed), so returning the error to the client is safe — and
             // it must honour the requested response_mode like every other exit.
             oauth_error_response(
