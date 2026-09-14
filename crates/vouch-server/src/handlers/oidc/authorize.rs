@@ -220,11 +220,15 @@ impl ResolvedClient {
             }
         };
 
-        Ok(Self {
+        let resolved = Self {
             client,
             redirect_uri,
             response_mode,
-        })
+        };
+        resolved
+            .ensure_code_response_type_allowed(state, oauth_state)
+            .await?;
+        Ok(resolved)
     }
 
     /// Phase A using a pre-loaded client: validates redirect_uri only.
@@ -316,6 +320,47 @@ impl ResolvedClient {
             self.response_mode,
         )
         .await
+    }
+
+    /// RFC 7591 §2: a client's registered `response_types` determine what it
+    /// is "allowed to use". `/authorize` only issues the `code` response
+    /// type, so a client whose registered `response_types` is `Some` and
+    /// excludes `"code"` cannot use this endpoint at all — reject it with a
+    /// redirect-based `unauthorized_client` error rather than surfacing a
+    /// code the token endpoint will refuse to redeem.
+    ///
+    /// `None` means "all defaults apply" — the same convention
+    /// [`crate::db::OAuthClient::is_authorized_for_grant`] uses for an absent
+    /// `grant_types` — so admin-registered clients with no explicit
+    /// `response_types` (the common case) are unaffected.
+    ///
+    /// This mirrors the per-client grant-type gate the token endpoint already
+    /// enforces (commit a8bae30a), closing the issuance side so the three
+    /// layers — registration, authorize, token — consult the same contract.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Err is an HTTP Response; size is acceptable in error path"
+    )]
+    async fn ensure_code_response_type_allowed(
+        &self,
+        state: &Arc<AppState>,
+        oauth_state: Option<&str>,
+    ) -> Result<(), Response> {
+        if let Some(response_types) = self.client.response_types.as_ref()
+            && !response_types
+                .iter()
+                .any(|rt| rt == crate::services::oidc::RESPONSE_TYPE_CODE)
+        {
+            return Err(self
+                .error_redirect(
+                    state,
+                    OAuthErrorCode::UnauthorizedClient,
+                    "Client is not registered for the 'code' response type",
+                    oauth_state,
+                )
+                .await);
+        }
+        Ok(())
     }
 }
 
@@ -804,6 +849,17 @@ async fn handle_jar_request(
         Err(resp) => return resp,
     };
 
+    // Phase A step 4: enforce the client's registered `response_types` now
+    // that the redirect_uri is validated and the response mode is resolved,
+    // so an `unauthorized_client` can be reported by redirect (RFC 6749
+    // Section 4.1.2.1). Same per-client gate as the Direct/PAR path above.
+    if let Err(resp) = resolved
+        .ensure_code_response_type_allowed(state, oauth_state.as_deref())
+        .await
+    {
+        return resp;
+    }
+
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
         Err(e) => {
@@ -1195,6 +1251,15 @@ async fn fetch_and_resolve_request_uri(
             // request's, including the `state` an error response echoes.
             request_params.state.as_deref(),
         )
+        .await?;
+
+    // Step 7: enforce the client's registered `response_types` once the
+    // redirect_uri and response mode are resolved, so an
+    // `unauthorized_client` can be reported by redirect (RFC 6749 Section
+    // 4.1.2.1). Mirrors the gate `ResolvedClient::resolve` applies for the
+    // Direct/PAR flows.
+    resolved
+        .ensure_code_response_type_allowed(state, request_params.state.as_deref())
         .await?;
 
     Ok((resolved, request_params))
