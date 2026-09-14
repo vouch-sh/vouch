@@ -3399,3 +3399,371 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
         "the stored registration_access_token_hash must be hash(T_new), not None"
     );
 }
+
+// =========================================================================
+// RFC 7592 §2.2 PUT — a faithful restatement of stored metadata
+//
+// RFC 7592 §2.2: the update request "MUST include all client metadata fields
+// as returned to the client from a previous registration, read, or update
+// operation". A client that was stored with `response_types: ["code"]` and
+// no `authorization_code` grant (the default an omitted `response_types`
+// once received) restates exactly that pair, and the server normalizes it to
+// `[]` rather than rejecting its own echoed metadata.
+// =========================================================================
+
+/// A dynamically registered client holding the `grant_types` /
+/// `response_types` pair exactly as stored, with a known registration access
+/// token for the PUT. Built directly because `register_client` refuses the
+/// pair.
+async fn make_legacy_dynamic_client(
+    state: &crate::AppState,
+    grant_types: &[&str],
+    response_types: &[&str],
+    application_type: db::OAuthClientType,
+    redirect_uris: &[&str],
+    plaintext_token: &str,
+) -> String {
+    let user = create_test_user(&state.store, "legacy-dynamic-client@example.com").await;
+    let owned = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type,
+            redirect_uris: owned(redirect_uris),
+            grant_types: Some(owned(grant_types)),
+            response_types: Some(owned(response_types)),
+            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    client.client_id
+}
+
+/// A faithful full-replacement PUT restating the `grant_types:
+/// ["client_credentials"]` + `response_types: ["code"]` the server itself
+/// stored must be accepted, and must migrate the client off
+/// the legacy state by normalizing `response_types` to `[]` (the state the
+/// server would issue today).
+#[tokio::test]
+async fn test_rfc7592_put_accepts_stored_client_credentials_code_restatement() {
+    let (app, state) = test_app().await;
+    let token = "legacy-cc-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["client_credentials"],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    // A conforming RFC 7592 §2.2 client restates the metadata the server
+    // echoed — including the `["code"]` `response_types` it was issued.
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a faithful restatement of stored legacy metadata must be \
+         accepted by the management PUT, not rejected as inconsistent: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["client_credentials"]),
+        "grant_types must be preserved on the legacy restatement PUT: {body}"
+    );
+    assert_eq!(
+        json["response_types"],
+        serde_json::json!([]),
+        "the legacy `response_types: [\"code\"]` must be normalized to `[]` on \
+         the response, migrating the client off the legacy state: {body}"
+    );
+
+    // The stored row must reflect the same migration: `grant_types` unchanged,
+    // `response_types` now `[]`.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "grant_types must be preserved across the legacy restatement PUT"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "stored response_types must be normalized to [] by the legacy PUT"
+    );
+}
+
+/// The recovery the server's error message prescribes (`response_types: []`)
+/// also succeeds against a legacy client, and is preserved as the fixed
+/// regression guard for the one-attempt recovery path.
+#[tokio::test]
+async fn test_rfc7592_put_workaround_empty_response_types_unlocks_client() {
+    let (app, state) = test_app().await;
+    let token = "legacy-cc-workaround-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["client_credentials"],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the `response_types: []` workaround PUT must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["client_credentials"])
+    );
+    assert_eq!(json["response_types"], serde_json::json!([]));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "the workaround must preserve grant_types"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "the workaround must store response_types = []"
+    );
+}
+
+/// A `device_code`-only client is the other legacy shape (an omitted
+/// `response_types` defaulted to
+/// `["code"]` with a non-`authorization_code` grant). Its faithful restatement
+/// must be accepted too, confirming the fix is not `client_credentials`-specific.
+#[tokio::test]
+async fn test_rfc7592_put_accepts_stored_device_code_code_restatement() {
+    let (app, state) = test_app().await;
+    let token = "legacy-device-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "client_credentials",
+        ],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    // RFC 7591 §2 places no ordering requirement on `grant_types`, so a
+    // reordered read-back is still a faithful restatement.
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials", "urn:ietf:params:oauth:grant-type:device_code"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a faithful restatement of a device_code-only legacy client must be \
+         accepted: {body}"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec![
+            "client_credentials".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ]),
+        "device_code grant_types must be preserved across the legacy PUT"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "device_code legacy response_types must be normalized to []"
+    );
+}
+
+/// A PUT that tries to *move* a client into the legacy state from a different,
+/// consistent state (dropping `authorization_code` while keeping
+/// `response_types: ["code"]`) is not a faithful restatement — it must still
+/// be rejected by the reverse check, proving the fix does not over-tolerate
+/// genuinely new inconsistent state on the management endpoint.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_moving_into_legacy_code_state() {
+    let (app, state) = test_app().await;
+    let token = "moving-into-legacy-token";
+    // A consistent `authorization_code` client the legacy tolerance must NOT
+    // touch: a faithful restatement of THIS state is what `["code"]` is for.
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["authorization_code"],
+        &["code"],
+        db::OAuthClientType::Web,
+        &["https://example.com/callback"],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a PUT moving a client into the legacy state from a consistent state \
+         must be rejected by the reverse check, not silently normalized: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("response_types includes 'code'")),
+        "the rejection must come from the reverse consistency check, not any \
+         other invalid_client_metadata path: {body}"
+    );
+
+    // The rejected PUT must not mutate the stored metadata.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()]),
+        "a rejected PUT must not change grant_types"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec!["code".to_string()]),
+        "a rejected PUT must not change response_types"
+    );
+}
+
+/// A faithful restatement by a consistent `authorization_code` client is
+/// unaffected by the legacy tolerance: it must still succeed, proving no
+/// regression for the normal management-PUT path.
+#[tokio::test]
+async fn test_rfc7592_put_consistent_auth_code_restatement_unaffected() {
+    let (app, state) = test_app().await;
+    let token = "consistent-auth-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["authorization_code"],
+        &["code"],
+        db::OAuthClientType::Web,
+        &["https://example.com/callback"],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "redirect_uris": ["https://example.com/callback"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a consistent authorization_code restatement must still succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["authorization_code"])
+    );
+    // The consistent client keeps its `["code"]` — the tolerance must not
+    // normalize a working authorization-code client out of the flow.
+    assert_eq!(json["response_types"], serde_json::json!(["code"]));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()])
+    );
+    assert_eq!(stored.response_types, Some(vec!["code".to_string()]));
+}

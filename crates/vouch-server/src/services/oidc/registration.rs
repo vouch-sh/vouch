@@ -33,6 +33,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE;
 
 // ============================================================================
 // Allowed Grant and Response Types
@@ -1563,6 +1564,25 @@ fn reject_immutable_changes(
     Ok(())
 }
 
+/// Whether an RFC 7592 update restates a stored `response_types: ["code"]`
+/// with no `authorization_code` grant. That pair is what an omitted
+/// `response_types` defaulted to before the reverse consistency check
+/// existed; a client restating it faithfully is not moving into an
+/// inconsistent state. Grant order is not significant (RFC 7591 §2).
+fn restates_stored_code_only_pair(request: &RegistrationRequest, client: &OAuthClient) -> bool {
+    let stored_grants = client.grant_types.as_deref().unwrap_or_default();
+    let requested_grants = request.grant_types.as_deref().unwrap_or_default();
+    let is_code_only =
+        |rts: Option<&[String]>| rts.is_some_and(|r| r == [super::RESPONSE_TYPE_CODE]);
+    is_code_only(client.response_types.as_deref())
+        && is_code_only(request.response_types.as_deref())
+        && !stored_grants
+            .iter()
+            .any(|g| g == GRANT_TYPE_AUTHORIZATION_CODE)
+        && requested_grants.len() == stored_grants.len()
+        && requested_grants.iter().all(|g| stored_grants.contains(g))
+}
+
 /// The application type to validate this registration's redirect URIs against.
 ///
 /// The client's own `application_type` wins when it sends one, since OIDC
@@ -1762,6 +1782,14 @@ pub async fn update_client_configuration(
     // because validate_grant_and_response_types take()s
     // token_endpoint_auth_method and substitutes a default.
     reject_immutable_changes(&mutable_request, &client)?;
+
+    // RFC 7592 §2.2: the PUT "MUST include all client metadata fields as
+    // returned to the client", so a restatement of the stored pair is
+    // normalized to what registration issues for such a client today rather
+    // than failing the reverse check below.
+    if restates_stored_code_only_pair(&mutable_request, &client) {
+        mutable_request.response_types = Some(vec![]);
+    }
 
     // Validate grant/response types (take() empties the request fields)
     let validated = validate_grant_and_response_types(&mut mutable_request)?;
