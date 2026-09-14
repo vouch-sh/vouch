@@ -121,6 +121,38 @@ impl OAuthClientType {
     pub fn requires_pkce(&self) -> bool {
         matches!(self, Self::Native | Self::Spa)
     }
+
+    /// The grants an application of this type is created able to use.
+    ///
+    /// Self-service application creation has no grant-types field — the
+    /// operator picks an application type, and the type is the statement of
+    /// intent: a Service application exists to do machine-to-machine calls, a
+    /// Native one runs on a device that may have no browser. Deriving the list
+    /// here keeps that intent in one place, and gives
+    /// [`crate::db::OAuthClient::is_authorized_for_grant`] something better
+    /// than RFC 7591 §2's registration default to resolve an absent list with.
+    ///
+    /// RFC 7591 §2's default (`["authorization_code"]`) governs a *dynamic
+    /// registration* that omitted the field — a client that could have said
+    /// otherwise and chose not to. A self-service application was never asked,
+    /// so applying that default to it says something the operator never did.
+    #[must_use]
+    pub fn default_grant_types(&self) -> &'static [&'static str] {
+        use vouch_common::protocol;
+        match self {
+            // Browser-redirect clients; the code grant is the only one they
+            // are created for.
+            Self::Web | Self::Spa => &[protocol::GRANT_TYPE_AUTHORIZATION_CODE],
+            // Installed applications: the code grant when a browser is
+            // available, RFC 8628 when one is not.
+            Self::Native => &[
+                protocol::GRANT_TYPE_AUTHORIZATION_CODE,
+                protocol::GRANT_TYPE_DEVICE_CODE,
+            ],
+            // Machine-to-machine: no user, so no code and no device flow.
+            Self::Service => &[protocol::GRANT_TYPE_CLIENT_CREDENTIALS],
+        }
+    }
 }
 
 impl std::str::FromStr for OAuthClientType {

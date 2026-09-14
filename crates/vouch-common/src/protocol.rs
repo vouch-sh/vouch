@@ -79,6 +79,14 @@
 /// authorization check for an absent list resolve to this one constant.
 pub const GRANT_TYPE_AUTHORIZATION_CODE: &str = "authorization_code";
 
+/// RFC 6749 §4.4.2 (Access Token Request) — client credentials grant.
+///
+/// > grant_type
+/// >       REQUIRED.  Value MUST be set to "client_credentials".
+///
+/// <https://www.rfc-editor.org/rfc/rfc6749#section-4.4.2>
+pub const GRANT_TYPE_CLIENT_CREDENTIALS: &str = "client_credentials";
+
 /// RFC 8628 §3.4 (Device Access Token Request) — device authorization grant.
 ///
 /// > grant_type

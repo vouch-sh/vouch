@@ -2007,4 +2007,53 @@ mod tests {
             "gate must not reject a verified approval: {body}"
         );
     }
+    /// A self-service Native application can run the device flow.
+    ///
+    /// This is the end-to-end shape the `native/*` examples use: an operator
+    /// creates a Native application in the dashboard — which stores no
+    /// `grant_types` — and the client posts its `client_id` to `/oauth/device`.
+    /// Resolving an absent list as RFC 7591 §2's registration default made
+    /// that first request `401 unauthorized_client`.
+    #[tokio::test]
+    async fn test_self_service_native_app_may_start_the_device_flow() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "native-app@example.com").await;
+
+        for (app_type, allowed) in [
+            (crate::db::OAuthClientType::Native, true),
+            (crate::db::OAuthClientType::Web, false),
+            (crate::db::OAuthClientType::Service, false),
+        ] {
+            let client = create_test_client(
+                &state.store,
+                &user.id,
+                TestClientSpec {
+                    name: format!("{app_type:?} App"),
+                    application_type: app_type,
+                    // Exactly what self-service creation stored before this
+                    // change, and what every application created before it
+                    // still has.
+                    grant_types: None,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let body = format!("client_id={}", client.client_id);
+            let (status, resp) = http_post_form(&app, "/oauth/device", &body, &[]).await;
+            if allowed {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "a Native application must be able to start the device flow: {resp}"
+                );
+            } else {
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "{app_type:?} is not a device-flow application: {resp}"
+                );
+            }
+        }
+    }
 }

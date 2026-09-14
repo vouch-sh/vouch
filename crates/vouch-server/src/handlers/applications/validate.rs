@@ -248,6 +248,15 @@ pub(crate) struct ValidatedCreateApp<'a> {
     /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
     /// array, or a trimmed https JWKS URI. Never both.
     pub keys: Option<crate::db::ClientKeys>,
+    /// Grants this application may use, derived from [`Self::app_type`] — the
+    /// creation form has no grant-types input, so the type is the operator's
+    /// statement of intent. Owned here because
+    /// `CreateOAuthClientParams` borrows its slices.
+    pub grant_types: Vec<String>,
+    /// Response types implied by [`Self::grant_types`]: RFC 7591 §2 Table 1
+    /// pairs `authorization_code` with `code`, and `client_credentials` with
+    /// none.
+    pub response_types: Vec<String>,
 }
 
 /// Validate the format of a create-application request.
@@ -325,12 +334,28 @@ pub(crate) fn validate_create_application<'a>(
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
     }
 
+    let grant_types: Vec<String> = app_type
+        .default_grant_types()
+        .iter()
+        .map(|g| (*g).to_string())
+        .collect();
+    let response_types = if grant_types
+        .iter()
+        .any(|g| g == vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE)
+    {
+        vec![crate::services::oidc::RESPONSE_TYPE_CODE.to_string()]
+    } else {
+        Vec::new()
+    };
+
     Ok(ValidatedCreateApp {
         name,
         app_type,
         access_scope,
         is_fapi,
         keys,
+        grant_types,
+        response_types,
     })
 }
 
@@ -650,8 +675,12 @@ pub(crate) fn build_create_params<'a>(
             None
         },
         dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
-        grant_types: None,
-        response_types: None,
+        // Written explicitly rather than left `None` so the stored row states
+        // what the application may do. `is_authorized_for_grant` resolves an
+        // absent list the same way, which is what keeps applications created
+        // before this change working without a data migration.
+        grant_types: Some(&validated.grant_types),
+        response_types: Some(&validated.response_types),
         software_id: None,
         software_version: None,
         registration_source: RegistrationSource::Manual,
