@@ -841,14 +841,24 @@ pub async fn create_scim_user(
 
 /// Update a user via SCIM, scoped to the caller's org.
 ///
-/// Returns `Ok(false)` if the user doesn't exist, belongs to a
-/// different org, or if a concurrent org-ownership change races with
-/// the modify loop and causes the mutation to be skipped (rather than
-/// reporting silent success). `Ok(true)` on a successful update.
+/// Returns `Ok(false)` if the user doesn't exist, belongs to a different org,
+/// or if a concurrent org-ownership change races with this transaction and
+/// causes the mutation to be skipped (rather than reporting silent success).
+/// `Ok(true)` on a successful update.
 ///
-/// Uses optimistic concurrency (`store.modify`) so concurrent field
-/// mutations (e.g. a GitHub identity update) landing between the org
-/// check and the write do not silently overwrite each other.
+/// # Errors
+///
+/// [`ScimUpdateError::LastAdmin`] when the write would clear `active` on the
+/// organization's only active admin. `active=false` reaching an admin removes
+/// them from the admin count exactly as
+/// [`crate::db::demote_or_deactivate_member`] does, so it takes the same floor
+/// — otherwise a `UsersWrite` token could `PATCH active=false` across every
+/// admin in turn.
+///
+/// The count, the write, and the organization row's version bump share one
+/// transaction. That is what makes the floor atomic on every backend: DSQL is
+/// OCC-only with no `SELECT … FOR UPDATE`, so concurrent deactivations have to
+/// be forced to collide on the org row (CLAUDE.md rule 10).
 pub async fn update_scim_user(
     store: &DocumentStore,
     user_id: &str,
@@ -856,40 +866,83 @@ pub async fn update_scim_user(
     name: Option<&str>,
     external_id: Option<&str>,
     active: bool,
-) -> Result<bool> {
-    // Org ownership check: read before entering the modify loop.
-    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id.as_deref() != Some(org_id) {
-        return Ok(false);
-    }
+) -> std::result::Result<bool, ScimUpdateError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Use modify for optimistic concurrency — re-check org ownership
-    // inside the closure so a concurrent org migration cannot smuggle
-    // a cross-org write through a version win.
-    //
-    // `AtomicBool` is used to signal from the `Fn` closure back to the caller
-    // whether the mutation was applied (org still matched) or skipped.
-    let applied = std::sync::atomic::AtomicBool::new(false);
-    let found = store
-        .modify::<UserDoc, _>(user_id, |data| {
-            // Reset at the top of every attempt: if an earlier OCC retry set
-            // this flag but then lost the version race, the closure runs again
-            // and org ownership must be re-evaluated from scratch.
-            applied.store(false, std::sync::atomic::Ordering::Relaxed);
-            if data.org_id.as_deref() == Some(org_id) {
-                data.name = name.map(String::from);
-                data.external_id = external_id.map(String::from);
-                data.active = active;
-                applied.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        })
-        .await?;
-    // found=true but applied=false means a concurrent org-ownership change
-    // raced between our pre-check and the modify loop. Report it as
-    // not-found rather than silent success so the caller sees the right signal.
-    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        // Re-checked inside the transaction so a concurrent org migration
+        // cannot smuggle a cross-org write through a version win.
+        if user_doc.data.org_id.as_deref() != Some(org_id) {
+            return Ok(false);
+        }
+
+        // Version first, then the predicate read it must guard — read
+        // afterwards it would already carry a sibling's bump and the
+        // compare-and-update below would wrongly succeed. Same ordering and
+        // same reason as `demote_or_deactivate_member` and `delete_user`.
+        let org_doc = tx
+            .get::<super::documents::organization::OrganizationDoc>(org_id)
+            .await?;
+
+        // Only clearing `active` on a currently-active admin can breach the
+        // floor. Renames, external_id changes, and `active=true` cannot.
+        if !active
+            && user_doc.data.is_org_admin
+            && user_doc.data.active
+            && super::users::other_active_admins(&mut tx, org_id, user_id).await? == 0
+        {
+            return Err(ScimUpdateError::LastAdmin);
+        }
+
+        let mut updated = user_doc.data.clone();
+        updated.name = name.map(String::from);
+        updated.external_id = external_id.map(String::from);
+        updated.active = active;
+        if !tx
+            .compare_and_update(user_id, user_doc.version, &updated)
+            .await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
+        if let Some(org_doc) = org_doc
+            && !tx
+                .compare_and_update(org_id, org_doc.version, &org_doc.data)
+                .await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    })
+}
+
+/// Failure modes of [`update_scim_user`].
+#[derive(Debug, thiserror::Error)]
+pub enum ScimUpdateError {
+    /// The write would leave the organization with no active admin.
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization or the user row while this
+    /// update was counting admins.
+    #[error("organization changed during SCIM user update")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for ScimUpdateError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
 }
 
 // ============================================================================

@@ -498,3 +498,105 @@ async fn test_scim_audit_logging() {
     assert_eq!(events.len(), 2, "both SCIM audit rows must be stored");
     assert_ne!(events[0].id, events[1].id);
 }
+
+/// SCIM `active=false` is a third path to removing an organization's last
+/// admin, alongside delete and demote, so it takes the same floor. A
+/// `UsersWrite` token could otherwise deactivate every admin in sequence.
+#[tokio::test]
+async fn test_update_scim_user_refuses_to_deactivate_the_last_active_admin() {
+    use crate::db::documents::user::UserDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let admin = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-sole-admin@example.com",
+        Some("Sole Admin"),
+        None,
+        true,
+    )
+    .await
+    .expect("create admin");
+    // SCIM provisioning never grants admin, so promote through the store.
+    update_user_admin_status(&store, &admin.id, true)
+        .await
+        .expect("promote");
+
+    let err = update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, false)
+        .await
+        .expect_err("deactivating the last admin must be refused");
+    assert!(
+        matches!(err, ScimUpdateError::LastAdmin),
+        "expected LastAdmin, got {err:?}"
+    );
+
+    // A refused write leaves every field untouched, not just `active` — the
+    // whole transaction rolls back.
+    let after = store
+        .get::<UserDoc>(&admin.id)
+        .await
+        .expect("get")
+        .expect("must exist");
+    assert!(after.data.active, "active must be unchanged");
+    assert_eq!(
+        after.data.name.as_deref(),
+        Some("Sole Admin"),
+        "the rename in the same request must not land either"
+    );
+
+    // Renames and reactivations are untouched by the floor.
+    assert!(
+        update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, true)
+            .await
+            .expect("rename must be allowed"),
+        "a write that does not clear `active` must not consult the floor"
+    );
+
+    // With a second active admin the deactivation goes through.
+    let peer = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-peer-admin@example.com",
+        Some("Peer"),
+        None,
+        true,
+    )
+    .await
+    .expect("create peer");
+    update_user_admin_status(&store, &peer.id, true)
+        .await
+        .expect("promote peer");
+    assert!(
+        update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, false)
+            .await
+            .expect("deactivation with a peer admin must be allowed"),
+        "an admin with a surviving active peer must be deactivatable"
+    );
+}
+
+/// Deactivating a plain member is never blocked, regardless of admin count.
+#[tokio::test]
+async fn test_update_scim_user_deactivates_non_admin_without_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let member = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-member@example.com",
+        Some("Member"),
+        None,
+        true,
+    )
+    .await
+    .expect("create member");
+
+    assert!(
+        update_scim_user(&store, &member.id, TEST_ORG_ID, Some("Member"), None, false)
+            .await
+            .expect("member deactivation must be allowed"),
+        "a non-admin is not part of the admin count"
+    );
+}

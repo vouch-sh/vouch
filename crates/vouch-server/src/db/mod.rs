@@ -60,10 +60,10 @@ pub use store::{InvalidIndexValue, StoreTransaction};
 
 // Re-export user types and functions
 pub use users::{
-    MemberDowngrade, MemberDowngradeError, User, delete_user, demote_or_deactivate_member,
-    get_user_by_email, get_user_by_id, get_user_github_refresh_token, get_user_org_domain,
-    get_users_by_ids, get_users_by_org_paginated, update_user_active_status,
-    update_user_admin_status, update_user_github_identity,
+    DeleteUserError, LastAdminGuard, MemberDowngrade, MemberDowngradeError, User, delete_user,
+    demote_or_deactivate_member, get_user_by_email, get_user_by_id, get_user_github_refresh_token,
+    get_user_org_domain, get_users_by_ids, get_users_by_org_paginated, is_last_active_org_admin,
+    update_user_active_status, update_user_admin_status, update_user_github_identity,
 };
 
 // Re-export user test helpers (only available in tests)
@@ -129,11 +129,11 @@ pub use config::{AuthEventParams, AuthEventType, ClientInfo, record_auth_event};
 // Re-export SCIM types and functions
 pub use scim::{
     CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimScope,
-    ScimScopeSet, ScimToken, ScimUserRecord, add_scim_group_member, create_scim_group,
-    create_scim_token, create_scim_user, delete_expired_scim_tokens, delete_scim_group,
-    delete_scim_token, get_scim_group, get_scim_group_members, get_scim_token_by_hash,
-    get_scim_user, list_scim_groups, list_scim_tokens, list_scim_users, record_scim_audit,
-    remove_scim_group_member, replace_scim_group_members, update_scim_group,
+    ScimScopeSet, ScimToken, ScimUpdateError, ScimUserRecord, add_scim_group_member,
+    create_scim_group, create_scim_token, create_scim_user, delete_expired_scim_tokens,
+    delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
+    get_scim_token_by_hash, get_scim_user, list_scim_groups, list_scim_tokens, list_scim_users,
+    record_scim_audit, remove_scim_group_member, replace_scim_group_members, update_scim_group,
     update_scim_token_last_used, update_scim_user,
 };
 

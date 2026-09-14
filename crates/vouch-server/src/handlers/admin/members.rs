@@ -447,11 +447,17 @@ pub(crate) async fn remove_member(
     )
     .await?;
 
-    let deleted = db::delete_user(&state.store, &target_id)
+    let deleted = db::delete_user(&state.store, &target_id, db::LastAdminGuard::Enforce)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete user: {e}");
-            ServiceError::Internal("Failed to delete user".to_string())
+        .map_err(|e| match e {
+            // Same refusal `demote_member` gives, for the same reason: the
+            // organization must keep one active admin, and removing the member
+            // outright removes them from that count just as demoting does.
+            db::DeleteUserError::LastAdmin => last_admin_refusal(),
+            e => {
+                tracing::error!("Failed to delete user: {e}");
+                ServiceError::Internal("Failed to delete user".to_string())
+            }
         })?;
     if !deleted {
         return Err(member_gone());
@@ -491,13 +497,17 @@ pub(crate) async fn remove_member(
 /// `LastAdmin` is the caller's mistake, not a fault: an organization with no
 /// admin cannot be administered back into shape, so the request is refused
 /// with a 400 the admin can act on. Everything else keeps its usual mapping.
+fn last_admin_refusal() -> ServiceError {
+    ServiceError::api(
+        StatusCode::BAD_REQUEST,
+        "last_admin",
+        "Cannot remove the organization's only remaining admin",
+    )
+}
+
 fn last_admin_error(err: db::MemberDowngradeError) -> ServiceError {
     match err {
-        db::MemberDowngradeError::LastAdmin => ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "last_admin",
-            "Cannot remove the organization's only remaining admin",
-        ),
+        db::MemberDowngradeError::LastAdmin => last_admin_refusal(),
         db::MemberDowngradeError::OccConflict => ServiceError::Internal(
             "Organization changed during member update; please retry".to_string(),
         ),

@@ -74,7 +74,7 @@ async fn test_user_cascade_delete() {
     );
 
     // Delete user
-    delete_user(&store, &user_id)
+    delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("Failed to delete user");
 
@@ -108,7 +108,7 @@ async fn test_delete_user_returns_false_when_missing() {
 
     // A valid UUID that was never inserted.
     let missing_id = "00000000-0000-7000-0000-000000000001";
-    let deleted = delete_user(&store, missing_id)
+    let deleted = delete_user(&store, missing_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user must not error on a missing user");
     assert!(
@@ -120,7 +120,7 @@ async fn test_delete_user_returns_false_when_missing() {
     let (user_id, _) = upsert_user(&store, "delete-bool@example.com", None)
         .await
         .expect("create user");
-    let deleted = delete_user(&store, &user_id)
+    let deleted = delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user should succeed");
     assert!(deleted, "delete_user must return true for an existing user");
@@ -133,7 +133,7 @@ async fn test_delete_user_returns_false_when_missing() {
     );
 
     // Deleting the same user again returns false (idempotent miss).
-    let deleted_again = delete_user(&store, &user_id)
+    let deleted_again = delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user must not error on a missing user");
     assert!(
@@ -175,7 +175,9 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to revoke SSH certificates");
 
-    delete_user(&store, &user_id).await.expect("delete failed");
+    delete_user(&store, &user_id, LastAdminGuard::Enforce)
+        .await
+        .expect("delete failed");
 
     // User should be gone
     assert!(
@@ -312,6 +314,204 @@ async fn create_scoped_client(
     .app_id
 }
 
+/// "At least one active admin per organization" applies to deletion, not just
+/// to demote and deactivate: removing an active admin takes them out of the
+/// admin count exactly as demoting one does.
+#[tokio::test]
+async fn test_delete_user_refuses_to_remove_the_last_active_admin() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (sole_admin, _) = upsert_user_with_org(
+        &store,
+        "sole-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create sole admin");
+    let (member, _) = upsert_user_with_org(
+        &store,
+        "plain-member@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create member");
+
+    assert!(
+        matches!(
+            delete_user(&store, &sole_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "the organization's only active admin must not be deletable"
+    );
+    assert!(
+        get_user_by_id(&store, &sole_admin)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "a refused delete must not have removed the user"
+    );
+
+    // A plain member is not part of the count, so the floor does not apply.
+    assert!(
+        delete_user(&store, &member, LastAdminGuard::Enforce)
+            .await
+            .expect("member delete"),
+        "deleting a non-admin must not be blocked by the admin floor"
+    );
+
+    // With a second admin present the first becomes deletable.
+    let (second_admin, _) = upsert_user_with_org(
+        &store,
+        "second-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create second admin");
+    assert!(
+        delete_user(&store, &sole_admin, LastAdminGuard::Enforce)
+            .await
+            .expect("admin delete"),
+        "an admin with a surviving peer must be deletable"
+    );
+    assert!(
+        matches!(
+            delete_user(&store, &second_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "the survivor is now the last admin and must be protected in turn"
+    );
+}
+
+/// A deactivated admin does not count toward the floor, so the last *active*
+/// admin is protected even when the organization has other admin rows.
+#[tokio::test]
+async fn test_delete_user_ignores_deactivated_admins_in_the_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (active_admin, _) = upsert_user_with_org(
+        &store,
+        "active-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create active admin");
+    let (inactive_admin, _) = upsert_user_with_org(
+        &store,
+        "inactive-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create inactive admin");
+    update_user_active_status(&store, &inactive_admin, false)
+        .await
+        .expect("deactivate");
+
+    assert!(
+        matches!(
+            delete_user(&store, &active_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "a deactivated admin must not satisfy the floor"
+    );
+}
+
+/// `LastAdminGuard::Bypass` is what the cascade tests use to reach states the
+/// floor makes unreachable; it must actually skip the check.
+#[tokio::test]
+async fn test_delete_user_bypass_skips_the_admin_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (sole_admin, _) = upsert_user_with_org(
+        &store,
+        "bypass-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create sole admin");
+
+    assert!(
+        delete_user(&store, &sole_admin, LastAdminGuard::Bypass)
+            .await
+            .expect("bypass delete"),
+        "Bypass must delete the last admin without consulting the floor"
+    );
+}
+
+/// Two admins removing each other at the same moment must not empty the
+/// organization.
+///
+/// This is the case the floor exists for on the admin-UI surface. Sequentially
+/// it is unreachable there: the acting admin must themselves be an active
+/// admin to pass authorization, so whenever the target is someone else a
+/// second admin exists, and self-removal is refused by a separate check. Two
+/// concurrent requests each see the other as that second admin — the anomaly a
+/// per-document version guard cannot catch, since the two writes land on
+/// different user rows. Forcing both onto the organization row is what makes
+/// one of them lose.
+#[tokio::test]
+async fn test_concurrent_mutual_admin_removal_leaves_one_admin() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let store = std::sync::Arc::new(store);
+
+    let (admin_a, _) = upsert_user_with_org(
+        &store,
+        "mutual-a@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin a");
+    let (admin_b, _) = upsert_user_with_org(
+        &store,
+        "mutual-b@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin b");
+
+    let (r1, r2) = tokio::join!(
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_a.clone();
+            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+        },
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_b.clone();
+            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+        },
+    );
+
+    // Whatever order they resolved in, both deleting is the anomaly.
+    let mut any_survivor = false;
+    for id in [&admin_a, &admin_b] {
+        any_survivor |= get_user_by_id(&store, id).await.expect("lookup").is_some();
+    }
+    assert!(
+        any_survivor,
+        "both admins were deleted: r1={r1:?} r2={r2:?}"
+    );
+}
+
 /// Deleting an org-scoped application's creator transfers the application to
 /// an active org admin. Management is creator-only, so leaving `user_id`
 /// empty would strand the application with no one able to manage it.
@@ -357,7 +557,9 @@ async fn test_delete_user_transfers_org_scoped_apps_to_org_admin() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -408,7 +610,9 @@ async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Bypass)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -461,7 +665,9 @@ async fn test_delete_user_skips_deactivated_org_admin_as_successor() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -537,12 +743,12 @@ async fn test_concurrent_admin_deletes_never_strand_org_apps() {
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_a.clone();
-            async move { delete_user(&s, &id).await }
+            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
         },
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_b.clone();
-            async move { delete_user(&s, &id).await }
+            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
         },
     );
     assert!(r1.expect("delete a"), "admin a must be deleted");
@@ -643,7 +849,9 @@ async fn test_delete_user_client_reassignment_writes_against_latest_version() {
     }
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
