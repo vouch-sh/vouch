@@ -1927,9 +1927,9 @@ fn build_client_assertion_with_exp(
 }
 
 /// Override `jwt_assertion_max_lifetime_seconds` on an already-built test
-/// app to compress the residual-window opening to ~2 s of real wall-clock.
-/// The handler re-reads `state.config()` (an `ArcSwap`) on each request,
-/// so a post-build `store` takes effect for the very next token request.
+/// app. The handler re-reads `state.config()` (an `ArcSwap`) on each
+/// request, so a post-build `store` takes effect for the very next token
+/// request.
 async fn override_jwt_assertion_max_lifetime(
     state: &std::sync::Arc<crate::AppState>,
     seconds: i64,
@@ -1949,21 +1949,23 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
     enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
 
-    // Compress the residual window to ~2 s of real wall-clock.
-    override_jwt_assertion_max_lifetime(&state, 2).await;
+    // A zero max lifetime puts the residual window entirely in the past
+    // from the moment the JTI is committed, so no wall-clock time has to
+    // elapse for the buggy formula to become cleanup-eligible.
+    override_jwt_assertion_max_lifetime(&state, 0).await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let fixed_jti = "residual-window-replay-after-cleanup";
     let now = jiff::Timestamp::now().as_second();
-    // `iat = now`, `exp = now + 2` ⇒ `lifetime = max_lifetime` (the slice
-    // upper bound; the no-skew residual window is the full 10 s of
-    // CLOCK_SKEW). Validator admits this assertion until `exp + 10`.
+    // `iat = exp = now` ⇒ `lifetime = 0 = max_lifetime`; the lifetime gate
+    // is a strict `>`, so the assertion is admitted, and the validator keeps
+    // accepting it until `exp + 10` (the full CLOCK_SKEW residual window).
     let assertion = build_client_assertion_with_exp(
         &client.client_id,
         &token_endpoint,
         &pkcs8_bytes,
         now,
-        now + 2,
+        now,
         fixed_jti,
     );
 
@@ -1983,18 +1985,11 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
         .expect("access_token")
         .to_string();
 
-    // Advance the real clock 2.5 s: the OLD (buggy) `expires_at =
-    // commit_now + 2` is now ~0.5 s in the past (cleanup-eligible), while
-    // the validator still accepts the verbatim assertion until `exp + 10`
-    // (~9.5 s in the future). 2.5 s of `tokio::time::sleep` is the
-    // lightweight alternative to a production-code clock seam.
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-
     // Run the same cleanup routine `infra/cleanup.rs:221` runs on a real
     // tick. Under the fix, the row's `expires_at = exp + CLOCK_SKEW` is
-    // still ~9.5 s in the future, so cleanup deletes nothing — this
+    // still ~10 s in the future, so cleanup deletes nothing — this
     // assertion is the one that inverts under the bug (where `expires_at =
-    // commit_now + max_lifetime` would be ~0.5 s in the past and
+    // commit_now + max_lifetime = commit_now` is already in the past and
     // `deleted == 1`).
     let deleted = db::delete_expired_jwt_assertion_jtis(&state.store)
         .await

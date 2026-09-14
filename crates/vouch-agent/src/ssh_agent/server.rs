@@ -276,8 +276,9 @@ mod tests {
         let server_clone = Arc::clone(&server);
         let task = tokio::spawn(async move { server_clone.run_listener(listener).await });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        // The listener's receiver is a clone of the one handed to the server,
+        // which has never observed a value, so a signal sent before the task
+        // is first polled is still seen by `changed()`.
         shutdown_tx.send(true).expect("send shutdown");
 
         let result = tokio::time::timeout(Duration::from_secs(5), task)

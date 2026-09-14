@@ -181,8 +181,10 @@ mod tests {
             .with_state(state);
 
         let (_, first) = http_get(&app, "/t", &[]).await;
-        // A second past the first request's stamp, so the comparison does not
-        // depend on sub-second clock granularity (Windows resolves ~15ms).
+        // This wait is intrinsic: the test proves the layer reads the real
+        // clock per request, so `for_test` cannot stand in. A full second past
+        // the first stamp keeps the comparison independent of sub-second
+        // clock granularity (Windows resolves ~15ms).
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         let (_, second) = http_get(&app, "/t", &[]).await;
 

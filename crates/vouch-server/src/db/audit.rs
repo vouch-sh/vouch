@@ -425,6 +425,27 @@ impl AuditStore {
             .await
     }
 
+    /// Rewrite `created_at` on every stored event.
+    ///
+    /// Test-only: lets an end-to-end test drive a real handler that stamps
+    /// `now` on its audit row, then move that row behind the audit events
+    /// API's lag window ([`crate::handlers::api::org::audit`]) without
+    /// waiting the window out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn backdate_events_for_test(&self, created_at: jiff::Timestamp) -> Result<u64> {
+        let stmt = Query::update()
+            .table(AuditEvents::Table)
+            .value(AuditEvents::CreatedAt, created_at.to_string())
+            .to_owned();
+
+        let result = crate::db_execute!(&self.pool, stmt)?;
+        Ok(result.rows_affected())
+    }
+
     /// Test-only: like [`Self::insert_event_for_test`] but with a user id,
     /// for seeding per-principal temporal policy history.
     ///

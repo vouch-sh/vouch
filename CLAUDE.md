@@ -330,6 +330,16 @@ the factory to `CreateOAuthTokenParams` / `CreateOAuthClientParams`. Those
 literals are spelled out once, inside the factory, so adding a field to either
 does not touch a single test.
 
+**Tests never wait on the wall clock.** A `sleep` that stands in for a clock
+is a load-sensitive assertion. Pick the instant instead: `ArrivalTime::for_test`
+/ `for_test_second` for a service called directly, `TestVerification::Verified
+{ auth_time }` for an aged session, `AuditStore::insert_event_for_test` /
+`backdate_events_for_test` for rows behind the export lag window, the `ArcSwap`
+config override for a window constant, and `set_modify_test_hook` to place a
+write between two clock reads. The only sanctioned waits are ones whose subject
+*is* the real clock (`arrival.rs`) or that are cancelled by the thing under
+test (`TimeoutLayer`, slow fake servers).
+
 **Cite the requirement a test pins.** A test that verifies a normative
 statement names the spec and section in a comment above it or in its assertion
 message:
