@@ -1563,83 +1563,6 @@ fn reject_immutable_changes(
     Ok(())
 }
 
-/// Whether an RFC 7592 PUT restates the pre-`a8bae30a` legacy
-/// `grant_types`/`response_types` pair the server itself issued, so the
-/// update path can tolerate it instead of running the reverse consistency
-/// check that a faithful restatement would now fail.
-///
-/// Before `a8bae30a`, [`validate_grant_and_response_types`] defaulted an
-/// omitted `response_types` to `["code"]` and stored it, so a client whose
-/// `grant_types` omitted `authorization_code` — a `client_credentials`-only or
-/// `device_code`-only client — was issued, and on every registration/read/PUT
-/// response echoed back, `response_types: ["code"]`. A conforming RFC 7592 §2.2
-/// client restates exactly that pair on a full-replacement PUT, which the
-/// reverse half of the consistency check (also added by `a8bae30a`) now rejects,
-/// locking the client out of every management PUT until it sends
-/// `response_types: []` instead of the `["code"]` it was issued.
-///
-/// Returns `true` only when the client's stored pair is exactly that legacy
-/// state — `grant_types` with no `authorization_code` and `response_types` of
-/// exactly `["code"]` — *and* the request restates that exact pair. The caller
-/// then normalizes the restated `["code"]` to `[]`, the state the server would
-/// issue today. A PUT that tries to move a client *into* the legacy state from
-/// a different stored state is not a faithful restatement, so it falls through
-/// to the reverse check and is still rejected; the registration path runs the
-/// unmodified validator, so a genuinely new inconsistent registration is still
-/// rejected too.
-fn restates_pre_a8bae30a_code_response_pair(
-    request: &RegistrationRequest,
-    client: &OAuthClient,
-) -> bool {
-    legacy_code_response_pair_restated(
-        request,
-        client.grant_types.as_deref().unwrap_or_default(),
-        client.response_types.as_deref().unwrap_or_default(),
-    )
-}
-
-/// Pure decision behind [`restates_pre_a8bae30a_code_response_pair`], separated
-/// so it can be unit-tested without constructing a full [`OAuthClient`].
-///
-/// `stored_grant_types` / `stored_response_types` are the client's persisted
-/// `grant_types` / `response_types` (an absent column reads as the empty slice).
-fn legacy_code_response_pair_restated(
-    request: &RegistrationRequest,
-    stored_grant_types: &[String],
-    stored_response_types: &[String],
-) -> bool {
-    // The stored legacy state: a non-`authorization_code` client whose omitted
-    // `response_types` was defaulted to `["code"]` and persisted.
-    let stored_has_auth_code = stored_grant_types
-        .iter()
-        .any(|g| g == vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE);
-    if stored_has_auth_code || stored_response_types != [super::RESPONSE_TYPE_CODE] {
-        return false;
-    }
-    // The request must carry the `["code"]` the server echoed — a conforming
-    // §2.2 client restates it explicitly — and restate the same grant types.
-    let request_restates_code = request
-        .response_types
-        .as_ref()
-        .is_some_and(|rts| rts.as_slice() == [super::RESPONSE_TYPE_CODE]);
-    if !request_restates_code {
-        return false;
-    }
-    let request_grant_types = request.grant_types.as_deref().unwrap_or_default();
-    same_grant_set(request_grant_types, stored_grant_types)
-}
-
-/// Order-insensitive equality for two small grant-type lists.
-///
-/// RFC 7591 §2 places no ordering requirement on `grant_types`, so a client
-/// that reorders the echoed array on read-back is still a faithful
-/// restatement. Grant types are a set — duplicates are nonsensical and never
-/// persisted by this server — so a same-length all-membership test is exact
-/// for every list the registration or update path can produce.
-fn same_grant_set(a: &[String], b: &[String]) -> bool {
-    a.len() == b.len() && a.iter().all(|g| b.contains(g))
-}
-
 /// The application type to validate this registration's redirect URIs against.
 ///
 /// The client's own `application_type` wins when it sends one, since OIDC
@@ -1840,17 +1763,27 @@ pub async fn update_client_configuration(
     // token_endpoint_auth_method and substitutes a default.
     reject_immutable_changes(&mutable_request, &client)?;
 
-    // Tolerate a faithful restatement of the pre-`a8bae30a` legacy
-    // `grant_types` (no `authorization_code`) + `response_types: ["code"]`
-    // state, which the server itself issued before the reverse consistency
-    // check was added and would now reject a conforming client's own
-    // read-back metadata for. Normalizing the restated `["code"]` to `[]` —
-    // the state the server would issue today — keeps the reverse check
-    // intact for genuinely new inconsistent state (the registration path is
-    // unchanged, and a PUT moving a client *into* this state from another
-    // does not match the stored pair). See
-    // `restates_pre_a8bae30a_code_response_pair`.
-    if restates_pre_a8bae30a_code_response_pair(&mutable_request, &client) {
+    // A client registered before the reverse `response_types` check existed
+    // can hold `response_types: ["code"]` without the `authorization_code`
+    // grant: an omitted `response_types` used to default to `["code"]` and
+    // was stored. RFC 7592 §2.2 requires the PUT to "include all client
+    // metadata fields as returned to the client", so a faithful restatement
+    // of that stored pair is normalized to `[]`, what registration issues
+    // for such a client today, instead of failing the check. Only an exact
+    // restatement qualifies; a PUT that moves a client into the pair still
+    // fails validation below.
+    let stored_grants = client.grant_types.as_deref().unwrap_or_default();
+    let requested_grants = mutable_request.grant_types.as_deref().unwrap_or_default();
+    let is_code_only =
+        |rts: Option<&[String]>| rts.is_some_and(|r| r == [super::RESPONSE_TYPE_CODE]);
+    let stored_is_legacy_pair = !stored_grants
+        .iter()
+        .any(|g| g == vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE)
+        && is_code_only(client.response_types.as_deref());
+    let restates_pair = is_code_only(mutable_request.response_types.as_deref())
+        && requested_grants.len() == stored_grants.len()
+        && requested_grants.iter().all(|g| stored_grants.contains(g));
+    if stored_is_legacy_pair && restates_pair {
         mutable_request.response_types = Some(vec![]);
     }
 
