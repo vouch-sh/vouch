@@ -227,6 +227,39 @@ impl OAuthClient {
             None => self.application_type.default_grant_types().contains(&grant),
         }
     }
+
+    /// The RFC 6749 §2.1 client type, from the registered auth method.
+    ///
+    /// RFC 7591 §2: `"none": The client is a public client as defined in
+    /// OAuth 2.0, Section 2.1, and does not have a client secret.` Every
+    /// other method is a credential the client must present, which is what
+    /// makes it confidential. `application_type` is not consulted: RFC 8252
+    /// §8.4 lets a native app hold a per-instance secret, and a secret it
+    /// registered is a secret it is held to.
+    #[must_use]
+    pub fn client_type(&self) -> ClientType {
+        if self.token_endpoint_auth_method == TokenEndpointAuthMethod::None {
+            ClientType::Public
+        } else {
+            ClientType::Confidential
+        }
+    }
+}
+
+/// RFC 6749 §2.1: "OAuth defines two client types, based on their ability
+/// to authenticate securely with the authorization server (i.e., ability to
+/// maintain the confidentiality of their client credentials)".
+///
+/// Not the same axis as [`AccessScope::Public`], which says who may sign in
+/// through an application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientType {
+    /// "Clients capable of maintaining the confidentiality of their
+    /// credentials".
+    Confidential,
+    /// "Clients incapable of maintaining the confidentiality of their
+    /// credentials".
+    Public,
 }
 
 // ============================================================================

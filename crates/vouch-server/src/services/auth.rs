@@ -469,7 +469,7 @@ impl NoClientAuth {
     pub(crate) fn for_public_client(
         client: &crate::db::OAuthClient,
     ) -> Result<Self, crate::error::ServiceError> {
-        if client.token_endpoint_auth_method == crate::db::TokenEndpointAuthMethod::None {
+        if client.client_type() == crate::db::ClientType::Public {
             Ok(Self { _private: () })
         } else {
             Err(crate::error::ServiceError::oauth(

@@ -669,10 +669,7 @@ async fn resolve_non_jwt_auth(
             .await
         {
             Ok(verification) => Ok((
-                crate::services::oidc::token::AuthenticatedClient {
-                    client,
-                    is_public: false,
-                },
+                crate::services::oidc::token::AuthenticatedClient { client },
                 ClientAuthProof::MutualTls(verification),
             )),
             Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
@@ -686,10 +683,7 @@ async fn resolve_non_jwt_auth(
         Err(svc) => return Err(svc.into_oauth_response().into_response()),
     };
     Ok((
-        crate::services::oidc::token::AuthenticatedClient {
-            client,
-            is_public: true,
-        },
+        crate::services::oidc::token::AuthenticatedClient { client },
         ClientAuthProof::NoAuth(witness),
     ))
 }
@@ -956,7 +950,7 @@ async fn handle_client_credentials_grant(
     let secret_verification = any_auth.secret_verification;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
-    if authenticated_client.is_public {
+    if authenticated_client.client.client_type() == crate::db::ClientType::Public {
         return ServiceError::oauth(
             OAuthErrorCode::UnauthorizedClient,
             "Public clients are not allowed to use client_credentials grant",
@@ -1605,7 +1599,6 @@ async fn handle_fido2_assertion_grant(
         assertion: assertion.expose_secret(),
         client: &crate::services::oidc::token::AuthenticatedClient {
             client: jwt_authenticated.client,
-            is_public: false,
         },
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         scope: params.scope.as_deref(),

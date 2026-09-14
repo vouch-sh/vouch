@@ -315,10 +315,7 @@ pub async fn authenticate_client_jwt(
     );
 
     Ok((
-        AuthenticatedClient {
-            client,
-            is_public: false,
-        },
+        AuthenticatedClient { client },
         pending_jti,
         JwtAuthSucceeded { _private: () },
     ))

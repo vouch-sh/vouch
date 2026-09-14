@@ -118,8 +118,6 @@ impl std::fmt::Debug for AuthCodeExchangeResult {
 pub struct AuthenticatedClient {
     /// The OAuth client record.
     pub client: OAuthClient,
-    /// Whether this is a public client (no secret required).
-    pub is_public: bool,
 }
 
 /// Witness that an OAuth client successfully authenticated via
@@ -549,7 +547,8 @@ fn verify_client_matches_code(
         ));
     }
     if let Some(client) = authenticated_client {
-        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
+        let pkce_required = client.client.client_type() == crate::db::ClientType::Public
+            || client.client.application_type.requires_pkce();
         if pkce_required && auth_code.code_challenge.is_none() {
             tracing::warn!(
                 "Client {} requires PKCE but no code_challenge was present",
@@ -854,8 +853,9 @@ pub async fn authenticate_client(
         return Err(ClientAuthError::InvalidClient);
     }
 
-    // Determine if this client type requires a secret
-    let requires_secret = client.application_type.requires_secret();
+    // RFC 6749 §2.1: a confidential client must present the credential it
+    // registered; a public one has none to present.
+    let is_confidential = client.client_type() == crate::db::ClientType::Confidential;
 
     // RFC 8705: mTLS clients authenticate via certificate, not secret.
     // When a confidential client uses tls_client_auth or self_signed_tls_client_auth,
@@ -866,22 +866,16 @@ pub async fn authenticate_client(
             | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
     );
 
-    if requires_secret && is_mtls_auth {
+    if is_confidential && is_mtls_auth {
         // mTLS client — skip secret validation, return as confidential.
         // The certificate will be validated by authenticate_client_mtls().
         if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
-        return Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
-            None,
-        ));
+        return Ok((AuthenticatedClient { client }, None));
     }
 
-    if requires_secret {
+    if is_confidential {
         // FAPI 2.0 Security Profile §5.3.2.1 item 6: the authorization server
         // "shall authenticate clients using one of the following methods:
         // MTLS as specified in Section 2 of [RFC8705], or private_key_jwt as
@@ -928,10 +922,7 @@ pub async fn authenticate_client(
         }
 
         Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
+            AuthenticatedClient { client },
             Some(ClientSecretVerification { _private: () }),
         ))
     } else {
@@ -941,13 +932,7 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok((
-            AuthenticatedClient {
-                client,
-                is_public: true,
-            },
-            None,
-        ))
+        Ok((AuthenticatedClient { client }, None))
     }
 }
 
@@ -2027,6 +2012,58 @@ mod tests {
     /// A secret-based confidential client authenticates successfully even
     /// when the observational `last_used_at` UPDATE fails — the write is
     /// swallowed at the service layer, matching the public/mTLS/private_key_jwt
+    // RFC 8252 §8.4: a native app may be provisioned a per-instance secret
+    // through dynamic registration; RFC 7591 §2 makes the registered
+    // `token_endpoint_auth_method`, not `application_type`, what says whether
+    // the client is public. A native client registered with a secret is held
+    // to it.
+    #[tokio::test]
+    async fn test_authenticate_client_native_client_with_secret_is_confidential() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "native-secret@example.com").await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1/cb".to_string()],
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let arrival = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now());
+
+        let without_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        assert!(
+            matches!(
+                authenticate_client(&state, &without_secret, arrival).await,
+                Err(ClientAuthError::SecretRequired)
+            ),
+            "a native client registered with a secret must present it"
+        );
+
+        let with_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+        let (auth, verification) = authenticate_client(&state, &with_secret, arrival)
+            .await
+            .expect("the registered secret authenticates the client");
+        assert_eq!(
+            auth.client.client_type(),
+            crate::db::ClientType::Confidential
+        );
+        assert!(verification.is_some());
+    }
+
     /// branches.
     #[tokio::test]
     async fn test_authenticate_client_secret_swallows_last_used_failure() {
@@ -2060,8 +2097,9 @@ mod tests {
             "secret-based auth must not fail when only the last_used_at write fails: {result:?}"
         );
         let (auth, verification) = result.expect("checked Ok above");
-        assert!(
-            !auth.is_public,
+        assert_eq!(
+            auth.client.client_type(),
+            crate::db::ClientType::Confidential,
             "secret-based client is confidential, not public"
         );
         assert!(
@@ -2479,7 +2517,6 @@ mod tests {
     fn test_verify_client_matches_code_matching_confidential_client_ok() {
         let client = AuthenticatedClient {
             client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
         };
         let auth_code = AuthorizationCode {
             client_id: client.client.client_id.clone(),
@@ -2494,7 +2531,6 @@ mod tests {
     fn test_verify_client_matches_code_rejects_client_id_mismatch() {
         let client = AuthenticatedClient {
             client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
         };
         // make_auth_code uses client_id "test", which differs from the client's.
         let auth_code = make_auth_code("");
@@ -2506,8 +2542,7 @@ mod tests {
     #[test]
     fn test_verify_client_matches_code_public_client_requires_pkce() {
         let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
+            client: make_mtls_client(TokenEndpointAuthMethod::None, None),
         };
         let auth_code = AuthorizationCode {
             client_id: client.client.client_id.clone(),
@@ -2521,8 +2556,7 @@ mod tests {
     #[test]
     fn test_verify_client_matches_code_public_client_with_pkce_ok() {
         let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
+            client: make_mtls_client(TokenEndpointAuthMethod::None, None),
         };
         let auth_code = AuthorizationCode {
             client_id: client.client.client_id.clone(),

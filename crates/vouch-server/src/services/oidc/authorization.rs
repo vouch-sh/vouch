@@ -8,10 +8,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
-use crate::db::{
-    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode,
-    TokenEndpointAuthMethod, User,
-};
+use crate::db::{AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
 use jiff::{Span, Timestamp};
@@ -806,9 +803,10 @@ pub fn require_pkce_for_client(
     validated: &ValidatedAuthRequest,
     client: &OAuthClient,
 ) -> ServiceResult<()> {
-    let is_public = client.token_endpoint_auth_method == TokenEndpointAuthMethod::None;
     // FAPI 2.0 Section 5.3.2.1: PKCE is required for all FAPI clients.
-    let pkce_required = is_public || client.application_type.requires_pkce() || client.is_fapi();
+    let pkce_required = client.client_type() == crate::db::ClientType::Public
+        || client.application_type.requires_pkce()
+        || client.is_fapi();
     if pkce_required && validated.code_challenge().is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
