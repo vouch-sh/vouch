@@ -1,8 +1,40 @@
 # Detail Volume Log
 
 Measured history of Detail's findings, so a later run can tell a trend from a
-blip. Append one section per triage pass. All figures come from
-`scripts/detail-stats.py`; do not hand-edit them.
+blip. Add a row to the batch table and append one section per triage pass.
+Counted figures come from `scripts/detail-stats.py`; do not hand-edit them. The
+judgement columns come from the batch's record in `.local/`.
+
+## Batch table
+
+| column | source | meaning |
+|---|---|---|
+| issues, fix PRs, dead-code PRs | script | what Detail opened on the detection date |
+| Detail PR | script | findings blamed on one of Detail's own PRs |
+| PR≤3d | script | findings blamed on any PR merged at most 3 days before detection, ours included |
+| not as written | record | PRs that needed changes, were superseded, or were closed after review |
+| dispositions | record | what happened to the batch's PRs |
+| residue | record | findings that match residue or an open decision in an earlier record |
+| rules | record | Detail rules requested for the batch's classes, and whether synced |
+
+| batch | issues | fix PRs | dead-code PRs | Detail PR | PR≤3d | not as written | dispositions | residue | rules |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-08-20 | 12 | 11 | 0 | 0 | 0 | 10 of 11 | not recorded | not recorded | 0 |
+| 2026-09-11 | 24 | 22 | 0 | 2 | 0 | 3 of 22 | all merged; #1312 and #1321 amended first | none (first record) | `no-case-fold-offset-remap`, synced #1327 |
+| 2026-09-12 | 8 | 8 | 0 | 4 | 8 | 5 of 8 | 3 merged as-is, 2 amended, 3 closed; class PRs #1346, #1347 | not checked | `use-arrival-time-for-request-deciding-expiry`, synced #1349 |
+| 2026-09-13 | 5 | 1 | 0 | 3 | 5 | 1 of 1 | 1 superseded; class PRs #1356–#1359; #1352 wontfix | 3 of 5 | 0 |
+| 2026-09-14 | 3 | 3 | 0 | 0 | 3 | 3 of 3 | 3 amended, merged | 1 of 3 | 0 |
+| 2026-09-15 | 6 | 6 | 7 | 1 | 6 | 6 of 6 fix, 2 of 7 dead-code | dead-code: 5 merged, 2 superseded (#1393, #1394); fix: 3 amended, 1 superseded (#1396), 2 closed | 1 of 6 | `wire-format-compat-on-persisted-structs`, synced #1395 |
+
+Batches before 2026-08-20 have no record, so only their counted columns exist:
+run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
+(created 2026-09-12) and has never been synced into this repository.
+
+**Reading:** from 2026-09-12 on, PR≤3d equals the issue count in every batch —
+every finding was in something merged in the previous three days — while the
+Detail-only column never did. And review changed or rejected most of what
+arrived in every recorded batch except 2026-09-11, so the batch's outcome is
+decided in review, not by Detail's PRs.
 
 ## 2026-09-11 — baseline
 
