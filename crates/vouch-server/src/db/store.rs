@@ -208,6 +208,28 @@ struct IdRow {
 // Shared Pure Helpers
 // ============================================================================
 
+/// Build the query that finds documents of `doc_type` whose expiry has passed.
+///
+/// The `expires_at IS NOT NULL` clause is logically redundant — a NULL never
+/// satisfies `expires_at < now` — and it is kept so that it matches the
+/// predicate of the partial index `idx_documents_cleanup_unexpired` word for
+/// word. Aurora DSQL "can use a partial index for a query only when it can
+/// prove that the query's WHERE conditions imply the index's predicate. If it
+/// can't, Aurora DSQL doesn't use the index for that query." How strong that
+/// prover is, AWS does not document. PostgreSQL 16 proves the implication from
+/// `expires_at < $1` alone (strict operator), so on Postgres the clause costs
+/// nothing and buys nothing; on DSQL it makes the match syntactic rather than
+/// something we are trusting an undocumented prover to derive.
+fn expired_doc_ids_stmt(doc_type: &str, now: &str) -> sea_query::SelectStatement {
+    Query::select()
+        .column(Documents::Id)
+        .from(Documents::Table)
+        .and_where(Expr::col(Documents::DocType).eq(doc_type))
+        .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+        .and_where(Expr::col(Documents::ExpiresAt).lt(now))
+        .to_owned()
+}
+
 /// Output of serializing and encrypting a document for storage.
 struct SerializedDoc {
     /// Raw JSON bytes (used to deserialize back after insert).
@@ -1575,13 +1597,7 @@ impl DocumentStore {
             let now = jiff::Timestamp::now().to_string();
 
             // Find expired document IDs
-            let select_stmt = Query::select()
-                .column(Documents::Id)
-                .from(Documents::Table)
-                .and_where(Expr::col(Documents::DocType).eq(doc_type))
-                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-                .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-                .to_owned();
+            let select_stmt = expired_doc_ids_stmt(doc_type, now.as_str());
 
             let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
 

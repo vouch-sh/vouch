@@ -1285,3 +1285,38 @@ async fn update_by_index_retries_from_fresh_read_after_conflict() {
         "the failed attempt rolled back its version bump along with everything else"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Partial-index predicate match
+// ---------------------------------------------------------------------------
+
+/// `idx_documents_cleanup_unexpired` (migration 020) and its SQLite
+/// counterpart are declared `WHERE expires_at IS NOT NULL`. Aurora DSQL "can
+/// use a partial index for a query only when it can prove that the query's
+/// WHERE conditions imply the index's predicate. If it can't, Aurora DSQL
+/// doesn't use the index for that query."
+/// (CREATE INDEX, Aurora DSQL User Guide,
+/// <https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-index-syntax-support.html>)
+///
+/// The clause is logically redundant next to `expires_at < now`, and a
+/// PostgreSQL 16 planner reaches the index without it, so dropping it would
+/// break no test and change no result — it would just stake the DSQL sweep on
+/// a prover whose strength AWS doesn't document. Keeping the query's predicate
+/// spelled identically to the index's makes the implication syntactic. This
+/// pins that spelling.
+#[test]
+fn expired_doc_ids_query_carries_the_partial_index_predicate() {
+    let (sql, _values) = sea_query_sqlx::SqlxBinder::build_sqlx(
+        &expired_doc_ids_stmt("session", "2026-01-01T00:00:00Z"),
+        sea_query::PostgresQueryBuilder,
+    );
+
+    assert!(
+        sql.contains(r#""expires_at" IS NOT NULL"#),
+        "cleanup query must restate the partial index predicate verbatim, got: {sql}"
+    );
+    assert!(
+        sql.contains(r#""doc_type" ="#),
+        "cleanup query must constrain doc_type, the index's leading column, got: {sql}"
+    );
+}

@@ -1,0 +1,21 @@
+-- Partial replacement for idx_documents_cleanup.
+--
+-- `DocumentStore::delete_expired` selects
+--   doc_type = $1 AND expires_at IS NOT NULL AND expires_at < $2
+-- and roughly half of the document types never set an expiry (users,
+-- authenticators, OAuth clients, organizations, ...). Those rows occupy a
+-- NULL entry in the full index that no query can ever probe.
+--
+-- Aurora DSQL gained partial-index support: "The optional WHERE clause
+-- specifies a Boolean expression, or predicate, that defines a partial index.
+-- The index includes only rows for which the predicate evaluates to true."
+-- (CREATE INDEX, Aurora DSQL User Guide.)
+--
+-- The predicate is spelled exactly as the query's own clause, because "Aurora
+-- DSQL can use a partial index for a query only when it can prove that the
+-- query's WHERE conditions imply the index's predicate. If it can't, Aurora
+-- DSQL doesn't use the index for that query." A PostgreSQL 16 planner derives
+-- that implication from `expires_at < $1` on its own; AWS does not document
+-- how strong the DSQL prover is, so the query keeps the clause and a unit test
+-- pins it there.
+CREATE INDEX ASYNC idx_documents_cleanup_unexpired ON documents(doc_type, expires_at) WHERE expires_at IS NOT NULL;

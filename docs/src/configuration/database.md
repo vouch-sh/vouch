@@ -74,6 +74,27 @@ Database migrations are embedded in the server binary and run automatically on s
 - SQLite migrations: `crates/vouch-server/migrations/sqlite/`
 - PostgreSQL migrations: `crates/vouch-server/migrations/postgres/`
 
+### Index builds on Aurora DSQL
+
+DSQL builds every index asynchronously: `CREATE INDEX ASYNC` returns a job ID as
+soon as the build is submitted, so startup finishes before the index is usable.
+Until the build completes the index is marked invalid and the planner ignores
+it. Migrations that replace an index therefore leave a window — after the old
+index is dropped and before the new one is valid — in which the affected query
+falls back to a scan. The queries involved so far belong to the background
+expiry sweep, so the effect is a slower sweep, not a slower request.
+
+Watch a build from a `psql` session against the cluster:
+
+```sql
+SELECT job_id, status, object_name FROM sys.jobs WHERE job_type = 'INDEX_BUILD';
+```
+
+A `failed` job leaves the index definition in place but invalid, and DSQL does
+not remove it. The migration is already recorded in `_sqlx_migrations`, so a
+restart will not retry it — drop the index by name and re-issue the statement
+from the matching file in `migrations/postgres/` by hand.
+
 ## Backup
 
 | Database | Backup Method | Frequency |
