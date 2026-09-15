@@ -21,7 +21,7 @@ async fn test_authenticator_crud() {
         .await
         .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let credential_id = vec![1u8, 2, 3, 4, 5];
     let public_key = vec![10u8; 65];
     let user_handle = vec![20u8; 32];
@@ -30,7 +30,6 @@ async fn test_authenticator_crud() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "auth@example.com",
             name: "YubiKey 5C",
             credential_id: &credential_id,
             public_key: &public_key,
@@ -107,13 +106,12 @@ async fn test_authenticator_count() {
         .expect("Failed to count");
     assert_eq!(count, 0);
 
-    // Add authenticators (with user_email parameter)
+    // Add authenticators
     for i in 0..3 {
         create_authenticator(
             &store,
             &CreateAuthenticatorParams {
                 user_id: &user_id,
-                user_email: "count@example.com",
                 name: &format!("Key {}", i),
                 credential_id: &[i as u8; 10],
                 public_key: &[0u8; 32],
@@ -160,7 +158,6 @@ async fn test_create_authenticator_persists_nonzero_registration_counter() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "reg-counter@example.com",
             name: "YubiKey 5C",
             credential_id: &credential_id,
             public_key: &public_key,
@@ -209,7 +206,6 @@ async fn test_create_authenticator_preserves_high_bit_counter_via_cast_signed() 
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "highbit@example.com",
             name: "YubiKey",
             credential_id: &credential_id,
             public_key: &[10u8; 65],
@@ -252,7 +248,6 @@ async fn seed_authenticator_at(store: &DocumentStore, email: &str, counter: u32)
         store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: email,
             name: "YubiKey",
             credential_id: email.as_bytes(),
             public_key: &[10u8; 65],

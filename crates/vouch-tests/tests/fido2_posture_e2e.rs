@@ -76,7 +76,6 @@ async fn create_jwt_client(
 async fn register_mock_device_in_db(
     harness: &TestHarness,
     user_id: &str,
-    user_email: &str,
     device: &IntegrationMockDevice,
 ) -> String {
     let user_handle = uuid::Uuid::parse_str(user_id)
@@ -88,7 +87,6 @@ async fn register_mock_device_in_db(
         &harness.state.store,
         &CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Mock FIDO2 Key",
             credential_id: &device.credential_id(),
             public_key: &device.inner_public_key_cose(),
@@ -241,7 +239,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
 
     // Register the mock device in the DB
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     // Activate the OsRecency preconfigured policy for this org
     db::set_preconfigured_active(
@@ -306,7 +304,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -367,7 +365,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -427,7 +425,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -475,7 +473,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
 
@@ -553,7 +551,7 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
 
@@ -638,7 +636,7 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
 
@@ -691,7 +689,7 @@ async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
     .expect("Failed to create SCIM user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
 
@@ -737,7 +735,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
         .await
         .expect("Failed to create user");
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     db::set_preconfigured_active(
         &harness.state.store,
         &org.id,
@@ -838,7 +836,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
 
     // Create and activate a custom posture policy with a distinctive name.
     let policy = db::create_custom_policy(
@@ -955,7 +953,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,

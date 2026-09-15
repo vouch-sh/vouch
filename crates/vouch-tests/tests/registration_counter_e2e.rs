@@ -85,7 +85,6 @@ async fn create_jwt_client(
 async fn register_mock_device_in_db_with_counter(
     harness: &TestHarness,
     user_id: &str,
-    user_email: &str,
     device: &IntegrationMockDevice,
     stored_counter: u32,
 ) -> String {
@@ -98,7 +97,6 @@ async fn register_mock_device_in_db_with_counter(
         &harness.state.store,
         &CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Mock FIDO2 Key",
             credential_id: &device.credential_id(),
             public_key: &device.inner_public_key_cose(),
@@ -233,7 +231,6 @@ async fn test_nonzero_stored_registration_counter_rejects_clone_assertion() {
     let _auth_id = register_mock_device_in_db_with_counter(
         &harness,
         &user.id,
-        &user.email,
         &device,
         initial_stored_counter,
     )
@@ -310,7 +307,7 @@ async fn test_zero_stored_registration_counter_accepts_first_assertion() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id =
-        register_mock_device_in_db_with_counter(&harness, &user.id, &user.email, &device, 0).await;
+        register_mock_device_in_db_with_counter(&harness, &user.id, &device, 0).await;
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
@@ -386,7 +383,6 @@ async fn test_high_bit_stored_registration_counter_rejects_clone_assertion() {
     let auth_id = register_mock_device_in_db_with_counter(
         &harness,
         &user.id,
-        &user.email,
         &device,
         high_bit_counter,
     )

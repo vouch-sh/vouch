@@ -955,7 +955,6 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
         store,
         &crate::db::CreateAuthenticatorParams {
             user_id,
-            user_email: "test@example.com",
             name: "Test Key",
             credential_id: format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],

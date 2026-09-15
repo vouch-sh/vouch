@@ -6,13 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::db::document_type::{DocumentType, IndexEntry};
 
 /// A registered FIDO2 authenticator (YubiKey).
-///
-/// Denormalized: includes `user_email` so credential-ID lookups
-/// resolve the owning user without a JOIN.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticatorDoc {
     pub user_id: String,
-    pub user_email: String,
     pub name: String,
     /// Base64-encoded FIDO2 credential ID.
     pub credential_id: String,

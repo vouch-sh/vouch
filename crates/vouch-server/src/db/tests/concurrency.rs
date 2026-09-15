@@ -78,7 +78,6 @@ async fn test_device_auth_consume_concurrent() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "race-device@example.com",
             name: "Key",
             credential_id: b"cred-race-device",
             public_key: &[0u8; 32],
@@ -248,7 +247,6 @@ async fn test_authorize_device_auth_concurrent() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "race-authorize@example.com",
             name: "Key",
             credential_id: b"cred-race-authorize",
             public_key: &[0u8; 32],
@@ -790,7 +788,6 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "counter@example.com",
             name: "Counter Key",
             credential_id: b"cred-counter-race",
             public_key: &[0u8; 32],
@@ -874,7 +871,6 @@ async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "counter-seam@example.com",
             name: "Counter Seam Key",
             credential_id: b"cred-counter-seam",
             public_key: &[0u8; 32],
@@ -1043,7 +1039,6 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "cascade@example.com",
             name: "Cascade Key",
             credential_id: b"cred-cascade",
             public_key: &[0u8; 32],
@@ -1161,7 +1156,6 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "retry-poll@example.com",
             name: "Key",
             credential_id: b"cred-retry-poll",
             public_key: &[0u8; 32],
@@ -1268,7 +1262,6 @@ async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "exhaust@example.com",
             name: "Key",
             credential_id: b"cred-exhaust",
             public_key: &[0u8; 32],
@@ -1367,7 +1360,6 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "retry-consume@example.com",
             name: "Key",
             credential_id: b"cred-retry-consume",
             public_key: &[0u8; 32],
@@ -1490,7 +1482,6 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "stale@example.com",
             name: "Key",
             credential_id: b"cred-stale",
             public_key: &[0u8; 32],
@@ -1639,7 +1630,6 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "consumed-cascade@example.com",
             name: "Cascade Key",
             credential_id: b"cred-consumed-cascade",
             public_key: &[0u8; 32],

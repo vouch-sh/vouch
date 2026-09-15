@@ -1639,7 +1639,6 @@ pub(crate) async fn browser_register_complete(
         &state.store,
         &db::CreateAuthenticatorParams {
             user_id: &reg_state.user_id.to_string(),
-            user_email: &reg_state.user_email,
             name: &validated.device_name,
             credential_id: &cred_id_to_store,
             public_key: &public_key_cbor,

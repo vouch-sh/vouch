@@ -388,7 +388,6 @@ pub(crate) async fn register_complete(
         &state.store,
         &db::CreateAuthenticatorParams {
             user_id: &reg_state.user_id.to_string(),
-            user_email: &reg_state.user_name,
             name: reg_state.device_name.as_str(),
             credential_id: &verified_cred_id,
             public_key: &verified_public_key,

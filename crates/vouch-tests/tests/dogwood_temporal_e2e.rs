@@ -329,7 +329,6 @@ async fn create_jwt_client(
 async fn register_mock_device_in_db(
     harness: &TestHarness,
     user_id: &str,
-    user_email: &str,
     device: &IntegrationMockDevice,
 ) -> String {
     let user_handle = uuid::Uuid::parse_str(user_id)
@@ -340,7 +339,6 @@ async fn register_mock_device_in_db(
         &harness.state.store,
         &CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Mock FIDO2 Key",
             credential_id: &device.credential_id(),
             public_key: &device.inner_public_key_cose(),
@@ -444,7 +442,7 @@ async fn grant_scenario(
     .await
     .expect("activate slugs");
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     (harness, user, device, client, pkcs8)
 }

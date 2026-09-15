@@ -1474,7 +1474,6 @@ mod tests {
                         &writer,
                         &crate::db::CreateAuthenticatorParams {
                             user_id: &doc_id,
-                            user_email: "test@example.com",
                             name: "Hook-Enrolled Key",
                             credential_id: cred.as_slice(),
                             public_key: &[0u8; 32],
@@ -1635,7 +1634,6 @@ mod tests {
                         &writer,
                         &crate::db::CreateAuthenticatorParams {
                             user_id: &doc_id,
-                            user_email: "test@example.com",
                             name: "Retry Hook Key",
                             credential_id: cred.as_slice(),
                             public_key: &[0u8; 32],

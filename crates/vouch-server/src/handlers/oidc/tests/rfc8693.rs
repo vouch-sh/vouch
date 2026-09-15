@@ -1777,7 +1777,6 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
         &state.store,
         &crate::db::CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: &user.email,
             name: "YubiKey 5",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],
@@ -1845,7 +1844,6 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
         &state.store,
         &crate::db::CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: &user.email,
             name: "YubiKey 5 (original)",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],
