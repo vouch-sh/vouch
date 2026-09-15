@@ -72,9 +72,10 @@ Report the actual strength. Three real examples from one session:
 - Unrecognized `prompt`: "it MAY return an error or it MAY ignore it" —
   both behaviors are conformant, so consistency is a product decision,
   not a compliance one.
-- `response_mode` for errors: "All parameters returned from the
-  Authorization Endpoint SHOULD use the same Response Mode" — a
-  recommendation, so calling a deviation a "violation" overstates it.
+- `response_mode` for multiple-valued response types: "All parameters
+  returned from the Authorization Endpoint SHOULD use the same Response
+  Mode" — a recommendation, so calling a deviation a "violation"
+  overstates it.
 - JARM error responses: the JWT "MUST furthermore contain the
   authorization endpoint response parameters ... even in case of an
   error response" — no escape clause, so an unsigned fallback is a
