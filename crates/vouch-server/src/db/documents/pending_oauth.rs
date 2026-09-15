@@ -45,10 +45,8 @@ impl DocumentType for PendingOAuthAuthDoc {
     const DOC_TYPE: &'static str = "pending_oauth_auth";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![IndexEntry {
-            field: "client_id",
-            value: self.client_id.clone(),
-        }]
+        // No index needed — pending authorizations are read by document ID.
+        Vec::new()
     }
 
     fn expires_at(&self) -> Option<Timestamp> {
