@@ -3616,14 +3616,12 @@ async fn test_par_empty_parameter_is_treated_as_omitted() {
 //
 // A PAR or pending-authorization request's `response_mode` lives in its stored
 // record, not on the `/oauth/authorize` URL. OAuth 2.0 Multiple Response Type
-// Encoding Practices §5
-// (specs/openid/oauth-v2-multiple-response-types-1_0.txt): "All parameters
-// returned from the Authorization Endpoint SHOULD use the same Response Mode.
-// This recommendation applies to both success and error responses." For the
-// JWT modes JARM §2.1 is stronger (converted cache,
-// specs/openid/openid-financial-api-jarm-ID1.txt): "The JWT furthermore
-// contains the authorization endpoint response parameters as defined for the
-// particular response types, even in case of an error response."
+// Encoding Practices §2.1
+// (specs/openid/oauth-v2-multiple-response-types-1_0.txt) defines
+// `response_mode` as "the mechanism to be used for returning Authorization
+// Response parameters from the Authorization Endpoint", and RFC 6749 §4.1.2.1
+// defines the error response as an Authorization Response, so a rejection is
+// encoded in the negotiated mode.
 // ========================================================================
 
 /// Assert an `/oauth/authorize` rejection is rendered as a `form_post` HTML

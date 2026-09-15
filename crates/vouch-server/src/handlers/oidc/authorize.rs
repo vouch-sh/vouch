@@ -184,11 +184,12 @@ struct ErrorTarget<'a> {
 /// A mode taken from the request is parsed only after the `redirect_uri` is
 /// validated, so an unusable value can be reported to it. A mode read back from
 /// a PAR or pending-authorization record was validated when it was stored and
-/// is the request's mode; the Multiple Response Type Encoding Practices say
-/// "All parameters returned from the Authorization Endpoint SHOULD use the same
-/// Response Mode. This recommendation applies to both success and error
-/// responses.", so a rejection must be rendered in it too, not in the `query`
-/// default an absent URL parameter parses to.
+/// is the request's mode. `response_mode` is "the mechanism to be used for
+/// returning Authorization Response parameters from the Authorization Endpoint"
+/// (OAuth 2.0 Multiple Response Type Encoding Practices §2.1), and an error is
+/// an Authorization Response (RFC 6749 §4.1.2.1), so a rejection is rendered in
+/// the stored mode, not in the `query` default an absent URL parameter parses
+/// to.
 #[derive(Clone, Copy)]
 enum ResponseModeSource<'a> {
     Requested(Option<&'a str>),
