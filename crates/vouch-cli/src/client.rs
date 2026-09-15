@@ -809,7 +809,6 @@ mod tests {
                  max_age=\"300\""
                     .to_string(),
             ),
-            dpop_nonce: None,
             sig_nonce: None,
             retry_after: None,
         };
