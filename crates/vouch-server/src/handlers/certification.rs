@@ -148,17 +148,16 @@ pub(crate) async fn complete_login(
     };
 
     // ── 4. Get or create the certification test authenticator ─────────────
-    let authenticator_id =
-        match get_or_create_cert_authenticator(&state, &user.id, &user.email).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Certification login: failed to get/create cert authenticator"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let authenticator_id = match get_or_create_cert_authenticator(&state, &user.id).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "Certification login: failed to get/create cert authenticator"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // ── 5. Create a browser session ──────────────────────────────────────
     // Delete any previous sessions for the cert user first to prevent
@@ -357,7 +356,6 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
 async fn get_or_create_cert_authenticator(
     state: &Arc<AppState>,
     user_id: &str,
-    user_email: &str,
 ) -> anyhow::Result<String> {
     let authenticators = db::get_authenticators_for_user(&state.store, user_id).await?;
     if let Some(auth) = authenticators.into_iter().next() {
@@ -375,7 +373,6 @@ async fn get_or_create_cert_authenticator(
         &state.store,
         &db::CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Certification Test Authenticator",
             credential_id: &dummy_credential_id,
             public_key: &dummy_public_key,

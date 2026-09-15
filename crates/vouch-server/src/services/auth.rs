@@ -52,9 +52,6 @@ pub(crate) struct AuthenticatorLookupResult {
 
 /// Look up an authenticator and verify it belongs to the specified user.
 ///
-/// Uses a single JOIN query to fetch both the authenticator and user,
-/// eliminating a sequential DB round-trip.
-///
 /// # Errors
 ///
 /// Returns `ServiceError::NotFound` if the credential or user is not found.
@@ -63,7 +60,6 @@ pub(crate) async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
 ) -> ServiceResult<AuthenticatorLookupResult> {
-    // Get the authenticator and user in a single JOIN query
     let row = db::get_authenticator_with_user_by_credential_id(&state.store, params.credential_id)
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?

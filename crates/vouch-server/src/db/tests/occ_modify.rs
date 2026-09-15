@@ -30,7 +30,6 @@ async fn test_update_authenticator_name_only_name_changes() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "rename@example.com",
             name: "OldName",
             credential_id: b"cred-rename",
             public_key: &[1u8; 32],

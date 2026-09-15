@@ -411,12 +411,11 @@ async fn test_scim_session_invalidation_on_deactivation() {
     .await
     .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let auth_id = create_authenticator(
         &store,
         &CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: "invalidate@example.com",
             name: "SCIM Key",
             credential_id: b"scim-cred-id",
             public_key: &[0u8; 32],

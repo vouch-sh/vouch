@@ -27,7 +27,6 @@ async fn test_user_cascade_delete() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "cascade@example.com",
             name: "Cascade Key",
             credential_id: &[99u8; 10],
             public_key: &[0u8; 32],

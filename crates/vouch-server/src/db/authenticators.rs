@@ -60,9 +60,6 @@ impl TryFrom<Document<AuthenticatorDoc>> for Authenticator {
 }
 
 /// Result of looking up an authenticator with its owning user.
-///
-/// Built from the denormalized `user_email` on `AuthenticatorDoc`,
-/// so no JOIN is needed.
 #[derive(Debug)]
 pub struct AuthenticatorWithUser {
     pub authenticator: Authenticator,
@@ -70,11 +67,8 @@ pub struct AuthenticatorWithUser {
 }
 
 /// Parameters for creating a new authenticator.
-///
-/// `user_email` is denormalized into the document to eliminate JOINs.
 pub struct CreateAuthenticatorParams<'a> {
     pub user_id: &'a str,
-    pub user_email: &'a str,
     pub name: &'a str,
     pub credential_id: &'a [u8],
     pub public_key: &'a [u8],
@@ -101,7 +95,7 @@ pub async fn create_authenticator(
 ) -> Result<String> {
     let doc = AuthenticatorDoc {
         user_id: params.user_id.to_string(),
-        user_email: params.user_email.to_string(),
+        user_email: String::new(),
         name: params.name.to_string(),
         credential_id: URL_SAFE_NO_PAD.encode(params.credential_id),
         public_key: URL_SAFE_NO_PAD.encode(params.public_key),
@@ -153,8 +147,7 @@ pub async fn get_authenticator_by_credential_id(
 
 /// Get an authenticator and its owning user by credential ID.
 ///
-/// Uses denormalized `user_email` in `AuthenticatorDoc` instead of a JOIN.
-/// Falls back to user lookup by ID to populate full user record.
+/// Looks up the full user record by ID after resolving the authenticator.
 pub async fn get_authenticator_with_user_by_credential_id(
     store: &DocumentStore,
     credential_id: &[u8],
