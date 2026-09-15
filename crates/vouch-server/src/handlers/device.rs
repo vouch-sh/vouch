@@ -5,15 +5,19 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::{self, DeviceAuthState};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
+use crate::handlers::oidc::client_auth::{
+    ClientAuthFields, ClientAuthPresentation, ClientAuthWitnesses, client_auth_proof,
+    complete_client_auth, extract_client_auth, with_client_auth_challenge,
+};
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::grant_type::OAuthGrantType;
-use crate::services::oidc::token::{authenticate_client_mtls, validate_dpop_if_present};
+use crate::services::oidc::token::validate_dpop_if_present;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -25,6 +29,7 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError, protocol,
@@ -84,40 +89,126 @@ fn hash_device_code(code: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
+impl ClientAuthFields for DeviceCodeRequest {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
+    }
+
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion.as_ref().map(|s| s.expose_secret())
+    }
+
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
+    }
+}
+
+/// A client authenticated at a device-flow endpoint and authorized for the
+/// `device_code` grant, with the witnesses that become its
+/// [`crate::services::auth::ClientAuthProof`].
+pub(crate) struct DeviceClient {
+    client: ValidatedOAuthClient,
+    witnesses: ClientAuthWitnesses,
+}
+
+/// Authenticate the caller of a device-flow endpoint.
+///
+/// RFC 8628 §3.1: "The client authentication requirements of Section 3.2.1
+/// of [RFC6749] apply to requests on this endpoint, which means that
+/// confidential clients (those that have established client credentials)
+/// authenticate in the same manner as when making requests to the token
+/// endpoint, and public clients provide the "client_id" parameter to
+/// identify themselves." §3.4 restates it for the token request: "If the
+/// client was issued client credentials (or assigned other authentication
+/// requirements), the client MUST authenticate". Both sections make
+/// `client_id` "REQUIRED if the client is not authenticating", so a request
+/// carrying neither is refused.
+///
+/// RFC 7591 §2 `grant_types`: the client must also be registered for the
+/// `device_code` grant, checked here so an unauthorized client neither gets
+/// a usable `user_code` nor burns a single-use device code.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+pub(crate) async fn authenticate_device_client<T: ClientAuthFields>(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    params: &T,
+    client_cert: &OptionalClientCert,
+    arrival: ArrivalTime,
+) -> Result<DeviceClient, Response> {
+    let presentation = ClientAuthPresentation::of(headers, params);
+    let auth = extract_client_auth(headers, params)?;
+    let Some(outcome) = complete_client_auth(state, auth, client_cert, arrival).await? else {
+        return Err(with_client_auth_challenge(
+            presentation,
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication or client_id required",
+            )
+            .into_oauth_response()
+            .into_response(),
+        ));
+    };
+    let client = ValidatedOAuthClient::for_grant(outcome.client, OAuthGrantType::DeviceCode)
+        .map_err(|e| e.into_oauth_response().into_response())?;
+    Ok(DeviceClient {
+        client,
+        witnesses: outcome.witnesses,
+    })
+}
+
 /// Start device authorization flow.
 /// POST /oauth/device
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// [`protocol::CONTENT_TYPE_FORM_URLENCODED`] format.
-#[expect(clippy::disallowed_methods, reason = "mints the device code's expiry")]
 pub(crate) async fn device_code(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
+    headers: HeaderMap,
     OAuthForm(req): OAuthForm<DeviceCodeRequest>,
-) -> Result<Json<DeviceCodeResponse>, ServiceError> {
+) -> Response {
     tracing::info!("Device authorization request");
 
-    // If a client_id is provided, it must refer to a registered OAuth client
-    // that is authorized (RFC 7591 §2 `grant_types`) for the device_code
-    // grant. Rejecting at creation avoids surfacing a usable `user_code` to
-    // the user for an unauthorized client; the redemption path re-checks so
-    // a client restricted mid-flow still cannot redeem.
-    if let Some(client_id) = req.client_id.as_deref() {
-        let client = db::get_oauth_client_by_client_id(&state.store, client_id)
-            .await
-            .map_err(|_| {
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "database_error",
-                    "Failed to validate client_id",
-                )
-            })?;
-        let client = client.ok_or_else(|| {
-            ServiceError::oauth(OAuthErrorCode::InvalidClient, "Unknown client_id")
-        })?;
-        ValidatedOAuthClient::for_grant(client, OAuthGrantType::DeviceCode)?;
-    }
+    let device_client =
+        match authenticate_device_client(&state, &headers, &req, &client_cert, arrival).await {
+            Ok(client) => client,
+            Err(resp) => return resp,
+        };
+    // Commit the assertion's JTI before any state is written, so a replayed
+    // assertion cannot start a second flow. The proof itself has no consumer
+    // here: this endpoint issues no token.
+    let _client_auth = match client_auth_proof(
+        &state,
+        device_client.witnesses,
+        &device_client.client,
+        "device_authorization",
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(resp) => return resp,
+    };
 
-    // Generate codes
+    match create_device_authorization(&state, &device_client.client.client_id).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// Mint and store a device authorization for `client_id`.
+#[expect(clippy::disallowed_methods, reason = "mints the device code's expiry")]
+async fn create_device_authorization(
+    state: &Arc<AppState>,
+    client_id: &str,
+) -> Result<DeviceCodeResponse, ServiceError> {
     let device_code = generate_device_code().map_err(|_| {
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -134,7 +225,6 @@ pub(crate) async fn device_code(
     })?;
     let device_code_hash = hash_device_code(&device_code);
 
-    // Calculate expiration
     let now = Timestamp::now();
     let expires_seconds = i64::try_from(state.config().device_code_expires_seconds).unwrap_or(600);
     let duration = Span::new().seconds(expires_seconds);
@@ -148,32 +238,30 @@ pub(crate) async fn device_code(
 
     let interval_seconds = i32::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
 
-    // Store in database (client_id is validated above when provided)
     db::create_device_auth_request(
         &state.store,
         &device_code_hash,
         &user_code,
-        req.client_id.as_deref(),
+        Some(client_id),
         expires_at,
         interval_seconds,
     )
     .await?;
 
-    // Build verification URLs
     let verification_uri = format!("{}/device", state.config().base_url);
     // RFC 8628 §3.2: Include verification_uri_complete with embedded user_code
     let verification_uri_complete = Some(format!("{verification_uri}?user_code={user_code}"));
 
     tracing::info!("Created device auth request, user_code: {}", user_code);
 
-    Ok(Json(DeviceCodeResponse {
+    Ok(DeviceCodeResponse {
         device_code,
         user_code,
         verification_uri,
         verification_uri_complete,
         expires_in: state.config().device_code_expires_seconds,
         interval: state.config().device_poll_interval_seconds,
-    }))
+    })
 }
 
 /// Revoke the OAuth sessions issued from a replayed device code, and drop
@@ -247,6 +335,7 @@ pub(crate) async fn device_token(
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     device_code: &str,
+    device_client: DeviceClient,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
     // Validate device_code format before hashing and DB lookup.
@@ -271,6 +360,35 @@ pub(crate) async fn device_token(
             )
         })?
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
+
+    // RFC 6749 §5.2 `invalid_grant` covers a grant that "was issued to
+    // another client", the rule §4.1.3 states for authorization codes. Checked
+    // before the poll-time write and every status response, so another client
+    // holding the code learns nothing and cannot affect the owner's polling.
+    // A row stored without a client_id (before client authentication was
+    // required here) fails the same way.
+    let oauth_client = device_client.client;
+    if request.client_id.as_deref() != Some(oauth_client.client_id.as_str()) {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::invalid_grant(),
+        ));
+    }
+
+    // Every authenticated poll commits its assertion's JTI, so an assertion
+    // authenticates exactly one request. `PendingJti` documents dropping it
+    // uncommitted on a retryable error such as `use_dpop_nonce`; here each
+    // poll is an independent request and the assertion's audience is not
+    // endpoint-specific, so an uncommitted one would stay valid at PAR,
+    // revoke, and introspect for its lifetime. The CLI signs a new assertion
+    // for every poll, including the immediate retry after `use_dpop_nonce`.
+    let client_auth = client_auth_proof(
+        &state,
+        device_client.witnesses,
+        &oauth_client,
+        "device_code",
+    )
+    .await?;
 
     // Check if expired
     let now = arrival.timestamp();
@@ -362,123 +480,26 @@ pub(crate) async fn device_token(
                     ));
                 }
             };
-            let has_mtls_cert = client_cert.0.is_some();
-
-            // Look up the registered OAuth client to enforce FAPI 2.0
-            // sender-constraint requirements. The built-in CLI flow (no
-            // registered client_id) has no FAPI constraints — consistent
-            // with how the device auth request is created in `device_code`.
-            let oauth_client = match request.client_id.as_deref() {
-                Some(cid) => match db::get_oauth_client_by_client_id(&state.store, cid).await {
-                    Ok(Some(c)) => Some(c),
-                    // A device request carrying a client_id that no longer
-                    // resolves (client deleted mid-flow) must not fall
-                    // through with FAPI enforcement disabled — that would
-                    // issue an unbound token.
-                    Ok(None) => {
-                        return Err(oauth_error(
-                            StatusCode::UNAUTHORIZED,
-                            OAuthError {
-                                error: OAuthErrorCode::InvalidClient.as_str().to_string(),
-                                error_description: Some(
-                                    "Unknown client_id for device authorization".to_string(),
-                                ),
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to look up OAuth client for device grant: {e}");
-                        return Err(oauth_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            OAuthError::server_error(),
-                        ));
-                    }
+            // Every sender-constraint requirement registered for this client.
+            let sender_constraint = match SenderConstraintProof::validate(
+                &oauth_client,
+                SenderConstraints {
+                    dpop: dpop_proof.is_some(),
+                    mtls_cert: client_cert.0.is_some(),
                 },
-                None => None,
-            };
-
-            // RFC 7591 §2 `grant_types` / RFC 6749 §5.2 `unauthorized_client`:
-            // the registered client loaded above for FAPI sender-constraint
-            // enforcement must also be authorized for the device_code grant
-            // before any token is issued. The other token-endpoint grants that
-            // load a registered client (`client_credentials`, `token_exchange`,
-            // `fido2_assertion`) enforce the same field via
-            // `is_authorized_for_grant`; the device-code grant authenticates by
-            // the consumed `device_code` (`ClientAuthProof::NoAuth`) rather
-            // than client credentials, so its client lookup happens here — this
-            // closes the registration-contract gap left by commit 45b8de2.
-            // Runs before `try_consume_device_auth` so an unauthorized client
-            // does not burn the single-use device code, matching the mTLS gate
-            // below. The built-in CLI flow carries no `client_id` and is
-            // unaffected: `oauth_client` is `None` and the guard is skipped.
-            let oauth_client = match oauth_client
-                .map(|c| ValidatedOAuthClient::for_grant(c, OAuthGrantType::DeviceCode))
-                .transpose()
-            {
-                Ok(client) => client,
-                Err(_) => {
-                    return Err(oauth_error(
-                        StatusCode::UNAUTHORIZED,
-                        OAuthError {
-                            error: OAuthErrorCode::UnauthorizedClient.as_str().to_string(),
-                            error_description: Some(
-                                "Client is not authorized for device_code grant".to_string(),
-                            ),
-                        },
-                    ));
-                }
-            };
-
-            // RFC 8705 §2 / parity with the authorization-code, client-credentials,
-            // refresh-token, and PAR grants: a client registered with
-            // `tls_client_auth` or `self_signed_tls_client_auth` authenticates by
-            // mTLS specifically, so the presented certificate must be matched
-            // against the client's registered identity (subject DN / SAN / x5c)
-            // before any token is issued. Without this gate the mTLS listener's
-            // `AcceptAnyClientCert` posture would let anyone who redeems a device
-            // code mint a cert-bound token for *their own* cert, defeating the
-            // `tls_client_certificate_bound_access_tokens` opt-in for the only
-            // client profile that has a registered cert to match against.
-            //
-            // Scoped to mTLS-client-auth methods by `authenticate_client_mtls`
-            // itself: a `client_secret_basic`/`private_key_jwt`
-            // sender-constraint-only client has no registered cert identity to
-            // match (RFC 8705 §3 binds to whatever cert is presented by design).
-            //
-            // Runs before `try_consume_device_auth` so a failed mTLS client
-            // authentication does not burn the single-use device code — the
-            // legitimate holder of the registered cert can retry.
-            if let Some(ref oc) = oauth_client
-                && let Err(e) = authenticate_client_mtls(&state, oc, client_cert.0.as_ref()).await
-            {
-                return Err(e.into_service_error().into_oauth_response().into_response());
-            }
-
-            // Every sender-constraint requirement registered for this
-            // client. The built-in CLI flow carries no registered client_id,
-            // so there is no registration to enforce against.
-            let sender_constraint = match oauth_client {
-                Some(ref oc) => match SenderConstraintProof::validate(
-                    oc,
-                    SenderConstraints {
-                        dpop: dpop_proof.is_some(),
-                        mtls_cert: has_mtls_cert,
-                    },
-                ) {
-                    Ok(witness) => witness,
-                    Err(e) => return Err(e.into_oauth_response().into_response()),
-                },
-                None => SenderConstraintProof::no_registered_client(),
+            ) {
+                Ok(witness) => witness,
+                Err(e) => return Err(e.into_oauth_response().into_response()),
             };
 
             // RFC 8705 Section 3: Bind the access token to the mTLS
             // certificate thumbprint only when the client has opted in.
             // DPoP (jkt) takes priority over mTLS (x5t#S256) in
             // `create_oauth_access_token`.
-            let mtls_cert_thumbprint = oauth_client
+            let mtls_cert_thumbprint = client_cert
+                .0
                 .as_ref()
-                .filter(|c| c.tls_client_certificate_bound_access_tokens)
-                .and(client_cert.0.as_ref())
+                .filter(|_| oauth_client.tls_client_certificate_bound_access_tokens)
                 .map(|c| c.thumbprint.clone());
 
             // RFC 8628 Section 3.5: Atomically consume the device
@@ -532,10 +553,7 @@ pub(crate) async fn device_token(
                 verification,
             } = approval;
 
-            // Use the registered client_id from the device auth request.
-            let client_id = request
-                .client_id
-                .unwrap_or_else(|| state.config().base_url.to_string());
+            let client_id = oauth_client.client_id.clone();
 
             // The device auth request doesn't carry aaguid/org_domain, so look
             // them up once here. These reads happen at session creation and
@@ -624,13 +642,7 @@ pub(crate) async fn device_token(
                 },
                 TokenIssuanceProof {
                     grant: GrantProof::DeviceCode(device_claim),
-                    // RFC 8628 device authorization grant: the consumed
-                    // `device_code` is itself the client credential at
-                    // this endpoint — see GrantProof::DeviceCode above.
-                    // No separate external client-auth step takes place.
-                    client_auth: ClientAuthProof::NoAuth(
-                        crate::services::auth::NoClientAuth::internal_endpoint(),
-                    ),
+                    client_auth,
                     sender_constraint,
                 },
                 arrival,
@@ -648,35 +660,24 @@ pub(crate) async fn device_token(
             let expires_in = session_result.expires_in;
             let token_type = session_result.token_type;
 
-            // Record issuance like the other token-endpoint grants; the
-            // device-code grant otherwise leaves no oauth_token_issued trail.
-            // Usage stats correlate on the client's doc id, so resolve it for
-            // registered clients; the built-in CLI flow (base_url fallback)
-            // keeps the raw identifier.
-            let audit_client = db::get_oauth_client_by_client_id(&state.store, &client_id)
-                .await
-                .ok()
-                .flatten();
-            let audit_client_id = audit_client
-                .as_ref()
-                .map_or_else(|| client_id.clone(), |c| c.id.clone());
+            // Record issuance like the other token-endpoint grants; usage
+            // stats correlate on the client's doc id.
             // The user-org half of `resolve_event_org_domain`'s "prefer
             // user, fall back to client" rule was already resolved above for
             // the session claims, so it's reused here rather than
             // re-derived; the client-org fallback still runs its own lookup
-            // when the user has no org, using the client already in scope
-            // instead of re-fetching it by id.
+            // when the user has no org.
             let audit_org_domain = db::resolve_event_org_domain(
                 &state.store,
                 org_domain.as_deref(),
-                audit_client.as_ref().and_then(|c| c.org_id.as_deref()),
+                oauth_client.org_id.as_deref(),
             )
             .await;
             db::record_oauth_event(
                 &state.audit,
                 &state.store,
                 &db::RecordOAuthEventParams {
-                    oauth_client_id: &audit_client_id,
+                    oauth_client_id: &oauth_client.id,
                     event_type: db::OAuthEventType::TokenIssued,
                     user_id: Some(&user_id),
                     ip_address: client_info.client_ip,
@@ -722,6 +723,35 @@ mod tests {
     use crate::db::DeviceApproval;
     use crate::test_utils::*;
 
+    /// A public client (RFC 6749 §2.1) that identifies itself with
+    /// `client_id` alone at both device-flow endpoints. It holds the shared
+    /// test signing key so tokens it obtains pass `/v1/*` signature
+    /// verification.
+    async fn public_device_client(state: &Arc<AppState>) -> String {
+        let owner = create_test_user(&state.store, "device-client-owner@example.com").await;
+        create_test_client(
+            &state.store,
+            &owner.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                with_secret: false,
+                jwks: TestJwks::Shared,
+                ..Default::default()
+            },
+        )
+        .await
+        .client_id
+    }
+
+    /// The device-code grant body for `client_id`'s poll of `device_code`.
+    fn device_poll_body(device_code: &str, client_id: &str) -> String {
+        format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
+        )
+    }
+
     // ========================================================================
     // RFC 8628 Section 3.2 - Device Code Response Format Tests
     // ========================================================================
@@ -729,10 +759,17 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_device_code_response_format() {
         // RFC 8628 Section 3.2: Device code response must contain required fields
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/device",
+            &format!("client_id={client_id}&scope=openid"),
+            &[],
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -765,10 +802,17 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_device_code_interval() {
         // RFC 8628 Section 3.2: interval field is OPTIONAL but recommended
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/device",
+            &format!("client_id={client_id}&scope=openid"),
+            &[],
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -790,10 +834,17 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_user_code_format() {
         // RFC 8628 Section 6.1: User code format recommendations
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/device",
+            &format!("client_id={client_id}&scope=openid"),
+            &[],
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -816,12 +867,19 @@ mod tests {
     async fn test_rfc8628_user_code_alphabet() {
         // RFC 8628 Section 6.1: User code should avoid ambiguous characters
         // Our implementation uses: BCDFGHJKLMNPQRSTVWXZ (no vowels, no 0/O, 1/l/I confusion)
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // Generate multiple codes to test the character set
         for _ in 0..5 {
             // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-            let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
+            let (status, body) = http_post_form(
+                &app,
+                "/oauth/device",
+                &format!("client_id={client_id}&scope=openid"),
+                &[],
+            )
+            .await;
 
             assert_eq!(status, StatusCode::OK);
             let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -859,10 +917,17 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_poll_authorization_pending() {
         // RFC 8628 Section 3.5: Pending authorization returns authorization_pending
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // Create a device auth request (RFC 8628 Section 3.1: form-urlencoded)
-        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/device",
+            &format!("client_id={client_id}&scope=openid"),
+            &[],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let device_code = code_resp["device_code"].as_str().expect("device_code");
@@ -871,10 +936,7 @@ mod tests {
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                device_code
-            ),
+            &device_poll_body(device_code, &client_id),
             &[],
         )
         .await;
@@ -897,6 +959,7 @@ mod tests {
     async fn test_rfc8628_poll_expired_token() {
         // RFC 8628 Section 3.5: Expired device code returns expired_token
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // Create an expired device auth request directly in the database
         let device_code = "test_expired_device_code";
@@ -909,7 +972,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             5,
         )
@@ -920,10 +983,7 @@ mod tests {
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                device_code
-            ),
+            &device_poll_body(device_code, &client_id),
             &[],
         )
         .await;
@@ -940,6 +1000,7 @@ mod tests {
     async fn test_rfc8628_poll_access_denied() {
         // RFC 8628 Section 3.5: Denied authorization returns access_denied
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // Create a device auth request and mark it as denied
         let device_code = "test_denied_device_code";
@@ -953,7 +1014,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             5,
         )
@@ -969,10 +1030,7 @@ mod tests {
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                device_code
-            ),
+            &device_poll_body(device_code, &client_id),
             &[],
         )
         .await;
@@ -996,6 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_poll_after_approving_authenticator_deleted() {
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_deleted_authenticator_code";
         let expires_at = Timestamp::now()
@@ -1005,7 +1064,7 @@ mod tests {
             &state.store,
             &hash_device_code(device_code),
             "GONE-CODE",
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1034,9 +1093,7 @@ mod tests {
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
-            ),
+            &device_poll_body(device_code, &client_id),
             &[],
         )
         .await;
@@ -1052,12 +1109,13 @@ mod tests {
     #[tokio::test]
     async fn test_rfc8628_poll_invalid_device_code() {
         // RFC 8628: Invalid device code returns invalid_grant
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=nonexistent_code",
+            &device_poll_body("nonexistent_code", &client_id),
             &[],
         )
         .await;
@@ -1074,6 +1132,7 @@ mod tests {
     async fn test_rfc8628_successful_authorization() {
         // RFC 8628: Successful authorization returns access token
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         // Create a device auth request
         let device_code = "test_success_device_code";
@@ -1087,7 +1146,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             5,
         )
@@ -1117,10 +1176,7 @@ mod tests {
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                device_code
-            ),
+            &device_poll_body(device_code, &client_id),
             &[],
         )
         .await;
@@ -1253,16 +1309,14 @@ mod tests {
     #[tokio::test]
     async fn test_device_code_rejects_too_long() {
         // Device code > 128 characters should be rejected
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let long_code = "a".repeat(200);
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                long_code
-            ),
+            &device_poll_body(&long_code, &client_id),
             &[],
         )
         .await;
@@ -1276,16 +1330,14 @@ mod tests {
     async fn test_device_code_accepts_valid_length() {
         // A device code within the length limit should pass validation
         // (it won't be found in DB, but it shouldn't be rejected by validation)
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let valid_code = "a".repeat(128);
         let (status, body) = http_post_form(
             &app,
             "/oauth/token",
-            &format!(
-                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                valid_code
-            ),
+            &device_poll_body(&valid_code, &client_id),
             &[],
         )
         .await;
@@ -1332,6 +1384,7 @@ mod tests {
         // After a successful token issuance, a second poll must
         // return invalid_grant.
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_single_use_device_code";
         let device_code_hash = hash_device_code(device_code);
@@ -1344,7 +1397,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             0, // no rate limit for test
         )
@@ -1370,11 +1423,7 @@ mod tests {
         .expect("authorize device");
 
         // First poll — should succeed
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={}",
-            device_code
-        );
+        let body = device_poll_body(device_code, &client_id);
         let (status, _) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(status, StatusCode::OK, "First poll should succeed");
 
@@ -1393,6 +1442,7 @@ mod tests {
         // Directly set a device code to Consumed, verify polling
         // returns invalid_grant.
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_consumed_device_code";
         let device_code_hash = hash_device_code(device_code);
@@ -1405,7 +1455,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1436,11 +1486,7 @@ mod tests {
             .expect("Consumption should succeed");
 
         // Poll — must return invalid_grant
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={}",
-            device_code
-        );
+        let body = device_poll_body(device_code, &client_id);
         let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
@@ -1455,6 +1501,7 @@ mod tests {
         // Verify that replay detection actually revokes the user's
         // OAuth sessions, not just returns invalid_grant.
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_revoke_device_code";
         let device_code_hash = hash_device_code(device_code);
@@ -1467,7 +1514,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1493,11 +1540,7 @@ mod tests {
         .expect("authorize");
 
         // First poll — get a real token
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={}",
-            device_code
-        );
+        let body = device_poll_body(device_code, &client_id);
         let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(status, StatusCode::OK, "First poll should succeed");
 
@@ -1531,6 +1574,7 @@ mod tests {
         // A consumed device code with no user_id should still return
         // invalid_grant without a 500.
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_no_user_device_code";
         let device_code_hash = hash_device_code(device_code);
@@ -1543,7 +1587,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1566,11 +1610,7 @@ mod tests {
         state.store.update(&id, &data).await.expect("update");
 
         // Poll — should return invalid_grant, not 500
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={}",
-            device_code
-        );
+        let body = device_poll_body(device_code, &client_id);
         let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(
             status,
@@ -1599,6 +1639,7 @@ mod tests {
 
     async fn setup_race(setup_label: &str) -> (axum::Router, Arc<AppState>, RaceSetup) {
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = format!("test_race_{setup_label}");
         let device_code_hash = hash_device_code(&device_code);
@@ -1611,7 +1652,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1658,11 +1699,7 @@ mod tests {
                 .expect("session lookup");
         assert!(session.is_some(), "pre-existing session should exist");
 
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={}",
-            device_code
-        );
+        let body = device_poll_body(&device_code, &client_id);
 
         (
             app,
@@ -1811,6 +1848,7 @@ mod tests {
         // token poll must not receive a token (issue #846: the device flow
         // was the one grant path without a `user.active` check).
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = "test_deactivated_user_code";
         let device_code_hash = hash_device_code(device_code);
@@ -1820,7 +1858,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             "DEAC-CODE",
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1848,10 +1886,7 @@ mod tests {
             .await
             .expect("deactivate user");
 
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={device_code}"
-        );
+        let body = device_poll_body(device_code, &client_id);
         let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(
             status,
@@ -1873,6 +1908,7 @@ mod tests {
         hardware_verified: bool,
     ) -> (axum::Router, String) {
         let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
 
         let device_code = format!("test_hwv_{label}");
         let expires_at = Timestamp::now()
@@ -1882,7 +1918,7 @@ mod tests {
             &state.store,
             &hash_device_code(&device_code),
             "HWV-CODE",
-            None,
+            Some(&client_id),
             expires_at,
             0,
         )
@@ -1908,10 +1944,7 @@ mod tests {
         .await
         .expect("authorize device");
 
-        let body = format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:\
-             device_code&device_code={device_code}"
-        );
+        let body = device_poll_body(&device_code, &client_id);
         let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
         assert_eq!(status, StatusCode::OK, "device grant should issue: {resp}");
         let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
@@ -2017,6 +2050,11 @@ mod tests {
                     // change, and what every application created before it
                     // still has.
                     grant_types: None,
+                    // A public client, so the request identifies it with
+                    // `client_id` alone and the outcome rests on the grant
+                    // check.
+                    token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                    with_secret: false,
                     ..Default::default()
                 },
             )

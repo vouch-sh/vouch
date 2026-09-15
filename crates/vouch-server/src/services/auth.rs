@@ -479,8 +479,8 @@ impl NoClientAuth {
     /// server-internal endpoint where there is no external OAuth client.
     ///
     /// Use **only** for endpoints where the server is acting as both
-    /// issuer and client — browser login, enrollment callbacks, device
-    /// polling, certification test bypass. Adding new call sites is an
+    /// issuer and client — browser login, enrollment callbacks,
+    /// certification test bypass. Adding new call sites is an
     /// audit-relevant decision: grep for this constructor before merging
     /// any change that introduces a new caller.
     pub(crate) fn internal_endpoint() -> Self {

@@ -235,10 +235,10 @@ pub(crate) async fn par(
         );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
-    let mtls_verification = any_auth.mtls_verification;
+    let pending_jti = any_auth.witnesses.pending_jti;
+    let jwt_auth = any_auth.witnesses.jwt_auth;
+    let secret_verification = any_auth.witnesses.secret_verification;
+    let mtls_verification = any_auth.witnesses.mtls_verification;
 
     // FAPI 2.0: Validate client authentication method.
     //

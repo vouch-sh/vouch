@@ -175,6 +175,7 @@ async fn request_device_code(
     let device_request = DeviceCodeRequest {
         client_id: pre_registered_client_id.clone(),
         scope: None,
+        client_secret: None,
         client_assertion_type: client_assertion
             .as_ref()
             .map(|a| a.assertion_type.to_string()),
@@ -211,6 +212,7 @@ async fn request_device_code(
             let retry_request = DeviceCodeRequest {
                 client_id: new_client_id.clone(),
                 scope: None,
+                client_secret: None,
                 client_assertion_type: retry_assertion
                     .as_ref()
                     .map(|a| a.assertion_type.to_string()),

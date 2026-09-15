@@ -170,7 +170,7 @@ pub(crate) async fn revoke(
 
     let (caller_client_id, pending_jti) =
         match complete_client_auth(&state, auth, &client_cert, arrival).await {
-            Ok(Some(a)) => (a.client_id, a.pending_jti),
+            Ok(Some(a)) => (a.client_id, a.witnesses.pending_jti),
             Ok(None) => {
                 // No credentials provided → 401 with the shared challenge.
                 return with_client_auth_challenge(
@@ -244,7 +244,7 @@ pub(crate) async fn introspect(
 
     let (authenticated_client, pending_jti) =
         match complete_client_auth(&state, auth, &client_cert, arrival).await {
-            Ok(Some(a)) => (a.client, a.pending_jti),
+            Ok(Some(a)) => (a.client, a.witnesses.pending_jti),
             Ok(None) => {
                 // No credentials provided → 401 with the shared challenge.
                 return with_client_auth_challenge(

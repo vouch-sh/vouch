@@ -121,6 +121,13 @@ pub struct DeviceCodeRequest {
     /// Requested scope (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// RFC 6749 §2.3.1 `client_secret_post`. `client_secret_basic` travels in
+    /// the `Authorization` header instead.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_secret: Option<secrecy::SecretString>,
     /// RFC 7521 §4.2 `client_assertion`: "The assertion being used to
     /// authenticate the client." Present for a `private_key_jwt` client.
     #[serde(

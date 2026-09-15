@@ -446,13 +446,31 @@ mod auth_security {
 mod device_flow {
     use super::*;
 
+    /// A registered client for the device flow: both endpoints authenticate
+    /// the caller (RFC 8628 §3.1 and §3.4).
+    async fn device_client(harness: &TestHarness) -> vouch_server::test_utils::TestOAuthClient {
+        let owner = harness
+            .create_user("device-client-owner@example.com")
+            .await
+            .expect("Failed to create client owner");
+        harness
+            .create_oauth_client(&owner.id)
+            .await
+            .expect("Failed to create client")
+    }
+
     /// Test that device code endpoint returns valid response.
     #[tokio::test]
     async fn test_device_code_returns_valid_response() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
@@ -474,8 +492,13 @@ mod device_flow {
     async fn test_device_code_user_code_format() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
@@ -499,8 +522,13 @@ mod device_flow {
         let harness = TestHarness::new().await;
 
         // Create device code
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -512,7 +540,7 @@ mod device_flow {
             device_code
         );
         let response = harness
-            .post_form("/oauth/token", &poll_body)
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -531,10 +559,11 @@ mod device_flow {
     async fn test_device_token_poll_invalid_code() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let poll_body =
             "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=nonexistent";
         let response = harness
-            .post_form("/oauth/token", poll_body)
+            .post_form_with_auth("/oauth/token", poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -559,8 +588,13 @@ mod device_flow {
             .expect("Failed to create auth");
 
         // Create device code
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -579,7 +613,7 @@ mod device_flow {
             device_code
         );
         let response = harness
-            .post_form("/oauth/token", &poll_body)
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -617,8 +651,13 @@ mod device_flow {
             .await
             .expect("Failed to create auth");
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -635,7 +674,7 @@ mod device_flow {
             device_code
         );
         let response = harness
-            .post_form("/oauth/token", &poll_body)
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
         assert_eq!(response.status, 200);
@@ -667,8 +706,13 @@ mod device_flow {
     async fn test_device_code_interval_field() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
