@@ -854,7 +854,7 @@ async fn setup_authorized_device_for_client(
         &state.store,
         &sha256_base64url(&device_code),
         &format!("MT{label}"),
-        Some(client_id),
+        client_id,
         expires_at,
         0,
     )

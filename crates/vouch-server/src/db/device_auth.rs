@@ -120,28 +120,33 @@ pub struct DeviceAuthRequest {
     pub device_code_hash: String,
     pub user_code: String,
     pub state: DeviceAuthState,
-    /// OAuth client_id that initiated this device authorization.
-    pub client_id: Option<String>,
+    /// OAuth client that initiated this device authorization and the only
+    /// one that may redeem it.
+    pub client_id: String,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
     pub consumed_at: Option<Timestamp>,
 }
 
-impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
-    fn from(doc: Document<DeviceAuthRequestDoc>) -> Self {
+impl DeviceAuthRequest {
+    /// `None` for a row with no `client_id`: no client can prove it issued
+    /// the code, so nothing may read it (RFC 6749 §5.2: `invalid_grant` when
+    /// the grant "was issued to another client").
+    fn from_doc(doc: Document<DeviceAuthRequestDoc>) -> Option<Self> {
         let state = state_from_stored(&doc.data);
-        Self {
+        let client_id = doc.data.client_id?;
+        Some(Self {
             id: doc.id,
             device_code_hash: doc.data.device_code_hash,
             user_code: doc.data.user_code,
             state,
-            client_id: doc.data.client_id,
+            client_id,
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
             consumed_at: doc.data.consumed_at,
-        }
+        })
     }
 }
 
@@ -191,7 +196,7 @@ pub async fn create_device_auth_request(
     store: &DocumentStore,
     device_code_hash: &str,
     user_code: &str,
-    client_id: Option<&str>,
+    client_id: &str,
     expires_at: Timestamp,
     interval_seconds: i32,
 ) -> Result<String> {
@@ -199,7 +204,7 @@ pub async fn create_device_auth_request(
         device_code_hash: device_code_hash.to_string(),
         user_code: user_code.to_string(),
         status: DeviceAuthStatus::Pending,
-        client_id: client_id.map(String::from),
+        client_id: Some(client_id.to_string()),
         user_id: None,
         user_email: None,
         authenticator_id: None,
@@ -222,7 +227,7 @@ pub async fn get_device_auth_by_code_hash(
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
         .await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Get a device auth request by user code.
@@ -233,7 +238,7 @@ pub async fn get_device_auth_by_user_code(
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("user_code", user_code)
         .await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Get a device auth request by ID.
@@ -246,7 +251,7 @@ pub(crate) async fn get_device_auth_by_id(
     id: &str,
 ) -> Result<Option<DeviceAuthRequest>> {
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Inputs for [`authorize_device_auth`].

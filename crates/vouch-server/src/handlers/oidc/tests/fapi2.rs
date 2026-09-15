@@ -1087,7 +1087,7 @@ async fn setup_authorized_device(
         &state.store,
         &device_code_hash,
         &user_code,
-        Some(client_id),
+        client_id,
         expires_at,
         0, // no rate limit for test
     )

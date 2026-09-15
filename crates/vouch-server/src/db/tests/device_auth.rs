@@ -28,7 +28,7 @@ async fn test_device_auth_request_lifecycle() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         expires_at,
         interval,
     )
@@ -100,7 +100,7 @@ async fn test_device_auth_authorization_flow() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -157,7 +157,7 @@ async fn test_authorized_row_with_cleared_authenticator_reads_denied() {
         device_code_hash: "legacy_cleared_hash".to_string(),
         user_code: "LGCY-0001".to_string(),
         status: DeviceAuthStatus::Authorized,
-        client_id: None,
+        client_id: Some("client_a".to_string()),
         user_id: Some("user_a".to_string()),
         user_email: Some("a@example.com".to_string()),
         authenticator_id: None,
@@ -200,7 +200,7 @@ async fn test_device_auth_polling_rate_limit() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
     )
@@ -248,9 +248,16 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
     let user_code = "CNSM-SUCC";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let id = create_device_auth_request(&store, device_code_hash, user_code, None, expires_at, 5)
-        .await
-        .expect("create");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        user_code,
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create");
 
     // Authorize it first
     let (user_id, _) = upsert_user(&store, "consume@example.com", Some("Test"))
@@ -310,7 +317,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         &store,
         device_code_hash,
         "DBLC-CODE",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -371,7 +378,7 @@ async fn test_try_consume_device_auth_pending_returns_false() {
         &store,
         device_code_hash,
         "PEND-CODE",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -393,9 +400,16 @@ async fn test_try_consume_device_auth_expired_returns_false() {
     let device_code_hash = "expired_consume_hash";
     // Already expired
     let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
-    let id = create_device_auth_request(&store, device_code_hash, "EXPD-CNSM", None, expired_at, 5)
-        .await
-        .expect("create");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "EXPD-CNSM",
+        "test-client",
+        expired_at,
+        5,
+    )
+    .await
+    .expect("create");
 
     let (user_id, _) = upsert_user(&store, "expired@example.com", Some("Test"))
         .await
@@ -485,7 +499,7 @@ async fn test_double_authorization_should_fail() {
         &store,
         "dbl_auth_hash",
         "DBLA-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -543,7 +557,7 @@ async fn test_authorize_after_deny_should_fail() {
         &store,
         "deny_then_auth",
         "DNYA-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -582,7 +596,7 @@ async fn test_deny_after_authorize_should_fail() {
         &store,
         "auth_then_deny",
         "ATDN-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -627,7 +641,7 @@ async fn test_double_deny_should_fail() {
         &store,
         "dbl_deny_hash",
         "DBLD-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -646,4 +660,50 @@ async fn test_double_deny_should_fail() {
         .expect("get")
         .expect("exists");
     assert!(matches!(req.state, DeviceAuthState::Denied));
+}
+
+/// A row without a `client_id` belongs to no client (RFC 6749 §5.2:
+/// `invalid_grant` when the grant "was issued to another client"), so the
+/// getters refuse it rather than surface a code nobody may redeem.
+#[tokio::test]
+async fn test_row_without_client_id_is_unreadable() {
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let inserted = store
+        .insert(&crate::db::documents::device_auth::DeviceAuthRequestDoc {
+            device_code_hash: "legacy-hash".to_string(),
+            user_code: "LGCY-CODE".to_string(),
+            status: crate::db::DeviceAuthStatus::Authorized,
+            client_id: None,
+            user_id: Some("legacy-user".to_string()),
+            user_email: Some("legacy@example.com".to_string()),
+            authenticator_id: Some("legacy-auth".to_string()),
+            hardware_verified: true,
+            auth_time: Some(0),
+            expires_at,
+            interval_seconds: 5,
+            last_poll_at: None,
+            consumed_at: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        get_device_auth_by_code_hash(&store, "legacy-hash")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_device_auth_by_user_code(&store, "LGCY-CODE")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_device_auth_by_id(&store, &inserted.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

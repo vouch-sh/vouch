@@ -242,7 +242,7 @@ async fn create_device_authorization(
         &state.store,
         &device_code_hash,
         &user_code,
-        Some(client_id),
+        client_id,
         expires_at,
         interval_seconds,
     )
@@ -365,10 +365,8 @@ pub(crate) async fn device_token(
     // another client", the rule §4.1.3 states for authorization codes. Checked
     // before the poll-time write and every status response, so another client
     // holding the code learns nothing and cannot affect the owner's polling.
-    // A row stored without a client_id (before client authentication was
-    // required here) fails the same way.
     let oauth_client = device_client.client;
-    if request.client_id.as_deref() != Some(oauth_client.client_id.as_str()) {
+    if request.client_id != oauth_client.client_id {
         return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::invalid_grant(),
@@ -972,7 +970,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             5,
         )
@@ -1014,7 +1012,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             5,
         )
@@ -1064,7 +1062,7 @@ mod tests {
             &state.store,
             &hash_device_code(device_code),
             "GONE-CODE",
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1146,7 +1144,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             5,
         )
@@ -1397,7 +1395,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             0, // no rate limit for test
         )
@@ -1455,7 +1453,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1514,7 +1512,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1587,7 +1585,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1652,7 +1650,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1858,7 +1856,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             "DEAC-CODE",
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )
@@ -1918,7 +1916,7 @@ mod tests {
             &state.store,
             &hash_device_code(&device_code),
             "HWV-CODE",
-            Some(&client_id),
+            &client_id,
             expires_at,
             0,
         )

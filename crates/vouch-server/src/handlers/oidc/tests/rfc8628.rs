@@ -122,7 +122,7 @@ async fn setup_authorized_device(
         &state.store,
         &sha256_base64url(&device_code),
         &format!("DC{label}"),
-        Some(client_id),
+        client_id,
         expires_at,
         0,
     )
@@ -200,7 +200,7 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
         &state.store,
         &sha256_base64url(device_code),
         "AUTH-TIME",
-        Some(&client.client_id),
+        &client.client_id,
         expires_at,
         0,
     )
@@ -543,52 +543,6 @@ async fn test_device_grant_rejects_redemption_for_client_with_no_grant_types() {
         error["error"], "unauthorized_client",
         "expected unauthorized_client for a client with no grant_types: {body}"
     );
-}
-
-/// A device authorization stored without a `client_id` — the shape written
-/// before the endpoints required client authentication — belongs to no client,
-/// so no authenticated client can redeem it (RFC 6749 §5.2 `invalid_grant`:
-/// the grant "was issued to another client").
-#[tokio::test]
-async fn test_device_grant_rejects_row_without_client_id() {
-    let (app, state) = test_app().await;
-    let user = create_test_user(&state.store, "device-grant-legacy-row@example.com").await;
-    let auth = create_test_authenticator(&state.store, &user.id).await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
-
-    let device_code = "legacy_row_dev";
-    let expires_at = jiff::Timestamp::now()
-        .checked_add(jiff::Span::new().hours(1))
-        .expect("device code expiry");
-    let id = crate::db::create_device_auth_request(
-        &state.store,
-        &sha256_base64url(device_code),
-        "LEGACY-ROW",
-        None,
-        expires_at,
-        0,
-    )
-    .await
-    .expect("create device authorization request");
-    crate::db::authorize_device_auth(
-        &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
-            id: &id,
-            user_id: &user.id,
-            user_email: &user.email,
-            authenticator_id: &auth,
-            verification: DeviceApproval::Observed(AuthTime::for_test(
-                jiff::Timestamp::now().as_second(),
-            )),
-        },
-    )
-    .await
-    .expect("approve device authorization");
-
-    let (status, body) = poll_device_token(&app, device_code, &client).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant", "{body}");
 }
 
 /// Defense-in-depth (RFC 7591 §2): the device-authorization *creation*
@@ -1056,7 +1010,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
         &state.store,
         &sha256_base64url(expired),
         "EXPIRED",
-        Some(&owner.client_id),
+        &owner.client_id,
         expires_at,
         0,
     )

@@ -21,11 +21,13 @@ pub enum DeviceAuthStatus {
 
 /// A device authorization request (RFC 8628).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceAuthRequestDoc {
+pub(crate) struct DeviceAuthRequestDoc {
     pub device_code_hash: String,
     pub user_code: String,
     pub status: DeviceAuthStatus,
-    /// OAuth client_id that initiated this device authorization.
+    /// OAuth client_id that initiated this device authorization. Always
+    /// written; the default keeps rows without it deserializable during a
+    /// rolling deploy, and `DeviceAuthRequest::from_doc` refuses them.
     #[serde(default)]
     pub client_id: Option<String>,
     pub user_id: Option<String>,

@@ -1666,7 +1666,7 @@ mod tests {
             &state.store,
             "retry-seam-hash",
             "RETRY-UCODE",
-            None,
+            "test-client",
             expires_at,
             5,
         )

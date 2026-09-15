@@ -22,7 +22,7 @@ async fn seed_oidc_state(
         store,
         &format!("device_hash_for_{state_value}"),
         &format!("UC-{state_value}"),
-        None,
+        "test-client",
         expires_at,
         5,
     )
