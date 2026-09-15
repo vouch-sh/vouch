@@ -90,6 +90,61 @@ pub struct OAuthClient {
     pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
+/// Old↔new stored-row mapping: rows persisted while secretless client
+/// types still fell back to the RFC 7591 §2 default `client_secret_basic`
+/// are read as the public-client method `none`.
+///
+/// The legacy shape is a manually-registered `spa`/`native` client created
+/// between `d7b4e4fa` (which introduced `spa`/`native` and
+/// `RegistrationSource`) and `aa125025` (which fixed the writer to store
+/// `None` for secretless types). The pre-`aa125025` manual-registration writer
+/// derived `token_endpoint_auth_method` from `application_type.requires_secret()`
+/// (false for `spa`/`native`) via `unwrap_or_default()`, and
+/// `TokenEndpointAuthMethod::default()` is `ClientSecretBasic` — so it
+/// persisted `spa`/`native` + `client_secret_basic` while gating secret
+/// minting on the same `requires_secret()` flag, never issuing a secret.
+/// Reading that row verbatim makes every endpoint that loads the client
+/// (token, PAR, JAR, introspection) treat it as confidential and demand a
+/// secret that does not exist, yielding `invalid_client` with no in-product
+/// recovery path.
+///
+/// The gate is `registration_source != Some(Dynamic)` rather than the
+/// application type alone, so `ca8a6f65`'s per-instance-secret enforcement
+/// for dynamically-registered `spa`/`native` clients stays in effect. RFC
+/// 8252 §8.4 permits a native app to hold a per-instance secret, and dynamic
+/// registration (`register_client`) mints a real secret for every
+/// `client_secret_basic`/`client_secret_post` registration
+/// (`services/oidc/registration.rs`), so a dynamically-registered
+/// `spa`/`native` + `client_secret_basic` row carries a secret it is
+/// legitimately held to and must not be rewritten. Manual registration
+/// never minted a secret for `spa`/`native`, so a non-`Dynamic` row in that
+/// shape is, by construction, the legacy secretless row this rewrites.
+///
+/// Every `spa`/`native` row carries `Some(Manual)` or `Some(Dynamic)`
+/// because `RegistrationSource` was introduced alongside the `spa`/`native`
+/// variants, so the `None`-source arm of the `!= Some(Dynamic)` check is a
+/// defensive fallback that never fires for a `spa`/`native` row but is
+/// harmless for any older `web`/`service` row (which `requires_secret()`
+/// excludes anyway).
+///
+/// RFC 7591 §2 (<https://www.rfc-editor.org/rfc/rfc7591#section-2>):
+/// > "none": The client is a public client as defined in OAuth 2.0,
+/// > Section 2.1, and does not have a client secret.
+fn normalize_stored_auth_method(
+    application_type: OAuthClientType,
+    source: Option<RegistrationSource>,
+    stored: TokenEndpointAuthMethod,
+) -> TokenEndpointAuthMethod {
+    if source != Some(RegistrationSource::Dynamic)
+        && !application_type.requires_secret()
+        && stored == TokenEndpointAuthMethod::ClientSecretBasic
+    {
+        TokenEndpointAuthMethod::None
+    } else {
+        stored
+    }
+}
+
 impl From<Document<OAuthClientDoc>> for OAuthClient {
     fn from(doc: Document<OAuthClientDoc>) -> Self {
         Self {
@@ -108,7 +163,11 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             org_id: doc.data.org_id,
             resource_uris: doc.data.resource_uris,
             keys: stored_client_keys(&doc.id, doc.data.jwks, doc.data.jwks_uri),
-            token_endpoint_auth_method: doc.data.token_endpoint_auth_method,
+            token_endpoint_auth_method: normalize_stored_auth_method(
+                doc.data.application_type,
+                doc.data.registration_source,
+                doc.data.token_endpoint_auth_method,
+            ),
             request_object_signing_alg: doc.data.request_object_signing_alg,
             require_signed_request_object: doc.data.require_signed_request_object,
             fapi_profile: doc.data.fapi_profile,

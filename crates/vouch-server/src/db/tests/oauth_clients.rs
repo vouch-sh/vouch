@@ -201,6 +201,152 @@ async fn test_oauth_client_types() {
     }
 }
 
+/// Rows persisted before secretless client types were stored as public carry
+/// `client_secret_basic` (the `TokenEndpointAuthMethod` default); the read-side
+/// `normalize_stored_auth_method` reads them as `none` so legacy
+/// manually-registered `spa`/`native` clients — which never had a secret
+/// minted — load as public and can authenticate without one. This is the
+/// regression `aa125025` shipped the normalizer for; `ca8a6f65` deleted both
+/// the normalizer and this test, re-opening the outage for any operator with
+/// legacy rows.
+#[tokio::test]
+async fn test_legacy_public_client_rows_read_as_auth_method_none() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "legacy-public@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    for app_type in [OAuthClientType::Spa, OAuthClientType::Native] {
+        let client = create_test_client(
+            &store,
+            &user_id,
+            TestClientSpec {
+                name: format!("Legacy {app_type:?}"),
+                application_type: app_type,
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
+                with_secret: false,
+                ..TestClientSpec::default()
+            },
+        )
+        .await;
+
+        let loaded = get_oauth_client_by_client_id(&store, &client.client_id)
+            .await
+            .expect("Failed to get client")
+            .expect("Client should exist");
+        assert_eq!(
+            loaded.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::None,
+            "{app_type:?} + client_secret_basic (manual, no secret) must normalize to none on read"
+        );
+        assert_eq!(
+            loaded.client_type(),
+            ClientType::Public,
+            "{app_type:?} legacy manual row must load as a public client"
+        );
+    }
+}
+
+/// The `registration_source != Some(Dynamic)` gate on
+/// `normalize_stored_auth_method` preserves `ca8a6f65`'s per-instance-secret
+/// enforcement for dynamically-registered `spa`/`native` clients. RFC 8252
+/// §8.4 permits a native app to hold a per-instance secret, and dynamic
+/// registration mints one for every `client_secret_basic`/`client_secret_post`
+/// request, so a dynamically-registered `native` + `client_secret_basic` row
+/// carries a real secret it is legitimately held to. The normalizer must not
+/// rewrite it to `none` — that would let the client authenticate without the
+/// secret it was issued, the exact bypass `ca8a6f65` closed.
+#[tokio::test]
+async fn test_dynamic_native_client_rows_keep_their_registered_auth_method() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "dynamic-native@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    let redirect_uris = vec!["http://127.0.0.1:8080/callback".to_string()];
+    let (client, client_id) = create_oauth_client(
+        &store,
+        &CreateOAuthClientParams {
+            user_id: Some(&user_id),
+            name: "Dynamic Native",
+            description: None,
+            application_type: OAuthClientType::Native,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
+            keys: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Dynamic,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create dynamic native client");
+
+    // Dynamic registration mints a real secret for client_secret_basic after
+    // the client row is committed (mirrors `register_client`'s post-insert
+    // step); do the same here so the row carries the credential it registered.
+    let raw_secret = "dynamic-native-secret-value";
+    let secret_hash = crate::crypto::hash_token(raw_secret);
+    create_oauth_client_secret(&store, &client.id, &secret_hash, Some("test"), None)
+        .await
+        .expect("Failed to mint secret");
+
+    let loaded = get_oauth_client_by_client_id(&store, &client_id)
+        .await
+        .expect("Failed to get client")
+        .expect("Client should exist");
+    assert_eq!(
+        loaded.token_endpoint_auth_method,
+        TokenEndpointAuthMethod::ClientSecretBasic,
+        "dynamic native + client_secret_basic must stay client_secret_basic (held to its secret)"
+    );
+    assert_eq!(
+        loaded.client_type(),
+        ClientType::Confidential,
+        "dynamic native row must load as a confidential client"
+    );
+
+    // The minted secret validates — the dynamic native client is genuinely
+    // serviceable as a confidential client, which is what `ca8a6f65`'s
+    // per-instance-secret enforcement protects. If the normalizer had
+    // rewritten this row to `none`, `client_type()` would be `Public` and the
+    // client could authenticate without the secret it was issued.
+    let validated =
+        validate_oauth_client_credentials(&store, &client_id, &secret_hash, jiff::Timestamp::now())
+            .await
+            .expect("validate must not error");
+    assert!(
+        validated.is_some(),
+        "the dynamic native client's minted secret must validate — the normalizer must not \
+         have downgraded it to a secretless public client"
+    );
+}
+
 #[tokio::test]
 async fn test_oauth_client_list_for_user() {
     let (store, _audit) = test_db().await;
