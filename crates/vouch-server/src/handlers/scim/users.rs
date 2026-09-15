@@ -565,9 +565,37 @@ pub(crate) async fn patch_user(
             )
                 .into_response();
         }
-        // The advisory pre-check above missed a race, so the authoritative
-        // count inside the transaction refused. Nothing was persisted.
+        // The advisory pre-check above missed a race: while `revoke_then_persist`
+        // was withdrawing the user's sessions and SSH certificates, a concurrent
+        // admin demotion committed, so the authoritative count inside the
+        // transaction now refuses the `active = false` write. Revocation
+        // already committed — that durable side effect gets its audit row even
+        // though the persist step then refused. `refusal: "last_admin"`
+        // distinguishes a deliberate floor refusal from a write that was
+        // attempted and failed (the generic arm's `accessRevoked`/`persisted`
+        // payload) so an operator can tell the two apart.
         Err(crate::services::auth::DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
+            if patched.deactivated {
+                db::record_scim_audit(
+                    &state.audit,
+                    "update",
+                    "User",
+                    &id,
+                    Some(&auth.token_id),
+                    Some(
+                        &serde_json::json!({
+                            "active": patched.active,
+                            "deactivated": true,
+                            "accessRevoked": true,
+                            "persisted": false,
+                            "refusal": "last_admin"
+                        })
+                        .to_string(),
+                    ),
+                    auth.org_domain.as_deref(),
+                )
+                .await;
+            }
             return last_admin_scim_error();
         }
         Err(crate::services::auth::DeactivationError::Persist(e)) => {
@@ -770,6 +798,28 @@ pub(crate) async fn delete_user(
         // §3.12 lists no `scimType` applicable to DELETE, so this is a plain
         // 400 with a human-readable `detail`.
         Err(db::DeleteUserError::LastAdmin) => {
+            // Access was already revoked above; that committed change gets its
+            // audit row even though the floor then refused the delete.
+            // `refusal: "last_admin"` distinguishes a deliberate floor refusal
+            // from a delete that was attempted and failed (the generic arm's
+            // `accessRevoked`/`deleted` payload).
+            db::record_scim_audit(
+                &state.audit,
+                "delete",
+                "User",
+                &id,
+                Some(&auth.token_id),
+                Some(
+                    &serde_json::json!({
+                        "accessRevoked": true,
+                        "deleted": false,
+                        "refusal": "last_admin"
+                    })
+                    .to_string(),
+                ),
+                auth.org_domain.as_deref(),
+            )
+            .await;
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ScimError::new(

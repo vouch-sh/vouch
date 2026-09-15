@@ -367,6 +367,9 @@ pub struct DocumentStore {
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
+    /// See [`LastAdminCountTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    last_admin_count_test_hook: Option<LastAdminCountTestHook>,
     /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
@@ -469,6 +472,34 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only hook invoked inside `update_scim_user`
+/// ([`crate::db::update_scim_user`]) and `delete_user`
+/// ([`crate::db::delete_user`]) right after the transaction begins and before
+/// the first read, receiving the `user_id` being updated or deleted.
+///
+/// The SCIM PATCH/DELETE handlers enforce a "last active admin" floor with an
+/// advisory pre-check *before* revoking and an authoritative in-transaction
+/// count *after* it. `revoke_user_access` commits session deletion and SSH-cert
+/// revocation in its own transactions before the persist/delete step runs, so
+/// the count can refuse a write after a durable side effect has already
+/// landed. No existing hook can drive that post-revocation, pre-count window:
+/// `modify_test_hook`/`compare_and_update_test_hook`/`delete_test_hook` fire
+/// inside writes (the OCC step) or before the existence check, not between
+/// the advisory pre-check and the in-transaction count.
+///
+/// This hook fires before the transaction's first read (right after `begin()`),
+/// so under SQLite WAL the first read establishes a snapshot that already
+/// includes the hook's committed write — faithfully simulating a concurrent
+/// admin demotion that committed between the pre-check and the count. The
+/// test's callback deactivates a sibling admin from a separate committed
+/// transaction, so the in-transaction `other_active_admins` count sees zero
+/// other active admins and the authoritative guard returns `LastAdmin`.
+///
+/// Compiled out of non-test builds, so production pays nothing. Mirrors the
+/// existing `#[cfg(test)]`-gated seams in this file.
+#[cfg(test)]
+pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
 /// Test-only hook invoked inside
 /// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
 /// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
@@ -520,6 +551,8 @@ impl DocumentStore {
             compare_and_update_test_hook: None,
             #[cfg(test)]
             delete_test_hook: None,
+            #[cfg(test)]
+            last_admin_count_test_hook: None,
             #[cfg(test)]
             post_secret_revoke_test_hook: None,
             #[cfg(test)]
@@ -575,6 +608,34 @@ impl DocumentStore {
     #[cfg(test)]
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
+            hook(id).await;
+        }
+    }
+
+    /// Install the [`LastAdminCountTestHook`] seam for
+    /// [`update_scim_user`](super::scim::update_scim_user) and
+    /// [`delete_user`](super::users::delete_user). Lets handler tests
+    /// deterministically drive the "advisory pre-check passed, revocation
+    /// committed, then the in-transaction last-admin count refused" race
+    /// through the full router — the only path on which a committed
+    /// revocation leaves no `scim_operation` audit row when the floor then
+    /// refuses. The hook fires before the transaction's first read, so the
+    /// callback's separate committed write is visible to the in-transaction
+    /// count. Compiled out of non-test builds, so production pays nothing.
+    #[cfg(test)]
+    pub(crate) fn set_last_admin_count_test_hook(&mut self, hook: LastAdminCountTestHook) {
+        self.last_admin_count_test_hook = Some(hook);
+    }
+
+    /// Run the installed `last_admin_count_test_hook` for `id`, if any.
+    /// Invoked by `update_scim_user` and `delete_user` right after the
+    /// transaction begins and before the first read, so a sibling admin the
+    /// callback deactivates from a separate committed transaction is visible
+    /// to the in-transaction `other_active_admins` count. No-op in non-test
+    /// builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) async fn run_last_admin_count_test_hook(&self, id: &str) {
+        if let Some(hook) = &self.last_admin_count_test_hook {
             hook(id).await;
         }
     }

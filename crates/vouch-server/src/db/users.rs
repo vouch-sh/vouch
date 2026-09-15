@@ -515,6 +515,14 @@ pub async fn delete_user(
         #[cfg(test)]
         store.run_delete_test_hook(user_id).await;
 
+        // Test-only seam: let handler tests deactivate a sibling admin from a
+        // separate committed transaction before the first read here, so the
+        // in-transaction `other_active_admins` count sees the demotion and the
+        // authoritative floor fires after the handler's `revoke_user_access`
+        // already committed revocation. Mirrors the seam in `update_scim_user`.
+        #[cfg(test)]
+        store.run_last_admin_count_test_hook(user_id).await;
+
         // Return `false` when the user document is missing so callers can
         // surface a 404 and skip the audit event. `tx.delete` returns
         // `Ok(())` regardless of whether anything was removed, so this
