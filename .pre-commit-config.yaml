@@ -97,7 +97,12 @@ repos:
         # reusable-workflow reference. The pattern matches only `$/`-prefixed
         # values, so a genuinely malformed reference still fails. Support is
         # in rhysd/actionlint#732 — drop this flag once it ships.
-        entry: actionlint -ignore 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
+        #
+        # The same lag applies to `concurrency.queue` (added 2026-05-07), used
+        # by ami.yml to queue AMI builds. The pattern names that one key, so an
+        # actually-misspelled concurrency key still fails. Tracked upstream in
+        # rhysd/actionlint#657 — drop this flag once it ships.
+        entry: actionlint -ignore 'reusable workflow call "\$/[^"]+" at "uses" is not following the format' -ignore 'unexpected key "queue" for "concurrency" section'
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
 

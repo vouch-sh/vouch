@@ -11,6 +11,19 @@ on:
         required: true
         type: string
 
+# Serialize AMI builds: a run in progress is never cancelled (that would leave
+# orphaned builder instances, snapshots and half-published SSM parameters);
+# later runs queue behind it instead.
+#
+# queue: max keeps up to 100 runs pending and processes them FIFO. Without it
+# only one run may be pending, so a third trigger arriving while one run is
+# building and another is queued would silently cancel the queued one -- a
+# release could ship with no AMI ever built for it.
+concurrency:
+  group: build-ami
+  queue: max
+  cancel-in-progress: false
+
 permissions: {}
 
 env:
@@ -251,7 +264,9 @@ jobs:
             if [ "$attempt" -eq 120 ]; then
               echo "Build timed out after 1 hour"
               # Try to get logs anyway
-              aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+              if aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null; then
+                cat /tmp/build.log || true
+              fi
               exit 1
             fi
 
