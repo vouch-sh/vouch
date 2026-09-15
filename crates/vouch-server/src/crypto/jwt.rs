@@ -61,22 +61,6 @@ impl JwtType {
             Self::Fido2ChallengeState => "vouch-fido2-challenge+jwt",
         }
     }
-
-    /// Parse a `typ` header value to a `JwtType`.
-    #[cfg(test)]
-    #[must_use]
-    pub fn from_header_str(s: &str) -> Option<Self> {
-        match s {
-            "at+jwt" => Some(Self::AccessToken),
-            "vouch-authz+jwt" => Some(Self::AuthorizationCode),
-            "vouch-reg-state+jwt" => Some(Self::RegistrationState),
-            "vouch-browser-reg+jwt" => Some(Self::BrowserRegistrationState),
-            "vouch-browser-auth+jwt" => Some(Self::BrowserAuthenticationState),
-            "vouch-github-state+jwt" => Some(Self::GitHubState),
-            "vouch-fido2-challenge+jwt" => Some(Self::Fido2ChallengeState),
-            _ => None,
-        }
-    }
 }
 
 impl From<JwtType> for Header {
@@ -880,33 +864,6 @@ mod tests {
             decoded.is_none(),
             "Token with wrong issuer should be rejected"
         );
-    }
-
-    #[test]
-    fn test_jwt_type_roundtrip() {
-        let types = [
-            JwtType::AccessToken,
-            JwtType::AuthorizationCode,
-            JwtType::RegistrationState,
-            JwtType::BrowserRegistrationState,
-            JwtType::BrowserAuthenticationState,
-            JwtType::GitHubState,
-            JwtType::Fido2ChallengeState,
-        ];
-
-        for typ in types {
-            let s = typ.as_header_str();
-            let parsed = JwtType::from_header_str(s);
-            assert_eq!(parsed, Some(typ), "Roundtrip failed for {:?}", typ);
-        }
-    }
-
-    #[test]
-    fn test_jwt_type_unknown_returns_none() {
-        assert_eq!(JwtType::from_header_str("unknown"), None);
-        assert_eq!(JwtType::from_header_str(""), None);
-        // The retired session type must not parse
-        assert_eq!(JwtType::from_header_str("vouch-session+jwt"), None);
     }
 
     #[tokio::test]
