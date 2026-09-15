@@ -24,20 +24,10 @@ impl DocumentType for AuthorizationCodeDoc {
     const DOC_TYPE: &'static str = "authorization_code";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "code_hash",
-                value: self.code_hash.clone(),
-            },
-            IndexEntry {
-                field: "client_id",
-                value: self.client_id.clone(),
-            },
-            IndexEntry {
-                field: "user_id",
-                value: self.user_id.clone(),
-            },
-        ]
+        vec![IndexEntry {
+            field: "code_hash",
+            value: self.code_hash.clone(),
+        }]
     }
 
     fn expires_at(&self) -> Option<Timestamp> {
