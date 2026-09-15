@@ -320,3 +320,69 @@ fail with its gate removed) and a `response_types` axis on `TestClientSpec`;
 #1367 slimmed from three helpers to one inline condition with its test client
 built through the shared factory. A `GrantAuthorizedClient` newtype was
 approved as a separate PR, design first.
+
+## 2026-09-15
+
+Two arrivals. 06:45 UTC: seven Dead Code PRs (#1374–#1380), no issues. 13:51
+UTC: issues #1381–#1386 with fix PRs #1387–#1392. Full record in
+`.local/detail-triage-2026-09-15.md`.
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-08 | 69 | 152 | 187 | 23 | 40 |
+| 2026-09 | 89 | 4 | 194 | **47** | 30 |
+
+**Self-caused: 6 of 6, script reports 1.** Five findings blame #1369 (the
+client-type model), one #1368, one #1359 — class fixes from the previous two
+days. The script's column counts only Detail-authored PRs.
+
+**Dead Code PRs are invisible to `detail-stats.py`** (no issue is filed).
+Branch prefix `detail/dead-code/`; ~80 merged since 2026-06-19.
+
+### Classes
+
+- **Removing a required field from a cross-version serde struct** — #684
+  (`ChallengeStateDoc.doc_id`, shipped), #1165 (caught), #1170 (wontfix),
+  #1379 (`AuthenticatorDoc.user_email`). Old and new servers overlap daily
+  (ASG `min_healthy_percentage = 100`, `max_instance_lifetime = 86400`), and
+  serde rejects a missing non-`Option` field, so the dead-code scanner's
+  "never read" is not "safe to delete". Rule requested
+  (`rcr_ee104618-4551-403f-b8fa-fbc3c073fd5a`).
+- **Write-only index entries** — #1380 plus six siblings; one class PR.
+- **#1369 residue** — two real members (#1381 rotation gates on
+  `requires_secret()`, #1382 device flow on `internal_endpoint()`), and the
+  sibling enumeration found no others. Two findings were not defects: #1385 is
+  answered by RFC 8252 §8.4's per-instance-secret exception (8252 "Updates:
+  6749"), #1386 targets a population the 09-14 check found empty.
+
+### Review findings worth keeping
+
+- **A server-side MUST can be blocked by the first-party client.** #1388
+  enforces RFC 8628 §3.1/§3.4 client authentication correctly, but the CLI
+  registers `private_key_jwt` and never sends an assertion to `/oauth/device`;
+  merging would break `vouch enroll` for every installed CLI. When a fix
+  tightens what the server accepts, check what the shipped first-party client
+  sends before calling it mergeable.
+- **Detail findings can contradict each other within one batch** (#1385 vs
+  #1381/#1382). Resolve the governing spec question once, then dispose of the
+  set, instead of reviewing each PR against its own issue.
+- #1389 fixed PAR but not the pending-auth completion path with the same
+  pass-`None`-then-overlay shape; #1390 duplicated an existing test hook.
+
+### Decided
+
+#1374–#1378 merged. #1391/#1385 closed (RFC 8252 §8.4); #1392/#1386 closed
+wontfix. #1380 superseded by #1393 (all seven write-only index entries).
+#1379 superseded by #1394 (plumbing removed, `#[serde(default)] user_email`
+kept and written empty). #1387's comments reworked to verbatim spec quotes;
+#1389 fixed for PAR and pending-auth with its citation corrected; #1390 moved
+onto the existing delete hook. #1388 superseded by a CLI-first PR (assertion
+at the device request and every poll); server enforcement for #1382 follows
+after rollout. The wire-format rule was synced in #1395.
+
+- **Citations are not history.** Trimming comments must keep spec citations
+  (section plus verbatim quote) and cut only the narrative; #1387's RFC 8252
+  §8.4 citation was dropped once and restored.
+- **Check a quoted SHOULD's scope.** #1389 quoted a §2.2 sentence that
+  governs only multiple-valued response types; §2.1's definition of
+  `response_mode` was the applicable text.
