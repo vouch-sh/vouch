@@ -386,7 +386,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
         &state.store,
         "callback-replay-device-hash",
         "CBRP-CODE",
-        None,
+        "test-client",
         expires_at,
         5,
     )
@@ -1143,7 +1143,7 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         &state.store,
         device_code_hash,
         "CLI-RTRN",
-        None,
+        "test-client",
         expires_at,
         0,
     )
@@ -1250,7 +1250,7 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
         &state.store,
         device_code_hash,
         "CLI-DBERR",
-        None,
+        "test-client",
         expires_at,
         0,
     )
@@ -1696,7 +1696,7 @@ async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
         &state.store,
         &format!("hash-{user_code}"),
         user_code,
-        None,
+        "test-client",
         expires_at,
         5,
     )
@@ -2730,7 +2730,7 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
         &state.store,
         "hash-da-ok",
         "DA-OK-CODE",
-        None,
+        "test-client",
         expires_at,
         5,
     )

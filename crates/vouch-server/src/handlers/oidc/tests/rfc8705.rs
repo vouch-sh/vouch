@@ -854,7 +854,7 @@ async fn setup_authorized_device_for_client(
         &state.store,
         &sha256_base64url(&device_code),
         &format!("MT{label}"),
-        Some(client_id),
+        client_id,
         expires_at,
         0,
     )
@@ -877,10 +877,12 @@ async fn setup_authorized_device_for_client(
     device_code
 }
 
-/// POST `/oauth/token` with the device_code grant and an injected mTLS cert.
+/// POST `/oauth/token` with the device_code grant as `client_id`, which
+/// authenticates by the injected mTLS cert (RFC 8705 §2).
 async fn poll_device_token_with_cert(
     app: &axum::Router,
     device_code: &str,
+    client_id: &str,
     cert_der: Option<Vec<u8>>,
 ) -> (StatusCode, String) {
     http_post_form_with_cert(
@@ -888,7 +890,7 @@ async fn poll_device_token_with_cert(
         "/oauth/token",
         &format!(
             "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-             &device_code={device_code}"
+             &device_code={device_code}&client_id={client_id}"
         ),
         &[],
         cert_der,
@@ -925,7 +927,8 @@ async fn test_rfc8705_device_token_mtls_succeeds_with_registered_cert() {
     let device_code =
         setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "ok").await;
 
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_der)).await;
 
     assert_eq!(
         status,
@@ -984,7 +987,8 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
 
     // Attacker presents cert B — a different self-signed cert.
     let cert_b_der = make_test_cert_der("device-imposter");
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_b_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_b_der)).await;
 
     assert_eq!(
         status,
@@ -1000,7 +1004,8 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
     // The failed mTLS client authentication must not have consumed the
     // single-use device code — the legitimate holder of the registered cert
     // can still redeem it (the gate runs before `try_consume_device_auth`).
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_a_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_a_der)).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1039,7 +1044,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_no_cert() {
         setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "nocert").await;
 
     // No client certificate presented.
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, None).await;
+    let (status, body) = poll_device_token_with_cert(&app, &device_code, &client_id, None).await;
 
     assert_eq!(
         status,
@@ -1060,7 +1065,8 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_no_cert() {
 
     // The device code must survive so the legitimate client can retry with
     // its registered cert.
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_der)).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1117,7 +1123,8 @@ async fn test_rfc8705_device_token_self_signed_mtls_succeeds_with_registered_cer
     let device_code =
         setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "ssok").await;
 
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_der)).await;
 
     assert_eq!(
         status,
@@ -1160,7 +1167,8 @@ async fn test_rfc8705_device_token_self_signed_mtls_invalid_client_when_cert_mis
 
     // Attacker presents cert B — not in the client's JWKS x5c.
     let cert_b_der = make_test_cert_der("device-ssmtls-imposter");
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_b_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_b_der)).await;
 
     assert_eq!(
         status,
@@ -1174,7 +1182,8 @@ async fn test_rfc8705_device_token_self_signed_mtls_invalid_client_when_cert_mis
     );
 
     // The device code must survive the failed auth for the legitimate retry.
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_a_der)).await;
+    let (status, body) =
+        poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_a_der)).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1203,7 +1212,7 @@ async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding
 
     // client_secret_basic + tls_client_certificate_bound_access_tokens: the
     // sender-constraint-only profile the bug report scopes out.
-    let client_id = create_test_client(
+    let client = create_test_client(
         &state.store,
         &user.id,
         TestClientSpec {
@@ -1213,13 +1222,22 @@ async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding
             ..Default::default()
         },
     )
-    .await
-    .client_id;
+    .await;
 
     let device_code =
-        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "csb").await;
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client.client_id, "csb").await;
 
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    // The secret is the credential; the certificate only binds the token.
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+        Some(cert_der),
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -1432,4 +1450,36 @@ async fn test_rfc8705_revoke_and_introspect_reject_mismatched_certificate() {
         session_exists(&state, &c.token).await,
         "a mismatched certificate must not revoke the token"
     );
+}
+
+/// RFC 8628 §3.1 applies RFC 6749 §3.2.1 at `/oauth/device`, so an
+/// mTLS-registered client authenticates there by its certificate (RFC 8705 §2):
+/// accepted with the registered certificate, refused without one.
+#[tokio::test]
+async fn test_rfc8705_device_code_endpoint_requires_registered_certificate() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-endpoint-mtls@example.com").await;
+    let cert_der = make_test_cert_der("device-endpoint-mtls");
+    let subject_dn = parse_client_certificate(&cert_der)
+        .expect("parse cert")
+        .subject_dn
+        .expect("subject DN");
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
+    let body = format!("client_id={client_id}&scope=openid");
+
+    let (status, resp) =
+        http_post_form_with_cert(&app, "/oauth/device", &body, &[], Some(cert_der)).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+
+    let (status, resp) = http_post_form_with_cert(&app, "/oauth/device", &body, &[], None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp}");
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client", "{resp}");
 }

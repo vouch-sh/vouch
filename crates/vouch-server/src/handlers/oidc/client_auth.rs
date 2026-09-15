@@ -6,8 +6,10 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::error::{OAuthErrorCode, OAuthErrorResponse};
+use crate::db::JwtAssertionJtiClaim;
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::OptionalClientCert;
+use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth};
 use crate::services::oidc::{
     jwt_bearer::client_auth::{JwtAuthSucceeded, PendingJti, authenticate_client_jwt},
     token::{
@@ -284,6 +286,12 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 pub(crate) struct ClientAuthOutcome {
     pub(crate) client: crate::db::OAuthClient,
     pub(crate) client_id: String,
+    pub(crate) witnesses: ClientAuthWitnesses,
+}
+
+/// What a successful dispatch verified, separable from the client record so
+/// a handler can validate the client first and commit the proof later.
+pub(crate) struct ClientAuthWitnesses {
     /// `Some` only for JWT-authenticated clients — caller must commit.
     pub(crate) pending_jti: Option<PendingJti>,
     /// `Some` only for JWT-authenticated clients — pair with `pending_jti.commit()`
@@ -339,10 +347,12 @@ pub(crate) async fn complete_client_auth(
                     Ok(Some(ClientAuthOutcome {
                         client,
                         client_id: cid,
-                        pending_jti: Some(pending_jti),
-                        jwt_auth: Some(jwt_auth),
-                        secret_verification: None,
-                        mtls_verification: None,
+                        witnesses: ClientAuthWitnesses {
+                            pending_jti: Some(pending_jti),
+                            jwt_auth: Some(jwt_auth),
+                            secret_verification: None,
+                            mtls_verification: None,
+                        },
                     }))
                 }
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
@@ -383,11 +393,79 @@ pub(crate) async fn complete_client_auth(
     Ok(Some(ClientAuthOutcome {
         client,
         client_id,
-        pending_jti: None,
-        jwt_auth: None,
-        secret_verification,
-        mtls_verification,
+        witnesses: ClientAuthWitnesses {
+            pending_jti: None,
+            jwt_auth: None,
+            secret_verification,
+            mtls_verification,
+        },
     }))
+}
+
+/// Commit an optional pending JTI and translate failures to a response-ready
+/// `Response`. Shared by the token-issuance handlers so per-grant logging and
+/// error mapping stay consistent across grants.
+///
+/// The MUST-run-before-grant-state-persistence invariant (issue #391) is
+/// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
+/// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
+/// only path to a `TokenIssuanceProof` carrying that client-auth method.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+pub(crate) async fn commit_optional_jti(
+    state: &Arc<AppState>,
+    pending: Option<PendingJti>,
+    grant_name: &'static str,
+) -> Result<Option<JwtAssertionJtiClaim>, Response> {
+    let Some(p) = pending else {
+        return Ok(None);
+    };
+    p.commit(state).await.map_err(|e| {
+        tracing::warn!("JTI commit failed for {grant_name}: {e:?}");
+        e.into_service_error().into_oauth_response().into_response()
+    })
+}
+
+/// Turn the witnesses of a successful dispatch into the [`ClientAuthProof`]
+/// token issuance requires, committing the assertion's JTI on the way.
+///
+/// Every proof carries the witness the dispatched method produced; a client
+/// with no witness must be registered public (RFC 6749 §2.1), which
+/// [`NoClientAuth::for_public_client`] checks.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+pub(crate) async fn client_auth_proof(
+    state: &Arc<AppState>,
+    witnesses: ClientAuthWitnesses,
+    client: &crate::db::OAuthClient,
+    grant_name: &'static str,
+) -> Result<ClientAuthProof, Response> {
+    let jti_claim = commit_optional_jti(state, witnesses.pending_jti, grant_name).await?;
+    // RFC 7523 §3: `jti` is OPTIONAL. Gate on the auth-succeeded witness, not
+    // on the claim — a non-FAPI client may omit `jti` and still have
+    // authenticated.
+    if let Some(auth) = witnesses.jwt_auth {
+        return Ok(ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(
+            auth, jti_claim,
+        )));
+    }
+    match (witnesses.secret_verification, witnesses.mtls_verification) {
+        (Some(_), Some(_)) => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "client presented multiple authentication methods (RFC 6749 §2.3 violation)",
+        )
+        .into_oauth_response()
+        .into_response()),
+        (Some(s), None) => Ok(ClientAuthProof::ClientSecret(s)),
+        (None, Some(m)) => Ok(ClientAuthProof::MutualTls(m)),
+        (None, None) => NoClientAuth::for_public_client(client)
+            .map(ClientAuthProof::NoAuth)
+            .map_err(|svc| svc.into_oauth_response().into_response()),
+    }
 }
 
 /// Build an OAuth error response for parameter validation failures.

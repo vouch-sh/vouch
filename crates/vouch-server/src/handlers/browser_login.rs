@@ -1415,7 +1415,7 @@ mod tests {
             &state.store,
             "login-page-device-hash",
             "LGPG-CODE",
-            None,
+            "test-client",
             expires,
             0,
         )

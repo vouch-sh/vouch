@@ -234,13 +234,15 @@ pub async fn authenticate_client_jwt(
     let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
 
     // FAPI 2.0 Section 5.3.2.1-8: aud MUST be the issuer URL only.
-    // RFC 7523 Section 3: aud SHOULD be the token endpoint URL.
-    // We accept both issuer and endpoint URLs for non-FAPI clients,
-    // but restrict to issuer-only for FAPI clients.
+    // RFC 7523 Section 3: "The token endpoint URL of the authorization server
+    // MAY be used as a value for an "aud" element". Non-FAPI clients may name
+    // the issuer or any endpoint that authenticates them; FAPI clients the
+    // issuer only.
     let token_endpoint_url = format!("{base_url}/oauth/token");
     let revoke_endpoint_url = format!("{base_url}/oauth/revoke");
     let par_endpoint_url = format!("{base_url}/oauth/par");
     let introspect_endpoint_url = format!("{base_url}/oauth/introspect");
+    let device_endpoint_url = format!("{base_url}/oauth/device");
 
     let allowed_audiences: Vec<&str> = if client.is_fapi() {
         vec![base_url]
@@ -250,6 +252,7 @@ pub async fn authenticate_client_jwt(
             &revoke_endpoint_url,
             &par_endpoint_url,
             &introspect_endpoint_url,
+            &device_endpoint_url,
             base_url,
         ]
     };

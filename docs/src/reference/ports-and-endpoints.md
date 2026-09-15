@@ -68,7 +68,7 @@ Three things regularly surprise operators here:
 | `/oauth/token` | POST | Client auth | Authentication |
 | `/oauth/par` | POST | Client auth | Authentication |
 | `/oauth/fido2/challenge` | POST | None | Authentication |
-| `/oauth/device` | POST | None | Authentication |
+| `/oauth/device` | POST | Client auth (RFC 8628 §3.1); enrolling requires CLI 2026.9.4 or later | Authentication |
 | `/oauth/register` | POST | None (RFC 7591) | Authentication |
 | `/oauth/register/{client_id}` | GET/PUT/DELETE | Registration access token | Authentication |
 | `/oauth/authorize` | GET | Session | General |

@@ -68,9 +68,16 @@ async fn test_device_auth_consume_concurrent() {
 
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let device_code_hash = "race-device-hash";
-    let id = create_device_auth_request(&store, device_code_hash, "RACE-DC", None, expires_at, 5)
-        .await
-        .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "RACE-DC",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
     let (user_id, _) = upsert_user(&store, "race-device@example.com", Some("Test"))
         .await
         .expect("upsert user");
@@ -237,9 +244,16 @@ async fn test_authorize_device_auth_concurrent() {
 
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let device_code_hash = "race-authorize-hash";
-    let id = create_device_auth_request(&store, device_code_hash, "RACE-AUTH", None, expires_at, 5)
-        .await
-        .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "RACE-AUTH",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
     let (user_id, _) = upsert_user(&store, "race-authorize@example.com", Some("Test"))
         .await
         .expect("upsert user");
@@ -323,9 +337,16 @@ async fn test_deny_device_auth_concurrent() {
 
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let device_code_hash = "race-deny-hash";
-    let id = create_device_auth_request(&store, device_code_hash, "RACE-DENY", None, expires_at, 5)
-        .await
-        .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "RACE-DENY",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
 
     let store_a = store.clone();
     let store_b = store.clone();
@@ -1058,7 +1079,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -1143,7 +1164,7 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
         &store,
         "retry-poll-auth-hash",
         "RETRY-AUTH",
-        None,
+        "test-client",
         expires_at,
         5,
     )
@@ -1251,10 +1272,16 @@ async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
 
     let (store, _audit) = test_db().await;
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
-    let id =
-        create_device_auth_request(&store, "exhaust-auth-hash", "EXHAUST", None, expires_at, 5)
-            .await
-            .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        "exhaust-auth-hash",
+        "EXHAUST",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
     let (user_id, _) = upsert_user(&store, "exhaust@example.com", Some("Test"))
         .await
         .expect("upsert user");
@@ -1349,10 +1376,16 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
     let (store, _audit) = test_db().await;
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let device_code_hash = "retry-poll-consume-hash";
-    let id =
-        create_device_auth_request(&store, device_code_hash, "RETRY-CONS", None, expires_at, 5)
-            .await
-            .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "RETRY-CONS",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
     let (user_id, _) = upsert_user(&store, "retry-consume@example.com", Some("Test"))
         .await
         .expect("upsert user");
@@ -1472,9 +1505,16 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
         .checked_add(jiff::SignedDuration::from_mins(5))
         .unwrap();
     let device_code_hash = "stale-now-hash";
-    let id = create_device_auth_request(&store, device_code_hash, "STALE-NOW", None, expires_at, 5)
-        .await
-        .expect("create device auth");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "STALE-NOW",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create device auth");
     let (user_id, _) = upsert_user(&store, "stale@example.com", Some("Test"))
         .await
         .expect("upsert user");
@@ -1647,7 +1687,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
         &store,
         device_code_hash,
         "CSCD-CONS",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )

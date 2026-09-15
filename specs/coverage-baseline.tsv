@@ -1372,11 +1372,6 @@ rfc6749#2.2#da74fbb8	SHOULD	The authorization server SHOULD document the size of
 rfc6749#2.3.2#32ff2ae9	MUST	When using other authentication methods, the authorization server MUST define a mapping between the client identifier (registration record) and authentication s
 rfc6749#3.1.1#00ec783f	MUST	The value MUST be one of "code" for requesting an authorization code as described by Section 4.1.1, "token" for requesting an access token (implicit grant) as d
 rfc6749#3.1.1#b261c7f4	MUST	If an authorization request is missing the "response_type" parameter, or if the response type is not understood, the authorization server MUST return an error r
-rfc6749#3.2.1#25aa19e0	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#27720e9f	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#73d36e6e	MUST	In the "authorization_code" "grant_type" request to the token endpoint, an unauthenticated client MUST send its "client_id" to prevent itself from inadvertently
-rfc6749#3.2.1#78dfd839	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#84dd07cb	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
 rfc6749#3.3#2e348962	SHOULD	The authorization server SHOULD document its scope requirements and default value (if defined).
 rfc6749#3.3#445806b1	MUST	If the client omits the scope parameter when requesting authorization, the authorization server MUST either process the request using a pre-defined default valu
 rfc6749#3.3#cbdd0232	MUST	If the issued access token scope is different from the one requested by the client, the authorization server MUST include the "scope" response parameter to info

@@ -2,12 +2,12 @@
 //! Token endpoint handler.
 
 use super::client_auth::{
-    ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, complete_client_auth,
-    extract_client_auth, extract_client_credentials, with_client_auth_challenge,
+    ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, client_auth_proof,
+    commit_optional_jti, complete_client_auth, extract_client_auth, extract_client_credentials,
+    with_client_auth_challenge,
 };
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
@@ -24,7 +24,7 @@ use crate::services::oidc::{
     fapi::SenderConstraints,
     fido2_grant,
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
-    jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
+    jwt_bearer::client_auth::authenticate_client_jwt,
     token::{
         AuthCodeExchangeParams, authenticate_client, authenticate_client_mtls,
         exchange_authorization_code, validate_dpop_if_present,
@@ -516,6 +516,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
+                auth,
                 params,
             )
             .await
@@ -545,32 +546,6 @@ pub(crate) async fn token(
             .await
         }
     }
-}
-
-/// Commit an optional pending JTI and translate failures to a response-ready
-/// `Response`. Shared by the token-issuance handlers so per-grant logging and
-/// error mapping stay consistent across grants.
-///
-/// The MUST-run-before-grant-state-persistence invariant (issue #391) is
-/// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
-/// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
-/// only path to a `TokenIssuanceProof` carrying that client-auth method.
-#[expect(
-    clippy::result_large_err,
-    reason = "Err is an HTTP Response; size is acceptable in error path"
-)]
-async fn commit_optional_jti(
-    state: &Arc<AppState>,
-    pending: Option<PendingJti>,
-    grant_name: &'static str,
-) -> Result<Option<JwtAssertionJtiClaim>, Response> {
-    let Some(p) = pending else {
-        return Ok(None);
-    };
-    p.commit(state).await.map_err(|e| {
-        tracing::warn!("JTI commit failed for {grant_name}: {e:?}");
-        e.into_service_error().into_oauth_response().into_response()
-    })
 }
 
 /// Resolve non-JWT client authentication for the `authorization_code`
@@ -869,10 +844,6 @@ async fn handle_authorization_code_grant(
 ///
 /// Requires client authentication via `client_secret_basic` or `client_secret_post`.
 /// Issues an access token with `hardware_verified: false` and no ID token.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear RFC 6749 §4.4 client-credentials grant: authenticate, bind, issue"
-)]
 async fn handle_client_credentials_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -910,10 +881,7 @@ async fn handle_client_credentials_grant(
         );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
-    let mtls_verification = any_auth.mtls_verification;
+    let witnesses = any_auth.witnesses;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
     if authenticated_client.client_type() == crate::db::ClientType::Public {
@@ -978,46 +946,16 @@ async fn handle_client_credentials_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    let jti_claim = match commit_optional_jti(&state, pending_jti, "client_credentials").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    // Client-credentials grant: the client MUST authenticate (RFC 6749
-    // §4.4). Resolve the client-auth proof by precedence: JWT → secret
-    // → mTLS. If none succeeded, validate that the client is registered
-    // as public via `NoClientAuth::for_public_client` (which fails if
-    // the client is confidential — closing the "developer forgot to
-    // authenticate" hole).
-    //
-    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
-    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
-    let client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
-    } else {
-        match (secret_verification, mtls_verification) {
-            (Some(_), Some(_)) => {
-                return ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "client presented multiple authentication methods \
-                     (RFC 6749 §2.3 violation)",
-                )
-                .into_oauth_response()
-                .into_response();
-            }
-            (Some(s), None) => ClientAuthProof::ClientSecret(s),
-            (None, Some(m)) => ClientAuthProof::MutualTls(m),
-            (None, None) => {
-                let witness = match crate::services::auth::NoClientAuth::for_public_client(
-                    &authenticated_client,
-                ) {
-                    Ok(w) => w,
-                    Err(svc) => return svc.into_oauth_response().into_response(),
-                };
-                ClientAuthProof::NoAuth(witness)
-            }
-        }
+    let client_auth = match client_auth_proof(
+        &state,
+        witnesses,
+        &authenticated_client,
+        "client_credentials",
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(resp) => return resp,
     };
     let proof = TokenIssuanceProof {
         grant: GrantProof::ClientCredentials,
@@ -1083,14 +1021,32 @@ async fn handle_device_code_grant(
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
+    auth: ClientAuthParams,
     params: DeviceCodeParams,
 ) -> Response {
+    // RFC 8628 §3.4: "If the client was issued client credentials (or
+    // assigned other authentication requirements), the client MUST
+    // authenticate with the authorization server as described in Section
+    // 3.2.1 of [RFC6749]."
+    let device_client = match super::super::device::authenticate_device_client(
+        &state,
+        &headers,
+        &auth,
+        &client_cert,
+        arrival,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(resp) => return resp,
+    };
     match super::super::device::device_token(
         State(state),
         client_info,
         client_cert,
         headers,
         &params.device_code,
+        device_client,
         arrival,
     )
     .await
@@ -1233,10 +1189,7 @@ async fn handle_token_exchange_grant(
         );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
-    let mtls_verification = any_auth.mtls_verification;
+    let witnesses = any_auth.witnesses;
 
     // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated, so
     // credential failures have already mapped to `invalid_client` above. Now
@@ -1333,46 +1286,14 @@ async fn handle_token_exchange_grant(
         client_ip: client_info.client_ip,
     };
 
-    let jti_claim = match commit_optional_jti(&state, pending_jti, "token_exchange").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    // Token exchange: same precedence + public-client validation as
-    // client_credentials. Token exchange does not mandate confidential
-    // clients per RFC 8693, but `NoClientAuth::for_public_client` is
-    // still the right check for the "no method succeeded" case — a
-    // confidential client must authenticate.
-    //
-    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
-    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
-    let client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
-    } else {
-        match (secret_verification, mtls_verification) {
-            (Some(_), Some(_)) => {
-                return ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "client presented multiple authentication methods \
-                     (RFC 6749 §2.3 violation)",
-                )
-                .into_oauth_response()
-                .into_response();
-            }
-            (Some(s), None) => ClientAuthProof::ClientSecret(s),
-            (None, Some(m)) => ClientAuthProof::MutualTls(m),
-            (None, None) => {
-                let witness = match crate::services::auth::NoClientAuth::for_public_client(
-                    &authenticated_client,
-                ) {
-                    Ok(w) => w,
-                    Err(svc) => return svc.into_oauth_response().into_response(),
-                };
-                ClientAuthProof::NoAuth(witness)
-            }
-        }
-    };
+    // Token exchange does not mandate confidential clients (RFC 8693), so a
+    // public client passes with a `NoAuth` proof; a confidential one must
+    // have authenticated.
+    let client_auth =
+        match client_auth_proof(&state, witnesses, &authenticated_client, "token_exchange").await {
+            Ok(proof) => proof,
+            Err(resp) => return resp,
+        };
     let proof = TokenIssuanceProof {
         grant: GrantProof::TokenExchange,
         client_auth,

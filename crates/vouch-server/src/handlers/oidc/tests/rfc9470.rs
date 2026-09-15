@@ -255,33 +255,36 @@ async fn test_rfc9470_acr_values_too_long_rejected() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc9470_max_age_one_does_not_reauth_a_fresh_session() {
+async fn test_rfc9470_session_within_max_age_is_not_reauthenticated() {
     // OIDC Core 3.1.2.1 requires re-authentication only when the elapsed
-    // time is *greater than* max_age. A session created moments ago is well
-    // inside max_age=1, so the flow must proceed rather than bounce to
-    // /login.
+    // time is *greater than* max_age. A session authenticated within
+    // max_age must proceed rather than bounce to /login.
     //
-    // This pins the non-zero side of the boundary. It does not by itself
-    // distinguish the duration comparison from the previous truncating one —
-    // `floor(e) >= M` and `e >= M` agree for integer M, so those differ only
-    // at exactly `e == M`, which is not reachable in a test. The property
-    // that separates the implementations is max_age=0, covered by
-    // `test_rfc9470_max_age_zero_forces_reauth`: truncating and then testing
-    // `>` reports a fresh session's age as 0, so `0 > 0` skips the
-    // re-authentication that "max_age=0 is equivalent to prompt=login"
+    // The session's `auth_time` is pinned to an instant read once here, and
+    // max_age leaves a budget no test runner exceeds between that read and
+    // the request; a one-second budget failed on a slow runner. This pins the
+    // non-zero side of the boundary only. The property that separates the
+    // duration comparison from the previous truncating one is max_age=0,
+    // covered by `test_rfc9470_max_age_zero_forces_reauth`: truncating and
+    // then testing `>` reports a fresh session's age as 0, so `0 > 0` skips
+    // the re-authentication that "max_age=0 is equivalent to prompt=login"
     // requires.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "maxage-one@example.com").await;
+    let user = create_test_user(&state.store, "maxage-within@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
+    let auth_time = jiff::Timestamp::now().as_second();
     let session_token = create_test_session_with(
         &state,
         TestSessionSpec {
             user_id: &user.id,
             email: &user.email,
             auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(auth_time),
+            },
             ..Default::default()
         },
     )
@@ -294,7 +297,7 @@ async fn test_rfc9470_max_age_one_does_not_reauth_a_fresh_session() {
         &app,
         &format!(
             "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
-             &code_challenge={}&code_challenge_method=S256&max_age=1",
+             &code_challenge={}&code_challenge_method=S256&max_age=60",
             client.client_id,
             urlencoding::encode("https://example.com/callback"),
             challenge,
@@ -312,7 +315,7 @@ async fn test_rfc9470_max_age_one_does_not_reauth_a_fresh_session() {
 
     assert!(
         !location.starts_with("/login"),
-        "a session younger than max_age=1 must not be re-authenticated, got: {location}"
+        "a session authenticated within max_age must not be re-authenticated, got: {location}"
     );
 }
 
