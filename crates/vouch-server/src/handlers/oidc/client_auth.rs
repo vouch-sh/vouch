@@ -7,9 +7,13 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::error::{OAuthErrorCode, OAuthErrorResponse};
+use crate::handlers::extractors::OptionalClientCert;
 use crate::services::oidc::{
-    jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
-    token::{ClientCredentials, authenticate_client},
+    jwt_bearer::client_auth::{JwtAuthSucceeded, PendingJti, authenticate_client_jwt},
+    token::{
+        ClientCredentials, ClientSecretVerification, MtlsCertVerification, authenticate_client,
+        authenticate_client_mtls,
+    },
 };
 use axum::{
     Json,
@@ -285,19 +289,24 @@ pub(crate) struct ClientAuthOutcome {
     /// `Some` only for JWT-authenticated clients — pair with `pending_jti.commit()`
     /// to construct `ClientAuthProof::PrivateKeyJwt`. Independent of jti presence
     /// because RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI clients.
-    pub(crate) jwt_auth: Option<crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded>,
+    pub(crate) jwt_auth: Option<JwtAuthSucceeded>,
     /// `Some` only when a `client_secret` was validated.
-    pub(crate) secret_verification: Option<crate::services::oidc::token::ClientSecretVerification>,
+    pub(crate) secret_verification: Option<ClientSecretVerification>,
+    /// `Some` only when the client is registered for `tls_client_auth` or
+    /// `self_signed_tls_client_auth` and its certificate verified.
+    pub(crate) mtls_verification: Option<MtlsCertVerification>,
 }
 
 /// Authenticate a client using any supported method.
 ///
-/// Dispatches to secret-based or JWT-based authentication depending on
-/// the extracted authentication method. Returns the verification witnesses
-/// produced by the dispatched method (JTI claim for JWT, secret-verification
-/// for client_secret_basic/post). mTLS verification is performed separately
-/// by the handler via [`validate_mtls_client_auth`] because it requires the
-/// client certificate from the request extractor.
+/// Dispatches on the extracted credentials and returns the verification
+/// witness the dispatched method produced: a JTI claim for `private_key_jwt`,
+/// a secret verification for `client_secret_basic`/`client_secret_post`, or a
+/// certificate verification for the two mTLS methods. RFC 8705 §2: "The
+/// authorization server MUST enforce the binding between client and
+/// certificate", so an mTLS-registered client that presents no certificate,
+/// or one that does not match its registration, fails here rather than in
+/// each caller.
 #[expect(
     clippy::result_large_err,
     reason = "Err is an HTTP Response; size is acceptable in error path"
@@ -305,65 +314,80 @@ pub(crate) struct ClientAuthOutcome {
 pub(crate) async fn complete_client_auth(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
+    client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
 ) -> Result<Option<ClientAuthOutcome>, Response> {
-    match auth {
+    let (creds, presentation) = match auth {
         ExtractedClientAuth::Secret {
             creds,
             presentation,
-        } => {
-            let client_id = creds.client_id.clone();
-            match authenticate_client(state, &creds, arrival).await {
-                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id,
-                    pending_jti: None,
-                    jwt_auth: None,
-                    secret_verification,
-                })),
-                Err(e) => Err(with_client_auth_challenge(
-                    presentation,
-                    e.into_service_error().into_oauth_response().into_response(),
-                )),
-            }
-        }
+        } => (creds, presentation),
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
-        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref(), arrival)
+        } => {
+            return match authenticate_client_jwt(
+                state,
+                &client_assertion,
+                client_id.as_deref(),
+                arrival,
+            )
             .await
-        {
-            Ok((client, pending_jti, jwt_auth)) => {
-                let cid = client.client_id.clone();
-                Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id: cid,
-                    pending_jti: Some(pending_jti),
-                    jwt_auth: Some(jwt_auth),
-                    secret_verification: None,
-                }))
-            }
-            Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-        },
-        ExtractedClientAuth::PublicClient { client_id } => {
-            // Public client — create credentials without a secret for authenticate_client
-            let creds = ClientCredentials {
-                client_id: client_id.clone(),
-                client_secret: None,
-            };
-            match authenticate_client(state, &creds, arrival).await {
-                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id,
-                    pending_jti: None,
-                    jwt_auth: None,
-                    secret_verification,
-                })),
+            {
+                Ok((client, pending_jti, jwt_auth)) => {
+                    let cid = client.client_id.clone();
+                    Ok(Some(ClientAuthOutcome {
+                        client,
+                        client_id: cid,
+                        pending_jti: Some(pending_jti),
+                        jwt_auth: Some(jwt_auth),
+                        secret_verification: None,
+                        mtls_verification: None,
+                    }))
+                }
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-            }
+            };
         }
-        ExtractedClientAuth::None => Ok(None),
-    }
+        ExtractedClientAuth::PublicClient { client_id } => (
+            ClientCredentials {
+                client_id,
+                client_secret: None,
+            },
+            ClientAuthPresentation::RequestBody,
+        ),
+        ExtractedClientAuth::None => return Ok(None),
+    };
+
+    let client_id = creds.client_id.clone();
+    let (client, secret_verification) =
+        authenticate_client(state, &creds, arrival)
+            .await
+            .map_err(|e| {
+                with_client_auth_challenge(
+                    presentation,
+                    e.into_service_error().into_oauth_response().into_response(),
+                )
+            })?;
+
+    // `authenticate_client` returns no secret verification for an
+    // mTLS-registered client; the certificate is its credential.
+    let mtls_verification = authenticate_client_mtls(state, &client, client_cert.0.as_ref())
+        .await
+        .map_err(|e| {
+            with_client_auth_challenge(
+                presentation,
+                e.into_service_error().into_oauth_response().into_response(),
+            )
+        })?;
+
+    Ok(Some(ClientAuthOutcome {
+        client,
+        client_id,
+        pending_jti: None,
+        jwt_auth: None,
+        secret_verification,
+        mtls_verification,
+    }))
 }
 
 /// Build an OAuth error response for parameter validation failures.

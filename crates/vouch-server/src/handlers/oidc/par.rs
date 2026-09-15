@@ -18,6 +18,7 @@ use crate::services::oidc::authorization::{
     AuthorizeRequestParams, parse_response_mode, require_pkce_for_client,
     validate_authorize_request,
 };
+use crate::services::oidc::fapi::validate_fapi_client_auth_method;
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
 use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
 use axum::{
@@ -221,10 +222,12 @@ pub(crate) async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth, arrival).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    }) else {
+    let Some(any_auth) =
+        (match complete_client_auth(&state, client_auth, &client_cert, arrival).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
         return par_error_response(
             OAuthErrorCode::InvalidClient,
             presentation,
@@ -235,39 +238,7 @@ pub(crate) async fn par(
     let pending_jti = any_auth.pending_jti;
     let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
-
-    // RFC 8705 §2 / FAPI 2.0 §5.3.2.1: mTLS dispatch. When the client is
-    // registered with `tls_client_auth` or `self_signed_tls_client_auth`
-    // and no body-level credential has authenticated it, verify the TLS
-    // client certificate. Must run before FAPI auth-method validation so
-    // a successfully mTLS-authenticated client is accepted by that gate.
-    let mtls_verification = if pending_jti.is_none()
-        && secret_verification.is_none()
-        && matches!(
-            authenticated_client.token_endpoint_auth_method,
-            crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        ) {
-        let Some(cert) = client_cert.0.as_ref() else {
-            return par_error_response(
-                OAuthErrorCode::InvalidClient,
-                presentation,
-                "mTLS client certificate required",
-            );
-        };
-        match crate::services::oidc::token::authenticate_client_mtls(
-            &state,
-            &authenticated_client,
-            cert,
-        )
-        .await
-        {
-            Ok(verification) => Some(verification),
-            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
-        }
-    } else {
-        None
-    };
+    let mtls_verification = any_auth.mtls_verification;
 
     // FAPI 2.0: Validate client authentication method.
     //
@@ -283,10 +254,7 @@ pub(crate) async fn par(
         secret_verification.is_some(),
         mtls_verification.is_some(),
     );
-    if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
-        &authenticated_client,
-        actual_method,
-    ) {
+    if let Err(e) = validate_fapi_client_auth_method(&authenticated_client, actual_method) {
         return par_error_response(
             OAuthErrorCode::InvalidClient,
             presentation,

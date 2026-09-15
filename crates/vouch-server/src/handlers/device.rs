@@ -11,8 +11,9 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::grant_type::OAuthGrantType;
-use crate::services::oidc::token::validate_dpop_if_present;
+use crate::services::oidc::token::{authenticate_client_mtls, validate_dpop_if_present};
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -439,9 +440,8 @@ pub(crate) async fn device_token(
             // `tls_client_certificate_bound_access_tokens` opt-in for the only
             // client profile that has a registered cert to match against.
             //
-            // Scoped to mTLS-client-auth methods: `authenticate_client_mtls`
-            // returns `Err("client not registered for mTLS authentication")`
-            // for any other method, and a `client_secret_basic`/`private_key_jwt`
+            // Scoped to mTLS-client-auth methods by `authenticate_client_mtls`
+            // itself: a `client_secret_basic`/`private_key_jwt`
             // sender-constraint-only client has no registered cert identity to
             // match (RFC 8705 §3 binds to whatever cert is presented by design).
             //
@@ -449,26 +449,9 @@ pub(crate) async fn device_token(
             // authentication does not burn the single-use device code — the
             // legitimate holder of the registered cert can retry.
             if let Some(ref oc) = oauth_client
-                && matches!(
-                    oc.token_endpoint_auth_method,
-                    crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                        | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-                )
+                && let Err(e) = authenticate_client_mtls(&state, oc, client_cert.0.as_ref()).await
             {
-                let Some(cert) = client_cert.0.as_ref() else {
-                    return Err(oauth_error(
-                        StatusCode::UNAUTHORIZED,
-                        OAuthError {
-                            error: OAuthErrorCode::InvalidClient.as_str().to_string(),
-                            error_description: Some("mTLS client certificate required".to_string()),
-                        },
-                    ));
-                };
-                if let Err(e) =
-                    crate::services::oidc::token::authenticate_client_mtls(&state, oc, cert).await
-                {
-                    return Err(e.into_service_error().into_oauth_response().into_response());
-                }
+                return Err(e.into_service_error().into_oauth_response().into_response());
             }
 
             // Every sender-constraint requirement registered for this
@@ -477,7 +460,7 @@ pub(crate) async fn device_token(
             let sender_constraint = match oauth_client {
                 Some(ref oc) => match SenderConstraintProof::validate(
                     oc,
-                    crate::services::oidc::fapi::SenderConstraints {
+                    SenderConstraints {
                         dpop: dpop_proof.is_some(),
                         mtls_cert: has_mtls_cert,
                     },
