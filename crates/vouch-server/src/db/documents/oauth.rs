@@ -292,6 +292,22 @@ impl ResponseMode {
             .map(|(_, mode)| *mode)
     }
 
+    /// Returns the canonical wire string for this mode.
+    ///
+    /// The returned value is one [`Self::parse`] accepts, so `ResponseMode`
+    /// values can be round-tripped through a `&str` (e.g. threaded into a
+    /// constructor that re-parses). Every accepted string is in
+    /// [`Self::ACCEPTED`]; this returns the first, canonical spelling of each
+    /// variant — `"query"`, `"jwt"`, `"form_post"` — never an alias.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Jwt => "jwt",
+            Self::FormPost => "form_post",
+        }
+    }
+
     /// Comma-separated list of accepted values, for error messages.
     #[must_use]
     pub fn supported_values() -> String {

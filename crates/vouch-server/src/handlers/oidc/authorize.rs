@@ -946,11 +946,16 @@ async fn handle_par_request(
 
     // Phase A: client lookup + active check + redirect_uri validation (errors → page).
     // Client lookup happens here (after PAR lookup) to catch deactivated clients.
+    // The PAR record holds the authoritative `response_mode` for this request
+    // (it is NOT on the authorize URL), so it is threaded into `resolve` where
+    // the `for_authorize` gate runs — otherwise a rejection renders in the
+    // `Query` default parsed from `None` even when the PAR negotiated
+    // `form_post`/`jwt`.
     let resolved = match AuthorizeResponseTarget::resolve(
         state,
         &par.client_id,
         Some(&par.redirect_uri),
-        None, // PAR response_mode handled below
+        Some(par.response_mode.as_str()),
         par.state.as_deref(),
     )
     .await
@@ -999,7 +1004,10 @@ async fn handle_par_request(
         }
     };
 
-    // Overlay the PAR response_mode (resolve() used None above).
+    // Defense-in-depth overlay: `resolve()` already set `response_mode` from
+    // the PAR record (via `as_str()`), so this is a no-op for the modes the two
+    // share. Kept so the authoritative value is the exact enum from the PAR
+    // record, not the one round-tripped through `as_str`/`parse`.
     let resolved = AuthorizeResponseTarget {
         client: resolved.client,
         redirect_uri: resolved.redirect_uri,
