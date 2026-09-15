@@ -1064,24 +1064,6 @@ impl ServerConfig {
         })
     }
 
-    /// Check if at least one IdP (of any kind) is configured.
-    #[must_use]
-    pub fn has_idps(&self) -> bool {
-        !self.idps.is_empty()
-    }
-
-    /// Check if at least one OIDC IdP is configured.
-    #[must_use]
-    pub fn has_oidc_idp(&self) -> bool {
-        self.idps.iter().any(|i| matches!(i, IdpConfig::Oidc(_)))
-    }
-
-    /// Check if at least one SAML IdP is configured.
-    #[must_use]
-    pub fn has_saml_idp(&self) -> bool {
-        self.idps.iter().any(|i| matches!(i, IdpConfig::Saml(_)))
-    }
-
     /// Get the organization display name.
     #[must_use]
     pub fn get_org_display_name(&self) -> &str {
@@ -1406,20 +1388,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_saml_idp_when_configured() {
-        let mut config = test_config();
-        config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
-        assert!(config.has_saml_idp());
-    }
-
-    #[test]
-    fn test_has_saml_idp_returns_false_when_none() {
-        let mut config = test_config();
-        config.idps.retain(|i| matches!(i, IdpConfig::Oidc(_)));
-        assert!(!config.has_saml_idp());
-    }
-
-    #[test]
     fn test_validate_accepts_mixed_oidc_and_saml() {
         // Mutual exclusivity removed — both kinds can coexist in the same idps list.
         let mut config = test_config();
@@ -1470,14 +1438,6 @@ mod tests {
         let mut config = test_config();
         config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_has_oidc_idp_false_when_only_saml() {
-        let mut config = test_config();
-        config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
-        assert!(!config.has_oidc_idp(), "should be false when only SAML set");
-        assert!(config.has_saml_idp(), "has_saml_idp should be true");
     }
 
     #[test]
@@ -1604,15 +1564,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_idps_empty() {
-        let mut config = test_config();
-        config.idps = Vec::new();
-        assert!(!config.has_idps());
-        assert!(!config.has_oidc_idp());
-        assert!(!config.has_saml_idp());
-    }
-
-    #[test]
     fn test_validate_rejects_zero_idps() {
         // Without an IdP we cannot verify user identity, so the server must
         // refuse to boot rather than silently degrade to placeholder users.
@@ -1634,14 +1585,6 @@ mod tests {
         config.idps = Vec::new();
         config.certification_test_token = Some(SecretString::from("cert-token"));
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_has_idps_with_providers() {
-        let config = test_config();
-        // test_config sets one OIDC provider
-        assert!(config.has_idps());
-        assert!(config.has_oidc_idp());
     }
 
     /// Regression for #541: wildcard CORS origin must be rejected at startup
