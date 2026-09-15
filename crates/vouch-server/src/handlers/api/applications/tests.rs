@@ -3093,6 +3093,168 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
 }
 
 // ========================================================================
+// RFC 8252 §8.4 rotation reach: a native/spa client registered (via
+// authenticated dynamic registration) with a per-instance
+// `client_secret_basic`/`client_secret_post` method is confidential per
+// `OAuthClient::client_type` and is held to that secret at `/oauth/token`
+// (see `test_authenticate_client_native_client_with_secret_is_confidential`
+// in `services::oidc::token`). The rotation gate must use the same axis, so
+// such a client can rotate a compromised per-instance secret. Formerly the
+// gate used `application_type.requires_secret()` (Web/Service only), which
+// rejected the native/spa + secret client the token endpoint now demands a
+// secret from — a permanent lockout with no alternate rotation path
+// (RFC 7592 PUT carries no `client_secret`; GET returns `client_secret: None`).
+// ========================================================================
+
+// Regression: a native client registered with `client_secret_post` and a
+// stored secret must be able to mint a replacement secret, and that rotated
+// secret must authenticate the client at `/oauth/token` — proving the
+// rotation produces a live credential, not a dead row.
+#[tokio::test]
+async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
+    use crate::services::oidc::token::{ClientCredentials, authenticate_client};
+    use secrecy::SecretString;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "native-secret-rotate@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Native,
+            redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretPost),
+            with_secret: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(json.get("secret_id").is_some(), "secret_id missing: {body}");
+    let new_secret = json["client_secret"]
+        .as_str()
+        .expect("client_secret missing");
+    assert!(
+        new_secret.starts_with("vouch_"),
+        "rotated secret must be a vouch_ value: {new_secret}"
+    );
+
+    // The rotated secret row must be persisted alongside the seeded one.
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert_eq!(
+        secrets.len(),
+        2,
+        "the rotated secret row must be persisted alongside the seeded one: {secrets:?}"
+    );
+
+    // End-to-end: the rotated secret must authenticate the now-confidential
+    // native client. Before `ca8a6f65` this client authenticated secretless
+    // (its dormant secret was normalized to `none` on read); after it,
+    // `/oauth/token` requires the secret, so the rotation must produce one
+    // the token endpoint accepts — otherwise the owner is locked out of the
+    // very credential they are now required to present.
+    let arrival = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now());
+    let creds = ClientCredentials {
+        client_id: client.client_id.clone(),
+        client_secret: Some(SecretString::from(new_secret.to_string())),
+    };
+    let (authed, verification) = authenticate_client(&state, &creds, arrival)
+        .await
+        .expect("the rotated secret must authenticate the native+secret client");
+    assert_eq!(
+        authed.client_type(),
+        crate::db::ClientType::Confidential,
+        "a native client registered with a secret is confidential"
+    );
+    assert!(
+        verification.is_some(),
+        "the rotated secret must be validated against its stored hash"
+    );
+}
+
+// No-regression: the new `client_type() != Confidential` gate must keep
+// rejecting a public native client (`token_endpoint_auth_method = none`, no
+// stored secret) — the shape the self-service create form produces for a
+// native app. The rotation endpoint must not mint a secret an owner cannot
+// use, and must not regress the pre-fix rejection for native clients that
+// actually have no secret.
+#[tokio::test]
+async fn test_add_secret_rejects_public_native_client_with_no_secret() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "native-public-rotate@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Native,
+            redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should be minted for a public native client, got {secrets:?}"
+    );
+}
+
+// ========================================================================
 // FAPI delete-floor exemption: FAPI clients cannot authenticate with a
 // secret (minting is blocked for every FAPI profile), so a dead secret row
 // minted before the guard must remain deletable. The unconditional

@@ -619,7 +619,15 @@ pub(crate) async fn add_secret_form(
         }
     };
 
-    if !client.application_type.requires_secret() {
+    // Gate on the registered `token_endpoint_auth_method`, not
+    // `application_type`: RFC 8252 §8.4 lets a native/spa client hold a
+    // per-instance secret, and a secret it registered is one the token
+    // endpoint now requires (see `OAuthClient::client_type`). The old
+    // `application_type.requires_secret()` axis (Web/Service only) would
+    // reject exactly such a client, locking its owner out of rotating the
+    // very secret `/oauth/token` demands. Public (`none`) clients stay
+    // rejected; FAPI clients are blocked by the `is_fapi()` gate below.
+    if client.client_type() != crate::db::ClientType::Confidential {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-no-client-secrets"),
@@ -1503,6 +1511,149 @@ mod tests {
             secrets.len(),
             2,
             "the new secret row must be persisted alongside the seeded one: {secrets:?}"
+        );
+    }
+
+    // ========================================================================
+    // RFC 8252 §8.4 rotation reach: a native/spa client registered (via
+    // authenticated dynamic registration) with a per-instance
+    // `client_secret_basic`/`client_secret_post` method is confidential per
+    // `OAuthClient::client_type` and is held to that secret at `/oauth/token`.
+    // The web UI "Add Secret" handler must use the same axis so an owner can
+    // rotate a compromised per-instance secret. Formerly the gate used
+    // `application_type.requires_secret()` (Web/Service only) and rejected
+    // the native/spa + secret client the token endpoint now demands a secret
+    // from — the same lockout the API handler had (see the parallel tests in
+    // `handlers::api::applications::tests`).
+    // ========================================================================
+
+    // Regression: a native client registered with `client_secret_post` and a
+    // stored secret must be able to mint a replacement secret via the web UI.
+    // Before the fix, this returned the `apps-error-no-client-secrets` error
+    // page instead of minting.
+    #[tokio::test]
+    async fn test_web_add_secret_succeeds_for_native_client_with_registered_secret() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "native-web-secret@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+                token_endpoint_auth_method: Some(
+                    crate::db::TokenEndpointAuthMethod::ClientSecretPost,
+                ),
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "native+secret client must be able to rotate via the web UI, got {status}: {body}"
+        );
+        assert!(
+            body.contains("vouch_"),
+            "the response must render the freshly minted plaintext secret: {body}"
+        );
+        assert!(
+            !body.contains("does not use client secrets"),
+            "must not render the no-secrets error page for a native+secret client: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            secrets.len(),
+            2,
+            "the rotated secret row must be persisted alongside the seeded one: {secrets:?}"
+        );
+    }
+
+    // No-regression: the new `client_type() != Confidential` gate must keep
+    // rejecting a public native client (`token_endpoint_auth_method = none`,
+    // no stored secret) — the shape the self-service create form produces for
+    // a native app. The web UI must not mint a secret an owner cannot use and
+    // must not regress the pre-fix rejection for native clients that actually
+    // have no secret.
+    #[tokio::test]
+    async fn test_web_add_secret_rejects_public_native_client_with_no_secret() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "native-web-public@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        // `error_page` and `SecretAddedTemplate` both render as HTTP 200 HTML,
+        // so the guard is verified by response content + persisted rows, not
+        // by status (mirrors the FAPI tests above).
+        assert!(
+            !body.contains("vouch_"),
+            "a public native client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("does not use client secrets"),
+            "the error page must explain the client does not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should be minted for a public native client, got {secrets:?}"
         );
     }
 
