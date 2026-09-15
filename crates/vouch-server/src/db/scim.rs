@@ -870,6 +870,11 @@ pub async fn update_scim_user(
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Test-only seam, before the first read so a write it commits is
+        // visible to the last-admin count below.
+        #[cfg(test)]
+        store.run_last_admin_count_test_hook(user_id).await;
+
         let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };

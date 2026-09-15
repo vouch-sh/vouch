@@ -367,6 +367,9 @@ pub struct DocumentStore {
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
+    /// See [`LastAdminCountTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    last_admin_count_test_hook: Option<LastAdminCountTestHook>,
     /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
@@ -469,6 +472,16 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only hook invoked inside [`crate::db::update_scim_user`] right after
+/// the transaction begins and before its first read, receiving the `user_id`
+/// being updated.
+///
+/// A write the hook commits is visible to the in-transaction last-admin count,
+/// which runs after `revoke_user_access` has committed; tests deactivate a
+/// sibling admin here to make that count refuse.
+#[cfg(test)]
+pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
 /// Test-only hook invoked inside
 /// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
 /// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
@@ -520,6 +533,8 @@ impl DocumentStore {
             compare_and_update_test_hook: None,
             #[cfg(test)]
             delete_test_hook: None,
+            #[cfg(test)]
+            last_admin_count_test_hook: None,
             #[cfg(test)]
             post_secret_revoke_test_hook: None,
             #[cfg(test)]
@@ -575,6 +590,21 @@ impl DocumentStore {
     #[cfg(test)]
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
+            hook(id).await;
+        }
+    }
+
+    /// Install the [`LastAdminCountTestHook`] seam for
+    /// [`update_scim_user`](super::scim::update_scim_user).
+    #[cfg(test)]
+    pub(crate) fn set_last_admin_count_test_hook(&mut self, hook: LastAdminCountTestHook) {
+        self.last_admin_count_test_hook = Some(hook);
+    }
+
+    /// Run the installed `last_admin_count_test_hook` for `id`, if any.
+    #[cfg(test)]
+    pub(crate) async fn run_last_admin_count_test_hook(&self, id: &str) {
+        if let Some(hook) = &self.last_admin_count_test_hook {
             hook(id).await;
         }
     }

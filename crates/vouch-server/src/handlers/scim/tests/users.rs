@@ -1824,3 +1824,558 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
             .join(", "),
     );
 }
+
+// ========================================================================
+// In-transaction LastAdmin refusal after revocation committed
+// ========================================================================
+//
+// The in-transaction count refuses only when an admin demotion commits between
+// the advisory pre-check and the count, after revocation has committed. The
+// tests produce that by deactivating a sibling admin from a hook that runs
+// inside the transaction before its first read: `last_admin_count_test_hook`
+// for PATCH, `delete_test_hook` for DELETE.
+
+/// Records a `scim_operation` audit row when the in-transaction `LastAdmin`
+/// guard refuses a PATCH *after* `revoke_then_persist` already committed the
+/// target's session deletions and SSH-cert revocations. The row carries
+/// `auth.token_id` (audit after commit, #1249).
+#[expect(
+    clippy::too_many_lines,
+    reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
+)]
+#[tokio::test]
+async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocation() {
+    use crate::db::documents::session::SessionDoc;
+    use crate::db::documents::user::UserDoc;
+    use std::sync::{Arc, Mutex};
+
+    // Slots carry the target (admin1) and sibling (admin2) ids from the test
+    // thread into the hook closure; both are `None` until set after the two
+    // admins are stood up, so the hook stays dormant during setup.
+    let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sibling_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let t = Arc::clone(&target_slot);
+    let s = Arc::clone(&sibling_slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        // `writer` is a hookless clone taken before the seam is installed, so
+        // the sibling deactivation never re-enters `update_scim_user`.
+        let writer = store.clone();
+        store.set_last_admin_count_test_hook(Arc::new(move |user_id: &str| {
+            let writer = writer.clone();
+            let user_id = user_id.to_string();
+            let t = Arc::clone(&t);
+            let s = Arc::clone(&s);
+            Box::pin(async move {
+                let is_target = t.lock().expect("target lock").as_deref() == Some(user_id.as_str());
+                if !is_target {
+                    return;
+                }
+                let sibling = s.lock().expect("sibling lock").clone();
+                if let Some(sibling_id) = sibling {
+                    writer
+                        .modify::<UserDoc, _>(&sibling_id, |d| d.active = false)
+                        .await
+                        .expect("deactivate sibling admin from hook");
+                }
+            })
+        }));
+    })
+    .await;
+
+    // Two active admins in one org. admin1 carries a session from
+    // `create_test_org_admin`; admin2 gets one explicitly so its session count
+    // is non-zero too (proving the hook only deactivates admin2's *record*,
+    // not its sessions).
+    let (admin1, _admin1_session_token) = create_test_org_admin(&state).await;
+    let org_id = admin1
+        .org_id
+        .as_deref()
+        .expect("admin1 has org")
+        .to_string();
+    let admin2 = create_test_user_in_org(&state.store, "admin2@example.com", &org_id, true).await;
+    let admin2_auth_id = create_test_authenticator(&state.store, &admin2.id).await;
+    let _admin2_session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin2.id,
+            email: &admin2.email,
+            auth_id: Some(&admin2_auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Live SSH certs for both admins. admin1's is revoked by the PATCH;
+    // admin2's stays live (the hook only flips its user doc `active=false`).
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_030,
+        &admin1.id,
+        &admin1.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin1 issuance");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_031,
+        &admin2.id,
+        &admin2.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin2 issuance");
+
+    // `users:write` alone is all the PATCH handler checks.
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "attacker",
+        &org_id,
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    // Sanity: neither admin is the last active one (the other still counts),
+    // so the advisory pre-check passes for admin1. admin1 has a live session
+    // and no cert has been revoked yet.
+    assert!(
+        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+            .await
+            .expect("count admins for admin1"),
+        "setup: admin1 has a second active admin",
+    );
+    let session_count_before = state
+        .store
+        .count::<SessionDoc>("user_id", &admin1.id)
+        .await
+        .expect("count admin1 sessions");
+    assert!(session_count_before >= 1, "setup: admin1 has a session");
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no SSH revocations yet",
+    );
+
+    // Arm the hook: when `update_scim_user(admin1)` runs (after `revoke_user_access`
+    // has committed), deactivate admin2 so the in-transaction count sees zero
+    // other active admins and the authoritative floor fires.
+    *target_slot.lock().expect("target lock") = Some(admin1.id.clone());
+    *sibling_slot.lock().expect("sibling lock") = Some(admin2.id.clone());
+
+    // PATCH admin1 active=false. The pre-check passes (2 admins);
+    // `revoke_then_persist` commits admin1's revocation, then `update_scim_user`
+    // counts 0 other active admins (admin2 deactivated by the hook) and the
+    // floor refuses with `LastAdmin`.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", admin1.id),
+        Some(
+            r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#
+                .to_string(),
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "in-tx LastAdmin refusal must be a 400: got {status}: {body}",
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "mutability",
+        "in-tx LastAdmin refusal on PATCH uses the `mutability` scimType",
+    );
+
+    // Revocation committed before the floor refused: admin1's sessions are
+    // gone and its SSH cert is in the revocation list — the durable side
+    // effect the audit row must tie to this operation.
+    let session_count_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin1.id)
+        .await
+        .expect("count admin1 sessions after");
+    assert_eq!(
+        session_count_after, 0,
+        "SCIM PATCH revocation must delete the target's sessions before the floor refuses",
+    );
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked after");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "exactly one cert revoked — the target's; got {}",
+        revoked
+            .iter()
+            .map(|r| r.serial.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    assert_eq!(
+        revoked[0].user_id, admin1.id,
+        "the revoked cert was admin1's"
+    );
+
+    // admin1's record is untouched: the `active=false` write never committed,
+    // so it stays active/admin and is now the floor's only live admin (admin2
+    // was deactivated by the hook).
+    let admin1_after = crate::db::get_user_by_id(&state.store, &admin1.id)
+        .await
+        .expect("fetch admin1 after")
+        .expect("admin1 record still exists");
+    assert!(
+        admin1_after.active,
+        "admin1 still active — the persist was refused"
+    );
+    assert!(admin1_after.is_org_admin, "admin1 still admin");
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+            .await
+            .expect("rerun floor"),
+        "admin1 is the last active admin after admin2 was demoted by the hook",
+    );
+
+    // The fix: a `scim_operation` update audit event records the committed
+    // revocation, tying it to the issuing SCIM token. The payload mirrors the
+    // generic arm's `accessRevoked`/`persisted` shape but carries
+    // `refusal: "last_admin"` to distinguish a floor refusal from a write that
+    // was attempted and failed. `refusal` is nested inside the `details` JSON
+    // string, so parse the event and its details rather than substring-match.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let update_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"update\"") && e.data.contains(&admin1.id))
+        .collect();
+    assert!(
+        !update_events.is_empty(),
+        "SCIM PATCH in-tx LastAdmin: a committed revocation must record a \
+         `scim_operation` update audit event; got {}",
+        events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    // `actor_token_id` is the token record's id, recoverable by hashing the
+    // bearer the same way `authenticate_scim` does — proving the row ties the
+    // revocation to the specific SCIM token that issued the operation.
+    let token_hash = {
+        use aws_lc_rs::digest::{self, SHA256};
+        hex::encode(digest::digest(&SHA256, token.as_bytes()))
+    };
+    let token_record =
+        crate::db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
+            .await
+            .expect("look up token record")
+            .expect("token record exists");
+
+    let refusal_event = update_events
+        .iter()
+        .find_map(|e| {
+            let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
+            let details_str = v.get("details")?.as_str()?;
+            let details = serde_json::from_str::<serde_json::Value>(details_str).ok()?;
+            (details.get("refusal")?.as_str()? == "last_admin").then_some(v)
+        })
+        .expect("the update audit event for a LastAdmin refusal carries `refusal: \"last_admin\"`");
+    assert_eq!(refusal_event["operation"], "update");
+    assert_eq!(refusal_event["resource_type"], "User");
+    assert_eq!(refusal_event["resource_id"], admin1.id);
+    assert_eq!(
+        refusal_event["actor_token_id"].as_str(),
+        Some(token_record.id.as_str()),
+        "the audit row ties the revocation to the issuing SCIM token",
+    );
+    let details: serde_json::Value =
+        serde_json::from_str(refusal_event["details"].as_str().expect("details string"))
+            .expect("details is JSON");
+    assert_eq!(details["active"].as_bool(), Some(false));
+    assert_eq!(details["deactivated"].as_bool(), Some(true));
+    assert_eq!(details["accessRevoked"].as_bool(), Some(true));
+    assert_eq!(details["persisted"].as_bool(), Some(false));
+    assert_eq!(
+        details["refusal"].as_str(),
+        Some("last_admin"),
+        "the `refusal` distinguisher marks this row as a floor refusal",
+    );
+}
+
+/// Records a `scim_operation` audit row when the in-transaction `LastAdmin`
+/// guard refuses a DELETE *after* the handler's `revoke_user_access` already
+/// committed the target's session deletions and SSH-cert revocations. The row
+/// carries `auth.token_id`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
+)]
+#[tokio::test]
+async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revocation() {
+    use crate::db::documents::session::SessionDoc;
+    use crate::db::documents::user::UserDoc;
+    use std::sync::{Arc, Mutex};
+
+    let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sibling_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let t = Arc::clone(&target_slot);
+    let s = Arc::clone(&sibling_slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_delete_test_hook(Arc::new(move |user_id: &str| {
+            let writer = writer.clone();
+            let user_id = user_id.to_string();
+            let t = Arc::clone(&t);
+            let s = Arc::clone(&s);
+            Box::pin(async move {
+                let is_target = t.lock().expect("target lock").as_deref() == Some(user_id.as_str());
+                if !is_target {
+                    return;
+                }
+                let sibling = s.lock().expect("sibling lock").clone();
+                if let Some(sibling_id) = sibling {
+                    writer
+                        .modify::<UserDoc, _>(&sibling_id, |d| d.active = false)
+                        .await
+                        .expect("deactivate sibling admin from hook");
+                }
+            })
+        }));
+    })
+    .await;
+
+    let (admin1, _admin1_session_token) = create_test_org_admin(&state).await;
+    let org_id = admin1
+        .org_id
+        .as_deref()
+        .expect("admin1 has org")
+        .to_string();
+    let admin2 = create_test_user_in_org(&state.store, "admin2@example.com", &org_id, true).await;
+    let admin2_auth_id = create_test_authenticator(&state.store, &admin2.id).await;
+    let _admin2_session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &admin2.id,
+            email: &admin2.email,
+            auth_id: Some(&admin2_auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_040,
+        &admin1.id,
+        &admin1.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin1 issuance");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_010_041,
+        &admin2.id,
+        &admin2.email,
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record admin2 issuance");
+
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "attacker",
+        &org_id,
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+
+    // Sanity: the advisory pre-check passes for admin1 (2 active admins),
+    // admin1 has a live session, and no cert is revoked yet.
+    assert!(
+        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+            .await
+            .expect("count admins for admin1"),
+        "setup: admin1 has a second active admin",
+    );
+    let session_count_before = state
+        .store
+        .count::<SessionDoc>("user_id", &admin1.id)
+        .await
+        .expect("count admin1 sessions");
+    assert!(session_count_before >= 1, "setup: admin1 has a session");
+    assert!(
+        crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked")
+            .is_empty(),
+        "setup: no SSH revocations yet",
+    );
+
+    // Arm the hook: when `delete_user(admin1)` runs (after the handler's
+    // `revoke_user_access` has committed), deactivate admin2 so the
+    // in-transaction count sees zero other active admins.
+    *target_slot.lock().expect("target lock") = Some(admin1.id.clone());
+    *sibling_slot.lock().expect("sibling lock") = Some(admin2.id.clone());
+
+    // DELETE admin1. The pre-check passes (2 admins); the handler commits
+    // revocation, then `delete_user` counts 0 other active admins (admin2
+    // deactivated by the hook) and the floor refuses with `LastAdmin`.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", admin1.id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "in-tx LastAdmin refusal must be a 400: got {status}: {body}",
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+    assert!(
+        error["detail"].as_str().is_some_and(
+            |d| d.contains("Cannot delete the organization's only remaining active admin")
+        ),
+        "SCIM delete refusal detail must name the floor: body={body}",
+    );
+
+    // Revocation committed before the floor refused: admin1's sessions are
+    // gone and its SSH cert is revoked.
+    let session_count_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin1.id)
+        .await
+        .expect("count admin1 sessions after");
+    assert_eq!(
+        session_count_after, 0,
+        "SCIM delete revocation must delete the target's sessions before the floor refuses",
+    );
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked after");
+    assert_eq!(
+        revoked.len(),
+        1,
+        "exactly one cert revoked — the target's; got {}",
+        revoked
+            .iter()
+            .map(|r| r.serial.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    assert_eq!(
+        revoked[0].user_id, admin1.id,
+        "the revoked cert was admin1's"
+    );
+
+    // admin1's record survives: the delete never committed (the floor returned
+    // before the user-row delete and the org-row OCC), so admin1 stays
+    // active/admin and is now the floor's only live admin.
+    let admin1_after = crate::db::get_user_by_id(&state.store, &admin1.id)
+        .await
+        .expect("fetch admin1 after")
+        .expect("admin1 record still exists");
+    assert!(
+        admin1_after.active,
+        "admin1 still active — the delete was refused"
+    );
+    assert!(admin1_after.is_org_admin, "admin1 still admin");
+    assert!(
+        crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+            .await
+            .expect("rerun floor"),
+        "admin1 is the last active admin after admin2 was demoted by the hook",
+    );
+
+    // The fix: a `scim_operation` delete audit event records the committed
+    // revocation, tying it to the issuing SCIM token. `refusal` is nested
+    // inside the `details` JSON string, so parse the event and its details
+    // rather than substring-match.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let delete_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"delete\"") && e.data.contains(&admin1.id))
+        .collect();
+    assert!(
+        !delete_events.is_empty(),
+        "SCIM DELETE in-tx LastAdmin: a committed revocation must record a \
+         `scim_operation` delete audit event; got {}",
+        events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    let token_hash = {
+        use aws_lc_rs::digest::{self, SHA256};
+        hex::encode(digest::digest(&SHA256, token.as_bytes()))
+    };
+    let token_record =
+        crate::db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
+            .await
+            .expect("look up token record")
+            .expect("token record exists");
+
+    let refusal_event = delete_events
+        .iter()
+        .find_map(|e| {
+            let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
+            let details_str = v.get("details")?.as_str()?;
+            let details = serde_json::from_str::<serde_json::Value>(details_str).ok()?;
+            (details.get("refusal")?.as_str()? == "last_admin").then_some(v)
+        })
+        .expect("the delete audit event for a LastAdmin refusal carries `refusal: \"last_admin\"`");
+    assert_eq!(refusal_event["operation"], "delete");
+    assert_eq!(refusal_event["resource_type"], "User");
+    assert_eq!(refusal_event["resource_id"], admin1.id);
+    assert_eq!(
+        refusal_event["actor_token_id"].as_str(),
+        Some(token_record.id.as_str()),
+        "the audit row ties the revocation to the issuing SCIM token",
+    );
+    let details: serde_json::Value =
+        serde_json::from_str(refusal_event["details"].as_str().expect("details string"))
+            .expect("details is JSON");
+    assert_eq!(details["accessRevoked"].as_bool(), Some(true));
+    assert_eq!(details["deleted"].as_bool(), Some(false));
+    assert_eq!(
+        details["refusal"].as_str(),
+        Some("last_admin"),
+        "the `refusal` distinguisher marks this row as a floor refusal",
+    );
+}

@@ -565,9 +565,32 @@ pub(crate) async fn patch_user(
             )
                 .into_response();
         }
-        // The advisory pre-check above missed a race, so the authoritative
-        // count inside the transaction refused. Nothing was persisted.
+        // Reached when an admin demotion commits between the advisory pre-check
+        // and the in-transaction count. `revoke_then_persist` has already
+        // committed the revocation, so it is audited; `refusal: "last_admin"`
+        // separates a floor refusal from a failed write.
         Err(crate::services::auth::DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
+            if patched.deactivated {
+                db::record_scim_audit(
+                    &state.audit,
+                    "update",
+                    "User",
+                    &id,
+                    Some(&auth.token_id),
+                    Some(
+                        &serde_json::json!({
+                            "active": patched.active,
+                            "deactivated": true,
+                            "accessRevoked": true,
+                            "persisted": false,
+                            "refusal": "last_admin"
+                        })
+                        .to_string(),
+                    ),
+                    auth.org_domain.as_deref(),
+                )
+                .await;
+            }
             return last_admin_scim_error();
         }
         Err(crate::services::auth::DeactivationError::Persist(e)) => {
@@ -770,6 +793,26 @@ pub(crate) async fn delete_user(
         // §3.12 lists no `scimType` applicable to DELETE, so this is a plain
         // 400 with a human-readable `detail`.
         Err(db::DeleteUserError::LastAdmin) => {
+            // Access was revoked above and that commit stands, so it is
+            // audited; `refusal: "last_admin"` separates a floor refusal from a
+            // failed delete.
+            db::record_scim_audit(
+                &state.audit,
+                "delete",
+                "User",
+                &id,
+                Some(&auth.token_id),
+                Some(
+                    &serde_json::json!({
+                        "accessRevoked": true,
+                        "deleted": false,
+                        "refusal": "last_admin"
+                    })
+                    .to_string(),
+                ),
+                auth.org_domain.as_deref(),
+            )
+            .await;
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ScimError::new(
