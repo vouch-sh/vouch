@@ -3092,24 +3092,11 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
     );
 }
 
-// ========================================================================
-// RFC 8252 §8.4 rotation reach: a native/spa client registered (via
-// authenticated dynamic registration) with a per-instance
-// `client_secret_basic`/`client_secret_post` method is confidential per
-// `OAuthClient::client_type` and is held to that secret at `/oauth/token`
-// (see `test_authenticate_client_native_client_with_secret_is_confidential`
-// in `services::oidc::token`). The rotation gate must use the same axis, so
-// such a client can rotate a compromised per-instance secret. Formerly the
-// gate used `application_type.requires_secret()` (Web/Service only), which
-// rejected the native/spa + secret client the token endpoint now demands a
-// secret from — a permanent lockout with no alternate rotation path
-// (RFC 7592 PUT carries no `client_secret`; GET returns `client_secret: None`).
-// ========================================================================
-
-// Regression: a native client registered with `client_secret_post` and a
-// stored secret must be able to mint a replacement secret, and that rotated
-// secret must authenticate the client at `/oauth/token` — proving the
-// rotation produces a live credential, not a dead row.
+// RFC 8252 §8.4: "Except when using a mechanism like Dynamic Client
+// Registration [RFC7591] to provision per-instance secrets, native apps are
+// classified as public clients". A native client holding a registered
+// `client_secret_post` secret can add a secret, and the new secret
+// authenticates it at the token endpoint.
 #[tokio::test]
 async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
     use crate::services::oidc::token::{ClientCredentials, authenticate_client};
@@ -3172,12 +3159,7 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
         "the rotated secret row must be persisted alongside the seeded one: {secrets:?}"
     );
 
-    // End-to-end: the rotated secret must authenticate the now-confidential
-    // native client. Before `ca8a6f65` this client authenticated secretless
-    // (its dormant secret was normalized to `none` on read); after it,
-    // `/oauth/token` requires the secret, so the rotation must produce one
-    // the token endpoint accepts — otherwise the owner is locked out of the
-    // very credential they are now required to present.
+    // The new secret must authenticate the client.
     let arrival = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now());
     let creds = ClientCredentials {
         client_id: client.client_id.clone(),
@@ -3197,12 +3179,9 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
     );
 }
 
-// No-regression: the new `client_type() != Confidential` gate must keep
-// rejecting a public native client (`token_endpoint_auth_method = none`, no
-// stored secret) — the shape the self-service create form produces for a
-// native app. The rotation endpoint must not mint a secret an owner cannot
-// use, and must not regress the pre-fix rejection for native clients that
-// actually have no secret.
+// RFC 7591 §2: "\"none\": The client is a public client as defined in OAuth
+// 2.0, Section 2.1, and does not have a client secret." A public native client
+// is refused and no secret row is written.
 #[tokio::test]
 async fn test_add_secret_rejects_public_native_client_with_no_secret() {
     let (app, state) = test_app().await;

@@ -518,14 +518,12 @@ pub(crate) async fn add_secret_api(
     // client secrets).
     let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    // Gate on the registered `token_endpoint_auth_method`, not
-    // `application_type`: RFC 8252 §8.4 lets a native/spa client hold a
-    // per-instance secret, and a secret it registered is one the token
-    // endpoint now requires (see `OAuthClient::client_type`). The old
-    // `application_type.requires_secret()` axis (Web/Service only) would
-    // reject exactly such a client, locking its owner out of rotating the
-    // very secret `/oauth/token` demands. Public (`none`) clients stay
-    // rejected; FAPI clients are blocked by the `is_fapi()` gate below.
+    // The registered auth method decides whether a client holds a secret, not
+    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients". A public client (`none`) has no secret to rotate;
+    // FAPI clients are refused by the `is_fapi()` gate below.
     if client.client_type() != crate::db::ClientType::Confidential {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,

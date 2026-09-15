@@ -619,14 +619,12 @@ pub(crate) async fn add_secret_form(
         }
     };
 
-    // Gate on the registered `token_endpoint_auth_method`, not
-    // `application_type`: RFC 8252 §8.4 lets a native/spa client hold a
-    // per-instance secret, and a secret it registered is one the token
-    // endpoint now requires (see `OAuthClient::client_type`). The old
-    // `application_type.requires_secret()` axis (Web/Service only) would
-    // reject exactly such a client, locking its owner out of rotating the
-    // very secret `/oauth/token` demands. Public (`none`) clients stay
-    // rejected; FAPI clients are blocked by the `is_fapi()` gate below.
+    // The registered auth method decides whether a client holds a secret, not
+    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients". A public client (`none`) has no secret to rotate;
+    // FAPI clients are refused by the `is_fapi()` gate below.
     if client.client_type() != crate::db::ClientType::Confidential {
         return error_page(
             Tr::new("apps-error-title-error"),
@@ -1514,23 +1512,10 @@ mod tests {
         );
     }
 
-    // ========================================================================
-    // RFC 8252 §8.4 rotation reach: a native/spa client registered (via
-    // authenticated dynamic registration) with a per-instance
-    // `client_secret_basic`/`client_secret_post` method is confidential per
-    // `OAuthClient::client_type` and is held to that secret at `/oauth/token`.
-    // The web UI "Add Secret" handler must use the same axis so an owner can
-    // rotate a compromised per-instance secret. Formerly the gate used
-    // `application_type.requires_secret()` (Web/Service only) and rejected
-    // the native/spa + secret client the token endpoint now demands a secret
-    // from — the same lockout the API handler had (see the parallel tests in
-    // `handlers::api::applications::tests`).
-    // ========================================================================
-
-    // Regression: a native client registered with `client_secret_post` and a
-    // stored secret must be able to mint a replacement secret via the web UI.
-    // Before the fix, this returned the `apps-error-no-client-secrets` error
-    // page instead of minting.
+    // RFC 8252 §8.4: "Except when using a mechanism like Dynamic Client
+    // Registration [RFC7591] to provision per-instance secrets, native apps are
+    // classified as public clients". A native client holding a registered
+    // `client_secret_post` secret can add a secret through the web UI.
     #[tokio::test]
     async fn test_web_add_secret_succeeds_for_native_client_with_registered_secret() {
         let (app, state) = test_app().await;
@@ -1593,12 +1578,9 @@ mod tests {
         );
     }
 
-    // No-regression: the new `client_type() != Confidential` gate must keep
-    // rejecting a public native client (`token_endpoint_auth_method = none`,
-    // no stored secret) — the shape the self-service create form produces for
-    // a native app. The web UI must not mint a secret an owner cannot use and
-    // must not regress the pre-fix rejection for native clients that actually
-    // have no secret.
+    // RFC 7591 §2: "\"none\": The client is a public client as defined in OAuth
+    // 2.0, Section 2.1, and does not have a client secret." A public native
+    // client is refused and no secret row is written.
     #[tokio::test]
     async fn test_web_add_secret_rejects_public_native_client_with_no_secret() {
         let (app, state) = test_app().await;
