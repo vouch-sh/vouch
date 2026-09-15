@@ -306,8 +306,7 @@ async fn test_zero_stored_registration_counter_accepts_first_assertion() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id =
-        register_mock_device_in_db_with_counter(&harness, &user.id, &device, 0).await;
+    let _auth_id = register_mock_device_in_db_with_counter(&harness, &user.id, &device, 0).await;
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     let (challenge, state) = get_challenge(&harness).await;
@@ -380,13 +379,9 @@ async fn test_high_bit_stored_registration_counter_rejects_clone_assertion() {
     // read-path asymmetry the bug turns on.
     let device = IntegrationMockDevice::new();
     let high_bit_counter: u32 = 0x8000_0001;
-    let auth_id = register_mock_device_in_db_with_counter(
-        &harness,
-        &user.id,
-        &device,
-        high_bit_counter,
-    )
-    .await;
+    let auth_id =
+        register_mock_device_in_db_with_counter(&harness, &user.id, &device, high_bit_counter)
+            .await;
 
     // Confirm the DB stored the high-bit u32 as a negative i32 via the
     // write path's `cast_signed` bitwise reinterpretation, and that the

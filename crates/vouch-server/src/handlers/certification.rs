@@ -148,17 +148,16 @@ pub(crate) async fn complete_login(
     };
 
     // ── 4. Get or create the certification test authenticator ─────────────
-    let authenticator_id =
-        match get_or_create_cert_authenticator(&state, &user.id).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Certification login: failed to get/create cert authenticator"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let authenticator_id = match get_or_create_cert_authenticator(&state, &user.id).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "Certification login: failed to get/create cert authenticator"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // ── 5. Create a browser session ──────────────────────────────────────
     // Delete any previous sessions for the cert user first to prevent
