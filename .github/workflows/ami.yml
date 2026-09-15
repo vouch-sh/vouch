@@ -11,6 +11,13 @@ on:
         required: true
         type: string
 
+# Serialize AMI builds: a run in progress is never cancelled (that would leave
+# orphaned builder instances, snapshots and half-published SSM parameters);
+# later runs queue behind it instead.
+concurrency:
+  group: build-ami
+  cancel-in-progress: false
+
 permissions: {}
 
 env:
