@@ -35,9 +35,16 @@ import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 DEFAULT_AUTHOR = "app/detail-app"
+
+# Detail's Dead Code PRs arrive on this branch prefix and file no issue.
+DEAD_CODE_BRANCH = "detail/dead-code/"
+
+# A finding blamed on a PR merged this many days before detection counts as
+# caused by a recent merge, whoever authored the PR.
+RECENT_MERGE_DAYS = 3
 
 # "Introduced in [#992](https://github.com/...) by @jplock on Aug 20, 2026"
 INTRODUCED_RE = re.compile(
@@ -58,13 +65,13 @@ CLASSES: tuple[tuple[str, str], ...] = (
     ("stale-cache invalidation",
      r"cache|cached|stale"),
     ("time/clock boundary",
-     r"expir|max_age|TTL|lifetime|timestamp|clock|skew|freshness|boundary"
-     r"|auth_time|NotOnOrAfter|staleness"),
+     (r"expir|max_age|TTL|lifetime|timestamp|clock|skew|freshness|boundary"
+      r"|auth_time|NotOnOrAfter|staleness")),
     ("incomplete revocation",
      r"revok|revoc|logout|invalidat.*session"),
     ("string canonicalization",
-     r"canonical|whitespace|casing|case-insensitiv|leading zero|normaliz"
-     r"|trailing|encod|escap|comma|anchor|suffix|malformed"),
+     (r"canonical|whitespace|casing|case-insensitiv|leading zero|normaliz"
+      r"|trailing|encod|escap|comma|anchor|suffix|malformed")),
     ("missing audit event",
      r"audit"),
     ("metadata vs behavior",
@@ -72,8 +79,8 @@ CLASSES: tuple[tuple[str, str], ...] = (
     ("fail-open error path",
      r"silently|ignores|fail.?open|no-?op|best-effort|swallow"),
     ("authz gap",
-     r"unauthoriz|without .*authoriz|bypass|allows .*without|deactivated"
-     r"|can delete|another user|takeover|grant_types"),
+     (r"unauthoriz|without .*authoriz|bypass|allows .*without|deactivated"
+      r"|can delete|another user|takeover|grant_types")),
 )
 
 
@@ -98,17 +105,28 @@ class Finding:
         return self.detected.strftime("%Y-%m")
 
     def classes(self) -> list[str]:
-        return [name for name, pattern in CLASSES if re.search(pattern, self.title, re.I)]
+        return [
+            name for name, pattern in CLASSES if re.search(pattern, self.title, re.IGNORECASE)
+        ]
 
 
-def fetch_fix_prs(author: str, limit: int) -> set[int]:
-    """PR numbers authored by Detail, for the self-caused-regression measure."""
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    author: str
+    branch: str
+    created: date
+    merged: date | None
+
+
+def fetch_prs(limit: int) -> list[PullRequest]:
+    """Every PR, for attributing findings and counting Detail's arrivals per batch."""
     proc = subprocess.run(
         [
             "gh", "pr", "list",
             "--state", "all",
             "--limit", str(limit),
-            "--json", "number,author",
+            "--json", "number,author,headRefName,createdAt,mergedAt",
         ],
         capture_output=True,
         text=True,
@@ -116,11 +134,16 @@ def fetch_fix_prs(author: str, limit: int) -> set[int]:
     )
     if proc.returncode != 0:
         sys.exit(f"gh pr list failed: {proc.stderr.strip()}")
-    return {
-        row["number"]
+    return [
+        PullRequest(
+            number=row["number"],
+            author=(row.get("author") or {}).get("login") or "",
+            branch=row.get("headRefName") or "",
+            created=date.fromisoformat(row["createdAt"][:10]),
+            merged=date.fromisoformat(row["mergedAt"][:10]) if row.get("mergedAt") else None,
+        )
         for row in json.loads(proc.stdout)
-        if (row.get("author") or {}).get("login") == author
-    }
+    ]
 
 
 def fetch(author: str, limit: int) -> list[Finding]:
@@ -146,7 +169,9 @@ def fetch(author: str, limit: int) -> list[Finding]:
         body = row.get("body") or ""
         introduced = introduced_pr = None
         if match := INTRODUCED_RE.search(body):
-            introduced = datetime.strptime(match["when"], "%b %d, %Y").date()
+            introduced = (
+                datetime.strptime(match["when"], "%b %d, %Y").replace(tzinfo=timezone.utc).date()
+            )
             introduced_pr = int(match["pr"])
         bug = BUG_ID_RE.search(body)
         findings.append(
@@ -229,7 +254,8 @@ def render_diff_sizes(rows: list[dict[str, object]]) -> None:
     print("  counted as production. Treat its prod figure as an upper bound.")
 
 
-def fix_defect_rate(findings: list[Finding], author: str, today: date) -> list[dict[str, object]]:
+def fix_defect_rate(findings: list[Finding], prs: list[PullRequest], author: str,
+                    today: date) -> list[dict[str, object]]:
     """How often a merged PR is later blamed by a Detail finding, bot vs human.
 
     This is the number the "draft, not merge candidate" policy rests on. If
@@ -243,20 +269,11 @@ def fix_defect_rate(findings: list[Finding], author: str, today: date) -> list[d
     work; and post-merge blame understates the true defect rate, because the
     scanner does not re-find everything it introduces.
     """
-    proc = subprocess.run(
-        ["gh", "pr", "list", "--state", "merged", "--limit", "1000",
-         "--json", "number,author,mergedAt"],
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0:
-        sys.exit(f"gh pr list failed: {proc.stderr.strip()}")
-
-    merged: dict[int, tuple[str, date]] = {}
-    for row in json.loads(proc.stdout):
-        login = (row.get("author") or {}).get("login") or ""
-        if not row.get("mergedAt") or login == "app/dependabot":
-            continue
-        merged[row["number"]] = (login, date.fromisoformat(row["mergedAt"][:10]))
+    merged: dict[int, tuple[str, date]] = {
+        pr.number: (pr.author, pr.merged)
+        for pr in prs
+        if pr.merged is not None and pr.author != "app/dependabot"
+    }
 
     first_blame: dict[int, date] = {}
     for finding in findings:
@@ -356,36 +373,70 @@ def by_class(findings: list[Finding]) -> tuple[list[str], list[dict[str, object]
     return months, rows, unmatched
 
 
-def self_caused(findings: list[Finding], fix_prs: set[int]) -> list[dict[str, object]]:
-    """Per batch, how many findings are attributed to one of Detail's own fix PRs.
+def batches(findings: list[Finding], prs: list[PullRequest],
+            author: str) -> list[dict[str, object]]:
+    """Per detection date: what Detail opened, and how much of it recent merges caused.
 
-    A rising share means merging the fix PRs is feeding the next scan. Read it
-    with care: as Detail's PR count grows, its commits are increasingly the last
-    to touch any given line, which inflates the share for mechanical reasons.
-    Confirm a spike by reading whether the finding is a defect in the logic the
-    fix added, rather than merely in a file it touched.
+    `from_detail_pr` counts findings blamed on a Detail-authored PR. A rising
+    share means merging the fix PRs is feeding the next scan, though part of it
+    is mechanical: as Detail's PR count grows, its commits are increasingly the
+    last to touch any line. Confirm a spike by reading whether the finding is a
+    defect in the logic the fix added.
+
+    `from_recent_pr` counts findings blamed on any PR merged at most
+    RECENT_MERGE_DAYS before detection, whoever wrote it. It exists because
+    `from_detail_pr` misses class fixes a human merged: on 2026-09-14 and
+    2026-09-15 every finding came from one (3 of 3, 6 of 6) while
+    `from_detail_pr` read 0 and 1.
+
+    Dead Code PRs file no issue, so they appear only in `dead_code_prs`.
     """
-    batches: dict[date, list[Finding]] = collections.defaultdict(list)
-    for finding in findings:
-        batches[finding.detected].append(finding)
+    by_number = {pr.number: pr for pr in prs}
+    detail_prs = {pr.number for pr in prs if pr.author == author}
 
+    issues: dict[date, list[Finding]] = collections.defaultdict(list)
+    for finding in findings:
+        issues[finding.detected].append(finding)
+    fix_prs: collections.Counter[date] = collections.Counter()
+    dead_code_prs: collections.Counter[date] = collections.Counter()
+    for pr in prs:
+        if pr.author != author:
+            continue
+        if pr.branch.startswith(DEAD_CODE_BRANCH):
+            dead_code_prs[pr.created] += 1
+        else:
+            fix_prs[pr.created] += 1
+
+    earliest = min(issues)
     rows: list[dict[str, object]] = []
-    for detected in sorted(batches):
-        bucket = batches[detected]
-        attributed = [f for f in bucket if f.introduced_pr is not None]
+    for day in sorted(set(issues) | set(fix_prs) | set(dead_code_prs)):
+        if day < earliest:
+            continue
+        attributed = [f for f in issues.get(day, []) if f.introduced_pr is not None]
+        from_detail = from_recent = 0
+        for finding in attributed:
+            if finding.introduced_pr in detail_prs:
+                from_detail += 1
+            blamed = by_number.get(finding.introduced_pr)
+            if (blamed and blamed.merged
+                    and 0 <= (day - blamed.merged).days <= RECENT_MERGE_DAYS):
+                from_recent += 1
         rows.append(
             {
-                "date": detected.isoformat(),
-                "issues": len(bucket),
+                "date": day.isoformat(),
+                "issues": len(issues.get(day, [])),
+                "fix_prs": fix_prs[day],
+                "dead_code_prs": dead_code_prs[day],
                 "attributed": len(attributed),
-                "from_fix_pr": sum(1 for f in attributed if f.introduced_pr in fix_prs),
+                "from_detail_pr": from_detail,
+                "from_recent_pr": from_recent,
             }
         )
     return rows
 
 
 def render(findings: list[Finding], months: list[str], class_rows: list[dict[str, object]],
-           unmatched: list[Finding], self_caused_rows: list[dict[str, object]]) -> None:
+           unmatched: list[Finding], batch_rows: list[dict[str, object]]) -> None:
     print(f"{len(findings)} Detail issues, "
           f"{findings[0].detected.isoformat()} to {findings[-1].detected.isoformat()}\n")
 
@@ -408,16 +459,21 @@ def render(findings: list[Finding], months: list[str], class_rows: list[dict[str
         print(f"  {row['class']:28} {row['total']:5}  {cells}")
     print(f"\n  {len(unmatched)} issues matched no class; read those titles directly.")
 
-    print("\nFindings introduced by one of Detail's own fix PRs (batches of 5+)")
-    print(f"  {'batch':12} {'issues':>6} {'attributed':>10} {'from fix PR':>12}")
-    for row in self_caused_rows:
-        if row["issues"] < 5:
+    print("\nPer batch (days with 3+ issues or any Detail PR)")
+    print(f"  {'batch':10} {'issues':>6} {'fix PRs':>7} {'dead-code':>9} {'attrib':>6} "
+          f"{'Detail PR':>9} {f'PR<={RECENT_MERGE_DAYS}d':>7}")
+    for row in batch_rows:
+        if row["issues"] < 3 and not row["fix_prs"] and not row["dead_code_prs"]:
             continue
-        print(f"  {row['date']:12} {row['issues']:6} {row['attributed']:10} "
-              f"{row['from_fix_pr']:12}")
-    print("\n  A rising share means merging the fix PRs feeds the next scan. Some of")
-    print("  it is mechanical -- Detail's commits become the last to touch a line --")
-    print("  so confirm a spike by checking the finding is in the logic the fix added.")
+        print(f"  {row['date']:10} {row['issues']:6} {row['fix_prs']:7} "
+              f"{row['dead_code_prs']:9} {row['attributed']:6} "
+              f"{row['from_detail_pr']:9} {row['from_recent_pr']:7}")
+    print("\n  Detail PR: blamed on one of Detail's own PRs. "
+          f"PR<={RECENT_MERGE_DAYS}d: blamed on any PR merged")
+    print(f"  at most {RECENT_MERGE_DAYS} days before detection, including class fixes we "
+          "wrote. A high")
+    print("  share means our recent merges are feeding the scan; confirm by checking")
+    print("  the finding is in the logic the PR added.")
 
 
 def main() -> int:
@@ -427,6 +483,8 @@ def main() -> int:
                         help=f"issue author to treat as Detail (default: {DEFAULT_AUTHOR})")
     parser.add_argument("--limit", type=int, default=1000,
                         help="maximum issues to read from gh (default: 1000)")
+    parser.add_argument("--pr-limit", type=int, default=5000,
+                        help="maximum PRs to read from gh (default: 5000)")
     parser.add_argument("--since", metavar="YYYY-MM",
                         help="only count detections in this month or later")
     parser.add_argument("--pr-diff-sizes", metavar="RANGE",
@@ -456,8 +514,11 @@ def main() -> int:
         sys.exit(f"no issues authored by {args.author} found")
     findings.sort(key=lambda f: f.detected)
 
+    prs = fetch_prs(args.pr_limit)
+
     if args.fix_defect_rate:
-        rows = fix_defect_rate(findings, args.author, date.fromisoformat(args.fix_defect_rate))
+        rows = fix_defect_rate(findings, prs, args.author,
+                               date.fromisoformat(args.fix_defect_rate))
         if args.as_json:
             json.dump(rows, sys.stdout, indent=2)
             print()
@@ -466,14 +527,14 @@ def main() -> int:
         return 0
 
     months, class_rows, unmatched = by_class(findings)
-    self_caused_rows = self_caused(findings, fetch_fix_prs(args.author, args.limit))
+    batch_rows = batches(findings, prs, args.author)
     if args.as_json:
         json.dump(
             {
                 "total": len(findings),
                 "monthly": monthly(findings),
                 "classes": class_rows,
-                "self_caused": self_caused_rows,
+                "batches": batch_rows,
                 "unmatched": [{"number": f.number, "title": f.title} for f in unmatched],
                 "open_bug_ids": {
                     f.number: f.bug_id for f in findings if f.state == "OPEN" and f.bug_id
@@ -484,7 +545,7 @@ def main() -> int:
         )
         print()
     else:
-        render(findings, months, class_rows, unmatched, self_caused_rows)
+        render(findings, months, class_rows, unmatched, batch_rows)
     return 0
 
 

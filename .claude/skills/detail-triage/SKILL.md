@@ -43,8 +43,10 @@ Read three things together:
 
 - **median / p90 age** — how far back into history this pass reached.
 - **`<30d`** — findings against code merged in the last month.
-- **`from fix PR`** — findings attributed to one of Detail's *own* earlier fix
-  PRs.
+- **`Detail PR` and `PR<=3d`** (per-batch table) — findings attributed to one of
+  Detail's own fix PRs, and to any PR merged at most three days before
+  detection, whoever wrote it. The same table counts Detail's fix PRs and its
+  Dead Code PRs, which file no issue.
 
 A climbing median with a flat `<30d` means Detail is working through backlog:
 volume is high for a reason that no process change will fix, and the right
@@ -52,7 +54,7 @@ response is throughput. A climbing `<30d` means new code is generating findings
 as fast as old code is cleaned up, and the right response is a guardrail. Say
 which of the two you are looking at before proposing any remedy.
 
-`from fix PR` is the one that decides how this batch gets merged. When it is
+`PR<=3d` is the one that decides how this batch gets merged. When it is
 high, merging fix PRs as-is is feeding the next scan, and the loop only breaks
 by making class decisions *before* merging. Part of the signal is mechanical —
 as Detail's merged PR count grows, its commits are increasingly the last to
@@ -62,13 +64,16 @@ The 2026-09-08 batch is the recorded worked example: all seven findings were
 attributed to fix PRs merged two days earlier, and each was a defect in the
 added logic (a stale timestamp in a retry the fix introduced, a zero-boundary
 bypass of a cap the fix introduced, a residual gap in a window the fix
-widened).
+widened). The human-authored case matters as much: on 2026-09-14 and
+2026-09-15 every finding (3 of 3, then 6 of 6) was in a class fix we had merged
+the day before, while the Detail-only column read 0 and 1.
 
 The class table is **keyword clustering over titles — directional, not
 rigorous**. Titles overlap classes and a large share match none. Use it to spot
 recurrence worth investigating; never quote its counts as fact.
 
-Compare against `references/volume-log.md`, which holds the measured history.
+Compare against `references/volume-log.md`, which holds the measured history;
+its batch table is the per-batch series to extend.
 
 ## Step 2: Classify every open finding
 
@@ -89,6 +94,14 @@ same day. Worked example: issue #1284 quoted
 the whole-second truncation it described survived at line 1397 — but the
 citation was stale, and a reviewer trusting the body would have reached the
 wrong conclusion in either direction.
+
+**Match against stated residue before hunting.** Read the residue and
+open-decision sections of the last few records in `.local/`. A finding that
+matches something a review already accepted is a residue recurrence, not a
+surprise: on 2026-09-13, all three self-caused findings had been written down
+the day before as residue or an open decision. Count it in the batch table. The
+lever for a residue recurrence is fixing residue in the PR that left it, not a
+new guardrail.
 
 Finding the siblings is the actual work of this step, and it is what turns a
 list of instances into a class. Prefer `codegraph_explore` or `ast-grep` over
@@ -115,6 +128,27 @@ merge the instance.
 Issues Detail filed **without** a paired fix PR belong in this table too. They
 are usually the ones it judged too structural to auto-fix, which makes them the
 strongest class candidates in the batch, not the weakest.
+
+### Dead Code PRs
+
+Detail also opens Dead Code PRs (branch `detail/dead-code/…`) that file no
+issue. CI builds every workspace target, so the compiler proves most removals: a
+function, impl, or constant that still had a caller would not build. Review the
+removals the compiler cannot see:
+
+- **A field on a persisted or wire-format struct** — a `DocumentType` document
+  or a state-token payload. Old and new servers read the same rows during a
+  rolling refresh, so a required field no code reads is still a contract with
+  the previous release (rule `wire-format-compat-on-persisted-structs`). #1379
+  on 2026-09-15 would have made every newly registered authenticator unreadable
+  to old servers. Keep the field with `#[serde(default)]`, write it empty, and
+  delete it a release later.
+- **Index entries** — find the readers by field name. A write-only index entry
+  is dead, and it is rarely alone: #1380 had six siblings.
+- **Anything `fuzz/` uses** — that crate is outside the workspace and CI does
+  not build it.
+- **Unreachable branches kept on purpose** — check the knowledge base for
+  defense-in-depth arms before accepting their deletion.
 
 ## Step 3: Decide instance versus class
 
@@ -145,6 +179,15 @@ it closes the instance and erases the evidence that the class exists, so the
 next pass rediscovers the same pattern at a different call site and the cycle
 repeats. Of every rule here, this is the one that would have changed the most
 outcomes historically.
+
+**Settle contradictory findings together.** A batch can hold findings that pull
+in opposite directions, or a fix that reverses a decision already on record.
+#985 reverted a boundary Detail itself had chosen in #924. On 2026-09-15, #1385
+asked for native clients holding a registered secret to be treated as public,
+while #1381 and #1382 asked for them to be held to that secret, and #1392
+restored code #1369 had deleted on purpose. Resolve the governing spec text or
+recorded decision once — memory, the knowledge base, the PR that made the
+decision — then dispose of the whole set against it.
 
 A class fix that lands without a guardrail will regress, so step 4 is part of
 the same PR, not a follow-up.
@@ -177,6 +220,15 @@ or state the residue in the PR.
 Verify the guardrail the way the project verifies tests: break the code, confirm
 CI catches it, then fix it. A guardrail never observed failing is not known to
 work.
+
+**A class fix produces the next batch's findings.** Rule 6 of
+`development-discipline.md` applies to the mechanism the fix introduces, not
+only the one the issue reported. On 2026-09-14 a mechanism recorded the day
+before had been applied to one of its two call sites; on 2026-09-15 the #1369
+client-type refactor, itself the structural answer to three batches, drew five
+findings within a day. Before merging a class fix, hunt siblings of the new type
+or guard: every consumer of the old axis it replaces, and every caller it did
+not touch.
 
 ## Step 5: Request a Detail rule for each confirmed class
 
@@ -262,6 +314,12 @@ addresses the report:
 - **A new normalizer or parser** — does it alter input it should leave alone?
 - **A new error path** — does it swallow, and does that match how the adjacent
   code treats the same error?
+- **A new server-side requirement** — does the shipped first-party client
+  already satisfy it? #1308 added a grant check the released CLI failed,
+  breaking WIF in v2026.9.3; #1388 required a client assertion `vouch enroll`
+  never sent. Ship the client change first and enforce a release later.
+- **A changed serde shape** — the rolling-deploy constraint under Dead Code PRs
+  (step 2) applies to any field a fix removes, renames, or tightens.
 
 ### Check the fix against the class it fixes
 
@@ -280,6 +338,14 @@ So: test the fix against the spec's own examples, and against neighbouring
 inputs in the same class. RFC 4514 §4 supplied the counterexample for #1321
 directly — `CN=James \"Jim\" Smith\, III,DC=example,DC=net`.
 
+A test whose input is derived from the code's own output cannot find a
+disagreement with the real producer. Three batches fixed `canonicalize_dn`
+against subject strings built from the certificate's own rendering, so an
+RDN-order mismatch with OpenSSL's output could never surface; one string
+captured verbatim from `openssl x509 -noout -subject` found it. When a function
+exists to accept external input, require at least one fixture captured from the
+external producer.
+
 ### Reproduce, do not argue
 
 For a suspected defect in a pure function, extract the function body into a
@@ -296,7 +362,13 @@ showing `Some("ictim-user-id")` does not.
 ### Then the hygiene checks
 
 - Confirm the spec citation matches the actual text — open the document under
-  `specs/` and quote it; never accept the PR body's paraphrase.
+  `specs/` and quote it; never accept the PR body's paraphrase. Check the
+  quote's scope as well as its strength: #1389 quoted a SHOULD from a section
+  that governs only multiple-valued response types, and #985 quoted one sentence
+  while omitting the next, which reversed its meaning.
+- When trimming narrative comments, keep every spec citation (section and
+  verbatim quote). Cut the history, not the requirement; fix an imprecise
+  citation rather than deleting it.
 - Confirm fixtures come from the shared helpers in
   `crates/vouch-server/src/test_utils.rs`, not hand-rolled `Create*Params`.
 - Confirm no single-caller helpers were added.
@@ -307,6 +379,20 @@ Read CI status fresh with `gh pr checks <n>` at the moment you decide. Do not
 reuse a run ID captured earlier in the session — runs get superseded, and on
 this batch an earlier failing run for #1312 had already been replaced by a
 passing one, which I initially reported as a failure.
+
+Before enqueueing, check that every commit is signed. Detail's follow-up
+commits — a rustfmt or baseline fix pushed after its CI fails — have arrived
+unsigned on #981, #1338, and #1379, and the merge queue rejects the whole
+branch:
+
+```bash
+gh api repos/vouch-sh/vouch/pulls/<n>/commits \
+  --jq '.[] | "\(.sha[0:8]) \(.commit.verification.verified)"'
+```
+
+Rebuild such a branch with signed commits rather than rewriting Detail's.
+Pushing any new commit to a queued PR removes it from the queue, so re-enqueue
+once CI passes.
 
 Enqueue with the GraphQL `enqueuePullRequest` mutation; `gh pr merge` does not
 work with this repo's merge queue. After the batch lands, re-run `make lint` and
@@ -322,9 +408,18 @@ recent one before starting**. Doing so on 2026-09-11 surfaced a SAML
 XML-comment truncation issue found outside Detail in August, which a check
 against the tree confirmed was since fixed.
 
-Then append this pass to `references/volume-log.md`: the monthly row, the
-per-class counts, the self-caused share, and what was decided. The next run
-reads it to tell a trend from a blip.
+Give the record a **Residue** section listing everything the review accepted and
+did not fix, each with the finding it would become. The next pass matches new
+findings against it (step 2).
+
+Then extend `references/volume-log.md`: add a row to the batch table, with the
+counts from `detail-stats.py` and the judgement columns defined above the table,
+and append a section with the monthly row, the classes, and what was decided.
+The next run reads both to tell a trend from a blip.
+
+Every few batches, read all the records in `.local/` together and fold any
+lesson that has recurred into this skill. Otherwise the records are read one at
+a time, and a lesson that lives only in a record is not applied.
 
 Success is **the `<30d` count and the per-class counts falling** over successive
 batches. It is not an empty issue list — while Detail is still excavating
