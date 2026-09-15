@@ -4,6 +4,7 @@
 use super::helpers::*;
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::DeviceApproval;
+use crate::services::oidc::mtls::parse_client_certificate;
 
 // ========================================================================
 // RFC 8705 Section 3 — mTLS Token Binding Tests
@@ -273,8 +274,7 @@ async fn test_rfc8705_token_mtls_authorization_code_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("mtls-token-ok");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
     let thumbprint = cert_thumbprint(&cert_der);
 
@@ -321,8 +321,7 @@ async fn test_rfc8705_token_mtls_invalid_grant_when_code_already_used() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("mtls-token-reuse");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -367,8 +366,7 @@ async fn test_rfc8705_token_mtls_invalid_client_when_cert_mismatch() {
 
     // Client is registered against cert A's subject DN.
     let cert_a_der = make_test_cert_der("registered");
-    let parsed_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let parsed_a = parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -410,8 +408,7 @@ async fn test_rfc8705_token_mtls_invalid_request_when_dpop_required_but_missing(
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("mtls-needs-dpop");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -458,8 +455,7 @@ async fn test_rfc8705_token_mtls_plus_dpop_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("mtls-dpop-ok");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -528,8 +524,7 @@ async fn test_rfc8705_token_mtls_plus_dpop_invalid_grant_when_jkt_mismatch() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("mtls-dpop-mismatch");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -914,8 +909,7 @@ async fn test_rfc8705_device_token_mtls_succeeds_with_registered_cert() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("device-mtls-ok");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
     let thumbprint = cert_thumbprint(&cert_der);
 
@@ -974,8 +968,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
 
     // Client registered against cert A's subject DN.
     let cert_a_der = make_test_cert_der("device-registered");
-    let parsed_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let parsed_a = parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -1031,8 +1024,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_no_cert() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = make_test_cert_der("device-nocert-registered");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
         &state.store,
@@ -1241,5 +1233,203 @@ async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding
         claims["cnf"]["x5t#S256"].as_str(),
         Some(thumbprint.as_str()),
         "the presented cert must still be bound for the sender-constraint-only profile: {body}"
+    );
+}
+
+// ========================================================================
+// RFC 8705 §2 at the revocation and introspection endpoints
+//
+// "The authorization server MUST enforce the binding between client and
+// certificate" (specs/rfc/rfc8705.txt:255). Both endpoints authenticate the
+// caller through `complete_client_auth`, so an mTLS-registered client that
+// presents only its `client_id` is refused there and one that presents its
+// registered certificate is accepted.
+// ========================================================================
+
+/// An mTLS client whose token the revoke/introspect tests act on, with the
+/// certificate that authenticates it.
+struct MtlsClientWithToken {
+    client_id: String,
+    cert_der: Vec<u8>,
+    token: String,
+}
+
+async fn mtls_client_with_token(
+    state: &std::sync::Arc<crate::AppState>,
+    label: &str,
+) -> MtlsClientWithToken {
+    let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let cert_der = make_test_cert_der(label);
+    let subject_dn = parse_client_certificate(&cert_der)
+        .expect("parse cert")
+        .subject_dn
+        .expect("subject DN");
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    MtlsClientWithToken {
+        client_id,
+        cert_der,
+        token,
+    }
+}
+
+async fn session_exists(state: &std::sync::Arc<crate::AppState>, token: &str) -> bool {
+    db::get_session_by_token_hash(
+        &state.store,
+        &crate::handlers::hash_token(token),
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("session lookup")
+    .is_some()
+}
+
+/// RFC 8705 §2: a bare `client_id` is not the credential of an mTLS client.
+/// RFC 7009 §2.1: "The authorization server first validates the client
+/// credentials (in case of a confidential client)" — nothing is revoked.
+#[tokio::test]
+async fn test_rfc8705_revoke_rejects_mtls_client_without_certificate() {
+    let (app, state) = test_app().await;
+    let c = mtls_client_with_token(&state, "revoke-mtls-nocert").await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}&client_id={}", c.token, c.client_id),
+        &[],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client", "{body}");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("mTLS client certificate required")),
+        "{body}"
+    );
+    assert!(
+        session_exists(&state, &c.token).await,
+        "a refused caller must not revoke the token"
+    );
+}
+
+/// RFC 8705 §2.1: the registered certificate authenticates the client at the
+/// revocation endpoint, and the token is revoked.
+#[tokio::test]
+async fn test_rfc8705_revoke_succeeds_with_registered_certificate() {
+    let (app, state) = test_app().await;
+    let c = mtls_client_with_token(&state, "revoke-mtls-cert").await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}&client_id={}", c.token, c.client_id),
+        &[],
+        Some(c.cert_der.clone()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !session_exists(&state, &c.token).await,
+        "the authenticated client's revocation must take effect"
+    );
+}
+
+/// RFC 7662 §2.1: "the endpoint MUST also require some form of authorization
+/// to access this endpoint" — for an mTLS client that is its certificate
+/// (RFC 8705 §2), not its `client_id`.
+#[tokio::test]
+async fn test_rfc8705_introspect_rejects_mtls_client_without_certificate() {
+    let (app, state) = test_app().await;
+    let c = mtls_client_with_token(&state, "introspect-mtls-nocert").await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}&client_id={}", c.token, c.client_id),
+        &[],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client", "{body}");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("mTLS client certificate required")),
+        "{body}"
+    );
+}
+
+/// RFC 8705 §2.1: the registered certificate authenticates the client at the
+/// introspection endpoint, which then reports its own token as active.
+#[tokio::test]
+async fn test_rfc8705_introspect_succeeds_with_registered_certificate() {
+    let (app, state) = test_app().await;
+    let c = mtls_client_with_token(&state, "introspect-mtls-cert").await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}&client_id={}", c.token, c.client_id),
+        &[],
+        Some(c.cert_der.clone()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["active"], true, "{body}");
+}
+
+/// RFC 8705 §2: presence of a certificate is not the binding — it must match
+/// the client's registration. A different certificate is refused at both
+/// endpoints and the token is untouched.
+#[tokio::test]
+async fn test_rfc8705_revoke_and_introspect_reject_mismatched_certificate() {
+    let (app, state) = test_app().await;
+    let c = mtls_client_with_token(&state, "mtls-mismatch").await;
+    let other_cert = make_test_cert_der("mtls-mismatch-other");
+
+    for endpoint in ["/oauth/revoke", "/oauth/introspect"] {
+        let (status, body) = http_post_form_with_cert(
+            &app,
+            endpoint,
+            &format!("token={}&client_id={}", c.token, c.client_id),
+            &[],
+            Some(other_cert.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{endpoint}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client", "{endpoint}: {body}");
+    }
+    assert!(
+        session_exists(&state, &c.token).await,
+        "a mismatched certificate must not revoke the token"
     );
 }

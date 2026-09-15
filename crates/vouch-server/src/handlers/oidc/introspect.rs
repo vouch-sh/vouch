@@ -9,7 +9,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
-use crate::handlers::extractors::OAuthForm;
+use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
@@ -158,27 +158,28 @@ pub(crate) async fn revoke(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<RevokeRequest>,
 ) -> Response {
     // RFC 7009 Section 2.1: Authenticate the calling client.
-    // Supports client_secret_basic, client_secret_post, and private_key_jwt.
     let auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
         Err(response) => return response,
     };
 
-    let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth, arrival).await {
-        Ok(Some(a)) => (a.client_id, a.pending_jti),
-        Ok(None) => {
-            // No credentials provided → 401 with the shared challenge.
-            return with_client_auth_challenge(
-                ClientAuthPresentation::of(&headers, &params),
-                StatusCode::UNAUTHORIZED.into_response(),
-            );
-        }
-        Err(response) => return response,
-    };
+    let (caller_client_id, pending_jti) =
+        match complete_client_auth(&state, auth, &client_cert, arrival).await {
+            Ok(Some(a)) => (a.client_id, a.pending_jti),
+            Ok(None) => {
+                // No credentials provided → 401 with the shared challenge.
+                return with_client_auth_challenge(
+                    ClientAuthPresentation::of(&headers, &params),
+                    StatusCode::UNAUTHORIZED.into_response(),
+                );
+            }
+            Err(response) => return response,
+        };
 
     // Commit the JTI (if any) BEFORE the destructive revocation. The
     // `revoke` endpoint authenticates via `private_key_jwt` (RFC 7523), and
@@ -231,18 +232,18 @@ pub(crate) async fn revoke(
 pub(crate) async fn introspect(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<IntrospectRequest>,
 ) -> Response {
     // RFC 7662 Section 2.1: The introspection endpoint MUST authenticate the caller.
-    // Supports client_secret_basic, client_secret_post, and private_key_jwt.
     let auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
         Err(response) => return response,
     };
 
     let (authenticated_client, pending_jti) =
-        match complete_client_auth(&state, auth, arrival).await {
+        match complete_client_auth(&state, auth, &client_cert, arrival).await {
             Ok(Some(a)) => (a.client, a.pending_jti),
             Ok(None) => {
                 // No credentials provided → 401 with the shared challenge.
