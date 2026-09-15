@@ -27,10 +27,6 @@ pub struct HttpResponse {
     /// WWW-Authenticate header value (if present on 401 responses).
     /// Used for RFC 9470 step-up authentication challenge detection.
     pub www_authenticate: Option<String>,
-    /// DPoP-Nonce header value (if present).
-    /// Returned by the server to bind the next DPoP proof to a server-issued nonce
-    /// (RFC 9449 Section 8).
-    pub dpop_nonce: Option<String>,
     /// Signature-Nonce header value (if present).
     /// Server-issued nonce for RFC 9421 HTTP signature replay protection.
     pub sig_nonce: Option<String>,
@@ -46,7 +42,6 @@ impl HttpResponse {
             status,
             body,
             www_authenticate: None,
-            dpop_nonce: None,
             sig_nonce: None,
             retry_after: None,
         }
@@ -133,13 +128,13 @@ fn check_clock_skew(headers: &reqwest::header::HeaderMap) {
 
 /// Extract common response headers from a `HeaderMap`.
 ///
-/// Returns `(www_authenticate, dpop_nonce, retry_after)` extracted from
+/// Returns `(www_authenticate, sig_nonce, retry_after)` extracted from
 /// the headers based on the HTTP status code. Shared by both the
 /// production `ReqwestClient` and the test `TestHttpClient`.
 fn extract_response_headers(
     status: u16,
     headers: &reqwest::header::HeaderMap,
-) -> (Option<String>, Option<String>, Option<String>, Option<u64>) {
+) -> (Option<String>, Option<String>, Option<u64>) {
     let www_authenticate = if status == 401 {
         headers
             .get("www-authenticate")
@@ -148,11 +143,6 @@ fn extract_response_headers(
     } else {
         None
     };
-
-    let dpop_nonce = headers
-        .get(protocol::HEADER_DPOP_NONCE)
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
 
     let sig_nonce = headers
         .get("signature-nonce")
@@ -168,7 +158,7 @@ fn extract_response_headers(
         None
     };
 
-    (www_authenticate, dpop_nonce, sig_nonce, retry_after)
+    (www_authenticate, sig_nonce, retry_after)
 }
 
 /// Trait for abstracting HTTP client operations.
@@ -308,7 +298,7 @@ impl HttpClient for ReqwestClient {
             .context(tr!("err-http-request-failed"))?;
 
         let status = response.status().as_u16();
-        let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
+        let (www_authenticate, sig_nonce, retry_after) =
             extract_response_headers(status, response.headers());
         check_clock_skew(response.headers());
 
@@ -331,7 +321,6 @@ impl HttpClient for ReqwestClient {
             status,
             body: body.to_vec(),
             www_authenticate,
-            dpop_nonce,
             sig_nonce,
             retry_after,
         })
@@ -591,7 +580,7 @@ mod test_utils {
                 .context(tr!("err-router-error"))?;
 
             let status = response.status().as_u16();
-            let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
+            let (www_authenticate, sig_nonce, retry_after) =
                 extract_response_headers(status, response.headers());
 
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
@@ -602,7 +591,6 @@ mod test_utils {
                 status,
                 body: body_bytes.to_vec(),
                 www_authenticate,
-                dpop_nonce,
                 sig_nonce,
                 retry_after,
             })
@@ -667,25 +655,6 @@ mod tests {
         let response = HttpResponse::new(200, b"not json".to_vec());
         let result: Result<serde_json::Value> = response.json();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_http_response_dpop_nonce_default_none() {
-        let response = HttpResponse::new(200, b"{}".to_vec());
-        assert!(response.dpop_nonce.is_none());
-    }
-
-    #[test]
-    fn test_http_response_401_dpop_nonce_none() {
-        let response = HttpResponse {
-            status: 401,
-            body: b"{}".to_vec(),
-            www_authenticate: None,
-            dpop_nonce: None,
-            sig_nonce: None,
-            retry_after: None,
-        };
-        assert!(response.dpop_nonce.is_none());
     }
 
     #[test]
