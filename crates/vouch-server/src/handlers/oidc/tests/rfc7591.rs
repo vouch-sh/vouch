@@ -2705,3 +2705,178 @@ async fn test_rfc7591_registered_auth_method_is_stored_and_enforced_as_requested
         "expected most combinations to register, got {registered}"
     );
 }
+
+// RFC 6749 §2.1: "A native application is a public client". RFC 6749 §4.4:
+// "The client credentials grant type MUST only be used by confidential clients."
+// RFC 8252 §8.4 lets a native app hold a per-instance secret provisioned via
+// Dynamic Client Registration (RFC 7591), and §3.2.1 still requires the client
+// to present that secret to authenticate — but presenting it does not
+// reclassify the native client as confidential (§2.1): the recorded client
+// type remains public, so §4.4 bars it from `client_credentials`.
+//
+// Regression for the §4.4 MUST-violation introduced in ca8a6f65 (#1369): that
+// commit derived `client_type()` solely from `token_endpoint_auth_method`, so
+// a `native` client that registered a `client_secret_post` secret read
+// `Confidential` and cleared the §4.4 gate, minting a user-less access token
+// (`sub == client_id`). The fix restores the §2.1 application-type axis at the
+// grant-authorization gate only, leaving `authenticate_client` (the §3.2.1
+// presentation tightening from the same commit) untouched.
+//
+// <https://www.rfc-editor.org/rfc/rfc6749#section-2.1>
+// <https://www.rfc-editor.org/rfc/rfc6749#section-4.4>
+// <https://www.rfc-editor.org/rfc/rfc8252#section-8.4>
+#[tokio::test]
+async fn bug_report_native_client_credentials_regression() {
+    let (app, state) = test_app().await;
+
+    // Step 1: dynamically register a native client that RFC 8252 §8.4
+    // provisioned a per-instance secret via `client_secret_post`, authorized
+    // only for the `client_credentials` grant (RFC 7591 §2 `grant_types`).
+    // Open registration (no Bearer) — see `test_rfc7591_open_registration_succeeds_without_bearer`.
+    let reg_body = serde_json::json!({
+        "application_type": "native",
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+        "token_endpoint_auth_method": "client_secret_post",
+        "redirect_uris": ["com.example.app:/cb"],
+        "client_name": "Native per-instance secret"
+    });
+
+    let (status, reg_response) =
+        http_post_json(&app, "/oauth/register", &reg_body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration of a native client with a per-instance secret must succeed: {reg_response}"
+    );
+    let reg_json: serde_json::Value =
+        serde_json::from_str(&reg_response).expect("Valid JSON registration response");
+    let client_id = reg_json["client_id"]
+        .as_str()
+        .expect("client_id")
+        .to_string();
+    let client_secret = reg_json["client_secret"]
+        .as_str()
+        .expect("client_secret issued for client_secret_post")
+        .to_string();
+
+    // Pin the class, not the instance: the declared `application_type: native`
+    // wins at registration (`resolve_client_type`), so the stored client is
+    // `Native` regardless of the registered secret. §2.1's classification is
+    // what the §4.4 gate keys on.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("stored");
+    assert_eq!(
+        stored.application_type,
+        db::OAuthClientType::Native,
+        "declared application_type must be stored as Native"
+    );
+    assert_eq!(
+        stored.token_endpoint_auth_method,
+        db::TokenEndpointAuthMethod::ClientSecretPost
+    );
+
+    // Step 2: request a client_credentials token presenting the registered
+    // secret in the body (client_secret_post). The client authenticates
+    // (§3.2.1 — the secret it registered is one it must present), but the
+    // §4.4 grant-authorization gate must reject it because the client is
+    // public per §2.1.
+    let token_body = format!(
+        "grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}"
+    );
+    let (status, body) = http_post_form(&app, "/oauth/token", &token_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a native client (public per RFC 6749 §2.1) must NOT mint a \
+         client_credentials token (RFC 6749 §4.4 \"MUST only be used by \
+         confidential clients\"): {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON error");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "the rejection must be the §4.4 unauthorized_client gate, not an auth failure: {body}"
+    );
+
+    // Step 3: §3.2.1 non-regression — the same native client, omitting the
+    // secret it registered, must still be rejected with `invalid_client`.
+    // This confirms the commit's auth-tightening (a secret it registered is
+    // one it must present) is preserved by the fix.
+    let no_secret_body = format!("grant_type=client_credentials&client_id={client_id}");
+    let (status, body) = http_post_form(&app, "/oauth/token", &no_secret_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a client that registered a secret must still present it (RFC 6749 §3.2.1): {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON error");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "omitting the registered secret must be a §3.2.1 invalid_client auth failure: {body}"
+    );
+}
+
+// Baseline contrast: a `web` client (confidential per RFC 6749 §2.1: "A web
+// application is a confidential client") registered with the same auth method
+// and grant legitimately mints a `client_credentials` token. Confirms the §4.4
+// fix does not regress legitimate confidential-client access.
+//
+// <https://www.rfc-editor.org/rfc/rfc6749#section-2.1>
+// <https://www.rfc-editor.org/rfc/rfc6749#section-4.4>
+#[tokio::test]
+async fn bug_report_web_baseline_client_credentials_legacy_behavior() {
+    let (app, _state) = test_app().await;
+
+    let reg_body = serde_json::json!({
+        "application_type": "web",
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+        "token_endpoint_auth_method": "client_secret_post",
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Web M2M"
+    });
+
+    let (status, reg_response) =
+        http_post_json(&app, "/oauth/register", &reg_body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "web registration must succeed: {reg_response}"
+    );
+    let reg_json: serde_json::Value =
+        serde_json::from_str(&reg_response).expect("Valid JSON registration response");
+    let client_id = reg_json["client_id"]
+        .as_str()
+        .expect("client_id")
+        .to_string();
+    let client_secret = reg_json["client_secret"]
+        .as_str()
+        .expect("client_secret issued for client_secret_post")
+        .to_string();
+
+    let token_body = format!(
+        "grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}"
+    );
+    let (status, body) = http_post_form(&app, "/oauth/token", &token_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a web client (confidential per RFC 6749 §2.1) must mint a client_credentials token: {body}"
+    );
+    let token_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON token");
+    assert!(
+        token_json
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "client_credentials response must contain an access_token: {body}"
+    );
+    // RFC 9068 §2.2: the M2M token names the client, not a user.
+    let claims = decode_jwt_payload(token_json["access_token"].as_str().expect("access_token"));
+    assert_eq!(
+        claims["sub"], client_id,
+        "client_credentials sub must be the client_id (M2M, no user): {body}"
+    );
+}

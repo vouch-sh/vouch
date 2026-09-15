@@ -929,8 +929,25 @@ async fn handle_client_credentials_grant(
     let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
 
-    // RFC 6749 Section 4.4: client_credentials requires a confidential client
-    if authenticated_client.client_type() == crate::db::ClientType::Public {
+    // RFC 6749 §4.4: "The client credentials grant type MUST only be used by
+    // confidential clients", and §2.1: "A native application is a public
+    // client." The gate therefore keys on the §2.1 *classification* axis (the
+    // client's recorded application type), not on the §3.2.1 *presentation*
+    // axis that [`OAuthClient::client_type`] derives from the registered auth
+    // method. RFC 8252 §8.4 lets a native app hold a per-instance DCR secret,
+    // and that secret is one it MUST present (§3.2.1, enforced by
+    // `authenticate_client` above) — but presenting it does not reclassify a
+    // native client as confidential (§2.1): it is recorded as public and so
+    // §4.4 bars it. The disjunction mirrors the PKCE gates' `client_type() ==
+    // Public || application_type.requires_pkce()` shape
+    // (`services/oidc/token.rs`, `services/oidc/authorization.rs`):
+    // `requires_secret()` is `true` only for `Web | Service` (the two types
+    // §2.1 defines as confidential), so a native or SPA client with a
+    // registered secret is rejected here while still being held to that
+    // secret at the authentication step.
+    if authenticated_client.client_type() == crate::db::ClientType::Public
+        || !authenticated_client.application_type.requires_secret()
+    {
         return ServiceError::oauth(
             OAuthErrorCode::UnauthorizedClient,
             "Public clients are not allowed to use client_credentials grant",

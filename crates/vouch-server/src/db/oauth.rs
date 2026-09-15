@@ -228,14 +228,33 @@ impl OAuthClient {
         }
     }
 
-    /// The RFC 6749 §2.1 client type, from the registered auth method.
+    /// The RFC 6749 §3.2.1 *presentation* axis: whether the client holds a
+    /// credential it MUST present at the token endpoint, derived from the
+    /// registered `token_endpoint_auth_method`.
     ///
     /// RFC 7591 §2: `"none": The client is a public client as defined in
     /// OAuth 2.0, Section 2.1, and does not have a client secret.` Every
     /// other method is a credential the client must present, which is what
-    /// makes it confidential. `application_type` is not consulted: RFC 8252
-    /// §8.4 lets a native app hold a per-instance secret, and a secret it
-    /// registered is a secret it is held to.
+    /// makes it confidential for §3.2.1's "if the client was issued client
+    /// credentials ... the client MUST authenticate" rule. `application_type`
+    /// is not consulted here: RFC 8252 §8.4 lets a native app hold a
+    /// per-instance secret, and a secret it registered is a secret it is
+    /// held to.
+    ///
+    /// This is **not** the same as the RFC 6749 §2.1 *classification* axis
+    /// ("is the client public per its application type"), which is keyed on
+    /// `application_type` and governs grant *authorization* (notably the
+    /// §4.4 `client_credentials` "MUST only be used by confidential clients"
+    /// bar, enforced at `handle_client_credentials_grant`). A native client
+    /// that registered a per-instance secret reads `Confidential` here
+    /// (so it must present the secret to authenticate, §3.2.1) but is
+    /// `Public` per §2.1 (so it is barred from `client_credentials`, §4.4).
+    /// The same two-axis split the PKCE gates already use
+    /// (`client_type() == Public || application_type.requires_pkce()`) keeps
+    /// the two decisions — authentication presentation and grant
+    /// authorization — on their respective RFC axes. See
+    /// [`crate::db::OAuthClientType::requires_secret`] for the §2.1
+    /// classification helper.
     #[must_use]
     pub fn client_type(&self) -> ClientType {
         if self.token_endpoint_auth_method == TokenEndpointAuthMethod::None {
