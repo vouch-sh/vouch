@@ -264,7 +264,9 @@ jobs:
             if [ "$attempt" -eq 120 ]; then
               echo "Build timed out after 1 hour"
               # Try to get logs anyway
-              aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+              if aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null; then
+                cat /tmp/build.log || true
+              fi
               exit 1
             fi
 
