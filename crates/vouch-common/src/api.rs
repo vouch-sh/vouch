@@ -2,6 +2,7 @@
 //! API request and response types for CLI-Server communication.
 
 use jiff::Timestamp;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -121,6 +122,26 @@ pub struct DeviceCodeRequest {
     /// Requested scope (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// RFC 6749 §2.3.1 `client_secret_post`: the client secret in the body.
+    /// `client_secret_basic` is carried by the `Authorization` header, which
+    /// the server reads directly and never expects in this field.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_secret: Option<SecretString>,
+    /// RFC 7523 §2.2 `client_assertion` for `private_key_jwt` client
+    /// authentication at the device-authorization endpoint (RFC 8628 §3.1)
+    /// and the token endpoint (RFC 8628 §3.4).
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<SecretString>,
+    /// RFC 7523 §2.2 `client_assertion_type`. REQUIRED when
+    /// `client_assertion` is present; the server rejects any other value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing device and user codes.
@@ -153,6 +174,19 @@ pub struct DeviceTokenRequest {
     pub grant_type: String,
     /// Device code from device authorization response.
     pub device_code: String,
+    /// RFC 7523 §2.2 `client_assertion` for `private_key_jwt` client
+    /// authentication at the token endpoint (RFC 8628 §3.4). REQUIRED for a
+    /// confidential client registered with `private_key_jwt`; absent for the
+    /// built-in CLI flow (no `client_id`) or a public client.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<SecretString>,
+    /// RFC 7523 §2.2 `client_assertion_type`. Present iff `client_assertion`
+    /// is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing access token.

@@ -888,6 +888,18 @@ async fn poll_device_token_with_cert(
     device_code: &str,
     cert_der: Option<Vec<u8>>,
 ) -> (StatusCode, String) {
+    poll_device_token_with_cert_and_headers(app, device_code, &[], cert_der).await
+}
+
+/// Same as [`poll_device_token_with_cert`] but also carries request headers
+/// (e.g. `Authorization: Basic` for a `client_secret_basic` client whose
+/// credentials the RFC 8628 §3.4 client-auth gate now requires).
+async fn poll_device_token_with_cert_and_headers(
+    app: &axum::Router,
+    device_code: &str,
+    headers: &[(&str, &str)],
+    cert_der: Option<Vec<u8>>,
+) -> (StatusCode, String) {
     http_post_form_with_cert(
         app,
         "/oauth/token",
@@ -895,7 +907,7 @@ async fn poll_device_token_with_cert(
             "grant_type=urn:ietf:params:oauth:grant-type:device_code\
              &device_code={device_code}"
         ),
-        &[],
+        headers,
         cert_der,
     )
     .await
@@ -1211,7 +1223,7 @@ async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding
 
     // client_secret_basic + tls_client_certificate_bound_access_tokens: the
     // sender-constraint-only profile the bug report scopes out.
-    let client_id = create_test_client(
+    let client = create_test_client(
         &state.store,
         &user.id,
         TestClientSpec {
@@ -1221,13 +1233,21 @@ async fn test_rfc8705_device_token_unbound_client_secret_basic_with_cert_binding
             ..Default::default()
         },
     )
-    .await
-    .client_id;
+    .await;
 
     let device_code =
-        setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "csb").await;
+        setup_authorized_device_for_client(&state, &user, &auth_id, &client.client_id, "csb").await;
 
-    let (status, body) = poll_device_token_with_cert(&app, &device_code, Some(cert_der)).await;
+    // RFC 8628 §3.4: the confidential (`client_secret_basic`) client
+    // authenticates per poll.
+    let auth_header = client.basic_auth_header();
+    let (status, body) = poll_device_token_with_cert_and_headers(
+        &app,
+        &device_code,
+        &[("Authorization", &auth_header)],
+        Some(cert_der),
+    )
+    .await;
 
     assert_eq!(
         status,

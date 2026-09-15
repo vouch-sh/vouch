@@ -168,11 +168,11 @@ impl std::fmt::Debug for TokenRequestForm {
 
 /// RFC 6749 §2.3 client authentication parameters, which every grant carries.
 /// Held beside the per-grant value rather than repeated in each variant.
-struct ClientAuthParams {
-    client_id: Option<String>,
-    client_secret: Option<SecretString>,
-    client_assertion: Option<SecretString>,
-    client_assertion_type: Option<String>,
+pub(crate) struct ClientAuthParams {
+    pub(crate) client_id: Option<String>,
+    pub(crate) client_secret: Option<SecretString>,
+    pub(crate) client_assertion: Option<SecretString>,
+    pub(crate) client_assertion_type: Option<String>,
 }
 
 /// RFC 6749 §4.1.3 authorization code grant parameters.
@@ -510,6 +510,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
+                auth,
                 params,
             )
             .await
@@ -1104,6 +1105,7 @@ async fn handle_device_code_grant(
     client_info: crate::db::ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
+    auth: ClientAuthParams,
     params: DeviceCodeParams,
 ) -> Response {
     match super::super::device::device_token(
@@ -1111,6 +1113,7 @@ async fn handle_device_code_grant(
         client_info,
         client_cert,
         headers,
+        &auth,
         &params.device_code,
         arrival,
     )

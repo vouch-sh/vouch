@@ -14,11 +14,14 @@ async fn test_rfc8628_device_authorization_response_format() {
     let user = create_test_user(&state.store, "device-resp@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
+    // RFC 8628 §3.1: a confidential client authenticates at the device
+    // authorization endpoint; the default test client is `client_secret_basic`.
+    let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
         "/oauth/device",
         &format!("client_id={}&scope=openid", client.client_id),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -47,11 +50,12 @@ async fn test_rfc8628_verification_uri_complete() {
     let user = create_test_user(&state.store, "device-complete@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
+    let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
         "/oauth/device",
         &format!("client_id={}&scope=openid", client.client_id),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -82,28 +86,22 @@ async fn test_rfc8628_pending_token_request() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Get device code
+    let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
         "/oauth/device",
         &format!("client_id={}&scope=openid", client.client_id),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let device_code = response["device_code"].as_str().expect("device_code");
 
-    // Poll token endpoint — should return authorization_pending
-    let (status, body) = http_post_form(
-        &app,
-        "/oauth/token",
-        &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-            device_code
-        ),
-        &[],
-    )
-    .await;
+    // Poll token endpoint — should return authorization_pending.
+    // The confidential client authenticates per RFC 8628 §3.4.
+    let (status, body) =
+        poll_device_token_with(&app, device_code, &[("Authorization", &auth_header)]).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -155,6 +153,17 @@ async fn setup_authorized_device(
 
 /// Poll `/oauth/token` with the device code grant.
 async fn poll_device_token(app: &axum::Router, device_code: &str) -> (StatusCode, String) {
+    poll_device_token_with(app, device_code, &[]).await
+}
+
+/// Poll `/oauth/token` with the device code grant and request headers (e.g.
+/// `Authorization: Basic` for a confidential client whose credentials the
+/// `/oauth/token` device-code redemption path now requires per RFC 8628 §3.4).
+async fn poll_device_token_with(
+    app: &axum::Router,
+    device_code: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String) {
     http_post_form(
         app,
         "/oauth/token",
@@ -162,7 +171,7 @@ async fn poll_device_token(app: &axum::Router, device_code: &str) -> (StatusCode
             "grant_type=urn:ietf:params:oauth:grant-type:device_code\
              &device_code={device_code}"
         ),
-        &[],
+        headers,
     )
     .await
 }
@@ -470,9 +479,10 @@ async fn test_device_grant_rejects_redemption_for_client_not_registered_for_devi
     );
 }
 
-/// No-regression control: a client registered for the device_code grant (the
-/// `test_utils` default — all supported grants) redeems a device code and
-/// receives an access token attributed to its `client_id`.
+/// No-regression control: a confidential client registered for the
+/// device_code grant (the `test_utils` default — all supported grants)
+/// authenticates and redeems a device code, receiving an access token
+/// attributed to its `client_id`.
 #[tokio::test]
 async fn test_device_grant_redeems_for_client_registered_for_device_code() {
     let (app, state) = test_app().await;
@@ -483,7 +493,10 @@ async fn test_device_grant_redeems_for_client_registered_for_device_code() {
     let device_code =
         setup_authorized_device_for_client(&state, &user, &auth, "auth", &client.client_id).await;
 
-    let (status, body) = poll_device_token(&app, &device_code).await;
+    // RFC 8628 §3.4: the client authenticates with its registered `client_secret_basic`.
+    let auth_header = client.basic_auth_header();
+    let (status, body) =
+        poll_device_token_with(&app, &device_code, &[("Authorization", &auth_header)]).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -519,7 +532,10 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
         setup_authorized_device_for_client(&state, &user, &auth, "retry", &client.client_id).await;
 
     // First poll: rejected by the grant_types gate. The code is NOT consumed.
-    let (status, body) = poll_device_token(&app, &device_code).await;
+    // The client authenticates per RFC 8628 §3.4 — `client_secret_basic`.
+    let auth_header = client.basic_auth_header();
+    let (status, body) =
+        poll_device_token_with(&app, &device_code, &[("Authorization", &auth_header)]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "gate must reject: {body}");
 
     // Re-authorize the client for device_code (toggle the gate off).
@@ -531,7 +547,8 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
     .await;
 
     // Second poll on the SAME device code: succeeds, proving it was not burned.
-    let (status, body) = poll_device_token(&app, &device_code).await;
+    let (status, body) =
+        poll_device_token_with(&app, &device_code, &[("Authorization", &auth_header)]).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -651,12 +668,16 @@ async fn test_device_grant_end_to_end_registered_client_flow() {
     let auth = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
+    // RFC 8628 §3.1: a confidential client authenticates at the device
+    // authorization endpoint. The default test client is `client_secret_basic`.
+    let auth_header = client.basic_auth_header();
+
     // 1. Create the device authorization via the HTTP endpoint.
     let (status, body) = http_post_form(
         &app,
         "/oauth/device",
         &format!("client_id={}&scope=openid", client.client_id),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create device auth: {body}");
@@ -686,8 +707,9 @@ async fn test_device_grant_end_to_end_registered_client_flow() {
     .await
     .expect("approve device auth");
 
-    // 3. Poll for a token.
-    let (status, body) = poll_device_token(&app, &device_code).await;
+    // 3. Poll for a token (authenticating as the confidential client, RFC 8628 §3.4).
+    let (status, body) =
+        poll_device_token_with(&app, &device_code, &[("Authorization", &auth_header)]).await;
     assert_eq!(status, StatusCode::OK, "end-to-end redeem: {body}");
     let token_json: serde_json::Value =
         serde_json::from_str(&body).expect("token response is JSON");
@@ -695,4 +717,139 @@ async fn test_device_grant_end_to_end_registered_client_flow() {
         token_json.get("access_token").is_some(),
         "access_token must be issued end-to-end: {body}"
     );
+}
+
+// ========================================================================
+// RFC 8628 §3.1 / §3.4 confidential-client authentication enforcement
+//
+// Regression tests for the fix that closed the gap left by `ca8a6f65`:
+// a confidential client (secret-based / `private_key_jwt`) registered for
+// the `device_code` grant MUST present its registered credential at both
+// the device-authorization creation endpoint (`POST /oauth/device`,
+// RFC 8628 §3.1) and the token redemption endpoint (`POST /oauth/token`
+// with `grant_type=device_code`, RFC 8628 §3.4). Before the fix, both
+// endpoints used unconditional `ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint())`
+// regardless of `client_type()`, so the very
+// `ca8a6f65` client the commit targets — a Native client provisioned a
+// per-instance secret under RFC 8252 §8.4 — could run the whole device
+// flow with only its public `client_id`.
+// ========================================================================
+
+/// RFC 8628 §3.1: a confidential (`client_secret_basic`) client MUST
+/// authenticate at the device-authorization creation endpoint. Without its
+/// `Authorization: Basic` header, the request is rejected with
+/// `invalid_client` — before the fix, it was accepted and a `device_code`
+/// was issued.
+#[tokio::test]
+async fn test_device_code_creation_rejects_confidential_client_without_credentials() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-noauth-create@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &format!("client_id={}&scope=openid", client.client_id),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a confidential client without credentials must not start a device flow: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(resp["error"], "invalid_client");
+    assert!(
+        resp.get("device_code").is_none(),
+        "no device_code should be issued without authenticating: {body}"
+    );
+}
+
+/// RFC 8628 §3.4: a confidential (`client_secret_basic`) client MUST
+/// authenticate at the token redemption endpoint. Without its
+/// `Authorization: Basic` header, the request is rejected with
+/// `invalid_client` and the device code is NOT consumed — before the
+/// fix, the request was accepted and an `access_token` was issued.
+#[tokio::test]
+async fn test_device_code_redemption_rejects_confidential_client_without_credentials() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-noauth-redeem@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Create the device auth directly (interval=0 so the no-rate-limit retry
+    // path is exercised) and approve it. The stored `client_id` is what the
+    // redemption endpoint loads.
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "noauth", &client.client_id).await;
+
+    // Poll WITHOUT credentials — must be rejected.
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a confidential client without credentials must not redeem a device code: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(resp["error"], "invalid_client");
+
+    // The device code must NOT be consumed — retry WITH credentials must
+    // still succeed (proving the rejection was the auth gate, not consumption).
+    let auth_header = client.basic_auth_header();
+    let (status, body) =
+        poll_device_token_with(&app, &device_code, &[("Authorization", &auth_header)]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the same device code must redeem with valid credentials: {body}"
+    );
+    let token_json: serde_json::Value =
+        serde_json::from_str(&body).expect("token response is JSON");
+    assert!(
+        token_json.get("access_token").is_some(),
+        "must issue token: {body}"
+    );
+}
+
+/// RFC 8628 §3.4: a `private_key_jwt` (FAPI) client MUST present a
+/// `client_assertion` at redemption. Without it, the request is rejected
+/// with `invalid_client`.
+#[tokio::test]
+async fn test_device_code_redemption_rejects_fapi_client_without_assertion() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-fapi-noauth@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+
+    // Register a FAPI 2.0 `private_key_jwt` client with a JWKS, authorized
+    // for every grant (so the device_code grant_types gate does not fire).
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let _pkcs8_bytes = pkcs8_bytes; // would sign an assertion for a positive test
+
+    let device_code =
+        setup_authorized_device_for_client(&state, &user, &auth, "fapi-noauth", &client.client_id)
+            .await;
+
+    // Poll WITHOUT client_assertion — must be rejected.
+    let (status, body) = poll_device_token(&app, &device_code).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a private_key_jwt client without client_assertion must not redeem: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(resp["error"], "invalid_client");
 }

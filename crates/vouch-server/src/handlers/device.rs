@@ -3,16 +3,21 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db::{self, DeviceAuthState};
+use crate::db::{self, DeviceAuthState, TokenEndpointAuthMethod};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
+use crate::handlers::oidc::ClientAuthParams;
+use crate::handlers::oidc::client_auth::{ClientAuthFields, extract_client_credentials};
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, JwtClientAuthProof, NoClientAuth,
+    SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::grant_type::OAuthGrantType;
-use crate::services::oidc::token::validate_dpop_if_present;
+use crate::services::oidc::jwt_bearer::client_auth::authenticate_client_jwt;
+use crate::services::oidc::token::{
+    authenticate_client, authenticate_client_mtls, validate_dpop_if_present,
+};
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -24,6 +29,7 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError, protocol,
@@ -39,6 +45,176 @@ const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 /// OAuth error response helper.
 fn oauth_error(status: StatusCode, error: OAuthError) -> Response {
     (status, Json(error)).into_response()
+}
+
+/// `ClientAuthFields` impl so the device-authorization **creation** endpoint
+/// (`POST /oauth/device`, RFC 8628 §3.1) reuses the same
+/// `extract_client_credentials` / `resolve_device_client_auth` machinery the
+/// token endpoint uses — a `private_key_jwt` or `client_secret` client
+/// presents its credential at creation exactly as it does at redemption.
+impl crate::handlers::oidc::client_auth::ClientAuthFields for DeviceCodeRequest {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
+    }
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+    }
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
+    }
+}
+
+/// Resolve the client-authentication proof for a device-flow endpoint,
+/// mirroring the other token grants.
+///
+/// A confidential client (`private_key_jwt`, `client_secret_basic` /
+/// `client_secret_post`, or mTLS) registered for the device_code grant (RFC
+/// 7591 §2 `grant_types`) MUST present its registered credential at both
+/// device-flow endpoints (RFC 8628 §3.1 creation, §3.4 redemption): "If the
+/// client was issued client credentials (…), the client MUST authenticate
+/// with the authorization server as described in Section 3.2.1 of
+/// [RFC6749]." `ca8a6f65` enforced that contract on the `authorization_code`,
+/// `client_credentials`, `token_exchange`, and `fido2_assertion` grants
+/// through `authenticate_client` / `for_public_client` but left the
+/// device_code grant on unconditional `ClientAuthProof::NoAuth` — this
+/// helper closes that gap.
+///
+/// The lookup is anchored on the registered client already loaded from the
+/// device-authorization request's `client_id` (redemption) or the request's
+/// `client_id` (creation): the credentials the caller presents must
+/// authenticate *that* client, so a device code stored for client A cannot
+/// be redeemed by presenting client B's credentials. For a `client_secret`
+/// client the `client_id` returned by `authenticate_client` is compared to
+/// the loaded client's `client_id`; for `private_key_jwt`,
+/// `authenticate_client_jwt` already validates `iss == sub == client_id`
+/// against the hint we pass.
+///
+/// **Precedence** matches the other token-endpoint grants:
+/// `private_key_jwt` → `client_secret` → mTLS → public. mTLS is dispatched
+/// first only because it never consults the body credentials — the three
+/// body-based methods form the `else` fallthrough. A public client
+/// (`token_endpoint_auth_method = None`) is accepted without authentication
+/// via `NoClientAuth::for_public_client`, which rejects a confidential
+/// client at the type-system level.
+///
+/// Returns a fully-formed `ClientAuthProof` (one of `PrivateKeyJwt`,
+/// `ClientSecret`, `MutualTls`, or `NoAuth`). The creation endpoint drops
+/// the proof after the JTI commit side-effect; the redemption endpoint
+/// threads it into `TokenIssuanceProof`.
+async fn resolve_device_client_auth<T: ClientAuthFields>(
+    state: &Arc<AppState>,
+    oc: &ValidatedOAuthClient,
+    fields: &T,
+    headers: &HeaderMap,
+    client_cert: &OptionalClientCert,
+    arrival: ArrivalTime,
+) -> Result<ClientAuthProof, ServiceError> {
+    match oc.token_endpoint_auth_method {
+        TokenEndpointAuthMethod::TlsClientAuth
+        | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
+            let Some(cert) = client_cert.0.as_ref() else {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "mTLS client certificate required",
+                ));
+            };
+            let verification = authenticate_client_mtls(state, oc, cert)
+                .await
+                .map_err(|e| e.into_service_error())?;
+            Ok(ClientAuthProof::MutualTls(verification))
+        }
+        TokenEndpointAuthMethod::PrivateKeyJwt => {
+            let Some(assertion) = fields.client_assertion() else {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "client_assertion required for private_key_jwt client",
+                ));
+            };
+            // RFC 7523 §2.2: the assertion type MUST be the JWT bearer type.
+            // Reject any other value before invoking the validator so its
+            // error map stays consistent (invalid_request, not invalid_client).
+            let assertion_type = fields.client_assertion_type().unwrap_or("");
+            if assertion_type != protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    format!(
+                        "Unsupported client_assertion_type. Expected: {}",
+                        protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+                    ),
+                ));
+            }
+            // `authenticate_client_jwt` loads the client by the assertion's `iss`
+            // and verifies `iss == sub == client_id_hint` against the hint we
+            // pass (the loaded `client_id`), so the authenticated client is
+            // bound to the same client the device request was created for.
+            let (jwt_client, pending_jti, jwt_auth) =
+                authenticate_client_jwt(state, assertion, Some(&oc.client_id), arrival)
+                    .await
+                    .map_err(|e| e.into_service_error())?;
+            if jwt_client.client_id != oc.client_id {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "client_assertion subject does not match the registered client",
+                ));
+            }
+            // Commit the JTI for replay prevention before any device code is
+            // consumed (redemption) or a device code is issued (creation).
+            // Dropping the proof at the creation endpoint does NOT undo the
+            // commit: the side-effect already recorded the JTI in the database.
+            let jti_claim = pending_jti
+                .commit(state)
+                .await
+                .map_err(|e| e.into_service_error())?;
+            Ok(ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(
+                jwt_auth, jti_claim,
+            )))
+        }
+        TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost => {
+            // `extract_client_credentials` returns the credentials from the
+            // Authorization header (Basic) or the request body (Post), paired
+            // with a presentation witness the creation endpoint ignores.
+            let Some((creds, _presentation)) = extract_client_credentials(headers, fields) else {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "client credentials required",
+                ));
+            };
+            // `authenticate_client` validates the secret against the stored
+            // hash and rejects FAPI clients (which must use private_key_jwt
+            // or mTLS). It returns `Some(verification)` for a verified
+            // confidential secret client; `None` would mean the client is
+            // mTLS-registered or public, which contradicts this match arm.
+            let (auth_client, verification) = authenticate_client(state, &creds, arrival)
+                .await
+                .map_err(|e| e.into_service_error())?;
+            if auth_client.client_id != oc.client_id {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "client credential subject does not match the registered client",
+                ));
+            }
+            match verification {
+                Some(v) => Ok(ClientAuthProof::ClientSecret(v)),
+                None => Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "client authentication required",
+                )),
+            }
+        }
+        TokenEndpointAuthMethod::None => {
+            // RFC 6749 §2.1: a public client has no registered credential to
+            // present; `for_public_client` rejects a confidential client at
+            // the type-system level so this arm cannot mistakenly accept one.
+            Ok(ClientAuthProof::NoAuth(NoClientAuth::for_public_client(
+                oc,
+            )?))
+        }
+    }
 }
 
 /// Generate a random device code (32 bytes, base64url encoded).
@@ -91,6 +267,9 @@ fn hash_device_code(code: &str) -> String {
 #[expect(clippy::disallowed_methods, reason = "mints the device code's expiry")]
 pub(crate) async fn device_code(
     State(state): State<Arc<AppState>>,
+    arrival: ArrivalTime,
+    client_cert: OptionalClientCert,
+    headers: HeaderMap,
     OAuthForm(req): OAuthForm<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
@@ -100,6 +279,16 @@ pub(crate) async fn device_code(
     // grant. Rejecting at creation avoids surfacing a usable `user_code` to
     // the user for an unauthorized client; the redemption path re-checks so
     // a client restricted mid-flow still cannot redeem.
+    //
+    // RFC 8628 §3.1: "If the client was issued client credentials (…), the
+    // client MUST authenticate with the authorization server as described in
+    // Section 3.2.1 of [RFC6749]." `ca8a6f65` enforced that contract on the
+    // other token-endpoint grants through `authenticate_client`/
+    // `for_public_client` but left the device_code creation endpoint on
+    // unconditional `NoAuth` — a confidential client (secret-based /
+    // `private_key_jwt`) could start a device flow with only its public
+    // `client_id`. This gates creation on the same
+    // `resolve_device_client_auth` dispatch the redemption path now uses.
     if let Some(client_id) = req.client_id.as_deref() {
         let client = db::get_oauth_client_by_client_id(&state.store, client_id)
             .await
@@ -113,7 +302,17 @@ pub(crate) async fn device_code(
         let client = client.ok_or_else(|| {
             ServiceError::oauth(OAuthErrorCode::InvalidClient, "Unknown client_id")
         })?;
-        ValidatedOAuthClient::for_grant(client, OAuthGrantType::DeviceCode)?;
+        let client = ValidatedOAuthClient::for_grant(client, OAuthGrantType::DeviceCode)?;
+        // RFC 8628 §3.1: authenticate the registered client before issuing a
+        // device_code. The proof is dropped — the creation endpoint issues
+        // no token — but the `private_key_jwt` JTI commit side-effect has
+        // already recorded the JTI for replay prevention. The built-in CLI
+        // flow carries no `client_id`, so this block is skipped (`None` is
+        // the only call site that satisfies `internal_endpoint`'s "no
+        // external OAuth client" precondition).
+        let _client_auth =
+            resolve_device_client_auth(&state, &client, &req, &headers, &client_cert, arrival)
+                .await?;
     }
 
     // Generate codes
@@ -245,6 +444,7 @@ pub(crate) async fn device_token(
     client_info: db::ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
+    auth: &ClientAuthParams,
     device_code: &str,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
@@ -402,14 +602,14 @@ pub(crate) async fn device_token(
             // before any token is issued. The other token-endpoint grants that
             // load a registered client (`client_credentials`, `token_exchange`,
             // `fido2_assertion`) enforce the same field via
-            // `is_authorized_for_grant`; the device-code grant authenticates by
-            // the consumed `device_code` (`ClientAuthProof::NoAuth`) rather
-            // than client credentials, so its client lookup happens here — this
-            // closes the registration-contract gap left by commit 45b8de2.
-            // Runs before `try_consume_device_auth` so an unauthorized client
-            // does not burn the single-use device code, matching the mTLS gate
-            // below. The built-in CLI flow carries no `client_id` and is
-            // unaffected: `oauth_client` is `None` and the guard is skipped.
+            // `is_authorized_for_grant`; the device-code grant now resolves
+            // client authentication through `resolve_device_client_auth`
+            // (below), so its client lookup happens here — this closes the
+            // registration-contract gap left by commit 45b8de2. Runs before
+            // `try_consume_device_auth` so an unauthorized client does not
+            // burn the single-use device code. The built-in CLI flow carries
+            // no `client_id` and is unaffected: `oauth_client` is `None` and
+            // the guard is skipped.
             let oauth_client = match oauth_client
                 .map(|c| ValidatedOAuthClient::for_grant(c, OAuthGrantType::DeviceCode))
                 .transpose()
@@ -439,37 +639,46 @@ pub(crate) async fn device_token(
             // `tls_client_certificate_bound_access_tokens` opt-in for the only
             // client profile that has a registered cert to match against.
             //
-            // Scoped to mTLS-client-auth methods: `authenticate_client_mtls`
-            // returns `Err("client not registered for mTLS authentication")`
-            // for any other method, and a `client_secret_basic`/`private_key_jwt`
-            // sender-constraint-only client has no registered cert identity to
-            // match (RFC 8705 §3 binds to whatever cert is presented by design).
+            // RFC 8628 §3.4: "If the client was issued client credentials (…),
+            // the client MUST authenticate with the authorization server as
+            // described in Section 3.2.1 of [RFC6749]." `ca8a6f65` enforced
+            // this on the `authorization_code`, `client_credentials`,
+            // `token_exchange`, and `fido2_assertion` grants via
+            // `authenticate_client` / `for_public_client` but left the
+            // device_code grant on unconditional
+            // `ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint())`
+            // — a confidential client (secret-based / `private_key_jwt`)
+            // could redeem a device code with only its public `client_id`.
+            // `resolve_device_client_auth` runs the same four-method dispatch
+            // (mTLS → private_key_jwt → client_secret → public) the other
+            // grants use, anchored on the client already loaded from the
+            // stored `client_id` so the presented credentials must
+            // authenticate *that* client.
             //
-            // Runs before `try_consume_device_auth` so a failed mTLS client
+            // Runs before `try_consume_device_auth` so a failed client
             // authentication does not burn the single-use device code — the
-            // legitimate holder of the registered cert can retry.
-            if let Some(ref oc) = oauth_client
-                && matches!(
-                    oc.token_endpoint_auth_method,
-                    crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                        | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-                )
-            {
-                let Some(cert) = client_cert.0.as_ref() else {
-                    return Err(oauth_error(
-                        StatusCode::UNAUTHORIZED,
-                        OAuthError {
-                            error: OAuthErrorCode::InvalidClient.as_str().to_string(),
-                            error_description: Some("mTLS client certificate required".to_string()),
-                        },
-                    ));
-                };
-                if let Err(e) =
-                    crate::services::oidc::token::authenticate_client_mtls(&state, oc, cert).await
-                {
-                    return Err(e.into_service_error().into_oauth_response().into_response());
+            // legitimate client can retry with corrected credentials. The
+            // built-in CLI flow (no `client_id`) uses
+            // `NoClientAuth::internal_endpoint`, the only call site that
+            // satisfies the witness's "no external OAuth client" precondition.
+            let client_auth = match oauth_client {
+                None => ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
+                Some(ref oc) => {
+                    match resolve_device_client_auth(
+                        &state,
+                        oc,
+                        auth,
+                        &headers,
+                        &client_cert,
+                        arrival,
+                    )
+                    .await
+                    {
+                        Ok(proof) => proof,
+                        Err(e) => return Err(e.into_oauth_response().into_response()),
+                    }
                 }
-            }
+            };
 
             // Every sender-constraint requirement registered for this
             // client. The built-in CLI flow carries no registered client_id,
@@ -641,13 +850,16 @@ pub(crate) async fn device_token(
                 },
                 TokenIssuanceProof {
                     grant: GrantProof::DeviceCode(device_claim),
-                    // RFC 8628 device authorization grant: the consumed
-                    // `device_code` is itself the client credential at
-                    // this endpoint — see GrantProof::DeviceCode above.
-                    // No separate external client-auth step takes place.
-                    client_auth: ClientAuthProof::NoAuth(
-                        crate::services::auth::NoClientAuth::internal_endpoint(),
-                    ),
+                    // RFC 8628 §3.4 + `ca8a6f65`'s confidentiality contract: the
+                    // `client_auth` proof is resolved above via
+                    // `resolve_device_client_auth`, which dispatches on the
+                    // registered client's `token_endpoint_auth_method` —
+                    // `MutualTls`, `PrivateKeyJwt`, `ClientSecret`, or `NoAuth`
+                    // (public client / built-in CLI flow). This replaces the
+                    // unconditional `NoClientAuth::internal_endpoint()` that
+                    // previously let a confidential client redeem without its
+                    // registered credential.
+                    client_auth,
                     sender_constraint,
                 },
                 arrival,
@@ -2011,9 +2223,13 @@ mod tests {
     ///
     /// This is the end-to-end shape the `native/*` examples use: an operator
     /// creates a Native application in the dashboard — which stores no
-    /// `grant_types` — and the client posts its `client_id` to `/oauth/device`.
-    /// Resolving an absent list as RFC 7591 §2's registration default made
-    /// that first request `401 unauthorized_client`.
+    /// `grant_types` and (per `requires_secret`) no `client_secret`, so the
+    /// client is public (`token_endpoint_auth_method = None`) — and the
+    /// client posts its `client_id` to `/oauth/device`. Resolving an absent
+    /// list as the application type's `default_grant_types` made that first
+    /// request pass for Native rather than `401 unauthorized_client`, which
+    /// is what Web/Service still get (their `default_grant_types` excludes
+    /// `device_code`).
     #[tokio::test]
     async fn test_self_service_native_app_may_start_the_device_flow() {
         let (app, state) = test_app().await;
@@ -2024,6 +2240,11 @@ mod tests {
             (crate::db::OAuthClientType::Web, false),
             (crate::db::OAuthClientType::Service, false),
         ] {
+            // Match what the self-service application creation handler
+            // persists (`validated_app_type` in `applications/validate.rs`):
+            // Native/Spa get `token_endpoint_auth_method = None` (public) and
+            // no secret, while Web/Service get `ClientSecretBasic` + a secret.
+            let is_public = !app_type.requires_secret();
             let client = create_test_client(
                 &state.store,
                 &user.id,
@@ -2034,6 +2255,12 @@ mod tests {
                     // change, and what every application created before it
                     // still has.
                     grant_types: None,
+                    token_endpoint_auth_method: if is_public {
+                        Some(crate::db::TokenEndpointAuthMethod::None)
+                    } else {
+                        None
+                    },
+                    with_secret: !is_public,
                     ..Default::default()
                 },
             )

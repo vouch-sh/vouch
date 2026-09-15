@@ -63,7 +63,7 @@ pub(crate) async fn run(server: &str) -> Result<()> {
         &client,
         server,
         Some(&fapi_key),
-        Some(pre_registered_client_id),
+        Some(pre_registered_client_id.clone()),
     )
     .await?;
 
@@ -96,7 +96,13 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     tr_println!("enroll-waiting");
 
     // Step 5: Poll for token (with optional DPoP proofs).
-    let token_response = poll_for_token(&client, &device_response, Some(&fapi_key)).await?;
+    let token_response = poll_for_token(
+        &client,
+        &device_response,
+        Some(&fapi_key),
+        &Some(pre_registered_client_id),
+    )
+    .await?;
 
     // Step 6: Compute expiration timestamp from expires_in.
     let expires_at = compute_session_expires_at(token_response.expires_in);
@@ -146,16 +152,21 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 /// If the request fails with a cached client_id, the id may be stale (e.g.
 /// the server DB was reset): FAPI state is cleared, the client re-registers,
 /// and the request is retried once.
+///
+/// RFC 8628 §3.1: "If the client was issued client credentials (…), the
+/// client MUST authenticate with the authorization server as described in
+/// Section 3.2.1 of [RFC6749]." A FAPI client registered with
+/// `private_key_jwt` authenticates here by signing a short-lived
+/// `client_assertion` JWT and including it (with `client_assertion_type`)
+/// in the form body.
 async fn request_device_code(
     client: &VouchClient,
     server: &str,
     fapi_key: Option<&vouch_cli::fapi::ClientKey>,
     pre_registered_client_id: Option<String>,
 ) -> Result<DeviceCodeResponse> {
-    let device_request = DeviceCodeRequest {
-        client_id: pre_registered_client_id.clone(),
-        scope: None,
-    };
+    let device_request =
+        build_device_code_request(&pre_registered_client_id, server, fapi_key).await?;
 
     match client.post_form("/oauth/device", &device_request).await {
         Ok(resp) => Ok(resp),
@@ -176,10 +187,7 @@ async fn request_device_code(
                 None
             };
 
-            let retry_request = DeviceCodeRequest {
-                client_id: new_client_id,
-                scope: None,
-            };
+            let retry_request = build_device_code_request(&new_client_id, server, fapi_key).await?;
             client
                 .post_form("/oauth/device", &retry_request)
                 .await
@@ -187,6 +195,31 @@ async fn request_device_code(
         }
         Err(e) => Err(e.context(tr!("enroll-err-start"))),
     }
+}
+
+/// Build a `DeviceCodeRequest`, attaching a `private_key_jwt` client
+/// assertion when a FAPI client key and `client_id` are available.
+async fn build_device_code_request(
+    pre_registered_client_id: &Option<String>,
+    server: &str,
+    fapi_key: Option<&vouch_cli::fapi::ClientKey>,
+) -> Result<DeviceCodeRequest> {
+    let client_assertion = match (pre_registered_client_id.as_ref(), fapi_key) {
+        (Some(client_id), Some(key)) => Some(
+            vouch_cli::fapi::ClientAssertionBuilder::new(client_id, server)
+                .build(key)
+                .with_context(|| tr!("enroll-err-start"))?,
+        ),
+        _ => None,
+    };
+    Ok(DeviceCodeRequest {
+        client_id: pre_registered_client_id.clone(),
+        client_assertion: client_assertion.as_ref().map(|a| a.assertion.clone()),
+        client_assertion_type: client_assertion
+            .as_ref()
+            .map(|_| vouch_cli::fapi::ClientAssertion::TYPE.to_string()),
+        ..Default::default()
+    })
 }
 
 /// Attempt open (unauthenticated) FAPI client registration.
@@ -260,16 +293,19 @@ async fn register_fapi_client_open(
 ///
 /// If a FAPI key is provided, includes DPoP proofs on token requests
 /// and handles DPoP nonce retry from the server.
+///
+/// RFC 8628 §3.4: "If the client was issued client credentials (…), the
+/// client MUST authenticate with the authorization server as described in
+/// Section 3.2.1 of [RFC6749]." A FAPI client registered with
+/// `private_key_jwt` authenticates per poll by signing a fresh
+/// `client_assertion` (new `jti` each time — the server commits the JTI
+/// for replay prevention, so a stale assertion would be rejected).
 async fn poll_for_token(
     client: &VouchClient,
     device_response: &DeviceCodeResponse,
     fapi_key: Option<&vouch_cli::fapi::ClientKey>,
+    client_id: &Option<String>,
 ) -> Result<DeviceTokenResponse> {
-    let request = DeviceTokenRequest {
-        grant_type: protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
-        device_code: device_response.device_code.clone(),
-    };
-
     let interval = std::time::Duration::from_secs(device_response.interval);
     let timeout = std::time::Duration::from_secs(device_response.expires_in);
     let start = std::time::Instant::now();
@@ -294,6 +330,16 @@ async fn poll_for_token(
             print!("{}", " ".repeat(3_usize.saturating_sub(dots)));
             stdout().flush().ok();
         }
+
+        // Build a fresh request so the `private_key_jwt` assertion carries a
+        // new `jti` each poll — the server commits a JTI for replay
+        // prevention, so reusing a stale assertion would be rejected.
+        let request = build_device_token_request(
+            &device_response.device_code,
+            client.base_url(),
+            fapi_key,
+            client_id,
+        )?;
 
         // Poll for token (with optional DPoP proof)
         match poll_once(client, &request, fapi_key, dpop_nonce.as_deref()).await {
@@ -329,6 +375,34 @@ async fn poll_for_token(
             }
         }
     }
+}
+
+/// Build a `DeviceTokenRequest`, attaching a signed `private_key_jwt`
+/// `client_assertion` when both a FAPI client key and `client_id` are
+/// available. A fresh assertion is generated for every call so the `jti`
+/// is unique — the server commits each JTI for replay prevention.
+fn build_device_token_request(
+    device_code: &str,
+    server: &str,
+    fapi_key: Option<&vouch_cli::fapi::ClientKey>,
+    client_id: &Option<String>,
+) -> Result<DeviceTokenRequest> {
+    let client_assertion = match (client_id.as_ref(), fapi_key) {
+        (Some(cid), Some(key)) => Some(
+            vouch_cli::fapi::ClientAssertionBuilder::new(cid, server)
+                .build(key)
+                .with_context(|| tr!("enroll-err-start"))?,
+        ),
+        _ => None,
+    };
+    Ok(DeviceTokenRequest {
+        grant_type: protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
+        device_code: device_code.to_string(),
+        client_assertion: client_assertion.as_ref().map(|a| a.assertion.clone()),
+        client_assertion_type: client_assertion
+            .as_ref()
+            .map(|_| vouch_cli::fapi::ClientAssertion::TYPE.to_string()),
+    })
 }
 
 /// Compute seconds to add to now when deriving session expiry from `expires_in`.

@@ -1120,6 +1120,27 @@ fn device_token_body(device_code: &str) -> String {
     )
 }
 
+/// Build a device_code token-endpoint form body that carries a `private_key_jwt`
+/// `client_assertion` (RFC 7523). Used by the FAPI device-flow tests so the new
+/// RFC 8628 §3.4 client-authentication gate does not reject the poll before the
+/// test's intended assertion (DPoP / sender-constraint enforcement) runs.
+fn device_token_body_with_assertion(
+    device_code: &str,
+    client_id: &str,
+    issuer: &str,
+    pkcs8_bytes: &[u8],
+) -> String {
+    use urlencoding::encode;
+    let assertion = build_client_assertion(client_id, issuer, pkcs8_bytes, None);
+    format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+         &device_code={device_code}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        encode(&assertion)
+    )
+}
+
 /// FAPI 2.0 Section 5.3.2.1: A FAPI client completing device flow without a
 /// sender constraint (DPoP or mTLS) must be rejected with `invalid_request`.
 /// The device code must NOT be consumed so the client can retry with a proof.
@@ -1129,13 +1150,17 @@ async fn test_fapi2_device_flow_rejects_without_dpop() {
 
     let user = create_test_user(&state.store, "fapi2-dev-nodpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
         setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "nodpop").await;
 
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+    // Authenticate as the confidential `private_key_jwt` client (RFC 8628
+    // §3.4) so the request clears the client-auth gate and reaches the
+    // sender-constraint check that this test targets.
+    let issuer = state.config().base_url.clone();
+    let body = device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
 
     assert_eq!(
         status,
@@ -1155,13 +1180,11 @@ async fn test_fapi2_device_flow_rejects_without_dpop() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
-    let (status, resp_body) = http_post_form(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", &proof)],
-    )
-    .await;
+    // Build a fresh assertion for the retry (jti is single-use).
+    let body_retry =
+        device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body_retry, &[("DPoP", &proof)]).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1178,7 +1201,7 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
 
     let user = create_test_user(&state.store, "fapi2-dev-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
         setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "dpop").await;
@@ -1189,13 +1212,10 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
-    let (status, resp_body) = http_post_form(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", &proof)],
-    )
-    .await;
+    let issuer = state.config().base_url.clone();
+    let body = device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
 
     assert_eq!(
         status,
@@ -1228,7 +1248,7 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
 
     let user = create_test_user(&state.store, "fapi2-dev-nonce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
         setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "nonce").await;
@@ -1238,13 +1258,9 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
     // Proof WITHOUT a nonce — server must require one.
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
 
-    let response = http_post_form_full(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", &proof)],
-    )
-    .await;
+    let issuer = state.config().base_url.clone();
+    let body = device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let response = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
 
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
@@ -1267,13 +1283,10 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
         .expect("nonce UTF-8")
         .to_string();
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
-    let (status, _) = http_post_form(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", &proof)],
-    )
-    .await;
+    // Fresh assertion for the retry (jti is single-use).
+    let body_retry =
+        device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, _) = http_post_form(&app, "/oauth/token", &body_retry, &[("DPoP", &proof)]).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1289,18 +1302,15 @@ async fn test_fapi2_device_flow_invalid_dpop_proof_rejected() {
 
     let user = create_test_user(&state.store, "fapi2-dev-badproof@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
         setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "badproof").await;
 
-    let (status, resp_body) = http_post_form(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", "not-a-valid-jwt")],
-    )
-    .await;
+    let issuer = state.config().base_url.clone();
+    let body = device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", "not-a-valid-jwt")]).await;
 
     assert_eq!(
         status,
@@ -1318,13 +1328,9 @@ async fn test_fapi2_device_flow_invalid_dpop_proof_rejected() {
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
-    let (status, _) = http_post_form(
-        &app,
-        "/oauth/token",
-        &device_token_body(&device_code),
-        &[("DPoP", &proof)],
-    )
-    .await;
+    let body_retry =
+        device_token_body_with_assertion(&device_code, &client.client_id, &issuer, &pkcs8);
+    let (status, _) = http_post_form(&app, "/oauth/token", &body_retry, &[("DPoP", &proof)]).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1345,8 +1351,16 @@ async fn test_fapi2_device_flow_non_fapi_client_succeeds_without_dpop() {
     let device_code =
         setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "std").await;
 
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+    // RFC 8628 §3.4: the confidential (`client_secret_basic`) client
+    // authenticates per poll.
+    let auth_header = client.basic_auth_header();
+    let (status, resp_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_token_body(&device_code),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -1384,11 +1398,14 @@ async fn test_fapi2_device_flow_non_fapi_client_with_dpop_issues_bound_token() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
+    // RFC 8628 §3.4: the confidential (`client_secret_basic`) client
+    // authenticates per poll.
+    let auth_header = client.basic_auth_header();
     let (status, resp_body) = http_post_form(
         &app,
         "/oauth/token",
         &device_token_body(&device_code),
-        &[("DPoP", &proof)],
+        &[("DPoP", &proof), ("Authorization", &auth_header)],
     )
     .await;
 
