@@ -870,12 +870,8 @@ pub async fn update_scim_user(
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
-        // Test-only seam: let handler tests deactivate a sibling admin from a
-        // separate committed transaction before the first read here, so the
-        // in-transaction `other_active_admins` count sees the demotion and the
-        // authoritative floor fires after `revoke_then_persist` already
-        // committed revocation. Fires before the first read, so under SQLite
-        // WAL the snapshot the count reads includes the hook's committed write.
+        // Test-only seam, before the first read so a write it commits is
+        // visible to the last-admin count below.
         #[cfg(test)]
         store.run_last_admin_count_test_hook(user_id).await;
 

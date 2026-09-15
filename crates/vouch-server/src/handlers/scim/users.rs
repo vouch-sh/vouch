@@ -565,15 +565,10 @@ pub(crate) async fn patch_user(
             )
                 .into_response();
         }
-        // The advisory pre-check above missed a race: while `revoke_then_persist`
-        // was withdrawing the user's sessions and SSH certificates, a concurrent
-        // admin demotion committed, so the authoritative count inside the
-        // transaction now refuses the `active = false` write. Revocation
-        // already committed — that durable side effect gets its audit row even
-        // though the persist step then refused. `refusal: "last_admin"`
-        // distinguishes a deliberate floor refusal from a write that was
-        // attempted and failed (the generic arm's `accessRevoked`/`persisted`
-        // payload) so an operator can tell the two apart.
+        // Reached when an admin demotion commits between the advisory pre-check
+        // and the in-transaction count. `revoke_then_persist` has already
+        // committed the revocation, so it is audited; `refusal: "last_admin"`
+        // separates a floor refusal from a failed write.
         Err(crate::services::auth::DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
             if patched.deactivated {
                 db::record_scim_audit(
@@ -798,11 +793,9 @@ pub(crate) async fn delete_user(
         // §3.12 lists no `scimType` applicable to DELETE, so this is a plain
         // 400 with a human-readable `detail`.
         Err(db::DeleteUserError::LastAdmin) => {
-            // Access was already revoked above; that committed change gets its
-            // audit row even though the floor then refused the delete.
-            // `refusal: "last_admin"` distinguishes a deliberate floor refusal
-            // from a delete that was attempted and failed (the generic arm's
-            // `accessRevoked`/`deleted` payload).
+            // Access was revoked above and that commit stands, so it is
+            // audited; `refusal: "last_admin"` separates a floor refusal from a
+            // failed delete.
             db::record_scim_audit(
                 &state.audit,
                 "delete",

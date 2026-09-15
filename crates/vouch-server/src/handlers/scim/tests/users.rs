@@ -1826,37 +1826,19 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
 }
 
 // ========================================================================
-// In-transaction LastAdmin race: committed revocation must audit
+// In-transaction LastAdmin refusal after revocation committed
 // ========================================================================
 //
-// The dedicated `Err(...LastAdmin)` arms fire only when the advisory pre-check
-// passed (≥2 active admins) and the authoritative in-transaction count then
-// refused — i.e. a concurrent admin demotion committed between the pre-check
-// and the count. By then `revoke_user_access` (PATCH, via `revoke_then_persist`)
-// or the handler's direct `revoke_user_access` (DELETE) has already committed
-// session deletion and SSH-cert revocation in their own transactions. Those
-// commits are not rolled back when the floor refuses, so the dedicated arms
-// must record a `scim_operation` audit row tying the durable revocation
-// (incl. `auth.token_id`) to the operation — mirroring the generic error arm
-// but with a `refusal: "last_admin"` distinguisher.
-//
-// The `last_admin_count_test_hook` is the only seam that can drive this
-// post-revocation, pre-count window: it fires inside `update_scim_user` /
-// `delete_user` right after `begin()` and before the first read, so under
-// SQLite WAL the transaction's first read establishes a snapshot that already
-// includes the hook's committed sibling deactivation. `modify_test_hook` /
-// `compare_and_update_test_hook` / `delete_test_hook` fire inside writes or
-// before the existence check, not between the pre-check and the count.
+// The in-transaction count refuses only when an admin demotion commits between
+// the advisory pre-check and the count, after revocation has committed. The
+// tests produce that by deactivating a sibling admin from a hook that runs
+// inside the transaction before its first read: `last_admin_count_test_hook`
+// for PATCH, `delete_test_hook` for DELETE.
 
 /// Records a `scim_operation` audit row when the in-transaction `LastAdmin`
 /// guard refuses a PATCH *after* `revoke_then_persist` already committed the
-/// target's session deletions and SSH-cert revocations.
-///
-/// Before the fix the dedicated `Err(...LastAdmin)` arm returned the
-/// `mutability` 400 without auditing, so a SCIM-initiated revocation that
-/// committed left no `scim_operation` row carrying `auth.token_id` — the
-/// token-level attribution the #1249 audit-after-commit invariant requires
-/// was lost (the revocation remained visible only at the credential layer).
+/// target's session deletions and SSH-cert revocations. The row carries
+/// `auth.token_id` (audit after commit, #1249).
 #[expect(
     clippy::too_many_lines,
     reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
@@ -2141,11 +2123,8 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
 
 /// Records a `scim_operation` audit row when the in-transaction `LastAdmin`
 /// guard refuses a DELETE *after* the handler's `revoke_user_access` already
-/// committed the target's session deletions and SSH-cert revocations.
-///
-/// Before the fix the dedicated `Err(DeleteUserError::LastAdmin)` arm returned
-/// the plain 400 without auditing, so a SCIM-initiated deletion that revoked
-/// access committed without a `scim_operation` row carrying `auth.token_id`.
+/// committed the target's session deletions and SSH-cert revocations. The row
+/// carries `auth.token_id`.
 #[expect(
     clippy::too_many_lines,
     reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
@@ -2162,7 +2141,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     let s = Arc::clone(&sibling_slot);
     let (app, state) = test_app_with_modify_hook(move |store| {
         let writer = store.clone();
-        store.set_last_admin_count_test_hook(Arc::new(move |user_id: &str| {
+        store.set_delete_test_hook(Arc::new(move |user_id: &str| {
             let writer = writer.clone();
             let user_id = user_id.to_string();
             let t = Arc::clone(&t);
