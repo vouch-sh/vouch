@@ -1754,6 +1754,10 @@ pub struct TestPendingAuthSpec<'a> {
     pub prompt: Option<&'a str>,
     /// RFC 9470 maximum authentication age. Default: `None`.
     pub max_age: Option<i64>,
+    /// Response mode stored on the request. Default: `query`.
+    pub response_mode: crate::db::documents::oauth::ResponseMode,
+    /// `state` stored on the request. Default: `None`.
+    pub state: Option<&'a str>,
 }
 
 /// Store a pending OAuth authorization and return its id.
@@ -1767,7 +1771,7 @@ pub async fn create_test_pending_auth(
             client_id: spec.client_id,
             redirect_uri: "https://example.com/callback",
             response_type: "code",
-            state: None,
+            state: spec.state,
             scope: Some("openid"),
             nonce: None,
             code_challenge: None,
@@ -1778,7 +1782,7 @@ pub async fn create_test_pending_auth(
             prompt: spec.prompt,
             dpop_jkt: None,
             authorization_details: None,
-            response_mode: Default::default(),
+            response_mode: spec.response_mode,
             par_request_uri: None,
         },
     )
