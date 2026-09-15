@@ -121,12 +121,11 @@ async fn test_session_lifecycle() {
         .await
         .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let auth_id = create_authenticator(
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "session@example.com",
             name: "Test Key",
             credential_id: b"test-cred-id",
             public_key: &[0u8; 32],

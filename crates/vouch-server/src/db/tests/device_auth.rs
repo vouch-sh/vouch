@@ -81,7 +81,6 @@ async fn test_device_auth_authorization_flow() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "device@example.com",
             name: "Test Key",
             credential_id: b"test-cred-id-device",
             public_key: &[0u8; 32],
@@ -261,7 +260,6 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "consume@example.com",
             name: "Key",
             credential_id: b"cred-consume",
             public_key: &[0u8; 32],
@@ -326,7 +324,6 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "double@example.com",
             name: "Key",
             credential_id: b"cred-double",
             public_key: &[0u8; 32],
@@ -407,7 +404,6 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "expired@example.com",
             name: "Key",
             credential_id: b"cred-expired",
             public_key: &[0u8; 32],

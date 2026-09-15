@@ -1729,7 +1729,6 @@ mod tests {
             &state.store,
             &crate::db::CreateAuthenticatorParams {
                 user_id: &user.id,
-                user_email: &user.email,
                 name: "Test Key",
                 credential_id: &credential_id,
                 public_key: &[0u8; 32],
