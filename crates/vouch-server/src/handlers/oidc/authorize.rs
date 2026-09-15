@@ -179,6 +179,23 @@ struct ErrorTarget<'a> {
     response_mode: ResponseMode,
 }
 
+/// The response mode an authorization answers in, as the caller holds it.
+///
+/// A mode taken from the request is parsed only after the `redirect_uri` is
+/// validated, so an unusable value can be reported to it. A mode read back from
+/// a PAR or pending-authorization record was validated when it was stored and
+/// is the request's mode. `response_mode` is "the mechanism to be used for
+/// returning Authorization Response parameters from the Authorization Endpoint"
+/// (OAuth 2.0 Multiple Response Type Encoding Practices §2.1), and an error is
+/// an Authorization Response (RFC 6749 §4.1.2.1), so a rejection is rendered in
+/// the stored mode, not in the `query` default an absent URL parameter parses
+/// to.
+#[derive(Clone, Copy)]
+enum ResponseModeSource<'a> {
+    Requested(Option<&'a str>),
+    Stored(ResponseMode),
+}
+
 impl AuthorizeResponseTarget {
     /// Full Phase A pipeline: DB lookup + active check + redirect_uri validation.
     ///
@@ -193,26 +210,20 @@ impl AuthorizeResponseTarget {
         state: &Arc<AppState>,
         client_id: &str,
         redirect_uri_param: Option<&str>,
-        response_mode_param: Option<&str>,
+        response_mode: ResponseModeSource<'_>,
         oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
         let client = lookup_and_check_active(state, client_id).await?;
         let redirect_uri = resolve_redirect_uri(redirect_uri_param, &client)?;
-        Self::finish(
-            state,
-            client,
-            redirect_uri,
-            response_mode_param,
-            oauth_state,
-        )
-        .await
+        Self::finish(state, client, redirect_uri, response_mode, oauth_state).await
     }
 
     /// Shared tail of both constructors: the response mode, then the
     /// client's registered `response_types`. Ordered so that each refusal
     /// is rendered against the already-validated `redirect_uri` (RFC 6749
-    /// Section 4.1.2.1): an unusable mode goes back in the default `query`
-    /// encoding, and an unregistered response type in the mode just parsed.
+    /// Section 4.1.2.1): an unusable requested mode goes back in the default
+    /// `query` encoding, and an unregistered response type in the request's
+    /// mode.
     #[expect(
         clippy::result_large_err,
         reason = "Err is an HTTP Response; size is acceptable in error path"
@@ -221,23 +232,26 @@ impl AuthorizeResponseTarget {
         state: &Arc<AppState>,
         client: OAuthClient,
         redirect_uri: String,
-        response_mode_param: Option<&str>,
+        response_mode: ResponseModeSource<'_>,
         oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
-        let response_mode = match parse_response_mode(response_mode_param) {
-            Ok(mode) => mode,
-            Err(e) => {
-                return Err(oauth_error_response(
-                    state,
-                    &client,
-                    &redirect_uri,
-                    OAuthErrorCode::InvalidRequest,
-                    &e.oauth_description(),
-                    oauth_state,
-                    ResponseMode::Query,
-                )
-                .await);
-            }
+        let response_mode = match response_mode {
+            ResponseModeSource::Stored(mode) => mode,
+            ResponseModeSource::Requested(param) => match parse_response_mode(param) {
+                Ok(mode) => mode,
+                Err(e) => {
+                    return Err(oauth_error_response(
+                        state,
+                        &client,
+                        &redirect_uri,
+                        OAuthErrorCode::InvalidRequest,
+                        &e.oauth_description(),
+                        oauth_state,
+                        ResponseMode::Query,
+                    )
+                    .await);
+                }
+            },
         };
         match ValidatedOAuthClient::for_authorize(client) {
             Ok(client) => Ok(Self {
@@ -279,7 +293,7 @@ impl AuthorizeResponseTarget {
         state: &Arc<AppState>,
         client: OAuthClient,
         redirect_uri: String,
-        response_mode_param: Option<&str>,
+        response_mode: ResponseModeSource<'_>,
         oauth_state: Option<&str>,
     ) -> Result<Self, Response> {
         if !client.is_valid_redirect_uri(&redirect_uri) {
@@ -296,14 +310,7 @@ impl AuthorizeResponseTarget {
             .into_response();
             return Err(resp);
         }
-        Self::finish(
-            state,
-            client,
-            redirect_uri,
-            response_mode_param,
-            oauth_state,
-        )
-        .await
+        Self::finish(state, client, redirect_uri, response_mode, oauth_state).await
     }
 
     /// Produce a redirect-based OAuth error using the validated redirect_uri.
@@ -669,7 +676,7 @@ async fn handle_direct_request(
         state,
         &client_id,
         params.redirect_uri.as_deref(),
-        params.response_mode.as_deref(),
+        ResponseModeSource::Requested(params.response_mode.as_deref()),
         params.state.as_deref(),
     )
     .await
@@ -798,7 +805,7 @@ async fn handle_jar_request(
         state,
         oauth_client,
         redirect_uri,
-        requested_response_mode.as_deref(),
+        ResponseModeSource::Requested(requested_response_mode.as_deref()),
         oauth_state.as_deref(),
     )
     .await
@@ -946,11 +953,12 @@ async fn handle_par_request(
 
     // Phase A: client lookup + active check + redirect_uri validation (errors → page).
     // Client lookup happens here (after PAR lookup) to catch deactivated clients.
+    // The request's response_mode is the one in the PAR record, not on the URL.
     let resolved = match AuthorizeResponseTarget::resolve(
         state,
         &par.client_id,
         Some(&par.redirect_uri),
-        None, // PAR response_mode handled below
+        ResponseModeSource::Stored(par.response_mode),
         par.state.as_deref(),
     )
     .await
@@ -997,13 +1005,6 @@ async fn handle_par_request(
                 .error_redirect(state, error_code, &description, par.state.as_deref())
                 .await;
         }
-    };
-
-    // Overlay the PAR response_mode (resolve() used None above).
-    let resolved = AuthorizeResponseTarget {
-        client: resolved.client,
-        redirect_uri: resolved.redirect_uri,
-        response_mode: par.response_mode,
     };
 
     // Phase B: PKCE only (PAR kind skips FAPI PAR requirement + signed_request_object).
@@ -1192,7 +1193,7 @@ async fn fetch_and_resolve_request_uri(
         state,
         oauth_client,
         redirect_uri,
-        request_params.response_mode.as_deref(),
+        ResponseModeSource::Requested(request_params.response_mode.as_deref()),
         // RFC 9101 Section 6.3: the Request Object's parameters are the
         // request's, including the `state` an error response echoes.
         request_params.state.as_deref(),
@@ -1250,20 +1251,13 @@ async fn handle_pending_auth(
         state,
         &pending.client_id,
         Some(&pending.redirect_uri),
-        None, // response_mode set from pending record below
+        ResponseModeSource::Stored(pending.response_mode),
         pending.state.as_deref(),
     )
     .await
     {
         Ok(r) => r,
         Err(resp) => return resp,
-    };
-
-    // Overlay the pending record's response_mode.
-    let resolved = AuthorizeResponseTarget {
-        client: resolved.client,
-        redirect_uri: resolved.redirect_uri,
-        response_mode: pending.response_mode,
     };
 
     // Get session from cookie (should exist after login).

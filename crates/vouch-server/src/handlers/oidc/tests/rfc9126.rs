@@ -3610,3 +3610,316 @@ async fn test_par_empty_parameter_is_treated_as_omitted() {
         "the pushed request must be accepted: {empty_body}"
     );
 }
+
+// ========================================================================
+// `response_mode` of rejections from the registered-`response_types` gate
+//
+// A PAR or pending-authorization request's `response_mode` lives in its stored
+// record, not on the `/oauth/authorize` URL. OAuth 2.0 Multiple Response Type
+// Encoding Practices §2.1
+// (specs/openid/oauth-v2-multiple-response-types-1_0.txt) defines
+// `response_mode` as "the mechanism to be used for returning Authorization
+// Response parameters from the Authorization Endpoint", and RFC 6749 §4.1.2.1
+// defines the error response as an Authorization Response, so a rejection is
+// encoded in the negotiated mode.
+// ========================================================================
+
+/// Assert an `/oauth/authorize` rejection is rendered as a `form_post` HTML
+/// auto-submitting form (OAuth 2.0 Form Post Response Mode §2) carrying the
+/// `unauthorized_client` error and echoing `state` — and NOT as a query-string
+/// redirect.
+fn assert_rejection_is_form_post(response: &crate::test_utils::HttpResponse, state_value: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post rejection must be HTTP 200, not a redirect: status={} body={}",
+        response.status,
+        response.body,
+    );
+    assert!(
+        response
+            .headers
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html")),
+        "form_post must carry a text/html body, got Content-Type: {:?}",
+        response.headers.get("Content-Type"),
+    );
+    let query_redirect = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|loc| loc.contains("error="));
+    assert!(
+        !query_redirect,
+        "form_post must not redirect with a query string: {:?}",
+        response.headers.get("Location"),
+    );
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post must contain a POST form: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form must target the registered redirect_uri: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="error""#) && response.body.contains("unauthorized_client"),
+        "form must carry error=unauthorized_client: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="error_description""#)
+            && response.body.contains("is not registered for the"),
+        "form must carry the gate's error_description: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form must include iss (RFC 9207): {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(state_value),
+        "form must echo the state parameter: {}",
+        response.body,
+    );
+}
+
+/// Assert an `/oauth/authorize` rejection is rendered as a `Query` mode
+/// redirect (303/302 to `redirect_uri?error=...&state=...`) and NOT as a
+/// `form_post` HTML form — the gate's `Query` baseline, so the fix did not
+/// collapse every mode onto `form_post`.
+fn assert_rejection_is_query_redirect(
+    response: &crate::test_utils::HttpResponse,
+    state_value: &str,
+) {
+    assert!(
+        response.status == StatusCode::SEE_OTHER || response.status == StatusCode::FOUND,
+        "query rejection must be a 3xx redirect, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("query rejection has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.starts_with("https://example.com/callback?"),
+        "query rejection must target the redirect_uri: {location}",
+    );
+    assert!(
+        location.contains("error=unauthorized_client") && !location.contains("code="),
+        "query rejection must carry error=unauthorized_client, no code: {location}",
+    );
+    assert!(
+        location.contains(&format!("state={state_value}")),
+        "query rejection must echo the state parameter: {location}",
+    );
+    let description = url::Url::parse(location)
+        .expect("Location is a URL")
+        .query_pairs()
+        .find(|(k, _)| k == "error_description")
+        .map(|(_, v)| v.into_owned());
+    assert_eq!(
+        description.as_deref(),
+        Some("Client is not registered for the 'code' response type"),
+        "query rejection must carry the gate's error_description: {location}",
+    );
+    assert!(
+        !response.body.contains(r#"method="post""#),
+        "query rejection must NOT render a form_post body: {}",
+        response.body,
+    );
+}
+
+/// Build a PAR body with the given `response_mode` and `state`, pushing a
+/// `response_type=code` request with PKCE for `client_id`.
+fn par_body_with_mode(client_id: &str, response_mode: &str, state: &str) -> String {
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+    format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &response_mode={response_mode}\
+         &scope=openid\
+         &state={state}\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256",
+        redirect_uri = urlencoding::encode("https://example.com/callback"),
+    )
+}
+
+/// Push a PAR and return the `request_uri`, asserting the push succeeds.
+async fn push_par(app: &axum::Router, client: &TestOAuthClient, body: &str) -> String {
+    let (status, response_body) = http_post_form(
+        app,
+        "/oauth/par",
+        body,
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "PAR push must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+    json["request_uri"].as_str().unwrap().to_string()
+}
+
+/// Hit `/oauth/authorize` with a PAR `request_uri` and no session, so the
+/// `for_authorize` gate inside `AuthorizeResponseTarget::resolve` fires before
+/// any session check.
+async fn authorize_with_par(
+    app: &axum::Router,
+    client_id: &str,
+    request_uri: &str,
+) -> crate::test_utils::HttpResponse {
+    http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?client_id={client_id}&request_uri={}",
+            urlencoding::encode(request_uri),
+        ),
+        &[],
+    )
+    .await
+}
+
+/// A client whose stored `response_types` is an explicit empty list — the one
+/// configuration `ValidatedOAuthClient::for_authorize` rejects (it accepts
+/// `None` or a list containing `"code"`). Registration reachable via
+/// `/oauth/register` accepts `grant_types: ["client_credentials"]` +
+/// `response_types: []`; the test seam stores the same shape directly.
+async fn client_not_registered_for_code(
+    state: &std::sync::Arc<crate::AppState>,
+) -> crate::test_utils::TestOAuthClient {
+    let user = create_test_user(&state.store, "par-mode-gate@example.com").await;
+    create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            response_types: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A `form_post` PAR whose client the `for_authorize` gate rejects answers
+/// with a `form_post` form, not a query redirect.
+#[tokio::test]
+async fn test_par_form_post_gate_rejection_renders_in_form_post_mode() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "form_post", "par-formpost-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert_rejection_is_form_post(&response, "par-formpost-state");
+}
+
+/// A `query` PAR rejected by the same gate still answers with a query
+/// redirect, so the stored mode is used rather than `form_post` forced.
+#[tokio::test]
+async fn test_par_query_gate_rejection_still_uses_query_redirect() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "query", "par-query-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert_rejection_is_query_redirect(&response, "par-query-state");
+}
+
+/// Decode the JARM `response` JWT from a redirect `Location` without
+/// verifying it; the claims are what these tests pin.
+fn jarm_claims_from_location(location: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let url = url::Url::parse(location).expect("Location is a URL");
+    let jwt = url
+        .query_pairs()
+        .find(|(k, _)| k == "response")
+        .map(|(_, v)| v.into_owned())
+        .expect("JARM redirect carries a `response` parameter");
+    let payload = jwt.split('.').nth(1).expect("JWT has a payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("payload is base64url");
+    serde_json::from_slice(&bytes).expect("payload is JSON")
+}
+
+/// A `jwt` PAR whose client the `for_authorize` gate rejects answers with a
+/// signed JARM `response`, not plain error parameters (JARM §2.1).
+#[tokio::test]
+async fn test_par_jwt_gate_rejection_renders_as_jarm() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "jwt", "par-jwt-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert!(
+        response.status.is_redirection(),
+        "jwt-mode rejection must redirect with a JARM response: status={} body={}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header");
+    let url = url::Url::parse(location).expect("Location is a URL");
+    assert!(
+        url.query_pairs().all(|(k, _)| k == "response"),
+        "JARM §2.1: the error must be inside the JWT, not plain parameters: {location}",
+    );
+    let claims = jarm_claims_from_location(location);
+    assert_eq!(claims["error"], "unauthorized_client", "claims: {claims}");
+    assert_eq!(
+        claims["error_description"], "Client is not registered for the 'code' response type",
+        "claims: {claims}"
+    );
+    assert_eq!(claims["state"], "par-jwt-state", "claims: {claims}");
+}
+
+/// A pending authorization stored with `form_post`, returned to after login,
+/// whose client the `for_authorize` gate rejects answers with a `form_post`
+/// form: the stored mode applies to this rejection as it does to the PAR one.
+#[tokio::test]
+async fn test_pending_auth_gate_rejection_renders_in_stored_mode() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            response_mode: crate::db::documents::oauth::ResponseMode::FormPost,
+            state: Some("pending-formpost-state"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[],
+    )
+    .await;
+
+    assert_rejection_is_form_post(&response, "pending-formpost-state");
+}
