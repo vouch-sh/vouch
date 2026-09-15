@@ -121,6 +121,17 @@ pub struct DeviceCodeRequest {
     /// Requested scope (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// RFC 7521 §4.2 `client_assertion`: "The assertion being used to
+    /// authenticate the client." Present for a `private_key_jwt` client.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<secrecy::SecretString>,
+    /// RFC 7521 §4.2 `client_assertion_type`: "The format of the assertion as
+    /// defined by the authorization server." Present iff `client_assertion` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing device and user codes.
@@ -153,6 +164,17 @@ pub struct DeviceTokenRequest {
     pub grant_type: String,
     /// Device code from device authorization response.
     pub device_code: String,
+    /// RFC 7521 §4.2 `client_assertion`: "The assertion being used to
+    /// authenticate the client." Present for a `private_key_jwt` client.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<secrecy::SecretString>,
+    /// RFC 7521 §4.2 `client_assertion_type`: "The format of the assertion as
+    /// defined by the authorization server." Present iff `client_assertion` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing access token.
@@ -624,5 +646,40 @@ mod tests {
         assert!(debug.contains("[REDACTED]"), "{debug}");
         assert!(!debug.contains("secret-token"), "{debug}");
         assert!(debug.contains("28800"), "{debug}");
+    }
+
+    /// RFC 7523 §2.2: "The value of the \"client_assertion_type\" is
+    /// \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\"." Both device
+    /// requests carry the assertion under the RFC 7521 §4.2 parameter names and
+    /// omit them when the client has no assertion.
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "test-only serialization of literals and JSON field lookups"
+    )]
+    fn test_device_requests_serialize_client_assertion_parameters() {
+        let with_assertion = DeviceTokenRequest {
+            grant_type: crate::protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
+            device_code: "code".to_string(),
+            client_assertion: Some("header.payload.signature".into()),
+            client_assertion_type: Some(
+                crate::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
+            ),
+        };
+        let value = serde_json::to_value(&with_assertion).expect("serialize");
+        assert_eq!(value["client_assertion"], "header.payload.signature");
+        assert_eq!(
+            value["client_assertion_type"],
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        );
+
+        let without = DeviceCodeRequest {
+            client_id: Some("client".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&without).expect("serialize");
+        assert!(value.get("client_assertion").is_none(), "{value}");
+        assert!(value.get("client_assertion_type").is_none(), "{value}");
     }
 }

@@ -1219,6 +1219,87 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
     );
 }
 
+/// RFC 8628 §3.1: "The client authentication requirements of Section 3.2.1 of
+/// [RFC6749] apply to requests on this endpoint"; §3.4: "If the client was
+/// issued client credentials (or assigned other authentication requirements),
+/// the client MUST authenticate". A `private_key_jwt` client sending
+/// `client_assertion` and `client_assertion_type` at both device-flow endpoints
+/// still receives a DPoP-bound token.
+#[tokio::test]
+async fn test_fapi2_device_flow_accepts_client_assertion_parameters() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-dev-assertion@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            grant_types: Some(vec![
+                vouch_common::protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let issuer = state.config().base_url.clone();
+    let assertion_type = vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
+
+    let assertion = build_client_assertion(&client.client_id, &issuer, &pkcs8_bytes, None);
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &format!(
+            "client_id={}&client_assertion={assertion}&client_assertion_type={assertion_type}",
+            client.client_id
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device authorization with a client assertion: {body}"
+    );
+
+    let device_code = setup_authorized_device(
+        &state,
+        Some(&client.client_id),
+        &user,
+        &auth_id,
+        "assertion",
+    )
+    .await;
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{issuer}/oauth/token");
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+    let poll_assertion = build_client_assertion(&client.client_id, &issuer, &pkcs8_bytes, None);
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "{}&client_assertion={poll_assertion}&client_assertion_type={assertion_type}",
+            device_token_body(&device_code)
+        ),
+        &[("DPoP", &proof)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device token request with a client assertion: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(resp["token_type"].as_str(), Some("DPoP"), "{body}");
+}
+
 /// RFC 9449 Section 4.3: A DPoP proof without a nonce at the token endpoint
 /// must return `use_dpop_nonce` with a `DPoP-Nonce` header. The device code
 /// must NOT be consumed so the client can retry with the nonce.
