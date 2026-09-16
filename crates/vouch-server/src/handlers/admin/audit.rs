@@ -243,8 +243,8 @@ impl TargetFields {
 /// Falls back to the event's own `email_domain`/`email_hmac` columns —
 /// stamped from the target's email at write time — when the target no
 /// longer exists. This is not a rare case: `admin_remove_user` events are
-/// written *after* the target is deleted, so that fallback always applies
-/// for removals.
+/// written *after* the target is deleted, so that fallback applies to every
+/// removal the floor did not refuse.
 fn resolve_target_email(
     target_users: &HashMap<String, db::User>,
     event: &crate::db::audit::AuditEvent,
@@ -340,6 +340,7 @@ mod tests {
             target_user_id: "u-target",
             admin_user_id: "u-admin",
             keys_revoked: None,
+            refusal: None,
         })
         .unwrap();
         let fields = TargetFields::from_json(&typed);

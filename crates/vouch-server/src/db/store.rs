@@ -472,13 +472,15 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
-/// Test-only hook invoked inside [`crate::db::update_scim_user`] right after
-/// the transaction begins and before its first read, receiving the `user_id`
-/// being updated.
+/// Test-only hook invoked inside [`crate::db::update_scim_user`] and
+/// [`demote_or_deactivate_member`](crate::db::demote_or_deactivate_member)
+/// right after the transaction begins and before its first read, receiving
+/// the `user_id` being updated.
 ///
 /// A write the hook commits is visible to the in-transaction last-admin count,
-/// which runs after `revoke_user_access` has committed; tests deactivate a
-/// sibling admin here to make that count refuse.
+/// which runs after `revoke_user_access` / `revoke_then_persist` has
+/// committed; tests deactivate a sibling admin (the calling admin, on the
+/// admin `deactivate_member` path) here to make that count refuse.
 #[cfg(test)]
 pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
@@ -595,7 +597,8 @@ impl DocumentStore {
     }
 
     /// Install the [`LastAdminCountTestHook`] seam for
-    /// [`update_scim_user`](super::scim::update_scim_user).
+    /// [`update_scim_user`](super::scim::update_scim_user) and
+    /// [`demote_or_deactivate_member`](super::users::demote_or_deactivate_member).
     #[cfg(test)]
     pub(crate) fn set_last_admin_count_test_hook(&mut self, hook: LastAdminCountTestHook) {
         self.last_admin_count_test_hook = Some(hook);

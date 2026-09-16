@@ -261,6 +261,12 @@ event types onto four Identity & Access Management classes. Native JSON stays th
 lossless representation — this is a projection for SIEM ingestion, and every field Vouch
 records is still present in `data`.
 
+`status_id` is `Success` unless the event type is itself a failure (`login_failed`, for
+example) or `data` carries a `refusal` member. `admin_remove_user` and `admin_deactivate` record
+`"refusal": "last_admin"` when removing the organization's last active admin was refused after
+the member's sessions and certificates had already been revoked; those rows export with
+`status_id` `Failure`.
+
 Seven event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
 predefined activity for them. Per the OCSF 1.9.0 spec, when `activity_id` is `99` the
 `activity_name` attribute **must** carry a source-specific label (not the literal "Other"), so
