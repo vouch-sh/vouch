@@ -346,14 +346,6 @@ pub(crate) async fn device_token(
     // is not endpoint-specific, so an uncommitted one would stay valid at PAR,
     // revoke, and introspect for its lifetime. The CLI signs a new assertion
     // for every poll, including the immediate retry after `use_dpop_nonce`.
-    //
-    // The format, not-found, and cross-client `invalid_grant` early returns
-    // below run *after* this commit, so an authenticated poll that fails them
-    // consumes the assertion rather than leaving it replayable. Without this
-    // ordering, a stolen assertion whose first use is a failed device-code
-    // poll (wrong/unknown/non-owned code) would stay live and authenticate
-    // successfully once at `/oauth/device`, `/oauth/par`, `/oauth/revoke`, or
-    // `/oauth/introspect` (the non-FAPI allowed-audience list is shared).
     let oauth_client = device_client.client;
     let client_auth = client_auth_proof(
         &state,

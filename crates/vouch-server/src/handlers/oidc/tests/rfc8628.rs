@@ -1096,18 +1096,12 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
 }
 
 // ========================================================================
-// RFC 8628 §3.4 — `private_key_jwt` JTI commit ordering on failed polls
-//
-// `device_token` commits the assertion's JTI before the device-code format,
-// not-found, and cross-client `invalid_grant` early-returns, so an
-// authenticated poll that fails on any of those grounds still burns the
-// assertion. Without this ordering a stolen assertion whose first use is a
-// failed device-code poll (wrong/unknown/non-owned code) would stay live and
-// authenticate successfully once at another endpoint that accepts it
-// (`/oauth/device`, `/oauth/par`, `/oauth/revoke`, `/oauth/introspect`), since
-// the non-FAPI allowed-audience list is shared. See commit 54f7a8c0 which
-// introduced client authentication on this endpoint and placed the commit
-// after the early-returns.
+// RFC 7523 §3 item 7: "The authorization server MAY ensure that JWTs are not
+// replayed by maintaining the set of used "jti" values for the length of time
+// for which the JWT would be considered valid based on the applicable "exp"
+// instant." A device-code poll that fails the format, not-found, or
+// cross-client check has still authenticated, so it consumes the assertion
+// and a replay at `/oauth/device` is refused.
 // ========================================================================
 
 /// Mint one `private_key_jwt` assertion for `client_a` (audience `base_url`,
