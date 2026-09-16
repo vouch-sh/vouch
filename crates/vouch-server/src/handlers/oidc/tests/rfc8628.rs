@@ -1104,13 +1104,6 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
 // and a replay at `/oauth/device` is refused.
 // ========================================================================
 
-/// Mint one `private_key_jwt` assertion for `client_a` (audience `base_url`,
-/// valid at both `/oauth/token` and `/oauth/device` for a non-FAPI client) with
-/// a fixed `jti`, so the same assertion can be sent twice to exercise replay.
-fn single_use_assertion(client_a: &str, base_url: &str, pkcs8_a: &[u8], jti: &str) -> String {
-    build_client_assertion(client_a, base_url, pkcs8_a, Some(jti))
-}
-
 /// The `/oauth/token` device-code poll body authenticated as `client_a` with
 /// `assertion`, mirroring `fapi_device_token_body` (no `client_id` in the
 /// body; the assertion's `iss`/`sub` identifies the client).
@@ -1162,11 +1155,11 @@ async fn test_device_grant_cross_client_poll_commits_jti_regression() {
         setup_authorized_device(&state, &user, &auth, "jti-xclient", &client_b.client_id).await;
 
     let base_url = state.config().base_url.clone();
-    let assertion = single_use_assertion(
+    let assertion = build_client_assertion(
         &client_a.client_id,
         &base_url,
         &pkcs8_a,
-        "device-jti-cross-client-fixed",
+        Some("device-jti-cross-client-fixed"),
     );
 
     // (1) Poll /oauth/token authenticated as A with B's device code. The
@@ -1213,11 +1206,11 @@ async fn test_device_grant_unknown_code_poll_commits_jti() {
     let (client_a, pkcs8_a) = private_key_jwt_client(&state, &user.id, false).await;
 
     let base_url = state.config().base_url.clone();
-    let assertion = single_use_assertion(
+    let assertion = build_client_assertion(
         &client_a.client_id,
         &base_url,
         &pkcs8_a,
-        "device-jti-unknown-fixed",
+        Some("device-jti-unknown-fixed"),
     );
 
     let (status, body) = http_post_form(
@@ -1246,11 +1239,11 @@ async fn test_device_grant_malformed_code_poll_commits_jti() {
     let (client_a, pkcs8_a) = private_key_jwt_client(&state, &user.id, false).await;
 
     let base_url = state.config().base_url.clone();
-    let assertion = single_use_assertion(
+    let assertion = build_client_assertion(
         &client_a.client_id,
         &base_url,
         &pkcs8_a,
-        "device-jti-malformed-fixed",
+        Some("device-jti-malformed-fixed"),
     );
 
     let long_code = "a".repeat(200);
