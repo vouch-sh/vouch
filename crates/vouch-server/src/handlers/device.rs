@@ -338,6 +338,23 @@ pub(crate) async fn device_token(
     device_client: DeviceClient,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
+    // Every authenticated poll commits its assertion's JTI before any
+    // grant-specific check, so an assertion authenticates exactly one request
+    // even when this poll returns `invalid_grant`. `PendingJti` documents
+    // dropping it uncommitted on a retryable error such as `use_dpop_nonce`;
+    // here each poll is an independent request and the assertion's audience
+    // is not endpoint-specific, so an uncommitted one would stay valid at PAR,
+    // revoke, and introspect for its lifetime. The CLI signs a new assertion
+    // for every poll, including the immediate retry after `use_dpop_nonce`.
+    let oauth_client = device_client.client;
+    let client_auth = client_auth_proof(
+        &state,
+        device_client.witnesses,
+        &oauth_client,
+        "device_code",
+    )
+    .await?;
+
     // Validate device_code format before hashing and DB lookup.
     // Generated codes are 32 random bytes base64url-encoded (43 chars).
     // Reject obviously invalid inputs to avoid unnecessary work.
@@ -365,28 +382,12 @@ pub(crate) async fn device_token(
     // another client", the rule §4.1.3 states for authorization codes. Checked
     // before the poll-time write and every status response, so another client
     // holding the code learns nothing and cannot affect the owner's polling.
-    let oauth_client = device_client.client;
     if request.client_id != oauth_client.client_id {
         return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::invalid_grant(),
         ));
     }
-
-    // Every authenticated poll commits its assertion's JTI, so an assertion
-    // authenticates exactly one request. `PendingJti` documents dropping it
-    // uncommitted on a retryable error such as `use_dpop_nonce`; here each
-    // poll is an independent request and the assertion's audience is not
-    // endpoint-specific, so an uncommitted one would stay valid at PAR,
-    // revoke, and introspect for its lifetime. The CLI signs a new assertion
-    // for every poll, including the immediate retry after `use_dpop_nonce`.
-    let client_auth = client_auth_proof(
-        &state,
-        device_client.witnesses,
-        &oauth_client,
-        "device_code",
-    )
-    .await?;
 
     // Check if expired
     let now = arrival.timestamp();

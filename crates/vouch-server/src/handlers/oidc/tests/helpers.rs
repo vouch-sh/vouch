@@ -538,3 +538,11 @@ pub(super) fn assert_bare_bearer_challenge(response: &HttpResponse) {
         "missing credentials must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
     );
 }
+
+/// Build the device_code token-endpoint form body.
+pub(super) fn device_token_body(device_code: &str) -> String {
+    format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+        device_code
+    )
+}
