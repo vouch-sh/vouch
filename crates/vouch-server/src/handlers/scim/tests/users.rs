@@ -2094,9 +2094,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
         .iter()
         .find_map(|e| {
             let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
-            let details_str = v.get("details")?.as_str()?;
-            let details = serde_json::from_str::<serde_json::Value>(details_str).ok()?;
-            (details.get("refusal")?.as_str()? == "last_admin").then_some(v)
+            (v.get("refusal")?.as_str()? == "last_admin").then_some(v)
         })
         .expect("the update audit event for a LastAdmin refusal carries `refusal: \"last_admin\"`");
     assert_eq!(refusal_event["operation"], "update");
@@ -2114,10 +2112,9 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     assert_eq!(details["deactivated"].as_bool(), Some(true));
     assert_eq!(details["accessRevoked"].as_bool(), Some(true));
     assert_eq!(details["persisted"].as_bool(), Some(false));
-    assert_eq!(
-        details["refusal"].as_str(),
-        Some("last_admin"),
-        "the `refusal` distinguisher marks this row as a floor refusal",
+    assert!(
+        details.get("refusal").is_none(),
+        "the refusal is recorded top-level, not inside details: {details}",
     );
 }
 
@@ -2355,9 +2352,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         .iter()
         .find_map(|e| {
             let v = serde_json::from_str::<serde_json::Value>(&e.data).ok()?;
-            let details_str = v.get("details")?.as_str()?;
-            let details = serde_json::from_str::<serde_json::Value>(details_str).ok()?;
-            (details.get("refusal")?.as_str()? == "last_admin").then_some(v)
+            (v.get("refusal")?.as_str()? == "last_admin").then_some(v)
         })
         .expect("the delete audit event for a LastAdmin refusal carries `refusal: \"last_admin\"`");
     assert_eq!(refusal_event["operation"], "delete");
@@ -2373,9 +2368,8 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
             .expect("details is JSON");
     assert_eq!(details["accessRevoked"].as_bool(), Some(true));
     assert_eq!(details["deleted"].as_bool(), Some(false));
-    assert_eq!(
-        details["refusal"].as_str(),
-        Some("last_admin"),
-        "the `refusal` distinguisher marks this row as a floor refusal",
+    assert!(
+        details.get("refusal").is_none(),
+        "the refusal is recorded top-level, not inside details: {details}",
     );
 }

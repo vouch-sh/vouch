@@ -172,8 +172,8 @@
             {% endif %}
             {% endif %}
 
-            <!-- Client Secrets Section (for confidential clients, hidden for FAPI) -->
-            {% if (app.application_type == "web" || app.application_type == "service") && app.fapi_profile != "fapi2_security" %}
+            <!-- Client Secrets Section: shown to add a secret, or to revoke ones the client cannot use -->
+            {% if app.can_add_secret || secrets_count > 0 %}
             <div class="border-t border-vouch-border pt-4">
                 <div class="flex items-center justify-between mb-3">
                     {% let secrets_count_str = secrets_count.to_string() %}
@@ -181,7 +181,7 @@
                         <h2 class="inline text-sm text-gray-400 font-normal">{{ self.tr("apps-detail-client-secrets") }}</h2>
                         <span class="text-xs text-gray-400 ml-2">({{ self.tr("apps-detail-secrets-count").arg("count", secrets_count_str.as_str()).arg("max", "2") }})</span>
                     </div>
-                    {% if secrets_count < 2 %}
+                    {% if app.can_add_secret && secrets_count < 2 %}
                     <form action="/applications/{{ app.id }}/secrets" method="POST">
                         <button type="submit"
                             class="px-3 py-1.5 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded text-xs font-medium transition-colors">

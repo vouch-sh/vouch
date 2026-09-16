@@ -230,6 +230,15 @@ findings within a day. Before merging a class fix, hunt siblings of the new type
 or guard: every consumer of the old axis it replaces, and every caller it did
 not touch.
 
+Look past Rust handlers. On 2026-09-16 both misses in a two-PR class fix were
+elsewhere: the rotation gate moved to the registered auth method, but the
+Askama template still showed "Add Secret" by application type; and the OCSF
+export learned a top-level `refusal` member, but the SCIM writer kept its
+refusal inside a `details` string. When a fix changes who is eligible for an
+action, check every template that renders the action. When it changes what a
+stored record means, check every reader of the record: the admin UI, the OCSF
+projection, and `docs/`.
+
 ## Step 5: Request a Detail rule for each confirmed class
 
 This is the step that reduces future volume. A class the scanner knows about is
@@ -290,7 +299,9 @@ python3 .claude/skills/detail-triage/scripts/detail-stats.py --pr-diff-sizes 130
 ```
 
 Read the production hunks. Read tests only to check that the assertion pins the
-behavior the issue describes.
+behavior the issue describes. Before reporting a test as missing, search the
+PR's test files for it: a diff filtered to production paths hides them, and
+the 2026-09-16 review wrongly reported #1409 as lacking an mTLS test.
 
 The split is by file path, so a PR reporting zero test lines has inline
 `#[cfg(test)] mod tests` in the production file rather than no tests — treat
@@ -391,13 +402,18 @@ gh api repos/vouch-sh/vouch/pulls/<n>/commits \
 ```
 
 Rebuild such a branch with signed commits rather than rewriting Detail's.
-Pushing any new commit to a queued PR removes it from the queue, so re-enqueue
-once CI passes.
 
-Enqueue with the GraphQL `enqueuePullRequest` mutation; `gh pr merge` does not
-work with this repo's merge queue. After the batch lands, re-run `make lint` and
-`make test` on `main` — branches touching disjoint files can still break each
-other (#1131 removed a helper #1125 called, with zero file overlap).
+A queued PR's branch rejects pushes ("protected branch hook declined"). To
+change one, dequeue it first with the GraphQL `dequeuePullRequest` mutation,
+push, then run `gh pr merge <n> --auto` with no strategy flag: it enters the
+queue when its checks pass, so nothing has to watch CI. If a green PR with
+auto-merge armed still has no queue entry, enqueue it with the GraphQL
+`enqueuePullRequest` mutation. When a wait is unavoidable, background
+`gh pr checks <n> --watch` rather than sleeping.
+
+After the batch lands, re-run `make lint` and `make test` on `main` — branches
+touching disjoint files can still break each other (#1131 removed a helper
+#1125 called, with zero file overlap).
 
 ## Step 7: Record the metric
 
@@ -411,6 +427,14 @@ against the tree confirmed was since fixed.
 Give the record a **Residue** section listing everything the review accepted and
 did not fix, each with the finding it would become. The next pass matches new
 findings against it (step 2).
+
+A gap the review notices is residue only after the user chooses to leave it.
+"Not a regression" or "already true before this PR" is an observation, not a
+decision: the 2026-09-15 review saw that the new rotation gate admitted
+`private_key_jwt` and mTLS clients, called it pre-existing, and the next day's
+batch filed it as #1405 and #1406 — including the token-endpoint acceptance the
+review had not traced. Put such a gap on the decision list, and follow what it
+admits to where that artifact is consumed before sizing it.
 
 Then extend `references/volume-log.md`: add a row to the batch table, with the
 counts from `detail-stats.py` and the judgement columns defined above the table,

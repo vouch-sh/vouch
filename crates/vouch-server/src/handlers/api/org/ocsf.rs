@@ -781,11 +781,26 @@ mod tests {
         };
         let refused = to_ocsf(&sample_event(
             AuditEventKind::AdminRemoveUser,
-            &data(Some("last_admin")),
+            &data(Some(crate::db::Refusal::LastAdmin)),
         ));
         assert_eq!(refused.status_id.value(), StatusId::Failure.value());
         let removed = to_ocsf(&sample_event(AuditEventKind::AdminRemoveUser, &data(None)));
         assert_eq!(removed.status_id.value(), StatusId::Success.value());
+    }
+
+    #[test]
+    fn refused_scim_delete_reports_failure_status() {
+        let data = serde_json::to_string(&crate::db::ScimAuditData {
+            operation: "delete",
+            resource_type: "User",
+            resource_id: "u-target",
+            actor_token_id: None,
+            details: Some(r#"{"accessRevoked":true,"deleted":false}"#),
+            refusal: Some(crate::db::Refusal::LastAdmin),
+        })
+        .unwrap();
+        let ocsf = to_ocsf(&sample_event(AuditEventKind::ScimOperation, &data));
+        assert_eq!(ocsf.status_id.value(), StatusId::Failure.value());
     }
 
     /// OCSF 1.9.0: when `activity_id` is `99` (Other), `activity_name`

@@ -141,7 +141,7 @@ pub use scim::{
 // credential envelope + per-kind details
 pub use documents::audit::{
     AuditData, AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope,
-    GitHubCredentialDetails, SshCredentialDetails, TokenExchangeDetails,
+    GitHubCredentialDetails, Refusal, ScimAuditData, SshCredentialDetails, TokenExchangeDetails,
 };
 pub use documents::oauth::{
     AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode,

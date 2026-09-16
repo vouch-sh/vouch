@@ -120,11 +120,14 @@ pub(crate) async fn list_users(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "list",
-        "User",
-        "*",
-        Some(&auth.token_id),
-        Some(&format!("{{\"count\": {}}}", resources.len())),
+        &db::ScimAuditData {
+            operation: "list",
+            resource_type: "User",
+            resource_id: "*",
+            actor_token_id: Some(&auth.token_id),
+            details: Some(&format!("{{\"count\": {}}}", resources.len())),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -298,11 +301,14 @@ pub(crate) async fn create_user(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "create",
-        "User",
-        &db_user.id,
-        Some(&auth.token_id),
-        None,
+        &db::ScimAuditData {
+            operation: "create",
+            resource_type: "User",
+            resource_id: &db_user.id,
+            actor_token_id: Some(&auth.token_id),
+            details: None,
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -573,20 +579,22 @@ pub(crate) async fn patch_user(
             if patched.deactivated {
                 db::record_scim_audit(
                     &state.audit,
-                    "update",
-                    "User",
-                    &id,
-                    Some(&auth.token_id),
-                    Some(
-                        &serde_json::json!({
-                            "active": patched.active,
-                            "deactivated": true,
-                            "accessRevoked": true,
-                            "persisted": false,
-                            "refusal": "last_admin"
-                        })
-                        .to_string(),
-                    ),
+                    &db::ScimAuditData {
+                        operation: "update",
+                        resource_type: "User",
+                        resource_id: &id,
+                        actor_token_id: Some(&auth.token_id),
+                        details: Some(
+                            &serde_json::json!({
+                                "active": patched.active,
+                                "deactivated": true,
+                                "accessRevoked": true,
+                                "persisted": false
+                            })
+                            .to_string(),
+                        ),
+                        refusal: Some(db::Refusal::LastAdmin),
+                    },
                     auth.org_domain.as_deref(),
                 )
                 .await;
@@ -600,19 +608,22 @@ pub(crate) async fn patch_user(
                 // row even though the `active = false` write then failed.
                 db::record_scim_audit(
                     &state.audit,
-                    "update",
-                    "User",
-                    &id,
-                    Some(&auth.token_id),
-                    Some(
-                        &serde_json::json!({
-                            "active": patched.active,
-                            "deactivated": true,
-                            "accessRevoked": true,
-                            "persisted": false
-                        })
-                        .to_string(),
-                    ),
+                    &db::ScimAuditData {
+                        operation: "update",
+                        resource_type: "User",
+                        resource_id: &id,
+                        actor_token_id: Some(&auth.token_id),
+                        details: Some(
+                            &serde_json::json!({
+                                "active": patched.active,
+                                "deactivated": true,
+                                "accessRevoked": true,
+                                "persisted": false
+                            })
+                            .to_string(),
+                        ),
+                        refusal: None,
+                    },
                     auth.org_domain.as_deref(),
                 )
                 .await;
@@ -650,14 +661,17 @@ pub(crate) async fn patch_user(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "update",
-        "User",
-        &id,
-        Some(&auth.token_id),
-        Some(
-            &serde_json::json!({"active": patched.active, "deactivated": patched.deactivated})
-                .to_string(),
-        ),
+        &db::ScimAuditData {
+            operation: "update",
+            resource_type: "User",
+            resource_id: &id,
+            actor_token_id: Some(&auth.token_id),
+            details: Some(
+                &serde_json::json!({"active": patched.active, "deactivated": patched.deactivated})
+                    .to_string(),
+            ),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -798,18 +812,20 @@ pub(crate) async fn delete_user(
             // failed delete.
             db::record_scim_audit(
                 &state.audit,
-                "delete",
-                "User",
-                &id,
-                Some(&auth.token_id),
-                Some(
-                    &serde_json::json!({
-                        "accessRevoked": true,
-                        "deleted": false,
-                        "refusal": "last_admin"
-                    })
-                    .to_string(),
-                ),
+                &db::ScimAuditData {
+                    operation: "delete",
+                    resource_type: "User",
+                    resource_id: &id,
+                    actor_token_id: Some(&auth.token_id),
+                    details: Some(
+                        &serde_json::json!({
+                            "accessRevoked": true,
+                            "deleted": false
+                        })
+                        .to_string(),
+                    ),
+                    refusal: Some(db::Refusal::LastAdmin),
+                },
                 auth.org_domain.as_deref(),
             )
             .await;
@@ -827,11 +843,16 @@ pub(crate) async fn delete_user(
             // its audit row even though the delete itself failed.
             db::record_scim_audit(
                 &state.audit,
-                "delete",
-                "User",
-                &id,
-                Some(&auth.token_id),
-                Some(&serde_json::json!({"accessRevoked": true, "deleted": false}).to_string()),
+                &db::ScimAuditData {
+                    operation: "delete",
+                    resource_type: "User",
+                    resource_id: &id,
+                    actor_token_id: Some(&auth.token_id),
+                    details: Some(
+                        &serde_json::json!({"accessRevoked": true, "deleted": false}).to_string(),
+                    ),
+                    refusal: None,
+                },
                 auth.org_domain.as_deref(),
             )
             .await;
@@ -847,11 +868,14 @@ pub(crate) async fn delete_user(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "delete",
-        "User",
-        &id,
-        Some(&auth.token_id),
-        None,
+        &db::ScimAuditData {
+            operation: "delete",
+            resource_type: "User",
+            resource_id: &id,
+            actor_token_id: Some(&auth.token_id),
+            details: None,
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
