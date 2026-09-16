@@ -25,6 +25,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-13 | 5 | 1 | 0 | 3 | 5 | 1 of 1 | 1 superseded; class PRs #1356–#1359; #1352 wontfix | 3 of 5 | 0 |
 | 2026-09-14 | 3 | 3 | 0 | 0 | 3 | 3 of 3 | 3 amended, merged | 1 of 3 | 0 |
 | 2026-09-15 | 6 | 6 | 7 | 1 | 6 | 6 of 6 fix, 2 of 7 dead-code | dead-code: 5 merged, 2 superseded (#1393, #1394); fix: 3 amended, 1 superseded (#1396), 2 closed | 1 of 6 | `wire-format-compat-on-persisted-structs`, synced #1395 |
+| 2026-09-16 | 4 | 3 | 0 | 2 | 4 | 3 of 3 | 3 amended, merged; #1406 fixed by #1409; siblings in `fix/secret-ui-and-scim-refusal` | 2 of 4 | client-type rule requested (`rcr_3b87ceaa…`), not synced |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -418,3 +419,35 @@ after rollout. The wire-format rule was synced in #1395.
 - **Check a quoted SHOULD's scope.** #1389 quoted a §2.2 sentence that
   governs only multiple-valued response types; §2.1's definition of
   `response_mode` was the applicable text.
+
+## 2026-09-16 — three class fixes, two residue recurrences
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 93 | 4 | 194 | **51** | 30 |
+
+**Self-caused: 4 of 4.** Blame: #1399 (device-flow client authentication), #1359
+(last-admin floor), #1387 (rotation gate) — all merged in the previous two days.
+
+### Classes
+
+- **Shared-secret decisions keyed on the wrong axis** (#1405, #1406). Six sites
+  used `client_type()` or `is_fapi()` where the question was whether the
+  registered method uses a secret; `authenticate_client` accepted a secret from
+  a non-FAPI `private_key_jwt` client, against OIDC Core 1.0 §3.1.3.1. The
+  2026-09-15 review had seen the gate admit these clients and judged it not a
+  regression. Fixed with `TokenEndpointAuthMethod::uses_client_secret()`; the
+  detail template was a seventh site, found afterwards.
+- **Refusal after committed revocation, unaudited on the admin side** (#1404).
+  Named in the 2026-09-14 record. #1408's audit row would have exported to OCSF
+  as a successful deletion; the projection now reports a top-level `refusal` as
+  Failure, and the SCIM writer, which kept its refusal inside `details`, moved to
+  a shared `Refusal` type.
+- **#1403** was isolated: one handler's comment promised a JTI commit on every
+  poll that three early returns skipped. RFC 7523 §3 replay prevention is a MAY.
+
+### Lessons folded into the skill
+
+Queued branches reject pushes; sibling hunts must reach templates and audit
+readers; a gap a review notices is a decision for the user, not residue; search
+test files before reporting a test missing.

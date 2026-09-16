@@ -834,6 +834,104 @@ mod tests {
     // UUIDs flow through to the db lookup and produce HTML error pages, not
     // JSON 400s. These tests guard against accidentally switching to ValidPath.
 
+    // The secrets section follows the registered auth method, the condition
+    // the add-secret handlers enforce: a native app registered for a secret
+    // method can add one (RFC 8252 §8.4 "Except when using a mechanism like
+    // Dynamic Client Registration [RFC7591] to provision per-instance
+    // secrets, native apps are classified as public clients"), and a
+    // `private_key_jwt` client is offered no button but still sees a secret it
+    // holds so it can be revoked.
+    #[tokio::test]
+    async fn test_detail_page_secret_section_follows_registered_method() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "detail-secrets@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let page = |app_id: String| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                http_get_full(
+                    &app,
+                    &format!("/applications/{app_id}"),
+                    &[("Cookie", &cookie)],
+                )
+                .await
+                .body
+            }
+        };
+
+        let native_secret = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+                token_endpoint_auth_method: Some(
+                    crate::db::TokenEndpointAuthMethod::ClientSecretPost,
+                ),
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let body = page(native_secret.app_id).await;
+        assert!(
+            body.contains("Add Secret"),
+            "native client_secret_post: {body}"
+        );
+
+        let pkjwt_with_secret = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Web,
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let body = page(pkjwt_with_secret.app_id).await;
+        assert!(
+            body.contains(">Client Secrets</h2>"),
+            "stray secret listed: {body}"
+        );
+        assert!(
+            !body.contains("Add Secret"),
+            "no add for private_key_jwt: {body}"
+        );
+
+        let pkjwt = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Web,
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let body = page(pkjwt.app_id).await;
+        assert!(
+            !body.contains(">Client Secrets</h2>"),
+            "section hidden: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn test_detail_page_invalid_uuid_returns_html_not_json() {
         let (app, state) = test_app().await;

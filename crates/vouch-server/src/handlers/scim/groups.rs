@@ -103,11 +103,14 @@ pub(crate) async fn list_groups(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "list",
-        "Group",
-        "*",
-        Some(&auth.token_id),
-        Some(&format!("{{\"count\": {}}}", resources.len())),
+        &db::ScimAuditData {
+            operation: "list",
+            resource_type: "Group",
+            resource_id: "*",
+            actor_token_id: Some(&auth.token_id),
+            details: Some(&format!("{{\"count\": {}}}", resources.len())),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -240,11 +243,14 @@ pub(crate) async fn create_group(
     // leave a created group with no `create` event.
     db::record_scim_audit(
         &state.audit,
-        "create",
-        "Group",
-        &db_group.id,
-        Some(&auth.token_id),
-        Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
+        &db::ScimAuditData {
+            operation: "create",
+            resource_type: "Group",
+            resource_id: &db_group.id,
+            actor_token_id: Some(&auth.token_id),
+            details: Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -473,11 +479,16 @@ async fn record_partial_group_update(
     }
     db::record_scim_audit(
         &state.audit,
-        "update",
-        "Group",
-        group_id,
-        Some(&auth.token_id),
-        Some(&serde_json::json!({"partial": true, "memberOpsApplied": applied}).to_string()),
+        &db::ScimAuditData {
+            operation: "update",
+            resource_type: "Group",
+            resource_id: group_id,
+            actor_token_id: Some(&auth.token_id),
+            details: Some(
+                &serde_json::json!({"partial": true, "memberOpsApplied": applied}).to_string(),
+            ),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -605,11 +616,14 @@ pub(crate) async fn patch_group(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "update",
-        "Group",
-        &id,
-        Some(&auth.token_id),
-        None,
+        &db::ScimAuditData {
+            operation: "update",
+            resource_type: "Group",
+            resource_id: &id,
+            actor_token_id: Some(&auth.token_id),
+            details: None,
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;
@@ -692,11 +706,14 @@ pub(crate) async fn delete_group(
     // Audit log
     db::record_scim_audit(
         &state.audit,
-        "delete",
-        "Group",
-        &id,
-        Some(&auth.token_id),
-        Some(&serde_json::json!({"displayName": &group.display_name}).to_string()),
+        &db::ScimAuditData {
+            operation: "delete",
+            resource_type: "Group",
+            resource_id: &id,
+            actor_token_id: Some(&auth.token_id),
+            details: Some(&serde_json::json!({"displayName": &group.display_name}).to_string()),
+            refusal: None,
+        },
         auth.org_domain.as_deref(),
     )
     .await;

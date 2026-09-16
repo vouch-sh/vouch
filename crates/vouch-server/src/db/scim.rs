@@ -377,22 +377,11 @@ pub async fn delete_expired_scim_tokens(store: &DocumentStore) -> Result<u64> {
 /// `GET /api/v1/org/audit-events`).
 pub async fn record_scim_audit(
     audit: &AuditStore,
-    operation: &str,
-    resource_type: &str,
-    resource_id: &str,
-    actor_token_id: Option<&str>,
-    details: Option<&str>,
+    data: &ScimAuditData<'_>,
     org_domain: Option<&str>,
 ) {
-    let data = ScimAuditData {
-        operation: operation.to_string(),
-        resource_type: resource_type.to_string(),
-        resource_id: resource_id.to_string(),
-        actor_token_id: actor_token_id.map(String::from),
-        details: details.map(String::from),
-    };
     audit
-        .record_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data)
+        .record_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, data)
         .await;
 }
 

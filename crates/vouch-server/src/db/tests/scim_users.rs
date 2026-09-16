@@ -473,17 +473,32 @@ async fn test_scim_audit_logging() {
 
     record_scim_audit(
         &audit,
-        "CREATE",
-        "User",
-        "user-123",
-        Some("token-123"),
-        Some("Created user via SCIM"),
+        &crate::db::ScimAuditData {
+            operation: "CREATE",
+            resource_type: "User",
+            resource_id: "user-123",
+            actor_token_id: Some("token-123"),
+            details: Some("Created user via SCIM"),
+            refusal: None,
+        },
         Some("example.com"),
     )
     .await;
 
     // Record another audit log without token or org domain (None is valid)
-    record_scim_audit(&audit, "DELETE", "User", "user-789", None, None, None).await;
+    record_scim_audit(
+        &audit,
+        &crate::db::ScimAuditData {
+            operation: "DELETE",
+            resource_type: "User",
+            resource_id: "user-789",
+            actor_token_id: None,
+            details: None,
+            refusal: None,
+        },
+        None,
+    )
+    .await;
 
     // The write is best-effort (failures are swallowed), so assert both
     // rows landed by querying them back.

@@ -48,10 +48,9 @@ macro_rules! impl_audit_data {
 /// kinds. `target_user_id` is what the admin UI resolves to a display
 /// email at render time.
 ///
-/// `refusal` is `Some("last_admin")` when the in-transaction last-admin floor
-/// refused a removal or deactivation after access revocation had already
-/// committed: the revocation stands and is audited, the action did not
-/// happen. The OCSF projection reports such a row with a failure status.
+/// `refusal` is set when the action was refused after access revocation had
+/// already committed: the revocation stands and is audited, the action did
+/// not happen.
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMemberActionData<'a> {
     pub action: &'static str,
@@ -62,7 +61,17 @@ pub(crate) struct AdminMemberActionData<'a> {
     pub keys_revoked: Option<usize>,
     /// Why the action was refused; `None` when it happened.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refusal: Option<&'static str>,
+    pub refusal: Option<Refusal>,
+}
+
+/// Why an audited action did not happen, recorded as a top-level `refusal`
+/// member. The OCSF projection reports any row carrying one with a failure
+/// status, whatever the reason.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// Removing or deactivating the organization's last active admin.
+    LastAdmin,
 }
 
 /// Admin-initiated additional-domain add/verify (`OrgDomainAdded`,
@@ -226,7 +235,7 @@ impl_audit_data!(
     OrgIssuerKeyRevocationData<'_>,
     PolicyDenialData<'_>,
     OAuthUsageData,
-    ScimAuditData,
+    ScimAuditData<'_>,
     AuthEventData<'_>,
 );
 
@@ -281,13 +290,16 @@ pub(crate) struct OAuthUsageData {
 }
 
 /// Data payload for SCIM operation audit events.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ScimAuditData {
-    pub operation: String,
-    pub resource_type: String,
-    pub resource_id: String,
-    pub actor_token_id: Option<String>,
-    pub details: Option<String>,
+#[derive(Debug, Serialize)]
+pub struct ScimAuditData<'a> {
+    pub operation: &'static str,
+    pub resource_type: &'static str,
+    pub resource_id: &'a str,
+    pub actor_token_id: Option<&'a str>,
+    pub details: Option<&'a str>,
+    /// Why the operation was refused; `None` when it happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Refusal>,
 }
 
 /// Fields shared by every credential-issuance audit payload.
@@ -554,7 +566,7 @@ mod tests {
                     target_user_id: "u-target",
                     admin_user_id: "u-admin",
                     keys_revoked: None,
-                    refusal: Some("last_admin"),
+                    refusal: Some(Refusal::LastAdmin),
                 })
                 .unwrap(),
                 json!({

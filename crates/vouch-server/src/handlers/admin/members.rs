@@ -254,8 +254,7 @@ pub(crate) async fn deactivate_member(
                 // Record an `AdminDeactivate` event carrying
                 // `refusal: "last_admin"` so the committed revocation is
                 // attributable and distinguishable from a successful
-                // deactivation (parity with the SCIM side, fixed in
-                // `0ab5c97b`).
+                // deactivation, as the SCIM handlers do.
                 state
                     .audit
                     .record_event(
@@ -267,7 +266,7 @@ pub(crate) async fn deactivate_member(
                             target_user_id: &target_id,
                             admin_user_id: &admin.id,
                             keys_revoked: None,
-                            refusal: Some("last_admin"),
+                            refusal: Some(crate::db::Refusal::LastAdmin),
                         },
                     )
                     .await;
@@ -494,8 +493,8 @@ pub(crate) async fn remove_member(
             // removed — but that committed revocation still belongs in the
             // canonical admin audit log. Record an `AdminRemoveUser` event
             // carrying `refusal: "last_admin"` so the committed revocation is
-            // attributable and distinguishable from a successful removal
-            // (parity with the SCIM side, fixed in `0ab5c97b`). Same refusal
+            // attributable and distinguishable from a successful removal,
+            // as the SCIM handlers do. Same refusal
             // `demote_member` gives, for the same reason: the organization
             // must keep one active admin, and removing the member outright
             // removes them from that count just as demoting does.
@@ -510,7 +509,7 @@ pub(crate) async fn remove_member(
                         target_user_id: &target_id,
                         admin_user_id: &admin.id,
                         keys_revoked: None,
-                        refusal: Some("last_admin"),
+                        refusal: Some(crate::db::Refusal::LastAdmin),
                     },
                 )
                 .await;
@@ -2022,7 +2021,7 @@ mod tests {
     // in-transaction last-admin floor runs. When that floor refuses, the
     // committed revocation must still land in the canonical admin audit log,
     // carrying `refusal: "last_admin"` so it is distinguishable from a
-    // successful action (parity with the SCIM side, fixed in `0ab5c97b`).
+    // successful action, as the SCIM handlers do.
     //
     // The floor only refuses under a concurrent race: the caller (admin1) must
     // lose their admin status between `OrgAdmin` extraction and the
@@ -2036,8 +2035,7 @@ mod tests {
     /// `LastAdmin` guard refuses a remove *after* the handler's
     /// `revoke_user_access` already committed the target's session deletions
     /// and SSH-cert revocations. The row carries `refusal: "last_admin"` to
-    /// distinguish a floor refusal from a successful removal (parity with the
-    /// SCIM side, fixed in `0ab5c97b`).
+    /// distinguish a floor refusal from a successful removal.
     #[expect(
         clippy::too_many_lines,
         reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
@@ -2297,8 +2295,7 @@ mod tests {
     /// `LastAdmin` guard refuses a deactivate *after* `revoke_then_persist`
     /// already committed the target's session deletions and SSH-cert
     /// revocations. The row carries `refusal: "last_admin"` to distinguish a
-    /// floor refusal from a successful deactivation (parity with the SCIM
-    /// side, fixed in `0ab5c97b`).
+    /// floor refusal from a successful deactivation.
     #[expect(
         clippy::too_many_lines,
         reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"

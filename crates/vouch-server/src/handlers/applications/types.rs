@@ -47,6 +47,9 @@ pub(crate) struct ApplicationInfo {
     pub token_endpoint_auth_method: String,
     /// FAPI 2.0 Security Profile designation ("none" or "fapi2_security").
     pub fapi_profile: String,
+    /// Whether the owner may add a client secret: the same condition the
+    /// add-secret handlers enforce.
+    pub can_add_secret: bool,
     /// Inline JWKS JSON (RFC 7523).
     pub jwks: Option<String>,
     /// Remote JWKS URI (RFC 7523).
@@ -59,6 +62,8 @@ impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
         let fapi_profile = client.fapi_profile.as_str().to_string();
+        let can_add_secret =
+            client.token_endpoint_auth_method.uses_client_secret() && !client.is_fapi();
         let jwks = client
             .keys
             .as_ref()
@@ -84,6 +89,7 @@ impl From<OAuthClient> for ApplicationInfo {
             resource_uris: client.resource_uris,
             token_endpoint_auth_method,
             fapi_profile,
+            can_add_secret,
             jwks,
             jwks_uri,
             post_logout_redirect_uris: client.post_logout_redirect_uris,

@@ -1103,11 +1103,12 @@ mod tests {
                 None,
                 Some("example.com"),
                 &super::super::documents::audit::ScimAuditData {
-                    operation: "create".to_string(),
-                    resource_type: "User".to_string(),
-                    resource_id: "u-1".to_string(),
+                    operation: "create",
+                    resource_type: "User",
+                    resource_id: "u-1",
                     actor_token_id: None,
                     details: None,
+                    refusal: None,
                 },
             )
             .await;

@@ -262,10 +262,11 @@ lossless representation — this is a projection for SIEM ingestion, and every f
 records is still present in `data`.
 
 `status_id` is `Success` unless the event type is itself a failure (`login_failed`, for
-example) or `data` carries a `refusal` member. `admin_remove_user` and `admin_deactivate` record
-`"refusal": "last_admin"` when removing the organization's last active admin was refused after
-the member's sessions and certificates had already been revoked; those rows export with
-`status_id` `Failure`.
+example) or `data` carries a top-level `refusal` member. `admin_remove_user`, `admin_deactivate`,
+and a `scim_operation` delete or deactivating update record `"refusal": "last_admin"` when
+removing the organization's last active admin was refused after the member's sessions and
+certificates had already been revoked; those rows export with `status_id` `Failure`. SCIM rows
+written by v2026.9.4 carry the refusal inside `details` instead and export as `Success`.
 
 Seven event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
 predefined activity for them. Per the OCSF 1.9.0 spec, when `activity_id` is `99` the
