@@ -543,6 +543,13 @@ pub(crate) fn parse_event_data(data: &str) -> RawOrValue {
     }
 }
 
+/// The top-level `refusal` member an event's `data` carries when the action
+/// it records was refused.
+#[derive(serde::Deserialize)]
+struct RefusalMarker {
+    refusal: Option<String>,
+}
+
 /// Project a stored [`AuditEvent`] into its OCSF representation.
 ///
 /// Never fails: an `event_type` that doesn't match a registered
@@ -582,7 +589,14 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
         };
     };
 
-    let mapping = ocsf_class(kind);
+    // A refused action (e.g. the last-admin floor) records under the kind of
+    // the action it attempted, so the kind alone would report it as done.
+    let mapping =
+        if serde_json::from_str::<RefusalMarker>(&event.data).is_ok_and(|m| m.refusal.is_some()) {
+            ocsf_class(kind).failure()
+        } else {
+            ocsf_class(kind)
+        };
     let class_uid = mapping.class.value();
     let type_uid = u32::from(class_uid)
         .saturating_mul(100)
@@ -751,6 +765,27 @@ mod tests {
         let ocsf = to_ocsf(&event);
         assert_eq!(ocsf.status_id.value(), StatusId::Failure.value());
         assert_eq!(ocsf.severity_id.value(), SeverityId::Medium.value());
+    }
+
+    #[test]
+    fn refused_admin_removal_reports_failure_status() {
+        let data = |refusal| {
+            serde_json::to_string(&crate::db::documents::audit::AdminMemberActionData {
+                action: "remove_user",
+                target_user_id: "u-target",
+                admin_user_id: "u-admin",
+                keys_revoked: None,
+                refusal,
+            })
+            .unwrap()
+        };
+        let refused = to_ocsf(&sample_event(
+            AuditEventKind::AdminRemoveUser,
+            &data(Some("last_admin")),
+        ));
+        assert_eq!(refused.status_id.value(), StatusId::Failure.value());
+        let removed = to_ocsf(&sample_event(AuditEventKind::AdminRemoveUser, &data(None)));
+        assert_eq!(removed.status_id.value(), StatusId::Success.value());
     }
 
     /// OCSF 1.9.0: when `activity_id` is `99` (Other), `activity_name`

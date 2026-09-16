@@ -48,14 +48,10 @@ macro_rules! impl_audit_data {
 /// kinds. `target_user_id` is what the admin UI resolves to a display
 /// email at render time.
 ///
-/// `refusal` is set to `Some("last_admin")` only on the `remove_member` /
-/// `deactivate_member` refusal arms: revocation (`revoke_user_access` /
-/// `revoke_then_persist`) commits *before* the authoritative in-transaction
-/// last-admin floor runs, so when that floor refuses the committed revocation
-/// is audited with this distinguisher to separate a floor refusal from a
-/// successful action (parity with the SCIM side, fixed in `0ab5c97b`). It is
-/// `None` on every successful action, so a refusal row is never byte-identical
-/// to a success row.
+/// `refusal` is `Some("last_admin")` when the in-transaction last-admin floor
+/// refused a removal or deactivation after access revocation had already
+/// committed: the revocation stands and is audited, the action did not
+/// happen. The OCSF projection reports such a row with a failure status.
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMemberActionData<'a> {
     pub action: &'static str,
@@ -64,8 +60,7 @@ pub(crate) struct AdminMemberActionData<'a> {
     /// Only the revoke-credentials site records how many keys were revoked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keys_revoked: Option<usize>,
-    /// `Some("last_admin")` on a refusal arm (see the struct docs); `None` on
-    /// every successful action.
+    /// Why the action was refused; `None` when it happened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<&'static str>,
 }
