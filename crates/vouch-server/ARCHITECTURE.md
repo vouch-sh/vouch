@@ -42,7 +42,8 @@ probe alike. **In tower and axum the last `.layer()` call is the outermost**, so
 
 ```mermaid
 flowchart TB
-  req(["HTTPS request"]) --> l1["set_request_id"]
+  req(["HTTPS request"]) --> l0["arrival_layer"]
+  l0 --> l1["set_request_id"]
   l1 --> l2["request_span_middleware"]
   l2 --> l3["propagate_request_id"]
   l3 --> l4["DefaultBodyLimit<br/>256 KiB"]
@@ -56,7 +57,12 @@ flowchart TB
   l7 -. "org subdomain, path outside<br/>discovery / jwks / health" .-> nf["404 Not Found"]
 ```
 
-Stage 9 is nine response-header layers, plus a tenth (HSTS) when TLS is configured.
+`arrival_layer` is outermost so that it stamps the request's `ArrivalTime` before any
+other layer can await. Every time comparison that decides the request — token and DPoP
+freshness, session expiry, request-object claims — reads that one instant.
+
+The security header bundle is nine response-header layers, plus a tenth (HSTS) when TLS
+is configured.
 CORS is **not** in that bundle: `build_api_cors_layer` and `build_ui_cors_layer` are
 applied inside the API and UI routers respectively, so the two groups get different
 CORS policies.
@@ -105,15 +111,16 @@ duplicated here.
 **Signature enforcement is default-deny within `/v1`.** `require_signature` matches the
 route template against `PUBLIC_V1_PATHS`: five templates pass unsigned, every other `/v1`
 path must be signed. Paths outside `/v1` are out of scope. With no matched template it
-falls back to the concrete URI, which lands in deny, not passthrough. A signature must
-cover two components — method and path. Bodies up to 1 MiB are buffered for RFC 9530
-`Content-Digest`, and signatures older than 300 s are rejected.
+falls back to the concrete URI and applies the same rule, so the failure mode is
+over-enforcement, never passthrough. A signature must cover `@method` and `@path`, and a
+request with a non-empty body must also cover RFC 9530 `Content-Digest`. Bodies up to
+1 MiB are buffered to check it, and signatures older than 300 s are rejected.
 
 `maybe_rate_limit!` replaces all three limiters with a no-op when
 `VOUCH_CERTIFICATION_TEST_TOKEN` is set. That variable changes three things: it disables
 rate limiting, activates `GET /certification/complete-login` (a session for a synthetic
-user, no FIDO2), and relaxes the upstream-IdP requirement. It must not be set in
-production.
+user, no FIDO2) and `GET /certification/deny-login`, and relaxes the upstream-IdP
+requirement. It must not be set in production.
 
 ## The proof chain
 
@@ -127,27 +134,41 @@ and cannot be dropped without a lint.
 flowchart TB
   store[("DocumentStore<br/>atomic consume-once")]
   store -- "try_consume_challenge_state" --> w1["ChallengeStateClaim"]
-  store -- "claim authorization code" --> w2["AuthCodeClaim"]
-  store -- "transition device code" --> w3["DeviceCodeClaim"]
-  store -- "consume OIDC state" --> w4["OidcStateClaim"]
-  store -- "insert assertion jti" --> w5["JwtAssertionJtiClaim"]
+  store -- "try_consume_authorization_code" --> w2["AuthCodeClaim"]
+  store -- "try_consume_device_auth" --> w3["DeviceCodeClaim"]
+  store -- "try_consume_oidc_state" --> w4["OidcStateClaim"]
+  store -- "PendingJti::commit" --> w5["JwtAssertionJtiClaim<br/>optional"]
   store -. "race loser, expired,<br/>never existed" .-> ce["ClaimError::AlreadyConsumed"]
   w1 & w2 & w3 & w4 --> gp["GrantProof<br/>one variant per grant"]
-  w5 --> jw["JwtClientAuthProof"]
+  jwta["authenticate_client_jwt"] --> jas["JwtAuthSucceeded"] --> jw["JwtClientAuthProof"]
+  w5 --> jw
   jw --> cap["ClientAuthProof"]
   sec["ClientSecretVerification<br/>MtlsCertVerification<br/>NoClientAuth witness"] --> cap
   reg["client registration flags"] --> scv["SenderConstraintProof::validate"] --> scp["SenderConstraintProof"]
+  nrc["no registered client"] --> scn["SenderConstraintProof::no_registered_client"] --> scp
   gp --> tip["TokenIssuanceProof<br/>not Clone<br/>must_use"]
   cap --> tip
   scp --> tip
   tip --> mint["create_oauth_access_token"]
-  mint --> at["ES256 at+jwt<br/>cnf.jkt for DPoP, cnf.x5t for mTLS"]
+  mint --> at["ES256 at+jwt<br/>cnf.jkt for DPoP, cnf.x5t#S256 for mTLS"]
 ```
 
 All three arrows into `TokenIssuanceProof` are required fields. A grant arm that skips
 its replay primitive has nothing for `grant`. One that skips the sender-constraint
 decision has nothing for `sender_constraint`. The build fails; no reviewer has to catch
 it.
+
+`SenderConstraintProof` has two constructors. `validate` checks a registered client's
+requirements; `no_registered_client` asserts there is no client whose registration could
+constrain the token. The second is for tokens minted for a user rather than a client —
+browser login, the two enrollment steps, the certification bypass — and like
+`NoClientAuth::internal_endpoint` below, a new caller is audit-relevant.
+
+`JwtClientAuthProof` pairs two witnesses: `JwtAuthSucceeded`, which only
+`authenticate_client_jwt` returns, and an optional `JwtAssertionJtiClaim`. The claim is
+optional because the `jti` is — RFC 7523 §3: *"The JWT MAY contain a "jti" (JWT ID) claim"*
+(`specs/rfc/rfc7523.txt`). `authenticate_client_jwt` rejects a FAPI client's assertion
+without one, so a FAPI client cannot reach the proof without a committed jti.
 
 | `GrantProof` variant | Replay primitive consumed first |
 |---|---|
@@ -167,10 +188,12 @@ code, challenge or jti exists. Preserve that property when adding a claim primit
 `ClientAuthProof` has four variants; the no-auth one has two named constructors.
 `NoClientAuth::for_public_client` returns an error if the client is registered with any
 `token_endpoint_auth_method` other than `None`, so a confidential client cannot use the
-no-auth arm. `NoClientAuth::internal_endpoint` covers the flows where the server is
-both issuer and client: browser login, enrollment callbacks, and the certification
-bypass. **Adding a caller to `internal_endpoint` is an audit-relevant
-change** — grep for it before merging.
+no-auth arm. `NoClientAuth::internal_endpoint` covers the flows where the server is both
+issuer and client: browser login, the two enrollment steps (the OIDC callback's bootstrap
+session and the completed registration), and the certification bypass. The device grant
+is not one of them: it authenticates a registered client as the token endpoint does.
+**Adding a caller to `internal_endpoint` is an audit-relevant change** — grep for it
+before merging.
 
 `SenderConstraintProof::validate` checks three registered requirements: FAPI 2.0
 §5.3.2.1, RFC 9449 §5, and RFC 8705 §3. `ParCreationProof` applies the same pattern to
@@ -235,8 +258,8 @@ Writing it before the gate would hand that proof to a denied attempt.
 | 2 | SHA-256 of the expected rp_id equals bytes 0..32 | `RpIdMismatch` |
 | 3 | flags: user present, and user verified | `UserNotPresent` / `UserNotVerified` |
 | 4-5 | signature counter strictly increasing once non-zero | `CounterNotIncreasing` |
-| 6 | clientDataJSON type is `webauthn.get`, challenge matches, origin matches | `ChallengeMismatch` / `InvalidOrigin` |
-| 7-8 | COSE signature over `authData \|\| SHA-256(clientDataJSON)` | signature verification failure |
+| 6 | clientDataJSON type is `webauthn.get`, challenge matches, origin matches | `InvalidClientData` / `ChallengeMismatch` / `InvalidOrigin` |
+| 7-8 | COSE signature over `authData \|\| SHA-256(clientDataJSON)` | `InvalidCoseKey` / `UnsupportedAlgorithm` / `SignatureInvalid` |
 
 Counter regression fails the ceremony, and that is our choice rather than the
 specification's. WebAuthn Level 2 §7.2 leaves it open: *"Whether the Relying Party
@@ -311,7 +334,7 @@ flowchart TB
   bind -- "cnf.jkt" --> dpop["validate_dpop_at_resource<br/>ath binds proof to this token"]
   dpop --> jkt{"jkt equals cnf.jkt?<br/>constant-time"}
   jkt -- "no" --> r401["401 invalid_token"]
-  bind -- "cnf.x5t, no jkt" --> mtls["client certificate thumbprint<br/>must match, constant-time"]
+  bind -- "cnf.x5t#S256, no jkt" --> mtls["client certificate thumbprint<br/>must match, constant-time"]
   mtls --> hw
   jkt -- "yes" --> hw
   bind -- "none" --> hw
@@ -384,8 +407,9 @@ than `application/x-www-form-urlencoded`, and drops empty-valued parameters befo
 deserializing. RFC 6749 §3.2: *"Parameters sent without a value MUST be treated as if
 they were omitted from the request."* (`specs/rfc/rfc6749.txt`). So `scope=` and an
 omitted `scope` arrive identically, a repeated recognized parameter fails, and an
-unrecognized one is ignored. `ValidJson` does the same for the browser WebAuthn flows,
-which read `errResp.message` from a JSON body and cannot see a plain-text rejection.
+unrecognized one is ignored. `ValidJson` does the same for JSON bodies: the browser
+WebAuthn completion endpoints, which read `errResp.message` from a JSON body and cannot see
+a plain-text rejection, and the CLI's key-registration completion.
 
 `OccConflict` is the only variant that reports itself retryable. Aurora DSQL offers no
 `SELECT … FOR UPDATE`, so cross-row invariants are written as one transaction that
@@ -403,7 +427,11 @@ test `occ_conflict_is_the_only_retryable_service_error` pins both halves.
 | FIDO2 grant | `src/services/oidc/fido2_grant.rs` |
 | WebAuthn assertion and attestation | `src/crypto/webauthn_verify.rs` |
 | DPoP | `src/services/oidc/dpop.rs` |
-| Client auth, token exchange | `src/services/oidc/token.rs` |
+| Client auth: secret and mTLS | `src/services/oidc/token.rs` |
+| Client auth: `private_key_jwt` | `src/services/oidc/jwt_bearer/client_auth.rs` |
+| Client auth dispatch at the endpoints | `src/handlers/oidc/client_auth.rs` |
+| Token exchange (RFC 8693) | `src/services/oidc/exchange.rs` |
+| Request arrival instant | `src/arrival.rs` |
 | JAR / JARM | `src/services/oidc/jar.rs`, `jarm.rs` |
 | Resource-token extraction | `src/handlers/session.rs` |
 | Extractor rejections | `src/handlers/extractors.rs` |

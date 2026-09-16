@@ -397,8 +397,7 @@ impl SenderConstraintProof {
     ///
     /// Browser sessions, enrollment bootstrap/completion, and the
     /// certification-test bypass mint tokens for a user rather than for a
-    /// client. The device grant's built-in CLI flow (no `client_id`) is the
-    /// same case.
+    /// client.
     pub(crate) fn no_registered_client() -> Self {
         Self { _private: () }
     }
@@ -431,7 +430,7 @@ pub(crate) enum ClientAuthProof {
     /// why client auth is absent — either the client is a registered
     /// public OAuth client (RFC 6749 §2.1), or the request originates
     /// from an internal flow where the server is both issuer and client
-    /// (browser login, enrollment, device polling).
+    /// (browser login, enrollment, certification bypass).
     NoAuth(NoClientAuth),
 }
 
@@ -443,7 +442,7 @@ pub(crate) enum ClientAuthProof {
 ///   is `None` (public client, RFC 6749 §2.1).
 /// - [`Self::internal_endpoint`] — the request originates from a
 ///   server-internal endpoint (browser login, enrollment callbacks,
-///   device-code polling) where there is no external OAuth client and
+///   certification bypass) where there is no external OAuth client and
 ///   the server itself is the client.
 ///
 /// A confidential client's grant arm cannot accidentally satisfy the
