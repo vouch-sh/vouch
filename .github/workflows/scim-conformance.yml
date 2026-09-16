@@ -1,0 +1,113 @@
+name: SCIM Conformance
+
+# Runs SCIM Verify (https://verify.scim.dev) against the SCIM API served by
+# crates/vouch-tests/src/bin/scim-conformance-server.rs. Not a required
+# check: it fails while known gaps are open (#1411, #1412, #1413) and turns
+# green when the last one lands.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/vouch-server/src/handlers/scim/**"
+      - "crates/vouch-server/src/db/scim.rs"
+      - "crates/vouch-server/src/db/documents/scim.rs"
+      - "crates/vouch-server/src/infra/router.rs"
+      - "crates/vouch-server/src/infra/rate_limit.rs"
+      - "crates/vouch-tests/src/bin/scim-conformance-server.rs"
+      - "crates/vouch-tests/scim-verify/**"
+      - ".github/workflows/scim-conformance.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+  # The published image runs the scim.dev web UI by default; the CLI is
+  # bin/scimverify.js inside it. Only a `latest` tag exists, so pin by digest.
+  SCIM_VERIFY_IMAGE: ghcr.io/limosa-io/scimverify@sha256:6a4b758d72d58636274fa5415d5b7fa39f9b0412938254e18ff90354f6f8e2e4
+  SCIM_ADDR: 127.0.0.1:18080
+
+jobs:
+  scim-verify:
+    name: SCIM Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      AWS_LC_FIPS_SYS_CC: clang
+      AWS_LC_FIPS_SYS_CXX: clang++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libudev-dev cmake golang-go clang
+      - name: Setup Rust toolchain
+        run: rustup show
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: "v2"
+          shared-key: "scim-conformance-${{ runner.os }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Build conformance server
+        run: cargo build --locked -p vouch-tests --bin scim-conformance-server
+      - name: Pull SCIM Verify
+        run: docker pull "$SCIM_VERIFY_IMAGE"
+      - name: Start conformance server
+        run: |
+          target/debug/scim-conformance-server "$SCIM_ADDR" "$RUNNER_TEMP/scim-token" \
+            > "$RUNNER_TEMP/scim-server.log" 2>&1 &
+          curl -sf --retry-connrefused --retry 30 --retry-delay 1 -o /dev/null "http://$SCIM_ADDR/health"
+          test -s "$RUNNER_TEMP/scim-token"
+      - name: Run SCIM Verify
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/scim-verify"
+          docker run --rm --network host \
+            --entrypoint node \
+            -v "$GITHUB_WORKSPACE/crates/vouch-tests/scim-verify:/config:ro" \
+            -v "$RUNNER_TEMP/scim-verify:/out" \
+            "$SCIM_VERIFY_IMAGE" \
+            bin/scimverify.js \
+            --base-url "http://$SCIM_ADDR/scim/v2" \
+            --auth-header "Bearer $(cat "$RUNNER_TEMP/scim-token")" \
+            --config /config/config.yaml \
+            --har-file /out/scim-verify.har \
+            | tee "$RUNNER_TEMP/scim-verify/results.tap"
+      - name: Summarize results
+        if: always()
+        run: |
+          tap="$RUNNER_TEMP/scim-verify/results.tap"
+          test -f "$tap" || exit 0
+          {
+            echo "## SCIM Verify"
+            echo
+            echo '```'
+            grep -E '^# (tests|pass|fail|skipped)' "$tap" || true
+            echo '```'
+            echo
+            echo "Failing checks:"
+            echo
+            grep -E '^ +not ok ' "$tap" | sed -E 's/^ +not ok [0-9]+ - /- /' || echo "- none"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload HAR and results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scim-verify
+          path: |
+            ${{ runner.temp }}/scim-verify/
+            ${{ runner.temp }}/scim-server.log
+          if-no-files-found: ignore
+          retention-days: 14

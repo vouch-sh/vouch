@@ -1,0 +1,171 @@
+# SCIM Verify (https://verify.scim.dev/docs/) configuration for Vouch.
+#
+# Vouch requires userName to be an email in the token's organization domain,
+# so every created or replaced user is an example.com address; the conformance
+# server seeds that organization. Expected responses are matched after SCIM
+# Verify canonicalizes the resource, which moves every core attribute except
+# id, externalId, meta, and schemas under the core schema URN.
+
+detectSchema: true
+detectResourceTypes: true
+# ServiceProviderConfig advertises sort.supported = false, and RFC 7644
+# §3.4.2.3 makes sorting OPTIONAL ("Sort is OPTIONAL."), so the suite's sort
+# checks do not apply.
+verifySorting: false
+
+users:
+  enabled: true
+  operations: [GET, POST, PUT, PATCH, DELETE]
+  post_tests:
+    - request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:User]
+        userName: bjensen@example.com
+        emails:
+          - value: bjensen@example.com
+            primary: true
+        active: true
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:User"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:User":
+            type: object
+            required: [userName]
+            properties:
+              userName: { const: bjensen@example.com }
+    - request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:User]
+        userName: testuser6238@example.com
+        externalId: ext-6238
+        name:
+          givenName: Test
+          familyName: User
+        emails:
+          - value: testuser6238@example.com
+        active: true
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:User"]
+        properties:
+          externalId: { const: ext-6238 }
+          "urn:ietf:params:scim:schemas:core:2.0:User":
+            type: object
+            required: [userName]
+            properties:
+              userName: { const: testuser6238@example.com }
+  put_tests:
+    - id: AUTO
+      request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:User]
+        userName: alice@example.com
+        name:
+          givenName: Alice
+          familyName: Replaced
+        active: true
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:User"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:User":
+            type: object
+            required: [userName, name]
+            properties:
+              name:
+                type: object
+                properties:
+                  familyName: { const: Replaced }
+  patch_tests:
+    - id: AUTO
+      request:
+        schemas: [urn:ietf:params:scim:api:messages:2.0:PatchOp]
+        Operations:
+          - op: replace
+            path: active
+            value: false
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:User"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:User":
+            type: object
+            required: [userName, active]
+            properties:
+              active: { const: false }
+    - id: AUTO
+      request:
+        schemas: [urn:ietf:params:scim:api:messages:2.0:PatchOp]
+        Operations:
+          - op: replace
+            path: name.givenName
+            value: Patched
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:User"]
+  delete_tests:
+    - id: AUTO
+
+groups:
+  enabled: true
+  operations: [GET, POST, PUT, PATCH, DELETE]
+  post_tests:
+    - request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:Group]
+        displayName: TestGroup
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:Group"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:Group":
+            type: object
+            required: [displayName]
+            properties:
+              displayName: { const: TestGroup }
+    - request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:Group]
+        displayName: Engineering
+        members:
+          - value: AUTO
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:Group"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:Group":
+            type: object
+            required: [displayName, members]
+            properties:
+              displayName: { const: Engineering }
+  put_tests:
+    - id: AUTO
+      request:
+        schemas: [urn:ietf:params:scim:schemas:core:2.0:Group]
+        displayName: ReplacedGroup
+        members:
+          - value: AUTO
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:Group"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:Group":
+            type: object
+            required: [displayName]
+            properties:
+              displayName: { const: ReplacedGroup }
+  patch_tests:
+    - id: AUTO
+      request:
+        schemas: [urn:ietf:params:scim:api:messages:2.0:PatchOp]
+        Operations:
+          - op: replace
+            path: displayName
+            value: NewGroupName
+      response:
+        type: object
+        required: [id, schemas, "urn:ietf:params:scim:schemas:core:2.0:Group"]
+        properties:
+          "urn:ietf:params:scim:schemas:core:2.0:Group":
+            type: object
+            required: [displayName]
+            properties:
+              displayName: { const: NewGroupName }
+  delete_tests:
+    - id: AUTO
