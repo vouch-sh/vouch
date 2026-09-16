@@ -1112,14 +1112,6 @@ async fn setup_authorized_device(
     device_code
 }
 
-/// Build the device_code token-endpoint form body.
-fn device_token_body(device_code: &str) -> String {
-    format!(
-        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-        device_code
-    )
-}
-
 /// The device_code token-endpoint form body for a `private_key_jwt` client,
 /// carrying a fresh assertion: the endpoint commits each assertion's JTI, so
 /// every poll needs its own.

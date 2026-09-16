@@ -1109,9 +1109,8 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
 /// body; the assertion's `iss`/`sub` identifies the client).
 fn device_poll_body_with_assertion(device_code: &str, assertion: &str) -> String {
     format!(
-        "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-         &device_code={device_code}&client_assertion={assertion}\
-         &client_assertion_type={}",
+        "{}&client_assertion={assertion}&client_assertion_type={}",
+        device_token_body(device_code),
         vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
     )
 }
