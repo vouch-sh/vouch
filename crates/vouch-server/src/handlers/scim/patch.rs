@@ -69,6 +69,15 @@ impl AttributeError {
         }
     }
 
+    /// The request body does not conform to the resource schema, such as a
+    /// resource that omits a required attribute.
+    pub(crate) fn invalid_syntax(detail: impl Into<String>) -> Self {
+        Self {
+            scim_type: "invalidSyntax",
+            detail: detail.into(),
+        }
+    }
+
     /// The operation names no target, or its value filter matched nothing.
     pub(crate) fn no_target(detail: impl Into<String>) -> Self {
         Self {
@@ -116,6 +125,18 @@ pub(crate) struct Attribute<S> {
     /// Clears the stored value for a `remove`, or rejects the removal when
     /// the attribute has no absent state.
     pub remove: fn(&mut S, &str) -> Result<(), AttributeError>,
+}
+
+/// The value of a required attribute of a POST or PUT resource body.
+///
+/// A body that omits one "did not conform to the request schema", RFC 7644
+/// §3.12 Table 9's `invalidSyntax`, which lists POST (Create) and PUT.
+/// `invalidValue` stays for a value that is present but unusable.
+pub(crate) fn required_attribute<'v>(
+    name: &str,
+    value: Option<&'v str>,
+) -> Result<&'v str, AttributeError> {
+    value.ok_or_else(|| AttributeError::invalid_syntax(format!("{name} is required")))
 }
 
 /// The `value` of an `add` or `replace`, which RFC 7644 §3.5.2.1 requires.

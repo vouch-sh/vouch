@@ -1533,7 +1533,7 @@ async fn test_rfc7644_put_group_requires_display_name() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(error["scimType"], "invalidSyntax");
 
     let (status, error) = put_group_json(
         &app,

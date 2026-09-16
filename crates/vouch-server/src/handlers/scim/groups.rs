@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
-    Attribute, AttributeError, apply_patch_op, get_attribute, optional_string, required_value,
-    unqualified,
+    Attribute, AttributeError, apply_patch_op, get_attribute, optional_string, required_attribute,
+    required_value, unqualified,
 };
 use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
@@ -179,9 +179,10 @@ pub(crate) async fn create_group(
     ScimJson(group): ScimJson<ScimGroup>,
 ) -> Response {
     // Pure validation first — no DB cost for malformed requests
-    if let Err(invalid) = check_display_name(&group.display_name) {
-        return invalid.into_response();
-    }
+    let display_name = match check_display_name(group.display_name.as_deref()) {
+        Ok(display_name) => display_name,
+        Err(invalid) => return invalid.into_response(),
+    };
 
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
@@ -202,7 +203,7 @@ pub(crate) async fn create_group(
     let db_group = match db::create_scim_group(
         &state.store,
         &auth.org_id,
-        &group.display_name,
+        display_name,
         group.external_id.as_deref(),
         &member_ids,
     )
@@ -292,7 +293,7 @@ const GROUP_ATTRIBUTES: &[Attribute<db::ScimGroupState>] = &[
                     "{path} must be a string"
                 )));
             };
-            check_display_name(display_name)?;
+            check_display_name(Some(display_name))?;
             group.display_name = display_name.to_string();
             Ok(())
         },
@@ -536,16 +537,17 @@ fn apply_group_op(group: &mut db::ScimGroupState, op: &ScimPatchOp) -> Result<()
     }
 }
 
-/// Rejects a `displayName` that is empty or whitespace. RFC 7643 §4.2 makes
-/// `displayName` required, and RFC 7644 §3.12 Table 9 defines `invalidValue`
-/// as "A required value was missing".
-fn check_display_name(display_name: &str) -> Result<(), AttributeError> {
+/// The `displayName` a Group body presents. RFC 7643 §4.2 makes it required:
+/// omitted, the body does not conform to the schema (`invalidSyntax`); empty
+/// or whitespace, the value is unusable (`invalidValue`).
+fn check_display_name(display_name: Option<&str>) -> Result<&str, AttributeError> {
+    let display_name = required_attribute("displayName", display_name)?;
     if display_name.trim().is_empty() {
         return Err(AttributeError::invalid_value(
-            "displayName is required and must not be empty",
+            "displayName must not be empty",
         ));
     }
-    Ok(())
+    Ok(display_name)
 }
 
 /// PATCH /scim/v2/Groups/:id (RFC 7644 Section 3.5.2).
@@ -595,9 +597,10 @@ pub(crate) async fn put_group(
     ScimJson(group): ScimJson<ScimGroup>,
 ) -> Response {
     // Pure validation first — no DB cost for malformed requests
-    if let Err(invalid) = check_display_name(&group.display_name) {
-        return invalid.into_response();
-    }
+    let display_name = match check_display_name(group.display_name.as_deref()) {
+        Ok(display_name) => display_name.to_string(),
+        Err(invalid) => return invalid.into_response(),
+    };
 
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
@@ -608,7 +611,7 @@ pub(crate) async fn put_group(
     }
 
     let replacement = db::ScimGroupState {
-        display_name: group.display_name,
+        display_name,
         external_id: group.external_id,
         members: group
             .members
@@ -822,7 +825,7 @@ pub(crate) fn db_group_to_scim(
         schemas: vec![urn::GROUP.to_string()],
         id: Some(group.id.clone()),
         external_id: group.external_id,
-        display_name: group.display_name,
+        display_name: Some(group.display_name),
         members: if members.is_empty() {
             None
         } else {

@@ -54,7 +54,10 @@ users:
             properties:
               userName: { const: testuser6238@example.com }
   put_tests:
-    - id: AUTO
+    # userName is immutable, so a PUT must address the user whose userName it
+    # carries. AUTO picks an arbitrary user; this is alice@example.com, seeded
+    # by the conformance server, whose id is derived from the email address.
+    - id: 34cabf01-247a-8e63-9c1f-bb1834c0e6ad
       request:
         schemas: [urn:ietf:params:scim:schemas:core:2.0:User]
         userName: alice@example.com

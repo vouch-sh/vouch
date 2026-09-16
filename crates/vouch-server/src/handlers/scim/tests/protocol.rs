@@ -659,9 +659,10 @@ fn assert_scim_error(
 
 // RFC 7644 §3.12: "implementers MUST return the errors in the body of the
 // response in a JSON format", and 400 covers a request that "violates
-// schema"; Table 9 `invalidValue` is "A required value was missing".
+// schema"; Table 9 `invalidSyntax` is a body that "did not conform to the
+// request schema".
 #[tokio::test]
-async fn test_scim_missing_required_attribute_is_400_invalid_value() {
+async fn test_scim_missing_required_attribute_is_400_invalid_syntax() {
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-missing-attr", "test-org").await;
     let auth_header = format!("Bearer {token}");
@@ -678,7 +679,7 @@ async fn test_scim_missing_required_attribute_is_400_invalid_value() {
     )
     .await;
 
-    let error = assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidValue"));
+    let error = assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidSyntax"));
     assert!(
         error["detail"]
             .as_str()

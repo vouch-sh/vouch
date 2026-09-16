@@ -10,7 +10,9 @@ use axum::{
 use std::sync::Arc;
 
 use super::extract::{ScimJson, ScimQuery};
-use super::patch::{Attribute, AttributeError, apply_patch_op, optional_string, unqualified};
+use super::patch::{
+    Attribute, AttributeError, apply_patch_op, optional_string, required_attribute, unqualified,
+};
 use super::types::{
     ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchOp,
     ScimPatchOpType, ScimPatchRequest, ScimUser,
@@ -228,6 +230,12 @@ pub(crate) async fn create_user(
     headers: HeaderMap,
     ScimJson(user): ScimJson<ScimUser>,
 ) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    let user_name = match required_attribute("userName", user.user_name.as_deref()) {
+        Ok(user_name) => user_name,
+        Err(invalid) => return invalid.into_response(),
+    };
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
@@ -240,16 +248,16 @@ pub(crate) async fn create_user(
     // Extract email from userName or emails. RFC 7643 doesn't require
     // userName to be an email, but Vouch keys users by email — a userName
     // with no '@' and no emails[] fallback is rejected below.
-    let email = if user.user_name.contains('@') {
-        user.user_name.clone()
+    let email = if user_name.contains('@') {
+        user_name.to_string()
     } else if let Some(emails) = &user.emails {
         emails
             .iter()
             .find(|e| e.primary)
             .or_else(|| emails.first())
-            .map_or_else(|| user.user_name.clone(), |e| e.value.clone())
+            .map_or_else(|| user_name.to_string(), |e| e.value.clone())
     } else {
-        user.user_name.clone()
+        user_name.to_string()
     };
 
     // Shape check (local part + domain suffix) — domain ownership is
@@ -634,6 +642,12 @@ pub(crate) async fn put_user(
     Path(id): Path<String>,
     ScimJson(user): ScimJson<ScimUser>,
 ) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    let user_name = match required_attribute("userName", user.user_name.as_deref()) {
+        Ok(user_name) => user_name,
+        Err(invalid) => return invalid.into_response(),
+    };
+
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
@@ -648,7 +662,7 @@ pub(crate) async fn put_user(
     };
 
     let email = Email::new(&stored.email);
-    if let Err(invalid) = check_user_name(&email, "userName", &user.user_name) {
+    if let Err(invalid) = check_user_name(&email, "userName", user_name) {
         return invalid.into_response();
     }
     if let Some(emails) = &user.emails {
@@ -1121,7 +1135,7 @@ pub(crate) fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimU
         schemas: vec![urn::USER.to_string()],
         id: Some(user.id.clone()),
         external_id: user.external_id,
-        user_name: user.email.clone(),
+        user_name: Some(user.email.clone()),
         name: user.name.map(|n| ScimName {
             formatted: Some(n),
             family_name: None,

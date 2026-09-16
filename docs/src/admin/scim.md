@@ -144,12 +144,12 @@ Attributes the body leaves out are **cleared**, as RFC 7644 §3.5.1 permits:
 
 | Resource | Attribute | Present | Omitted |
 |----------|-----------|---------|---------|
-| User | `userName` | must be the stored email, or `400 mutability` | `400 invalidValue` (required) |
+| User | `userName` | must be the stored email, or `400 mutability` | `400 invalidSyntax` (required) |
 | User | `emails` | every `value` must be the stored email, or `400 mutability` | left as is |
 | User | `name` | stored (`formatted`, or `givenName` and `familyName` joined) | cleared |
 | User | `externalId` | stored | cleared |
 | User | `active` | stored | set to `true` |
-| Group | `displayName` | stored; empty is `400 invalidValue` | `400 invalidValue` (required) |
+| Group | `displayName` | stored; empty is `400 invalidValue` | `400 invalidSyntax` (required) |
 | Group | `externalId` | stored | cleared |
 | Group | `members` | replaces the whole member set | **every member is removed** |
 
@@ -172,7 +172,8 @@ rejections that happen before the request reaches Vouch's SCIM logic:
 | Cause | Status | `scimType` |
 |-------|--------|------------|
 | Body is not valid JSON | `400` | `invalidSyntax` |
-| Body is JSON but a required attribute is missing or has the wrong type | `400` | `invalidValue` |
+| Body omits a required attribute (`userName`, Group `displayName`) | `400` | `invalidSyntax` |
+| Body is JSON but an attribute has the wrong type or an empty required value | `400` | `invalidValue` |
 | Query parameter has the wrong type (`startIndex=abc`) | `400` | `invalidValue` |
 | `Content-Type` is not JSON (`application/scim+json` and `application/json` both work) | `415` | — |
 | Body over 64 KiB | `413` | — |

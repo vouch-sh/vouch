@@ -2635,10 +2635,10 @@ async fn test_rfc7644_put_user_ignores_read_only_attributes() {
 }
 
 // RFC 7644 §3.5.1: "If an attribute is "required", clients MUST specify the
-// attribute in the PUT request"; RFC 7644 §3.12 Table 9 `invalidValue`: "A
-// required value was missing".
+// attribute in the PUT request"; a body without it "did not conform to the
+// request schema", RFC 7644 §3.12 Table 9 `invalidSyntax`.
 #[tokio::test]
-async fn test_rfc7644_put_user_without_user_name_is_400_invalid_value() {
+async fn test_rfc7644_put_user_without_user_name_is_400_invalid_syntax() {
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-put-required", "test-org").await;
     let auth_header = format!("Bearer {token}");
@@ -2658,7 +2658,7 @@ async fn test_rfc7644_put_user_without_user_name_is_400_invalid_value() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(error["scimType"], "invalidSyntax");
 }
 
 #[tokio::test]
