@@ -350,84 +350,6 @@ async fn create_group_error_unique_string_still_maps_to_500() {
     );
 }
 
-// ============================================================================
-// member_op_error_response — every arm has a test that triggers it
-// ============================================================================
-//
-// Group member operations (add/replace/remove in PATCH, add in POST create)
-// route their errors through `member_op_error_response`. A NUL byte in the
-// `user_id` index is a 400 `invalidValue` client error; every other failure
-// (HPKE decryption, JSON/timestamp parse, DB connection/timeout, exhausted
-// OCC retries) is a 500 infrastructure error — matching
-// `create_scim_group_error_response` so a failed member write never leaves
-// a PATCH/POST returning 200/201 with stale membership.
-
-#[tokio::test]
-async fn member_op_error_infrastructure_maps_to_500() {
-    // A generic infrastructure error (e.g. DB connection refused, HPKE
-    // decrypt failure, JSON parse error) must surface as 500, not 200 OK.
-    let resp = crate::handlers::scim::groups::member_op_error_response(anyhow::anyhow!(
-        "sqlx::Error::PoolTimedOut: queue limit reached"
-    ));
-    assert_eq!(
-        resp.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "infrastructure errors must return 500, not 200"
-    );
-    let body = error_body(resp).await;
-    assert_eq!(body["status"], "500", "SCIM status field must be 500");
-    assert!(
-        body.get("scimType").is_none_or(|v| v.is_null()),
-        "infrastructure errors must not carry a scimType: {body}"
-    );
-    assert_eq!(
-        body["detail"], "Failed to update group members",
-        "detail must not leak internal error strings"
-    );
-}
-
-#[tokio::test]
-async fn member_op_error_invalid_index_value_maps_to_400() {
-    // A NUL-byte index value is a client error (400 invalidValue), not a 500.
-    let err = anyhow::Error::from(crate::db::InvalidIndexValue { field: "user_id" });
-    let resp = crate::handlers::scim::groups::member_op_error_response(err);
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = error_body(resp).await;
-    assert_eq!(body["status"], "400");
-    assert_eq!(body["scimType"], "invalidValue");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("user_id"),
-        "detail must name the offending field: {body}"
-    );
-}
-
-/// An infrastructure error whose message happens to contain "UNIQUE" must
-/// still map to 500, not be misread as a duplicate-member conflict. Member
-/// documents use deterministic IDs, so a unique violation on the primary
-/// key is the concurrent-add idempotency guard — caught inside
-/// `add_scim_group_member` and returned as `Ok(true)`. An error that
-/// escapes to `member_op_error_response` is by definition not that case.
-#[tokio::test]
-async fn member_op_error_unique_string_still_maps_to_500() {
-    let resp = crate::handlers::scim::groups::member_op_error_response(anyhow::anyhow!(
-        "UNIQUE constraint failed: documents.id"
-    ));
-    assert_eq!(
-        resp.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a 'UNIQUE' string must not be misread as a duplicate-member 409"
-    );
-    let body = error_body(resp).await;
-    assert_eq!(body["status"], "500");
-    assert!(
-        body.get("scimType").is_none_or(|v| v.is_null()),
-        "no uniqueness scimType for infrastructure errors: {body}"
-    );
-}
-
 // =========================================================================
 // Advertised-vs-emitted schema guard
 // =========================================================================
@@ -664,6 +586,18 @@ async fn schemas_endpoint_carries_attribute_definitions() {
     assert_eq!(user_name["required"], true);
     assert_eq!(user_name["multiValued"], false);
     assert_eq!(user_name["uniqueness"], "server");
+    // `userName` and `emails` are immutable: Vouch cannot change a user's
+    // email, so it must not advertise them as `readWrite`, which RFC 7644
+    // §3.5.1 says "SHALL replace the existing attribute values".
+    for immutable in ["userName", "emails"] {
+        let attribute = user["attributes"]
+            .as_array()
+            .expect("attributes array")
+            .iter()
+            .find(|a| a["name"] == immutable)
+            .expect("attribute present");
+        assert_eq!(attribute["mutability"], "immutable", "{immutable}");
+    }
 
     let group = resources
         .iter()
@@ -676,4 +610,286 @@ async fn schemas_endpoint_carries_attribute_definitions() {
         .filter_map(|a| a["name"].as_str())
         .collect();
     assert_eq!(group_attr_names, ["displayName", "members"]);
+
+    // `active` is required: it has no absent state, so RFC 7644 §3.5.2.2
+    // makes its removal a `mutability` error rather than an unassigned value.
+    let active = user["attributes"]
+        .as_array()
+        .expect("attributes array")
+        .iter()
+        .find(|a| a["name"] == "active")
+        .expect("active attribute");
+    assert_eq!(active["required"], true);
+
+    // RFC 7643 §7: `uniqueness` "specifies how the service provider enforces
+    // uniqueness"; nothing refuses a second group with the same name.
+    let display_name = group["attributes"]
+        .as_array()
+        .expect("attributes array")
+        .iter()
+        .find(|a| a["name"] == "displayName")
+        .expect("displayName attribute");
+    assert_eq!(display_name["uniqueness"], "none");
+}
+
+// ============================================================================
+// Error bodies for rejections raised before a handler runs
+// ============================================================================
+
+const SCIM_ERROR_URN: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
+
+/// Asserts `response` is a SCIM error with `status` and, when given,
+/// `scim_type`, and returns the parsed body.
+fn assert_scim_error(
+    response: &HttpResponse,
+    status: StatusCode,
+    scim_type: Option<&str>,
+) -> serde_json::Value {
+    assert_eq!(response.status, status, "{}", response.body);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.body).expect("error body is JSON");
+    assert_eq!(error["schemas"], serde_json::json!([SCIM_ERROR_URN]));
+    assert_eq!(error["status"], status.as_str());
+    match scim_type {
+        Some(scim_type) => assert_eq!(error["scimType"], scim_type),
+        None => assert!(error["scimType"].is_null(), "{error}"),
+    }
+    error
+}
+
+// RFC 7644 §3.12: "implementers MUST return the errors in the body of the
+// response in a JSON format", and 400 covers a request that "violates
+// schema"; Table 9 `invalidValue` is "A required value was missing".
+#[tokio::test]
+async fn test_scim_missing_required_attribute_is_400_invalid_value() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-missing-attr", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/scim/v2/Groups",
+        Some(r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/scim+json"),
+        ],
+    )
+    .await;
+
+    let error = assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidValue"));
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("displayName")),
+        "detail names the missing attribute: {error}"
+    );
+}
+
+// RFC 7644 §3.12 Table 9: `invalidSyntax` is "The request body message
+// structure was invalid".
+#[tokio::test]
+async fn test_scim_malformed_json_is_400_invalid_syntax() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-bad-json", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000001",
+        Some("{not json".to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/scim+json"),
+        ],
+    )
+    .await;
+
+    assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidSyntax"));
+}
+
+// RFC 7644 §3.12: every error carries the JSON body, including a body sent
+// with a media type that is not JSON.
+#[tokio::test]
+async fn test_scim_non_json_content_type_keeps_415_with_scim_body() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-bad-ctype", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/scim/v2/Users",
+        Some(r#"{"userName":"a@test-org.example.com"}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "text/plain"),
+        ],
+    )
+    .await;
+
+    assert_scim_error(&response, StatusCode::UNSUPPORTED_MEDIA_TYPE, None);
+}
+
+// RFC 7644 §3.12: the body-size limit's rejection carries the JSON body.
+#[tokio::test]
+async fn test_scim_oversized_body_is_413_with_scim_body() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-too-large", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"{}"}}"#,
+        "a".repeat(128 * 1024)
+    );
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/scim/v2/Groups",
+        Some(body),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/scim+json"),
+        ],
+    )
+    .await;
+
+    assert_scim_error(&response, StatusCode::PAYLOAD_TOO_LARGE, None);
+}
+
+// RFC 7644 §3.12 Table 9 lists `invalidValue` for GET (Section 3.4.2): a
+// query parameter of the wrong type is a value the parameter cannot take.
+#[tokio::test]
+async fn test_scim_unparsable_query_parameter_is_400_invalid_value() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-bad-query", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    for uri in ["/scim/v2/Users?startIndex=abc", "/scim/v2/Groups?count=-1"] {
+        let response =
+            http_request_full(&app, "GET", uri, None, &[("Authorization", &auth_header)]).await;
+        assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidValue"));
+    }
+}
+
+// RFC 7644 §3.12: the method router's 405 carries the JSON body, and the
+// `Allow` header it sets survives.
+#[tokio::test]
+async fn test_scim_unrouted_method_is_405_with_scim_body() {
+    let (app, _state) = test_app().await;
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000001",
+        None,
+        &[],
+    )
+    .await;
+
+    let error = assert_scim_error(&response, StatusCode::METHOD_NOT_ALLOWED, None);
+    assert_eq!(error["detail"], "Method Not Allowed");
+    let allow = response
+        .headers
+        .get(axum::http::header::ALLOW)
+        .and_then(|value| value.to_str().ok())
+        .expect("Allow header");
+    assert!(allow.contains("PUT"), "Allow lists PUT: {allow}");
+}
+
+// RFC 7644 §3.12: 404 is "Specified resource (e.g., User) or endpoint does
+// not exist."
+#[tokio::test]
+async fn test_scim_unknown_endpoint_is_404_with_scim_body() {
+    let (app, _state) = test_app().await;
+
+    for uri in ["/scim/v2/Bogus", "/scim/v2/Users/a/b"] {
+        let response = http_request_full(&app, "GET", uri, None, &[]).await;
+        assert_scim_error(&response, StatusCode::NOT_FOUND, None);
+    }
+}
+
+// RFC 7644 §3.12: the rate limiter's 429 carries the JSON body, and its
+// `Retry-After` header survives.
+#[tokio::test]
+async fn test_scim_rate_limited_request_is_429_with_scim_body() {
+    let (app, _state) = test_app().await;
+
+    let mut limited = None;
+    for _ in 0..100 {
+        let response =
+            http_request_full(&app, "GET", "/scim/v2/ServiceProviderConfig", None, &[]).await;
+        if response.status == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(response);
+            break;
+        }
+    }
+    let response = limited.expect("the general rate limiter answers 429 within 100 requests");
+
+    assert_scim_error(&response, StatusCode::TOO_MANY_REQUESTS, None);
+    assert!(
+        response
+            .headers
+            .contains_key(axum::http::header::RETRY_AFTER),
+        "Retry-After survives the body rewrite"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_and_org_api_share_one_rate_limit_bucket() {
+    // SCIM sits in its own router so only it gets SCIM error bodies; both
+    // routers must still draw on the one per-IP bucket they shared before.
+    let (app, _state) = test_app().await;
+
+    let mut limited = false;
+    for _ in 0..100 {
+        let response =
+            http_request_full(&app, "GET", "/scim/v2/ServiceProviderConfig", None, &[]).await;
+        if response.status == StatusCode::TOO_MANY_REQUESTS {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "setup: SCIM traffic exhausts the bucket");
+
+    let response = http_request_full(&app, "GET", "/api/v1/org/scim-tokens", None, &[]).await;
+    assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_non_scim_routes_keep_their_own_error_bodies() {
+    // The SCIM error middleware is scoped to /scim/v2/*; the org API sharing
+    // its rate limiter must not start answering in SCIM format.
+    let (app, _state) = test_app().await;
+
+    let response = http_request_full(&app, "PUT", "/api/v1/org/audit-events", None, &[]).await;
+
+    assert_eq!(response.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(
+        !response.body.contains(SCIM_ERROR_URN),
+        "non-SCIM 405 must not carry a SCIM body: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_scim_handler_json_errors_pass_through_unchanged() {
+    // A handler's own SCIM error already is JSON; the middleware must not
+    // replace its detail or scimType.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-passthrough", "test-org").await;
+
+    let response = http_request_full(
+        &app,
+        "GET",
+        &format!("/scim/v2/Users?filter={}", "a".repeat(1100)),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    let error = assert_scim_error(&response, StatusCode::BAD_REQUEST, Some("invalidFilter"));
+    assert_eq!(error["detail"], "Filter exceeds maximum length");
 }

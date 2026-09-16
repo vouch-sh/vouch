@@ -348,3 +348,39 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
         "Error must indicate invalid filter, got scimType: {scim_type}"
     );
 }
+
+// RFC 7644 §3.10: "Clients MAY omit core schema attribute URN prefixes", so a
+// filter naming the fully qualified attribute matches the same resources.
+#[tokio::test]
+async fn test_rfc7644_filter_accepts_core_urn_qualified_attribute() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-urn-filter", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "qualified@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Qualified"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    for uri in [
+        "/scim/v2/Users?filter=urn%3Aietf%3Aparams%3Ascim%3Aschemas%3Acore%3A2.0%3AUser%3AuserName%20eq%20%22qualified%40test-org.example.com%22",
+        "/scim/v2/Groups?filter=URN%3Aietf%3Aparams%3Ascim%3Aschemas%3Acore%3A2.0%3AGroup%3AdisplayName%20eq%20%22Qualified%22",
+    ] {
+        let (status, body) = http_get(&app, uri, &[("Authorization", &auth_header)]).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let listed: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(listed["totalResults"], 1, "{uri}: {body}");
+    }
+}

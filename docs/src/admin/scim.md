@@ -79,16 +79,21 @@ across it:
 
 | Resource | Attribute path | `add` / `replace` | `remove` |
 |----------|----------------|-------------------|----------|
-| User | `active` | sets it; a non-boolean is rejected | rejected |
+| User | `active` | sets it; a non-boolean is rejected | rejected (`mutability`) |
 | User | `name.formatted`, `displayName` | sets the stored name | clears it |
 | User | `externalId` | sets it | clears it |
-| Group | `displayName` | sets it; empty is rejected | rejected |
+| User | `userName`, `emails` (including `emails[type eq "work"].value`) | accepted only when the value is the user's stored email; any other value is rejected (`mutability`) | rejected (`mutability`) |
+| Group | `displayName` | sets it; empty is rejected | rejected (`mutability`) |
 | Group | `externalId` | sets it | clears it |
-| Group | `members` | `add` appends members, `replace` swaps the whole set | removes the members named by `members[value eq "<user-id>"]` or by a `value` list |
+| Group | `members` | `add` adds members; `replace` swaps the whole set | removes every member |
+| Group | `members[value eq "<user-id>"]` | `replace` swaps that member for the one in `value`; `add` is rejected (`invalidPath`) | removes that member |
+
+Paths may carry the core schema URN (`urn:ietf:params:scim:schemas:core:2.0:User:userName`), and
+attribute names are matched case-insensitively, as RFC 7644 requires. List filters accept the same
+qualified names.
 
 An operation with no `path` — a value object such as `{"op": "replace", "value": {"active": false}}` —
-sets every attribute in the table the object carries. Attribute names are matched
-case-insensitively, as RFC 7643 requires.
+sets every attribute in the table the object carries, Group `members` included.
 
 **Any other attribute path is ignored, and the request still returns `200`.** Okta and Entra push
 attributes Vouch does not store (`title`, `department`, `name.givenName`, enterprise extensions);
@@ -96,20 +101,88 @@ rejecting those would fail an entire provisioning sync over data the directory n
 consequence for you: a `200` does not by itself prove Vouch stored what the IdP sent. The response
 body is the resource as stored — check it when an attribute appears not to sync.
 
-The two removals marked rejected return `400` with `"scimType": "invalidValue"`, because the
-attribute has no absent state to fall back to: `active` on a User (either default would change the
-user's access on its own) and `displayName` on a Group (RFC 7643 requires it). A rejected operation
-leaves the record untouched — Vouch writes it only once every operation in the request is accepted,
-membership included, so a `400` means nothing in the request was applied.
+`userName` and `emails` are advertised as `immutable` in `/scim/v2/Schemas`: Vouch keys a user by
+their email and cannot change it. An IdP that sends the unchanged address on a routine sync succeeds
+(the comparison ignores case); one that sends a different address, removes it, or clears `emails`
+gets `400` with `"scimType": "mutability"`. If a user's email changes at the IdP, de-provision and
+re-provision them.
 
-A `remove` of `members` that names nothing — no `members[value eq "…"]` filter and no `value` list —
-is ignored rather than emptying the group. RFC 7644 reads that as "remove every member"; emptying a
-group changes who has access, and an operation that names no member is more often a malformed
-request than an intended purge. Send an explicit `value` list, or `replace` with the set you want.
+`active` is advertised as required. A user has no state without it, so removing it returns `400`
+`mutability` rather than silently changing the user's access; RFC 7644 gives removing a required
+attribute that error, and it applies to Group `displayName` the same way.
+
+**A `remove` of `members` with no filter and no `value` list empties the group**, as RFC 7644
+defines it. Entra's form — `path: "members"` with the members to drop in `value` — removes only
+those members.
+
+Other requests rejected with `400`:
+
+| Request | `scimType` |
+|---------|------------|
+| `remove` with no `path` | `noTarget` |
+| `replace` of `members[value eq "<user-id>"]` when that user is not a member | `noTarget` |
+| A `members` filter other than `value eq "<user-id>"` | `invalidFilter` |
+| `add` or `replace` with no `value`, or a member entry without a string `value` | `invalidValue` |
+
+**A PATCH is all or nothing.** Every operation is applied to the stored resource in order and the
+result — attributes and membership together — is written in one transaction, so a `400` or `500`
+means nothing in the request was applied. A request that changes nothing (re-adding a current
+member, re-sending the current `externalId`) writes nothing and leaves `meta.lastModified` as it
+was.
 
 Setting `active` to `false` is the one attribute update with effects beyond the record: it
 invalidates the user's sessions, revokes their SSH certificates, and clears their GitHub refresh
-token, the same way de-provisioning does.
+token, the same way de-provisioning does. Those revocations run before the record is written, so a
+deactivation whose write then fails has still revoked access; retrying the request completes it.
+
+## Replacing Resources (PUT)
+
+`PUT /scim/v2/Users/{id}` and `PUT /scim/v2/Groups/{id}` replace the resource with the body and
+return `200` with the stored resource. PUT never creates: an id that does not exist returns `404`.
+
+Attributes the body leaves out are **cleared**, as RFC 7644 §3.5.1 permits:
+
+| Resource | Attribute | Present | Omitted |
+|----------|-----------|---------|---------|
+| User | `userName` | must be the stored email, or `400 mutability` | `400 invalidValue` (required) |
+| User | `emails` | every `value` must be the stored email, or `400 mutability` | left as is |
+| User | `name` | stored (`formatted`, or `givenName` and `familyName` joined) | cleared |
+| User | `externalId` | stored | cleared |
+| User | `active` | stored | set to `true` |
+| Group | `displayName` | stored; empty is `400 invalidValue` | `400 invalidValue` (required) |
+| Group | `externalId` | stored | cleared |
+| Group | `members` | replaces the whole member set | **every member is removed** |
+
+`id`, `meta`, and `schemas` in the body are ignored.
+
+Two rows change access, so check your IdP sends them:
+
+- A User PUT without `active` makes the user active. A PUT with `"active": false` deactivates the
+  user with the same effects as the PATCH described above, including the refusal to deactivate
+  the organization's last active admin.
+- A Group PUT without `members` empties the group: a PUT states the whole resource, so an absent
+  member list means none.
+
+## Error Responses
+
+Every error from `/scim/v2/*` has the RFC 7644 §3.12 JSON body
+(`"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"]`, `status` as a string), including
+rejections that happen before the request reaches Vouch's SCIM logic:
+
+| Cause | Status | `scimType` |
+|-------|--------|------------|
+| Body is not valid JSON | `400` | `invalidSyntax` |
+| Body is JSON but a required attribute is missing or has the wrong type | `400` | `invalidValue` |
+| Query parameter has the wrong type (`startIndex=abc`) | `400` | `invalidValue` |
+| `Content-Type` is not JSON (`application/scim+json` and `application/json` both work) | `415` | — |
+| Body over 64 KiB | `413` | — |
+| Resource id that does not exist, including one that is not a UUID | `404` | — |
+| Path that is not a SCIM endpoint | `404` | — |
+| Method the endpoint does not support (`Allow` lists the supported ones) | `405` | — |
+| Rate limit exceeded (`Retry-After` is set) | `429` | — |
+
+SCIM and the `/api/v1/org/*` API share one rate-limit bucket per client IP (20 requests burst,
+1 per second).
 
 ## De-Provisioning Behavior
 
@@ -129,7 +202,7 @@ Nothing waits for session expiry: access ends when the IdP sends the delete.
 
 SCIM endpoints require bearer token authentication:
 
-**Endpoint**: every `/scim/v2/*` route — `Users` and `Groups`, with `GET`, `POST`, `PATCH`, and `DELETE`.
+**Endpoint**: every `/scim/v2/*` route — `Users` and `Groups`, with `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
 
 **Authentication**:
 - Bearer token in the `Authorization` header
@@ -139,7 +212,7 @@ SCIM endpoints require bearer token authentication:
 
 ```bash
 # Example SCIM request
-curl -X DELETE https://auth.example.com/scim/v2/Users/usr_abc123 \
+curl -X DELETE https://auth.example.com/scim/v2/Users/0192f1a8-7c3e-7d4a-9b2e-5f6a7b8c9d0e \
   -H "Authorization: Bearer vouch_scim_..." \
   -H "Content-Type: application/scim+json"
 ```
@@ -162,6 +235,11 @@ responses automatically; no operator action is needed unless 503s persist,
 which indicates sustained contention on the organization (for example, a
 domain-management script running during a bulk sync).
 
+Group writes behave the same way per group: two PATCH or PUT requests for one
+group at the same moment collide on the group record, and one retries against
+the other's result so neither loses the other's member changes. Exhausted
+retries return the same `503` with `Retry-After`.
+
 ## SCIM Audit Logging
 
 All SCIM operations are logged for compliance and security monitoring:
@@ -169,10 +247,12 @@ All SCIM operations are logged for compliance and security monitoring:
 | Operation | Resource Type | Logged Data |
 |-----------|--------------|-------------|
 | `create` | `User` | resource_id, scim_token_id, timestamp |
-| `update` | `User` | resource_id, scim_token_id, timestamp |
+| `update` | `User` | resource_id, scim_token_id, timestamp (PATCH) |
+| `replace` | `User` | resource_id, scim_token_id, timestamp (PUT) |
 | `delete` | `User` | resource_id, scim_token_id, timestamp |
 | `create` | `Group` | resource_id, display_name, scim_token_id, timestamp |
-| `update` | `Group` | resource_id, scim_token_id, timestamp |
+| `update` | `Group` | resource_id, scim_token_id, timestamp (PATCH) |
+| `replace` | `Group` | resource_id, scim_token_id, timestamp (PUT) |
 | `delete` | `Group` | resource_id, scim_token_id, timestamp |
 
 ## SCIM vs Manual Enrollment

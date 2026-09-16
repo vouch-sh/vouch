@@ -11,6 +11,7 @@ use super::store::DocumentStore;
 use crate::error::ServiceError;
 use anyhow::Result;
 use jiff::Timestamp;
+use std::collections::BTreeSet;
 
 // ============================================================================
 // SCIM Scopes
@@ -579,11 +580,17 @@ fn match_filter_value(value: &str, filter: &ScimFilter, case_exact: bool) -> boo
 ///
 /// Returns `None` if the user doesn't exist OR belongs to a different
 /// org. Treating cross-org as not-found avoids leaking existence.
+///
+/// Every id Vouch issues is a UUID, so an id that does not parse as one
+/// names no resource and returns `None` without a store read.
 pub async fn get_scim_user(
     store: &DocumentStore,
     user_id: &str,
     org_id: &str,
 ) -> Result<Option<ScimUserRecord>> {
+    if uuid::Uuid::try_parse(user_id).is_err() {
+        return Ok(None);
+    }
     let Some(doc) = store.get::<UserDoc>(user_id).await? else {
         return Ok(None);
     };
@@ -1099,28 +1106,57 @@ impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
     }
 }
 
-/// Create a new SCIM group bound to the caller's org.
+/// Create a SCIM group bound to the caller's org, with its members.
+///
+/// The group and every membership row commit in one transaction, so a failed
+/// member insert (a NUL byte in a user id, say) leaves no group behind for a
+/// retried POST to duplicate. Repeated user ids collapse to one row.
+/// Cross-org user ids become inert references, filtered out when members are
+/// read.
 pub async fn create_scim_group(
     store: &DocumentStore,
     org_id: &str,
     display_name: &str,
     external_id: Option<&str>,
+    members: &[String],
 ) -> Result<ScimGroupRecord> {
-    let doc = ScimGroupDoc {
-        org_id: org_id.to_string(),
-        display_name: display_name.to_string(),
-        external_id: external_id.map(String::from),
-    };
-    let result = store.insert(&doc).await?;
-    Ok(ScimGroupRecord::from(result))
+    let members: BTreeSet<&str> = members.iter().map(String::as_str).collect();
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let group = tx
+            .insert(&ScimGroupDoc {
+                org_id: org_id.to_string(),
+                display_name: display_name.to_string(),
+                external_id: external_id.map(String::from),
+            })
+            .await?;
+        for user_id in &members {
+            tx.insert_with_id(
+                &deterministic_group_member_id(&group.id, user_id),
+                &ScimGroupMemberDoc {
+                    group_id: group.id.clone(),
+                    user_id: (*user_id).to_string(),
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(ScimGroupRecord::from(group))
+    })
 }
 
 /// Get a SCIM group by ID, scoped to the caller's org.
+///
+/// Every id Vouch issues is a UUID, so an id that does not parse as one
+/// names no resource and returns `None` without a store read.
 pub async fn get_scim_group(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
 ) -> Result<Option<ScimGroupRecord>> {
+    if uuid::Uuid::try_parse(id).is_err() {
+        return Ok(None);
+    }
     let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
         return Ok(None);
     };
@@ -1267,58 +1303,134 @@ fn apply_scim_group_filter(
     Ok(records)
 }
 
-/// Update a SCIM group, scoped to the caller's org.
+/// A SCIM group's attributes and member user ids, as [`update_scim_group`]
+/// hands them to an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScimGroupState {
+    pub display_name: String,
+    pub external_id: Option<String>,
+    /// User ids of the group's membership rows, including cross-org ids that
+    /// reads filter out.
+    pub members: BTreeSet<String>,
+}
+
+/// Failure modes of [`update_scim_group`].
+#[derive(Debug)]
+pub enum ScimGroupUpdateError<E> {
+    /// The edit rejected the update; nothing was written.
+    Rejected(E),
+    /// Another transaction changed the group while this one was editing it.
+    OccConflict,
+    Other(anyhow::Error),
+}
+
+impl<E> From<anyhow::Error> for ScimGroupUpdateError<E> {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+impl<E> std::fmt::Display for ScimGroupUpdateError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(_) => f.write_str("SCIM group update rejected"),
+            Self::OccConflict => f.write_str("SCIM group changed during update"),
+            Self::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl<E> super::pool::RetryableError for ScimGroupUpdateError<E> {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Rejected(_) => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Apply `edit` to a SCIM group's attributes and members in one transaction,
+/// scoped to the caller's org.
 ///
-/// Both fields are written through, so `external_id: None` clears the stored
-/// value — the caller passes the group's full desired state, as it does for
-/// [`update_scim_user`].
+/// RFC 7644 §3.5.2: "A PATCH request, regardless of the number of operations,
+/// SHALL be treated as atomic." `edit` runs against the stored state and the
+/// result is written whole or not at all: a rejection writes nothing, and the
+/// attribute change and every membership insert and delete commit together.
 ///
-/// Returns `Ok(false)` if the group doesn't exist, belongs to a different org,
-/// or if a concurrent org-ownership change races with the modify loop and causes
-/// the mutation to be skipped. `Ok(true)` on a successful update.
+/// Only the difference is written, so an edit that changes nothing writes
+/// nothing and leaves `meta.lastModified` alone (RFC 7644 §3.5.2.1). Any
+/// change version-bumps the group document first; concurrent updates of the
+/// same group collide on it and retry against the winner's state, so neither
+/// loses the other's members. `edit` is `Fn` because a retry runs it again.
 ///
-/// Uses optimistic concurrency (`store.modify`) so concurrent field mutations
-/// do not silently overwrite each other. The org-scope check is re-evaluated
-/// inside the closure on each OCC retry.
-pub async fn update_scim_group(
+/// Returns `Ok(false)` if the group doesn't exist or belongs to a different
+/// org.
+pub async fn update_scim_group<E, F>(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
-    display_name: &str,
-    external_id: Option<&str>,
-) -> Result<bool> {
-    // Pre-check: return not-found quickly without entering the modify loop
-    // if the group is absent or belongs to a different org.
-    let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id != org_id {
+    edit: F,
+) -> std::result::Result<bool, ScimGroupUpdateError<E>>
+where
+    F: Fn(&mut ScimGroupState) -> std::result::Result<(), E>,
+{
+    if uuid::Uuid::try_parse(id).is_err() {
         return Ok(false);
     }
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id != org_id {
+            return Ok(false);
+        }
+        let member_docs = tx.find_all::<ScimGroupMemberDoc>("group_id", id).await?;
 
-    // Owned copies for the Fn closure.
-    let display_name_owned = String::from(display_name);
-    let external_id_owned = external_id.map(String::from);
+        let stored = ScimGroupState {
+            display_name: doc.data.display_name.clone(),
+            external_id: doc.data.external_id.clone(),
+            members: member_docs
+                .iter()
+                .map(|member| member.data.user_id.clone())
+                .collect(),
+        };
+        let mut edited = stored.clone();
+        edit(&mut edited).map_err(ScimGroupUpdateError::Rejected)?;
+        if edited == stored {
+            return Ok(true);
+        }
 
-    let applied = std::sync::atomic::AtomicBool::new(false);
-    let found = store
-        .modify::<ScimGroupDoc, _>(id, |data| {
-            // Reset at the top of every attempt: if an earlier OCC retry set
-            // this flag but then lost the version race, the closure runs again
-            // and org ownership must be re-evaluated from scratch.
-            applied.store(false, std::sync::atomic::Ordering::Relaxed);
-            // Re-check org ownership inside the closure so a concurrent
-            // org migration cannot smuggle a cross-org write through a version win.
-            if data.org_id != org_id {
-                return;
+        let updated = ScimGroupDoc {
+            org_id: doc.data.org_id.clone(),
+            display_name: edited.display_name.clone(),
+            external_id: edited.external_id.clone(),
+        };
+        if !tx.compare_and_update(id, doc.version, &updated).await? {
+            return Err(ScimGroupUpdateError::OccConflict);
+        }
+        // Every row for a removed user goes, including legacy rows written
+        // before membership ids were deterministic.
+        for member in &member_docs {
+            if !edited.members.contains(&member.data.user_id) {
+                tx.delete(&member.id).await?;
             }
-            data.display_name = display_name_owned.clone();
-            data.external_id = external_id_owned.clone();
-            applied.store(true, std::sync::atomic::Ordering::Relaxed);
-        })
-        .await?;
+        }
+        for user_id in edited.members.difference(&stored.members) {
+            tx.insert_with_id(
+                &deterministic_group_member_id(id, user_id),
+                &ScimGroupMemberDoc {
+                    group_id: id.to_string(),
+                    user_id: user_id.clone(),
+                },
+            )
+            .await?;
+        }
 
-    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
+        tx.commit().await?;
+        Ok(true)
+    })
 }
 
 /// Delete a SCIM group atomically, scoped to the caller's org.
@@ -1348,11 +1460,9 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
 
 /// Derive a deterministic document ID from `(group_id, user_id)`.
 ///
-/// Two concurrent `add_scim_group_member` calls for the same group and user
-/// produce the same document ID, so the losing `insert_with_id` fails on the
-/// `documents` PRIMARY KEY constraint. This eliminates the check-then-insert
-/// TOCTOU race without requiring elevated transaction isolation or advisory
-/// locks.
+/// A membership row for a given group and user always has the same document
+/// ID, so no interleaving of writers can store the pair twice: a second
+/// insert fails on the `documents` PRIMARY KEY constraint instead.
 ///
 /// Same SHA-256-with-domain-separator construction as
 /// `deterministic_org_id` (`db/enrollment.rs`), [`deterministic_user_id`]
@@ -1370,111 +1480,6 @@ fn deterministic_group_member_id(group_id: &str, user_id: &str) -> String {
     ctx.update(b"\0");
     ctx.update(user_id.as_bytes());
     hex::encode(ctx.finish().as_ref())
-}
-
-/// Add a member to a SCIM group, scoped to the caller's org.
-///
-/// Verifies the group is in the caller's org (single indexed lookup,
-/// not per-user) and then inserts the membership row. Cross-org
-/// `user_id` values become inert references — they are filtered out
-/// when reading the group's members.
-///
-/// Returns `Ok(false)` if the group doesn't exist OR belongs to a
-/// different org.
-///
-/// # Race safety
-///
-/// The membership document ID is derived deterministically from
-/// `(group_id, user_id)` via [`deterministic_group_member_id`] and inserted
-/// with [`DocumentStore::insert_with_id`]. Two concurrent
-/// `add_scim_group_member` calls for the same pair therefore compute the
-/// same primary key: the winning insert commits, and the loser's insert
-/// fails with a primary-key violation (`is_unique_violation`), which is
-/// treated as idempotent success (`Ok(true)`).
-///
-/// This closes the check-then-act TOCTOU window that existed when the
-/// insert used a fresh random UUID v7: two transactions could both observe
-/// "no membership exists" and then commit distinct rows, because neither
-/// `SERIALIZABLE` isolation nor a `SELECT FOR UPDATE` catches two concurrent
-/// inserts of *distinct* primary keys. The deterministic ID makes the keys
-/// collide, forcing serialization at the `documents` PRIMARY KEY constraint.
-///
-/// The `find_by_indexes` pre-check is retained as a fast path for the common
-/// "membership already exists" case — including legacy rows created before
-/// deterministic IDs (which carry random UUID v7 IDs and would not collide
-/// with the deterministic ID). The pre-check alone does not close the race
-/// (it runs outside the insert transaction); the deterministic PRIMARY KEY
-/// collision is the real guard.
-///
-/// `insert_with_id` is wrapped in `with_dsql_retry!` (`db/store.rs`).
-/// `23505` (unique violation) is not retryable, so it surfaces here and is
-/// mapped to idempotent success. Under Aurora DSQL's optimistic concurrency
-/// control, the losing concurrent transaction first receives a serialization
-/// error (`40001`), which `with_dsql_retry!` retries; on retry the insert
-/// collides with the already-committed winner row (`23505`), which is then
-/// caught here. Only one transaction wins.
-pub async fn add_scim_group_member(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_id: &str,
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    // Fast path: if a membership already exists (including legacy rows
-    // created before deterministic IDs, which carry random UUID v7 IDs and
-    // would not collide with the deterministic ID below), return idempotent
-    // success without attempting an insert.
-    let existing = store
-        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
-        .await?;
-    if !existing.is_empty() {
-        return Ok(true);
-    }
-
-    // Deterministic ID: two concurrent adds for the same (group_id, user_id)
-    // compute the same primary key, so the losing insert fails with a
-    // unique/primary-key violation. The index pre-check above does not close
-    // the race (it runs outside the insert transaction), but the deterministic
-    // PRIMARY KEY collision does.
-    let member_id = deterministic_group_member_id(group_id, user_id);
-    let doc = ScimGroupMemberDoc {
-        group_id: group_id.to_string(),
-        user_id: user_id.to_string(),
-    };
-
-    match store.insert_with_id(&member_id, &doc).await {
-        Ok(_) => Ok(true),
-        Err(e) if super::pool::is_unique_violation(&e) => Ok(true),
-        Err(e) => Err(e),
-    }
-}
-
-/// Remove a member from a SCIM group, scoped to the caller's org.
-///
-/// Returns `Ok(false)` if the group doesn't exist, belongs to a
-/// different org, or the user is not a member.
-pub async fn remove_scim_group_member(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_id: &str,
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    let existing = store
-        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
-        .await?;
-
-    if let Some(doc) = existing.into_iter().next() {
-        store.delete(&doc.id).await?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 /// Get all members of a SCIM group, scoped to the caller's org.
@@ -1509,44 +1514,6 @@ pub async fn get_scim_group_members(
 
     users.sort_by(|a, b| a.email.cmp(&b.email));
     Ok(Some(users))
-}
-
-/// Replace all members of a SCIM group atomically, scoped to the
-/// caller's org.
-///
-/// Verifies the group is in the caller's org (single indexed lookup,
-/// not per-user). Cross-org `user_id` values in `user_ids` become
-/// inert references that are filtered out at read time.
-///
-/// Returns `Ok(false)` if the group doesn't exist OR belongs to a
-/// different org.
-pub async fn replace_scim_group_members(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_ids: &[String],
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    crate::with_dsql_retry!(async {
-        let mut tx = store.begin().await?;
-
-        tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
-            .await?;
-
-        for user_id in user_ids {
-            let doc = ScimGroupMemberDoc {
-                group_id: group_id.to_string(),
-                user_id: user_id.clone(),
-            };
-            tx.insert(&doc).await?;
-        }
-
-        tx.commit().await?;
-        Ok(true)
-    })
 }
 
 #[cfg(test)]
