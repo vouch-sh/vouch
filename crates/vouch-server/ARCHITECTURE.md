@@ -167,9 +167,9 @@ code, challenge or jti exists. Preserve that property when adding a claim primit
 `ClientAuthProof` has four variants; the no-auth one has two named constructors.
 `NoClientAuth::for_public_client` returns an error if the client is registered with any
 `token_endpoint_auth_method` other than `None`, so a confidential client cannot use the
-no-auth arm. `NoClientAuth::internal_endpoint` covers the four flows where the server is
-both issuer and client: browser login, enrollment callbacks, device polling, and the
-certification bypass. **Adding a caller to `internal_endpoint` is an audit-relevant
+no-auth arm. `NoClientAuth::internal_endpoint` covers the flows where the server is
+both issuer and client: browser login, enrollment callbacks, and the certification
+bypass. **Adding a caller to `internal_endpoint` is an audit-relevant
 change** — grep for it before merging.
 
 `SenderConstraintProof::validate` checks three registered requirements: FAPI 2.0
