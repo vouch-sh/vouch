@@ -390,7 +390,6 @@ oidc-core-1_0#3.1.2.6#864d8636	MUST NOT	If the Redirection URI is invalid, the A
 oidc-core-1_0#3.1.2.6#97d0f0eb	MUST	REQUIRED if the Authorization Request included the "state" parameter.
 oidc-core-1_0#3.1.2.6#ec9e8fe1	SHOULD NOT	Other parameters SHOULD NOT be returned.
 oidc-core-1_0#3.1.2.7#601bd222	MUST	When using the Authorization Code Flow, the Client MUST validate the response according to RFC 6749, especially Sections 4.1.2 and 10.12.
-oidc-core-1_0#3.1.3.1#3f3ba9e3	MUST	If the Client is a Confidential Client, then it MUST authenticate to the Token Endpoint using the authentication method registered for its "client_id", as descr
 oidc-core-1_0#3.1.3.2#1e5f8d00	MUST	The Authorization Server MUST validate the Token Request as follows: o Ensure the Authorization Code was issued to the authenticated Client.
 oidc-core-1_0#3.1.3.2#81faf28f	MUST	The Authorization Server MUST validate the Token Request as follows: o If possible, verify that the Authorization Code has not been previously used.
 oidc-core-1_0#3.1.3.2#af35bfb8	MUST	The Authorization Server MUST validate the Token Request as follows: o Ensure that the "redirect_uri" parameter value is identical to the "redirect_uri" paramet

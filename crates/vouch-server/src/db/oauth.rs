@@ -1476,13 +1476,16 @@ pub async fn revoke_oauth_client_secret(
             .count();
 
         // Floor guard: at least one *other* active secret must remain.
-        // FAPI clients are exempt: secret minting is blocked for every FAPI
-        // profile and `authenticate_client` refuses a secret from a FAPI
-        // client at every secret-verifying endpoint, so any remaining rows
-        // are dead weight from before those guards; the floor would pin them
-        // forever instead of protecting a usable credential.
-        let fapi = client_doc.data.fapi_profile != FapiProfile::None;
-        if other_active_count == 0 && !fapi {
+        // Exempt are clients whose secrets `authenticate_client` never
+        // accepts: FAPI clients, and clients not registered for a
+        // `client_secret_*` method. Their rows are dead, and the floor would
+        // pin them instead of protecting a usable credential.
+        let secret_usable = client_doc
+            .data
+            .token_endpoint_auth_method
+            .uses_client_secret()
+            && client_doc.data.fapi_profile == FapiProfile::None;
+        if other_active_count == 0 && secret_usable {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",

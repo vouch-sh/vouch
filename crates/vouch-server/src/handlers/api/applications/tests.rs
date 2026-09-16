@@ -3092,6 +3092,265 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
     );
 }
 
+// OIDC Core 1.0 §3.1.3.1: a confidential client "MUST authenticate to the
+// Token Endpoint using the authentication method registered for its
+// "client_id"". A non-FAPI `private_key_jwt` client has no secret method,
+// so the rotation endpoint refuses to mint one.
+#[tokio::test]
+async fn test_add_secret_rejects_non_fapi_private_key_jwt_service_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-service-secret@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Service,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should be minted for a non-FAPI private_key_jwt client, got {secrets:?}"
+    );
+}
+
+// The refusal keys on the registered method, not `application_type`: a
+// native app registered for `private_key_jwt` is refused the same way.
+#[tokio::test]
+async fn test_add_secret_rejects_non_fapi_private_key_jwt_native_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-native-secret@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Native,
+            redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
+            grant_types: Some(vec!["authorization_code".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should be minted for a non-FAPI native private_key_jwt client, got {secrets:?}"
+    );
+}
+
+// RFC 8705 §2: mTLS clients authenticate with a certificate, and
+// `authenticate_client` never compares a secret for them, so the rotation
+// endpoint refuses to mint one.
+#[tokio::test]
+async fn test_add_secret_rejects_non_fapi_mtls_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "mtls-nonfapi-secret@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "body: {body}");
+
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    assert!(
+        secrets.is_empty(),
+        "no secret rows should be minted for a non-FAPI mTLS client, got {secrets:?}"
+    );
+}
+
+// OIDC Core 1.0 §3.1.3.1, end to end: rotation refuses a non-FAPI
+// `private_key_jwt` client, and a secret row such a client already holds
+// does not authenticate it at `/oauth/token`.
+#[tokio::test]
+async fn test_pkjwt_secret_downgrade_blocked_e2e() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-e2e@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+
+    // (a) Rotation is refused for a non-FAPI `private_key_jwt` Service client.
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Service,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{}/secrets", client.app_id),
+        r#"{}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rotation body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "no_secret", "rotation body: {body}");
+
+    // (b) A secret row the client already holds does not authenticate it.
+    let stray = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type: crate::db::OAuthClientType::Service,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: None,
+            with_secret: true, // a secret row the registered method never uses
+            ..Default::default()
+        },
+    )
+    .await;
+    let basic = format!(
+        "Basic {}",
+        STANDARD.encode(format!("{}:{}", stray.client_id, stray.client_secret))
+    );
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &basic)],
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a stray secret must not authenticate a private_key_jwt client at /oauth/token: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert!(
+        json.get("access_token").is_none(),
+        "no access_token may be issued for a private_key_jwt client using a shared secret: {body}"
+    );
+    assert_eq!(
+        json["error"], "invalid_client",
+        "the rejection must surface as RFC 6749 §5.2 invalid_client: {body}"
+    );
+}
+
 // RFC 8252 §8.4: "Except when using a mechanism like Dynamic Client
 // Registration [RFC7591] to provision per-instance secrets, native apps are
 // classified as public clients". A native client holding a registered
@@ -3398,6 +3657,62 @@ async fn test_delete_last_secret_allowed_for_private_key_jwt_fapi_client() {
     assert!(
         secrets.iter().all(|s| !s.is_valid(&now)),
         "the dead secret must be revoked, got {secrets:?}"
+    );
+}
+
+// A non-FAPI mTLS client's secret row is never compared (`authenticate_client`
+// returns through the certificate branch), so the last-secret floor does not
+// pin it.
+#[tokio::test]
+async fn test_delete_last_secret_allowed_for_non_fapi_mtls_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "api-mtls-nonfapi-del-last@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
+            fapi_profile: None,
+            with_secret: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let secret_id = json["secrets"][0]["id"].as_str().expect("secret id");
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a non-FAPI mTLS client's last secret must be deletable, body: {body}"
     );
 }
 

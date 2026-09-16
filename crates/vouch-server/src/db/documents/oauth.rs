@@ -207,6 +207,18 @@ impl TokenEndpointAuthMethod {
         }
     }
 
+    /// Returns `true` for the methods whose credential is a `client_secret`.
+    ///
+    /// OIDC Core 1.0 §9: `client_secret_basic` and `client_secret_post` are
+    /// for "Clients that have received a "client_secret" value from the
+    /// Authorization Server". Every other method presents a key, a
+    /// certificate, or nothing, so a secret row on such a client is never a
+    /// credential. `client_secret_jwt` is not registrable here.
+    #[must_use]
+    pub fn uses_client_secret(&self) -> bool {
+        matches!(self, Self::ClientSecretBasic | Self::ClientSecretPost)
+    }
+
     /// Returns `true` for the auth methods FAPI 2.0 clients may use:
     /// `private_key_jwt` (client-assertion signing) or mTLS
     /// (`tls_client_auth`, `self_signed_tls_client_auth`).

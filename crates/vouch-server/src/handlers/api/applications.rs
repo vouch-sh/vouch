@@ -189,9 +189,7 @@ pub(crate) async fn create_application_api(
         )
     })?;
 
-    let client_secret = if client.token_endpoint_auth_method
-        == db::TokenEndpointAuthMethod::ClientSecretBasic
-    {
+    let client_secret = if client.token_endpoint_auth_method.uses_client_secret() {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -518,30 +516,32 @@ pub(crate) async fn add_secret_api(
     // client secrets).
     let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    // The registered auth method decides whether a client holds a secret, not
-    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
-    // "Except when using a mechanism like Dynamic Client Registration
-    // [RFC7591] to provision per-instance secrets, native apps are classified
-    // as public clients". A public client (`none`) has no secret to rotate;
-    // FAPI clients are refused by the `is_fapi()` gate below.
-    if client.client_type() != crate::db::ClientType::Confidential {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "no_secret",
-            "This client does not use client secrets",
-        ));
-    }
-
     // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
     // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
     // shared client secret, regardless of auth method. Block every FAPI
     // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
     // (reachable since #214) mint dead secrets the token endpoint refuses.
+    // Checked first so a FAPI client gets the FAPI-specific message.
     if client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
             "FAPI clients do not use client secrets",
+        ));
+    }
+
+    // Only a client registered for a `client_secret_*` method authenticates
+    // with a secret; minting one for any other method creates a credential
+    // it was never registered for. This includes native apps: RFC 8252 §8.4
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients", so a native app that registered a secret method
+    // may rotate it.
+    if !client.token_endpoint_auth_method.uses_client_secret() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "no_secret",
+            "This client does not use client secrets",
         ));
     }
 
@@ -704,13 +704,15 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    // FAPI clients cannot authenticate with a secret (minting is blocked for
-    // every FAPI profile, and `authenticate_client` refuses a secret from a
-    // FAPI client at every secret-verifying endpoint), so any remaining
-    // secret rows are dead weight from before those guards; the last-secret
-    // floor would pin them forever. The authoritative check is the same
-    // exemption inside `revoke_oauth_client_secret`'s transaction.
-    if other_active == 0 && !client.is_fapi() {
+    // The floor protects a usable credential. `authenticate_client` refuses a
+    // secret from a FAPI client and from any client not registered for a
+    // `client_secret_*` method, so those rows are dead and must stay
+    // deletable. The authoritative check is the same exemption inside
+    // `revoke_oauth_client_secret`'s transaction.
+    if other_active == 0
+        && client.token_endpoint_auth_method.uses_client_secret()
+        && !client.is_fapi()
+    {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",

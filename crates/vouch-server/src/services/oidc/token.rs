@@ -173,6 +173,10 @@ pub enum ClientAuthError {
     /// row minted before secret minting was blocked for FAPI profiles — is
     /// never a valid credential for them.
     FapiSecretRejected,
+    /// Secret-based (or no) client authentication for a client whose
+    /// registered method is `private_key_jwt`: it must present the assertion
+    /// it registered for, and a secret row it holds is never its credential.
+    SecretNotRegistered,
     /// Database error.
     DatabaseError(String),
     /// mTLS certificate verification failed.
@@ -210,6 +214,7 @@ impl ClientAuthError {
             | Self::InvalidCredentials
             | Self::SecretRequired
             | Self::FapiSecretRejected
+            | Self::SecretNotRegistered
             | Self::MtlsVerificationFailed(_) => ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
                 "Client authentication failed",
@@ -883,6 +888,21 @@ pub async fn authenticate_client(
                 "rejected client_secret authentication for a FAPI 2.0 client"
             );
             return Err(ClientAuthError::FapiSecretRejected);
+        }
+
+        // OIDC Core 1.0 §3.1.3.1: "If the Client is a Confidential Client,
+        // then it MUST authenticate to the Token Endpoint using the
+        // authentication method registered for its "client_id"". mTLS clients
+        // left through the certificate branch above, so what remains here
+        // without a secret method is `private_key_jwt`; a secret row it holds
+        // is refused before the hash lookup.
+        if !client.token_endpoint_auth_method.uses_client_secret() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                auth_method = %client.token_endpoint_auth_method.as_str(),
+                "rejected secret-based authentication for a client not registered for it"
+            );
+            return Err(ClientAuthError::SecretNotRegistered);
         }
 
         // Secret is required - validate it
@@ -2183,6 +2203,106 @@ mod tests {
                 }
             ),
             "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// OIDC Core 1.0 §3.1.3.1: a confidential client "MUST authenticate to the
+    /// Token Endpoint using the authentication method registered for its
+    /// "client_id"". A secret row on a non-FAPI `private_key_jwt` client does
+    /// not authenticate it.
+    #[tokio::test]
+    async fn test_authenticate_client_rejects_secret_for_non_fapi_private_key_jwt_client() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "pkjwt-secret-auth@example.com")
+                .await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Service,
+                grant_types: Some(vec!["client_credentials".to_string()]),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: crate::test_utils::TestJwks::Shared,
+                fapi_profile: None,
+                with_secret: true, // would verify if the method were not checked
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            !client.client_secret.is_empty(),
+            "fixture must seed a stray secret row to exercise the gate"
+        );
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClientAuthError::SecretNotRegistered)),
+            "a non-FAPI private_key_jwt client's stray secret must be refused, got {result:?}"
+        );
+        assert!(
+            matches!(
+                ClientAuthError::SecretNotRegistered.into_service_error(),
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidClient,
+                    ..
+                }
+            ),
+            "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// A public (`none`) client still authenticates with no credential.
+    #[tokio::test]
+    async fn test_authenticate_client_public_client_unaffected_by_registered_method_gate() {
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "public-gate@example.com").await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Spa,
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        let (authed, verification) = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await
+        .expect("a public client authenticates without a secret");
+        assert_eq!(
+            authed.client_type(),
+            crate::db::ClientType::Public,
+            "a `none`-registered client is public"
+        );
+        assert!(
+            verification.is_none(),
+            "no secret verification witness for a public client"
         );
     }
 

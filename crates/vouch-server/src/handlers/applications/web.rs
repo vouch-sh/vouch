@@ -214,9 +214,7 @@ pub(crate) async fn create_application_form(
         }
     };
 
-    let client_secret = if client.token_endpoint_auth_method
-        == db::TokenEndpointAuthMethod::ClientSecretBasic
-    {
+    let client_secret = if client.token_endpoint_auth_method.uses_client_secret() {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -619,29 +617,31 @@ pub(crate) async fn add_secret_form(
         }
     };
 
-    // The registered auth method decides whether a client holds a secret, not
-    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
-    // "Except when using a mechanism like Dynamic Client Registration
-    // [RFC7591] to provision per-instance secrets, native apps are classified
-    // as public clients". A public client (`none`) has no secret to rotate;
-    // FAPI clients are refused by the `is_fapi()` gate below.
-    if client.client_type() != crate::db::ClientType::Confidential {
-        return error_page(
-            Tr::new("apps-error-title-error"),
-            Tr::new("apps-error-no-client-secrets"),
-            format!("/applications/{app_id}"),
-        );
-    }
-
     // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
     // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
     // shared client secret, regardless of auth method. Block every FAPI
     // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
     // (reachable since #214) mint dead secrets the token endpoint refuses.
+    // Checked first so a FAPI client gets the FAPI-specific message.
     if client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-fapi-no-secrets"),
+            format!("/applications/{app_id}"),
+        );
+    }
+
+    // Only a client registered for a `client_secret_*` method authenticates
+    // with a secret; minting one for any other method creates a credential
+    // it was never registered for. This includes native apps: RFC 8252 §8.4
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients", so a native app that registered a secret method
+    // may rotate it.
+    if !client.token_endpoint_auth_method.uses_client_secret() {
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-no-client-secrets"),
             format!("/applications/{app_id}"),
         );
     }
@@ -754,13 +754,15 @@ pub(crate) async fn delete_secret_form(
         .filter(|s| s.id != secret_id && s.is_valid(&now))
         .count();
 
-    // FAPI clients cannot authenticate with a secret (minting is blocked for
-    // every FAPI profile, and `authenticate_client` refuses a secret from a
-    // FAPI client at every secret-verifying endpoint), so the last-secret
-    // floor does not apply: pre-guard secret rows must remain deletable.
-    // The authoritative check is the same exemption inside
+    // The floor protects a usable credential. `authenticate_client` refuses a
+    // secret from a FAPI client and from any client not registered for a
+    // `client_secret_*` method, so those rows are dead and must stay
+    // deletable. The authoritative check is the same exemption inside
     // `revoke_oauth_client_secret`'s transaction.
-    if other_active == 0 && !client.is_fapi() {
+    if other_active == 0
+        && client.token_endpoint_auth_method.uses_client_secret()
+        && !client.is_fapi()
+    {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-secret-last-active"),
@@ -1461,6 +1463,65 @@ mod tests {
         assert!(
             secrets.is_empty(),
             "no secret rows should exist for a private_key_jwt FAPI client, got {secrets:?}"
+        );
+    }
+
+    // Web twin of the API refusal: a non-FAPI `private_key_jwt` client is not
+    // registered for a secret method, so "Add secret" mints nothing.
+    #[tokio::test]
+    async fn test_web_add_secret_rejects_non_fapi_private_key_jwt_client() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "pkjwt-web-nonfapi@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Service,
+                grant_types: Some(vec!["client_credentials".to_string()]),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                fapi_profile: None,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "a non-FAPI private_key_jwt client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("does not use client secrets"),
+            "the error page must explain the client does not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should be minted for a non-FAPI private_key_jwt client, got {secrets:?}"
         );
     }
 
