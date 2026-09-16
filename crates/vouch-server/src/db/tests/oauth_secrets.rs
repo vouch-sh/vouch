@@ -296,6 +296,33 @@ async fn test_revoke_last_secret_rejected() {
     );
 }
 
+/// The floor exempts a client not registered for a `client_secret_*` method:
+/// `authenticate_client` never accepts its secret, so the row is removable.
+#[tokio::test]
+async fn test_revoke_last_secret_allowed_for_private_key_jwt_client() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: crate::test_utils::TestJwks::Shared,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    let secret = create_oauth_client_secret(&store, &app_id, "hash_stray", None, None)
+        .await
+        .expect("create stray secret");
+
+    revoke_oauth_client_secret(&store, &secret.id, &app_id)
+        .await
+        .expect("a private_key_jwt client's only secret is revocable");
+}
+
 /// Revoking an expired-but-unrevoked secret must succeed while another valid
 /// secret remains: the floor counts *other* active secrets, not the target.
 /// Without excluding the target, the expired row drops `active_count` to 1 and

@@ -189,9 +189,7 @@ pub(crate) async fn create_application_api(
         )
     })?;
 
-    let client_secret = if client.token_endpoint_auth_method
-        == db::TokenEndpointAuthMethod::ClientSecretBasic
-    {
+    let client_secret = if client.token_endpoint_auth_method.uses_client_secret() {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -523,8 +521,7 @@ pub(crate) async fn add_secret_api(
     // shared client secret, regardless of auth method. Block every FAPI
     // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
     // (reachable since #214) mint dead secrets the token endpoint refuses.
-    // Checked before the shared-secret gate below so a FAPI client gets the
-    // specific "FAPI clients do not use client secrets" message.
+    // Checked first so a FAPI client gets the FAPI-specific message.
     if client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -533,24 +530,14 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
-    // Only the `client_secret_basic`/`client_secret_post` methods
-    // authenticate with a shared secret; `private_key_jwt` and the mTLS
-    // methods do not, and `none` is public. (This codebase does not register
-    // `client_secret_jwt`.) Gating on `OAuthClient::client_type()` (a coarse
-    // Public/Confidential axis) admitted `private_key_jwt` and mTLS clients —
-    // both `Confidential` — and let them mint a shared secret they were never
-    // registered for, downgrading their asymmetric/certificate auth to a
-    // phishable shared secret the token endpoint then accepted. The
-    // registered method is the precise axis: only a client registered for a
-    // `client_secret_*` method may rotate one. RFC 8252 §8.4: per-instance
-    // `client_secret_*` secrets provisioned via RFC 7591 dynamic registration
-    // are rotatable even for native/spa apps.
-    let uses_shared_secret = matches!(
-        client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::ClientSecretBasic
-            | crate::db::TokenEndpointAuthMethod::ClientSecretPost
-    );
-    if !uses_shared_secret {
+    // Only a client registered for a `client_secret_*` method authenticates
+    // with a secret; minting one for any other method creates a credential
+    // it was never registered for. This includes native apps: RFC 8252 §8.4
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients", so a native app that registered a secret method
+    // may rotate it.
+    if !client.token_endpoint_auth_method.uses_client_secret() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
@@ -717,13 +704,15 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    // FAPI clients cannot authenticate with a secret (minting is blocked for
-    // every FAPI profile, and `authenticate_client` refuses a secret from a
-    // FAPI client at every secret-verifying endpoint), so any remaining
-    // secret rows are dead weight from before those guards; the last-secret
-    // floor would pin them forever. The authoritative check is the same
-    // exemption inside `revoke_oauth_client_secret`'s transaction.
-    if other_active == 0 && !client.is_fapi() {
+    // The floor protects a usable credential. `authenticate_client` refuses a
+    // secret from a FAPI client and from any client not registered for a
+    // `client_secret_*` method, so those rows are dead and must stay
+    // deletable. The authoritative check is the same exemption inside
+    // `revoke_oauth_client_secret`'s transaction.
+    if other_active == 0
+        && client.token_endpoint_auth_method.uses_client_secret()
+        && !client.is_fapi()
+    {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",

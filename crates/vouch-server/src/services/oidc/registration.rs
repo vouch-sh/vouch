@@ -622,10 +622,7 @@ pub async fn register_client(
     .await;
 
     // 17. Generate client_secret for confidential clients
-    let client_secret = if matches!(
-        jwks_auth.auth_method,
-        TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost
-    ) {
+    let client_secret = if jwks_auth.auth_method.uses_client_secret() {
         let secret_bytes = generate_random_bytes(SECRET_LENGTH)
             .map_err(|_| ServiceError::Internal("Failed to generate client secret".to_string()))?;
         let secret = format!("vouch_{}", URL_SAFE_NO_PAD.encode(secret_bytes));
