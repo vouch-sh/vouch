@@ -1094,3 +1094,189 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_token_alive(&app, &token, "the token after an unauthenticated replay").await;
 }
+
+// ========================================================================
+// RFC 8628 §3.4 — `private_key_jwt` JTI commit ordering on failed polls
+//
+// `device_token` commits the assertion's JTI before the device-code format,
+// not-found, and cross-client `invalid_grant` early-returns, so an
+// authenticated poll that fails on any of those grounds still burns the
+// assertion. Without this ordering a stolen assertion whose first use is a
+// failed device-code poll (wrong/unknown/non-owned code) would stay live and
+// authenticate successfully once at another endpoint that accepts it
+// (`/oauth/device`, `/oauth/par`, `/oauth/revoke`, `/oauth/introspect`), since
+// the non-FAPI allowed-audience list is shared. See commit 54f7a8c0 which
+// introduced client authentication on this endpoint and placed the commit
+// after the early-returns.
+// ========================================================================
+
+/// Mint one `private_key_jwt` assertion for `client_a` (audience `base_url`,
+/// valid at both `/oauth/token` and `/oauth/device` for a non-FAPI client) with
+/// a fixed `jti`, so the same assertion can be sent twice to exercise replay.
+fn single_use_assertion(client_a: &str, base_url: &str, pkcs8_a: &[u8], jti: &str) -> String {
+    build_client_assertion(client_a, base_url, pkcs8_a, Some(jti))
+}
+
+/// The `/oauth/token` device-code poll body authenticated as `client_a` with
+/// `assertion`, mirroring `fapi_device_token_body` (no `client_id` in the
+/// body; the assertion's `iss`/`sub` identifies the client).
+fn device_poll_body_with_assertion(device_code: &str, assertion: &str) -> String {
+    format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+         &device_code={device_code}&client_assertion={assertion}\
+         &client_assertion_type={}",
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+    )
+}
+
+/// Reuse `assertion` at `/oauth/device` enrollment and assert it is rejected
+/// as `invalid_client` (replay): the prior failed poll must have already
+/// committed the assertion's JTI, so a second successful use is impossible.
+async fn assert_replay_rejected_at_device(app: &axum::Router, client_a: &str, assertion: &str) {
+    let body = format!(
+        "client_id={client_a}&client_assertion={assertion}&client_assertion_type={}",
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+    );
+    let (status, resp) = http_post_form(app, "/oauth/device", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replayed assertion after a failed poll MUST be rejected (replay): {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client", "replay: {resp}");
+    assert!(
+        !resp.contains("device_code"),
+        "no device flow may be started by a replayed assertion: {resp}"
+    );
+}
+
+/// Regression for the cross-client early-return: client A authenticates with
+/// `private_key_jwt` and polls a device code owned by public client B. The
+/// cross-client binding check rejects the poll with `invalid_grant`. The
+/// assertion's JTI must be committed before that check, so reusing the same
+/// assertion at `/oauth/device` is refused as `invalid_client`. On the buggy
+/// tree the reuse returned `200` with a fresh device flow.
+#[tokio::test]
+async fn test_device_grant_cross_client_poll_commits_jti_regression() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-jti-xclient@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let (client_a, pkcs8_a) = private_key_jwt_client(&state, &user.id, false).await;
+    let client_b = public_client(&state, &user.id).await;
+    let device_code =
+        setup_authorized_device(&state, &user, &auth, "jti-xclient", &client_b.client_id).await;
+
+    let base_url = state.config().base_url.clone();
+    let assertion = single_use_assertion(
+        &client_a.client_id,
+        &base_url,
+        &pkcs8_a,
+        "device-jti-cross-client-fixed",
+    );
+
+    // (1) Poll /oauth/token authenticated as A with B's device code. The
+    // cross-client binding check rejects this with `invalid_grant`. On the
+    // buggy tree this path returned before the JTI commit, leaving the
+    // assertion un-burned.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_poll_body_with_assertion(&device_code, &assertion),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "cross-client poll: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "cross-client poll: {body}");
+
+    // (2) Reuse the SAME assertion (same JTI) at /oauth/device. The failed
+    // poll already burned the JTI, so the replay MUST be rejected.
+    assert_replay_rejected_at_device(&app, &client_a.client_id, &assertion).await;
+
+    // (3) Control: a fresh assertion for A authenticates at /oauth/device,
+    // proving A is otherwise entitled to the endpoint and the rejection above
+    // was the replay, not a misconfigured client.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &device_request_with_assertion(&client_a.client_id, &base_url, &pkcs8_a),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "fresh assertion control: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(resp.get("device_code").is_some(), "control: {body}");
+}
+
+/// The not-found early-return also runs after the JTI commit: an
+/// authenticated poll for a device code that does not exist returns
+/// `invalid_grant` and still burns the assertion.
+#[tokio::test]
+async fn test_device_grant_unknown_code_poll_commits_jti() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-jti-unknown@example.com").await;
+    let (client_a, pkcs8_a) = private_key_jwt_client(&state, &user.id, false).await;
+
+    let base_url = state.config().base_url.clone();
+    let assertion = single_use_assertion(
+        &client_a.client_id,
+        &base_url,
+        &pkcs8_a,
+        "device-jti-unknown-fixed",
+    );
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_poll_body_with_assertion("dev_does_not_exist", &assertion),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown code poll: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "unknown code poll: {body}");
+
+    assert_replay_rejected_at_device(&app, &client_a.client_id, &assertion).await;
+}
+
+/// The format early-return also runs after the JTI commit: an authenticated
+/// poll for an over-length device code returns `invalid_grant` and still
+/// burns the assertion. This is the defense-in-depth direction the commit-first
+/// ordering provides (a stolen assertion spent probing a garbage code is
+/// burned rather than left live).
+#[tokio::test]
+async fn test_device_grant_malformed_code_poll_commits_jti() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-jti-malformed@example.com").await;
+    let (client_a, pkcs8_a) = private_key_jwt_client(&state, &user.id, false).await;
+
+    let base_url = state.config().base_url.clone();
+    let assertion = single_use_assertion(
+        &client_a.client_id,
+        &base_url,
+        &pkcs8_a,
+        "device-jti-malformed-fixed",
+    );
+
+    let long_code = "a".repeat(200);
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_poll_body_with_assertion(&long_code, &assertion),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "malformed code poll: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "malformed code poll: {body}"
+    );
+
+    assert_replay_rejected_at_device(&app, &client_a.client_id, &assertion).await;
+}
