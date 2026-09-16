@@ -518,30 +518,43 @@ pub(crate) async fn add_secret_api(
     // client secrets).
     let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    // The registered auth method decides whether a client holds a secret, not
-    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
-    // "Except when using a mechanism like Dynamic Client Registration
-    // [RFC7591] to provision per-instance secrets, native apps are classified
-    // as public clients". A public client (`none`) has no secret to rotate;
-    // FAPI clients are refused by the `is_fapi()` gate below.
-    if client.client_type() != crate::db::ClientType::Confidential {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "no_secret",
-            "This client does not use client secrets",
-        ));
-    }
-
     // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
     // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
     // shared client secret, regardless of auth method. Block every FAPI
     // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
     // (reachable since #214) mint dead secrets the token endpoint refuses.
+    // Checked before the shared-secret gate below so a FAPI client gets the
+    // specific "FAPI clients do not use client secrets" message.
     if client.is_fapi() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
             "FAPI clients do not use client secrets",
+        ));
+    }
+
+    // Only the `client_secret_basic`/`client_secret_post` methods
+    // authenticate with a shared secret; `private_key_jwt` and the mTLS
+    // methods do not, and `none` is public. (This codebase does not register
+    // `client_secret_jwt`.) Gating on `OAuthClient::client_type()` (a coarse
+    // Public/Confidential axis) admitted `private_key_jwt` and mTLS clients —
+    // both `Confidential` — and let them mint a shared secret they were never
+    // registered for, downgrading their asymmetric/certificate auth to a
+    // phishable shared secret the token endpoint then accepted. The
+    // registered method is the precise axis: only a client registered for a
+    // `client_secret_*` method may rotate one. RFC 8252 §8.4: per-instance
+    // `client_secret_*` secrets provisioned via RFC 7591 dynamic registration
+    // are rotatable even for native/spa apps.
+    let uses_shared_secret = matches!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::ClientSecretBasic
+            | crate::db::TokenEndpointAuthMethod::ClientSecretPost
+    );
+    if !uses_shared_secret {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "no_secret",
+            "This client does not use client secrets",
         ));
     }
 

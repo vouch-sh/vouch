@@ -619,29 +619,42 @@ pub(crate) async fn add_secret_form(
         }
     };
 
-    // The registered auth method decides whether a client holds a secret, not
-    // `application_type` (see `OAuthClient::client_type`). RFC 8252 §8.4:
-    // "Except when using a mechanism like Dynamic Client Registration
-    // [RFC7591] to provision per-instance secrets, native apps are classified
-    // as public clients". A public client (`none`) has no secret to rotate;
-    // FAPI clients are refused by the `is_fapi()` gate below.
-    if client.client_type() != crate::db::ClientType::Confidential {
-        return error_page(
-            Tr::new("apps-error-title-error"),
-            Tr::new("apps-error-no-client-secrets"),
-            format!("/applications/{app_id}"),
-        );
-    }
-
     // FAPI 2.0 clients authenticate via `private_key_jwt` or mTLS
     // (`tls_client_auth` / `self_signed_tls_client_auth`) and never use a
     // shared client secret, regardless of auth method. Block every FAPI
     // client — narrowing this to `PrivateKeyJwt` lets mTLS-FAPI clients
     // (reachable since #214) mint dead secrets the token endpoint refuses.
+    // Checked before the shared-secret gate below so a FAPI client gets the
+    // specific "FAPI clients do not use client secrets" message.
     if client.is_fapi() {
         return error_page(
             Tr::new("apps-error-title-error"),
             Tr::new("apps-error-fapi-no-secrets"),
+            format!("/applications/{app_id}"),
+        );
+    }
+
+    // Only the `client_secret_basic`/`client_secret_post` methods
+    // authenticate with a shared secret; `private_key_jwt` and the mTLS
+    // methods do not, and `none` is public. (This codebase does not register
+    // `client_secret_jwt`.) Gating on `OAuthClient::client_type()` (a coarse
+    // Public/Confidential axis) admitted `private_key_jwt` and mTLS clients —
+    // both `Confidential` — and let them mint a shared secret they were
+    // never registered for, downgrading their asymmetric/certificate auth to
+    // a phishable shared secret the token endpoint then accepted. The
+    // registered method is the precise axis: only a client registered for a
+    // `client_secret_*` method may rotate one. RFC 8252 §8.4: per-instance
+    // `client_secret_*` secrets provisioned via RFC 7591 dynamic registration
+    // are rotatable even for native/spa apps.
+    let uses_shared_secret = matches!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::ClientSecretBasic
+            | crate::db::TokenEndpointAuthMethod::ClientSecretPost
+    );
+    if !uses_shared_secret {
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-no-client-secrets"),
             format!("/applications/{app_id}"),
         );
     }
@@ -1461,6 +1474,70 @@ mod tests {
         assert!(
             secrets.is_empty(),
             "no secret rows should exist for a private_key_jwt FAPI client, got {secrets:?}"
+        );
+    }
+
+    // Regression for the secret-downgrade bug (web surface): a non-FAPI
+    // `private_key_jwt` client — producible via RFC 7591 dynamic registration
+    // with a JWKS and no FAPI flags — must not be able to mint a shared
+    // secret through the "Add secret" UI. The old `client_type() !=
+    // Confidential` gate passed it (private_key_jwt is Confidential); the
+    // registered-method gate refuses it. The error page renders the generic
+    // "does not use client secrets" message (not the FAPI one).
+    #[tokio::test]
+    async fn test_web_add_secret_rejects_non_fapi_private_key_jwt_client() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "pkjwt-web-nonfapi@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: crate::db::OAuthClientType::Service,
+                grant_types: Some(vec!["client_credentials".to_string()]),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                fapi_profile: None,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let (_status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !body.contains("vouch_"),
+            "a non-FAPI private_key_jwt client must NOT receive a minted secret: {body}"
+        );
+        assert!(
+            body.contains("does not use client secrets"),
+            "the error page must explain the client does not use secrets: {body}"
+        );
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            secrets.is_empty(),
+            "no secret rows should be minted for a non-FAPI private_key_jwt client, got {secrets:?}"
         );
     }
 

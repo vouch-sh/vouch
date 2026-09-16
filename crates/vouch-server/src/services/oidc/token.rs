@@ -173,6 +173,14 @@ pub enum ClientAuthError {
     /// row minted before secret minting was blocked for FAPI profiles — is
     /// never a valid credential for them.
     FapiSecretRejected,
+    /// A shared `client_secret` was presented, but the client's registered
+    /// `token_endpoint_auth_method` is not a `client_secret_*` method (e.g. a
+    /// non-FAPI `private_key_jwt` client). A secret — which can only be a row
+    /// minted before rotation was gated on the registered method — is never a
+    /// valid credential for a client that registered asymmetric-key or
+    /// certificate auth; accepting it would downgrade that strong auth to a
+    /// phishable shared secret.
+    SecretNotRegistered,
     /// Database error.
     DatabaseError(String),
     /// mTLS certificate verification failed.
@@ -210,6 +218,7 @@ impl ClientAuthError {
             | Self::InvalidCredentials
             | Self::SecretRequired
             | Self::FapiSecretRejected
+            | Self::SecretNotRegistered
             | Self::MtlsVerificationFailed(_) => ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
                 "Client authentication failed",
@@ -883,6 +892,32 @@ pub async fn authenticate_client(
                 "rejected client_secret authentication for a FAPI 2.0 client"
             );
             return Err(ClientAuthError::FapiSecretRejected);
+        }
+
+        // The registered method must be a `client_secret_*` method for a
+        // presented secret to authenticate. mTLS clients were routed to the
+        // certificate branch above and FAPI clients by the gate just above;
+        // the remaining confidential method that does NOT use a shared
+        // secret is `private_key_jwt` (non-FAPI) — a DCR client that
+        // registers asymmetric-key auth and never held a secret. A stray
+        // secret row it acquired (e.g. minted before rotation was gated on
+        // the registered method) must not authenticate it: that would
+        // downgrade the asymmetric auth it registered for to a phishable
+        // shared secret. Rejected before the hash lookup so the dead secret
+        // is never compared. (This codebase registers only
+        // `client_secret_basic`/`client_secret_post`, not `client_secret_jwt`.)
+        let uses_shared_secret = matches!(
+            client.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::ClientSecretBasic
+                | crate::db::TokenEndpointAuthMethod::ClientSecretPost
+        );
+        if !uses_shared_secret {
+            tracing::warn!(
+                client_id = %client.client_id,
+                auth_method = %client.token_endpoint_auth_method.as_str(),
+                "rejected client_secret for a client not registered for secret auth"
+            );
+            return Err(ClientAuthError::SecretNotRegistered);
         }
 
         // Secret is required - validate it
@@ -2183,6 +2218,113 @@ mod tests {
                 }
             ),
             "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// A non-FAPI `private_key_jwt` client (the asymmetric-auth shape RFC 7591
+    /// dynamic registration produces without FAPI flags) holds no secret row.
+    /// A stray secret it acquired before rotation was gated on the registered
+    /// method must not authenticate it — accepting it would downgrade the
+    /// asymmetric auth it registered for to a phishable shared secret. The
+    /// `client_type()` axis passed such a client (it is `Confidential`), so
+    /// `authenticate_client` fell through to the hash comparison; the
+    /// registered-method gate now refuses it before the lookup.
+    #[tokio::test]
+    async fn test_authenticate_client_rejects_secret_for_non_fapi_private_key_jwt_client() {
+        use secrecy::SecretString;
+
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "pkjwt-secret-auth@example.com")
+                .await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Service,
+                grant_types: Some(vec!["client_credentials".to_string()]),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: crate::test_utils::TestJwks::Shared,
+                fapi_profile: None,
+                with_secret: true, // a pre-fix stray row that would otherwise verify
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            !client.client_secret.is_empty(),
+            "fixture must seed a stray secret row to exercise the gate"
+        );
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClientAuthError::SecretNotRegistered)),
+            "a non-FAPI private_key_jwt client's stray secret must be refused, got {result:?}"
+        );
+        assert!(
+            matches!(
+                ClientAuthError::SecretNotRegistered.into_service_error(),
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidClient,
+                    ..
+                }
+            ),
+            "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// A public (`none`) client never reaches the secret-validation branch.
+    /// Confirming the registered-method gate does not perturb the public
+    /// path: `authenticate_client` still returns `Ok` with no verification
+    /// when a public client presents nothing.
+    #[tokio::test]
+    async fn test_authenticate_client_public_client_unaffected_by_registered_method_gate() {
+        let state = crate::test_utils::test_app_state().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "public-gate@example.com").await;
+        let client = crate::test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            crate::test_utils::TestClientSpec {
+                application_type: crate::db::OAuthClientType::Spa,
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        let (authed, verification) = authenticate_client(
+            &state,
+            &creds,
+            crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await
+        .expect("a public client authenticates without a secret");
+        assert_eq!(
+            authed.client_type(),
+            crate::db::ClientType::Public,
+            "a `none`-registered client is public"
+        );
+        assert!(
+            verification.is_none(),
+            "no secret verification witness for a public client"
         );
     }
 
