@@ -47,6 +47,15 @@ macro_rules! impl_audit_data {
 /// revoke-credentials/remove), written under the corresponding `Admin*`
 /// kinds. `target_user_id` is what the admin UI resolves to a display
 /// email at render time.
+///
+/// `refusal` is set to `Some("last_admin")` only on the `remove_member` /
+/// `deactivate_member` refusal arms: revocation (`revoke_user_access` /
+/// `revoke_then_persist`) commits *before* the authoritative in-transaction
+/// last-admin floor runs, so when that floor refuses the committed revocation
+/// is audited with this distinguisher to separate a floor refusal from a
+/// successful action (parity with the SCIM side, fixed in `0ab5c97b`). It is
+/// `None` on every successful action, so a refusal row is never byte-identical
+/// to a success row.
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMemberActionData<'a> {
     pub action: &'static str,
@@ -55,6 +64,10 @@ pub(crate) struct AdminMemberActionData<'a> {
     /// Only the revoke-credentials site records how many keys were revoked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keys_revoked: Option<usize>,
+    /// `Some("last_admin")` on a refusal arm (see the struct docs); `None` on
+    /// every successful action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<&'static str>,
 }
 
 /// Admin-initiated additional-domain add/verify (`OrgDomainAdded`,
@@ -511,6 +524,7 @@ mod tests {
                     target_user_id: "u-target",
                     admin_user_id: "u-admin",
                     keys_revoked: None,
+                    refusal: None,
                 })
                 .unwrap(),
                 json!({
@@ -525,6 +539,7 @@ mod tests {
                     target_user_id: "u-target",
                     admin_user_id: "u-admin",
                     keys_revoked: Some(3),
+                    refusal: None,
                 })
                 .unwrap(),
                 json!({
@@ -532,6 +547,26 @@ mod tests {
                     "target_user_id": "u-target",
                     "admin_user_id": "u-admin",
                     "keys_revoked": 3,
+                }),
+            ),
+            // members.rs `remove_member` / `deactivate_member` refusal arm:
+            // revocation committed and the in-tx last-admin floor refused,
+            // so the row carries `refusal: "last_admin"` to distinguish it
+            // from a successful action.
+            (
+                serde_json::to_value(AdminMemberActionData {
+                    action: "remove_user",
+                    target_user_id: "u-target",
+                    admin_user_id: "u-admin",
+                    keys_revoked: None,
+                    refusal: Some("last_admin"),
+                })
+                .unwrap(),
+                json!({
+                    "action": "remove_user",
+                    "target_user_id": "u-target",
+                    "admin_user_id": "u-admin",
+                    "refusal": "last_admin",
                 }),
             ),
             // domains.rs add (method absent) and verify (method present)

@@ -340,6 +340,7 @@ mod tests {
             target_user_id: "u-target",
             admin_user_id: "u-admin",
             keys_revoked: None,
+            refusal: None,
         })
         .unwrap();
         let fields = TargetFields::from_json(&typed);
