@@ -11,7 +11,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -392,11 +392,18 @@ fn build_authorization_endpoint_routes(
 /// (its tokens are admin-minted opaque credentials), so it is excluded
 /// from the per-resource metadata document allowlist — see
 /// [`crate::services::oidc::protected_resource::PROTECTED_RESOURCE_PREFIXES`].
+///
+/// The SCIM routes are a separate router so that only they get
+/// [`handlers::scim::extract::scim_error_body`]. Both routers take a clone of
+/// one rate-limit layer; the clones share the limiter's state, so a client
+/// draws on a single per-IP bucket across the two.
 fn build_general_limited_routes(
     state: &Arc<AppState>,
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    let protected_api_routes = Router::new()
+    let rate_limit = maybe_rate_limit!(rate_limit::build_general_rate_limiter, config);
+
+    let org_api_routes = Router::new()
         // Org admin API (JSON; see handlers::api::org's module doc for auth per handler)
         .route(
             "/api/v1/org/scim-tokens",
@@ -416,7 +423,14 @@ fn build_general_limited_routes(
             "/api/v1/org/policies/validate",
             post(handlers::api::org::validate_policy_api),
         )
-        // SCIM 2.0 endpoints (RFC 7643/7644)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ))
+        .layer(rate_limit.clone());
+
+    // SCIM 2.0 endpoints (RFC 7643/7644)
+    let scim_routes = Router::new()
         .route(
             "/scim/v2/ServiceProviderConfig",
             get(handlers::scim::service_provider_config),
@@ -433,6 +447,7 @@ fn build_general_limited_routes(
         .route(
             "/scim/v2/Users/{id}",
             get(handlers::scim::get_user)
+                .put(handlers::scim::put_user)
                 .patch(handlers::scim::patch_user)
                 .delete(handlers::scim::delete_user),
         )
@@ -443,19 +458,25 @@ fn build_general_limited_routes(
         .route(
             "/scim/v2/Groups/{id}",
             get(handlers::scim::get_group)
+                .put(handlers::scim::put_group)
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
+        )
+        .route(
+            "/scim/v2/{*path}",
+            any(handlers::scim::extract::unknown_endpoint),
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
             resource_metadata::layer,
+        ))
+        .layer(rate_limit)
+        .layer(axum::middleware::from_fn(
+            handlers::scim::extract::scim_error_body,
         ));
 
-    Ok(protected_api_routes
-        .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
-            config
-        ))
+    Ok(org_api_routes
+        .merge(scim_routes)
         .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT)))
 }
 

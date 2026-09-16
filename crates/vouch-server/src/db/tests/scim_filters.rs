@@ -300,10 +300,11 @@ async fn test_scim_groups_externalid_eq_value_containing_attr_name_finds_group()
         TEST_ORG_ID,
         "Engineering",
         Some("displayName Reviewers Team"),
+        &[],
     )
     .await
     .expect("create group");
-    create_scim_group(&store, TEST_ORG_ID, "Marketing", Some("ext-marketing"))
+    create_scim_group(&store, TEST_ORG_ID, "Marketing", Some("ext-marketing"), &[])
         .await
         .expect("create decoy group");
 

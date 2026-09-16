@@ -2,7 +2,7 @@
 //! Database module tests, one file per domain.
 //!
 //! Shared fixtures (`test_db`, `seed_test_org`, `test_org_doc`, the
-//! `TEST_ORG_*` constants) live here in the module root. New tests go in
+//! `update_scim_group` edits, the `TEST_ORG_*` constants) live here in the module root. New tests go in
 //! the file whose scope matches; add a new file (and list it here) when
 //! none does:
 //!
@@ -69,6 +69,44 @@ async fn test_db() -> (DocumentStore, AuditStore) {
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool, crypto);
     (store, audit)
+}
+
+/// An [`update_scim_group`] edit that sets a group's attributes and keeps
+/// its members.
+fn set_group_attributes(
+    display_name: &str,
+    external_id: Option<&str>,
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let display_name = display_name.to_string();
+    let external_id = external_id.map(String::from);
+    move |group| {
+        group.display_name.clone_from(&display_name);
+        group.external_id.clone_from(&external_id);
+        Ok(())
+    }
+}
+
+/// An [`update_scim_group`] edit that replaces a group's members.
+fn set_group_members(
+    user_ids: &[&str],
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let user_ids: std::collections::BTreeSet<String> =
+        user_ids.iter().map(|id| (*id).to_string()).collect();
+    move |group| {
+        group.members.clone_from(&user_ids);
+        Ok(())
+    }
+}
+
+/// An [`update_scim_group`] edit that adds one member.
+fn add_group_member(
+    user_id: &str,
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let user_id = user_id.to_string();
+    move |group| {
+        group.members.insert(user_id.clone());
+        Ok(())
+    }
 }
 
 const TEST_ORG_ID: &str = "test-org";

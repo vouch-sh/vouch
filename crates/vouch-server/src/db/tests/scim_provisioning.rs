@@ -49,7 +49,7 @@ async fn test_create_scim_user_duplicate_email_rejected() {
     );
 
     // The created user must be addressable by its deterministic ID: the
-    // SCIM handler's `validate_resource_id` only accepts `uuid::Uuid`-parseable
+    // SCIM lookups (`get_scim_user`) only accept `uuid::Uuid`-parseable
     // IDs, so a deterministic ID that isn't a valid UUID would make the user
     // unreachable via GET/PATCH/PUT/DELETE.
     use crate::db::documents::user::UserDoc;

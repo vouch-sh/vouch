@@ -1790,24 +1790,6 @@ rfc7643#2.5#0f579275	MUST	Unassigned attributes, the null value, or an empty arr
 rfc7643#3.3#01ed5142	SHOULD	Schema extensions SHOULD avoid redefining any attributes defined in this specification and SHOULD follow conventions defined in this specification.
 rfc7643#3.3#2a06b145	MUST	The "schemas" attribute MUST contain at least one value, which SHALL be the base schema for the resource.
 rfc7643#3.3#5ea4e62e	MUST	Except for the base object schema, the schema extension URI SHALL be used as a JSON container to distinguish attributes belonging to the extension namespace fro
-rfc7643#4.1.1#009a3e3e	SHOULD	The name SHOULD be the full name of the User being described, if known (e.g., "Babs Jensen" or "Ms.
-rfc7643#4.1.1#0dddc61b	SHOULD	If both variants are returned, they SHOULD be describing the same name, with the formatted name indicating how the component attributes should be combined.
-rfc7643#4.1.1#14b5a89d	MUST	This identifier MUST be unique across the service provider's entire set of Users.
-rfc7643#4.1.1#41cc7d21	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#457e1e2f	SHOULD	When a password is set or changed by the client, the cleartext password SHOULD be processed by the service provider as follows:
-rfc7643#4.1.1#564dcf6e	MUST NOT	The mutability of the password attribute is "writeOnly", indicating that the value MUST NOT be returned by a service provider in any form (the attribute charact
-rfc7643#4.1.1#77fc815c	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#857bf288	SHOULD	The value provided SHOULD be the primary textual label by which this User is normally displayed by the service provider when presenting it to end-users.
-rfc7643#4.1.1#861b7776	MUST	If the value needs to be temporarily persisted for a period of time (e.g., because of a workflow) before provisioning, then the value MUST be protected by some 
-rfc7643#4.1.1#8a029714	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#8fa61f37	SHOULD	If a service provider holds the value locally, the value SHOULD be hashed.
-rfc7643#4.1.1#a336cfec	SHOULD NOT	This attribute SHOULD NOT be used to represent a User's username (e.g., bjensen or mpepperidge).
-rfc7643#4.1.1#a5791973	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#b0f2033f	MUST	This attribute is REQUIRED and is case insensitive.
-rfc7643#4.1.1#ce557f18	MUST NOT	The cleartext value or the hashed value of a password SHALL NOT be returnable by a service provider.
-rfc7643#4.1.1#d8bc116a	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#f0e6868b	MUST	Each User MUST include a non-empty userName value.
-rfc7643#4.1.1#fc0159f4	MUST	A service provider that immediately passes the cleartext value on to another system or programming interface MUST pass the value directly over a secured connect
 rfc7643#4.1.2#1c910004	SHOULD	No official canonicalization rules exist for all instant messaging addresses, but service providers SHOULD, when appropriate, remove all whitespace and convert 
 rfc7643#4.1.2#20f1c101	SHOULD	The value SHOULD be specified according to [RFC5321].
 rfc7643#4.1.2#2cb64b14	SHOULD	The value SHOULD be specified according to the format defined in [RFC3966], e.g., 'tel:+1-201-555-0123'.
@@ -1879,13 +1861,6 @@ rfc7644#3.4.3#96ad7c0d	MUST	Attribute names MUST be in standard attribute notati
 rfc7644#3.4.3#d2b52a31	MUST	This parameter SHALL have no effect on attributes whose schema "returned" setting is "always" (see Sections 2.2 and 7 of [RFC7643]).
 rfc7644#3.4.3#f1c351b3	MUST	The inclusion of "/.search" on the end of a valid SCIM endpoint SHALL be used to indicate that the HTTP POST verb is intended to be a query operation.
 rfc7644#3.4.3#fad30ead	MUST	The filter string MUST be a valid filter (Section 3.4.2.2) expression.
-rfc7644#3.5.1#0b24e69d	MUST	readWrite, writeOnly Any values provided SHALL replace the existing attribute values.
-rfc7644#3.5.1#0cabfdc8	MUST	Service providers MAY take into account whether or not a client has access to, or understands, all of the resource's attributes when deciding whether non-assert
-rfc7644#3.5.1#9d892308	MUST NOT	Because SCIM resource identifiers are assigned by the service provider, HTTP PUT MUST NOT be used to create new resources.
-rfc7644#3.5.1#c4f5f493	MUST	readOnly Any values provided SHALL be ignored.
-rfc7644#3.5.1#d50f2dbc	MUST	If an attribute is "required", clients MUST specify the attribute in the PUT request.
-rfc7644#3.5.1#ed5525ac	MUST	immutable If one or more values are already set for the attribute, the input value(s) MUST match, or HTTP status code 400 SHOULD be returned with a "scimType" e
-rfc7644#3.5.1#ef51cf83	MUST	If the service provider has no existing values, the new value(s) SHALL be applied.
 rfc7644#3.7#18ed8d0b	MUST	REQUIRED in a response, except in the event of a POST failure.
 rfc7644#3.7#60407dab	MUST	If "method" is "POST", the value must specify a resource type endpoint, e.g., /Users or /Groups, whereas all other "method" values must specify the path to a sp
 rfc7644#3.7#807eae83	MUST	REQUIRED in a request when "method" is "POST", "PUT", or "PATCH".

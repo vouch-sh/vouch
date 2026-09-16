@@ -7,11 +7,13 @@
 //!
 //! - [`types`] - SCIM types (error, list, user, group)
 //! - [`discovery`] - Discovery endpoints (ServiceProviderConfig, Schemas, ResourceTypes)
+//! - [`extract`] - Extractors and middleware that keep every error in SCIM format
 //! - [`patch`] - Table-driven applier shared by User and Group PATCH
 //! - [`users`] - User CRUD operations
 //! - [`groups`] - Group CRUD operations
 
 pub(crate) mod discovery;
+pub(crate) mod extract;
 pub(crate) mod groups;
 pub(crate) mod patch;
 pub(crate) mod types;
@@ -35,8 +37,10 @@ pub(crate) use types::*;
 
 // Re-export handlers
 pub(crate) use discovery::{resource_types, schemas, service_provider_config};
-pub(crate) use groups::{create_group, delete_group, get_group, list_groups, patch_group};
-pub(crate) use users::{create_user, delete_user, get_user, list_users, patch_user};
+pub(crate) use groups::{
+    create_group, delete_group, get_group, list_groups, patch_group, put_group,
+};
+pub(crate) use users::{create_user, delete_user, get_user, list_users, patch_user, put_user};
 
 // ============================================================================
 // Input Validation
@@ -51,18 +55,6 @@ const MAX_FILTER_LEN: usize = 1024;
 /// 10,000 — the maximum the document store accepts. Deeper pagination
 /// is rejected up-front to avoid expensive OFFSET scans.
 const MAX_START_INDEX: usize = 10_001;
-
-/// Validate a SCIM resource ID path parameter.
-/// All resource IDs are UUID v7; reject anything that doesn't parse.
-fn validate_resource_id(id: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
-    if uuid::Uuid::try_parse(id).is_err() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ScimError::new(400, "Invalid resource ID format")),
-        ));
-    }
-    Ok(())
-}
 
 /// Validate SCIM list query parameters.
 /// Enforces length bounds on `filter` and range bounds on `startIndex`.

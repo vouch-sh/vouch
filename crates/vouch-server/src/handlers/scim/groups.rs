@@ -3,19 +3,23 @@
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use super::authenticate_scim;
-use super::patch::{Attribute, InvalidValue, apply_patch_op, optional_string};
+use super::extract::{ScimJson, ScimQuery};
+use super::patch::{
+    Attribute, AttributeError, apply_patch_op, get_attribute, optional_string, required_attribute,
+    required_value, unqualified,
+};
 use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
     ScimPatchOpType, ScimPatchRequest,
 };
-use super::urn;
+use super::{ScimAuth, authenticate_scim, urn};
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
@@ -29,7 +33,7 @@ pub(crate) async fn list_groups(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<ScimListQuery>,
+    ScimQuery(query): ScimQuery<ScimListQuery>,
 ) -> Response {
     // Pure validation first — no DB cost for malformed requests
     let start_index = query.start_index.unwrap_or(1);
@@ -52,7 +56,11 @@ pub(crate) async fn list_groups(
     let (groups, total) = match db::list_scim_groups(
         &state.store,
         &auth.org_id,
-        query.filter.as_deref(),
+        // RFC 7644 §3.10: the attribute may carry its core schema URN prefix.
+        query
+            .filter
+            .as_deref()
+            .map(|filter| unqualified(filter.trim_start(), urn::GROUP)),
         start_index,
         count,
     )
@@ -150,40 +158,6 @@ pub(super) fn create_scim_group_error_response(err: anyhow::Error) -> Response {
         .into_response()
 }
 
-/// Map a group member operation error onto its SCIM wire response.
-///
-/// Member writes (`add_scim_group_member`,
-/// `replace_scim_group_members`, `remove_scim_group_member`) can fail two
-/// ways. A NUL byte in the `user_id` index is a client error and returns
-/// `400 invalidValue` via [`super::invalid_index_value_response`]. Every
-/// other failure — HPKE decryption, JSON or timestamp parsing, DB
-/// connection or timeout, exhausted OCC retries — is an infrastructure
-/// fault and returns `500 INTERNAL SERVER ERROR`, matching
-/// [`create_scim_group_error_response`] and the attribute-update arms of
-/// [`patch_group`].
-///
-/// Without this, a non-`InvalidIndexValue` member failure was logged and
-/// swallowed, so a PATCH/POST returned `200`/`201` with stale membership.
-///
-/// A 500 does not mean nothing changed. Add and remove commit one member
-/// per transaction, so a failure part-way leaves the earlier members
-/// written, and attribute updates run after member operations. Every member
-/// write is idempotent, so a client that retries the whole request
-/// converges; the guarantee is retry-convergence, not atomicity. The
-/// documented "leaves the record untouched" guarantee covers the `400`
-/// validation path, which runs before any write.
-pub(super) fn member_op_error_response(err: anyhow::Error) -> Response {
-    if let Some(resp) = super::invalid_index_value_response(&err) {
-        return resp.into_response();
-    }
-    tracing::error!("Failed to update group members: {err}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ScimError::new(500, "Failed to update group members")),
-    )
-        .into_response()
-}
-
 /// Response for a failed group-membership read.
 ///
 /// The read itself logs the cause; this only shapes the SCIM error body.
@@ -202,19 +176,13 @@ pub(crate) async fn create_group(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(group): Json<ScimGroup>,
+    ScimJson(group): ScimJson<ScimGroup>,
 ) -> Response {
     // Pure validation first — no DB cost for malformed requests
-    if group.display_name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ScimError::new(
-                400,
-                "displayName is required and must not be empty",
-            )),
-        )
-            .into_response();
-    }
+    let display_name = match check_display_name(group.display_name.as_deref()) {
+        Ok(display_name) => display_name,
+        Err(invalid) => return invalid.into_response(),
+    };
 
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
@@ -225,12 +193,19 @@ pub(crate) async fn create_group(
         return (status, json).into_response();
     }
 
-    // Create group
+    // Create the group and its members in one transaction
+    let member_ids: Vec<String> = group
+        .members
+        .unwrap_or_default()
+        .into_iter()
+        .map(|member| member.value)
+        .collect();
     let db_group = match db::create_scim_group(
         &state.store,
         &auth.org_id,
-        &group.display_name,
+        display_name,
         group.external_id.as_deref(),
+        &member_ids,
     )
     .await
     {
@@ -238,9 +213,6 @@ pub(crate) async fn create_group(
         Err(e) => return create_scim_group_error_response(e),
     };
 
-    // Audit log — the group row is committed, so its audit row is written
-    // before the fallible member adds below: a rejected member must not
-    // leave a created group with no `create` event.
     db::record_scim_audit(
         &state.audit,
         &db::ScimAuditData {
@@ -254,18 +226,6 @@ pub(crate) async fn create_group(
         auth.org_domain.as_deref(),
     )
     .await;
-
-    // Add members if provided
-    if let Some(members) = &group.members {
-        for member in members {
-            if let Err(e) =
-                db::add_scim_group_member(&state.store, &db_group.id, &auth.org_id, &member.value)
-                    .await
-            {
-                return member_op_error_response(e);
-            }
-        }
-    }
 
     let base_url = &state.config().base_url;
     let Ok(members) =
@@ -287,11 +247,6 @@ pub(crate) async fn get_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    // Validate resource ID before any processing
-    if let Err((status, json)) = super::validate_resource_id(&id) {
-        return (status, json).into_response();
-    }
-
     // Authenticate
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
@@ -328,33 +283,26 @@ pub(crate) async fn get_group(
     Json(db_group_to_scim(base_url, group, members)).into_response()
 }
 
-/// The Group fields a PATCH can change, seeded from the stored record.
-/// Members are not here: they live in the membership table, not in the
-/// group document.
-struct GroupPatch {
-    display_name: String,
-    external_id: Option<String>,
-}
-
 /// The single-valued Group attributes Vouch stores (RFC 7643 §4.2).
-const GROUP_ATTRIBUTES: &[Attribute<GroupPatch>] = &[
+const GROUP_ATTRIBUTES: &[Attribute<db::ScimGroupState>] = &[
     Attribute {
         paths: &["displayName"],
         set: |group, path, value| {
             let Some(display_name) = value.as_str() else {
-                return Err(InvalidValue::new(format!("{path} must be a string")));
+                return Err(AttributeError::invalid_value(format!(
+                    "{path} must be a string"
+                )));
             };
-            if display_name.trim().is_empty() {
-                return Err(InvalidValue::new(format!("{path} must not be empty")));
-            }
+            check_display_name(Some(display_name))?;
             group.display_name = display_name.to_string();
             Ok(())
         },
-        // RFC 7643 §4.2 makes displayName required, so a group has no state
-        // in which it carries none; RFC 7644 §3.12 maps a value the
-        // attribute cannot take to `invalidValue`.
+        // RFC 7644 §3.5.2.2: "If an attribute is removed or becomes
+        // unassigned and is defined as a required attribute ..., the server
+        // SHALL return ... a "scimType" error code of "mutability"", and
+        // RFC 7643 §4.2 makes displayName required.
         remove: |_, path| {
-            Err(InvalidValue::new(format!(
+            Err(AttributeError::mutability(format!(
                 "{path} is required and cannot be removed"
             )))
         },
@@ -372,140 +320,248 @@ const GROUP_ATTRIBUTES: &[Attribute<GroupPatch>] = &[
     },
 ];
 
-/// Applies one `members` operation against the membership table.
+/// A PATCH `path` addressing the Group `members` attribute: `members`, a
+/// value filter `members[value eq "…"]`, and an optional sub-attribute
+/// (RFC 7644 §3.5.2, `PATH = attrPath / valuePath [subAttr]`).
+#[derive(Debug, PartialEq, Eq)]
+struct MembersPath<'p> {
+    /// The member user id a `value eq` filter selects.
+    filter: Option<&'p str>,
+    sub_attribute: Option<&'p str>,
+}
+
+/// Parses `path` as a [`MembersPath`], or `None` when it addresses another
+/// attribute.
 ///
-/// `members` is multi-valued (RFC 7643 §4.2) and stored as membership rows
-/// rather than as a field of the group document, so it is applied here
-/// rather than through [`GROUP_ATTRIBUTES`]. `add` and `replace` carry the
-/// member set in the operation's value; `remove` names a single member with
-/// a value filter (`members[value eq "…"]`).
-#[expect(
-    clippy::result_large_err,
-    reason = "Err is an HTTP Response; size is acceptable in error path"
-)]
-async fn apply_member_op(
-    db: &crate::db::store::DocumentStore,
-    group_id: &str,
-    org_id: &str,
+/// Attribute names and the `eq` operator are case insensitive (RFC 7643
+/// §2.1, RFC 7644 §3.4.2.2); the quoted id is returned verbatim. `value eq`
+/// is the only filter members support, so any other filter is 400
+/// `invalidFilter` (RFC 7644 §3.12 Table 9: "the specified attribute and
+/// filter comparison combination is not supported").
+fn parse_members_path(path: &str) -> Result<Option<MembersPath<'_>>, AttributeError> {
+    let root_end = path.find(['[', '.']).unwrap_or(path.len());
+    let (root, rest) = path.split_at(root_end);
+    if !root.eq_ignore_ascii_case("members") {
+        return Ok(None);
+    }
+
+    let (filter, rest) = match rest.strip_prefix('[') {
+        Some(inner) => {
+            let unsupported = || {
+                AttributeError::invalid_filter(format!(
+                    "{path}: members supports only a [value eq \"<id>\"] filter"
+                ))
+            };
+            let inner = inner.trim_start();
+            let inner = strip_prefix_ignore_ascii_case(inner, "value")
+                .ok_or_else(unsupported)?
+                .trim_start();
+            let inner = strip_prefix_ignore_ascii_case(inner, "eq")
+                .ok_or_else(unsupported)?
+                .trim_start();
+            let inner = inner.strip_prefix('"').ok_or_else(unsupported)?;
+            let (id, after) = inner.split_once('"').ok_or_else(unsupported)?;
+            let after = after
+                .trim_start()
+                .strip_prefix(']')
+                .ok_or_else(unsupported)?;
+            (Some(id), after)
+        }
+        None => (None, rest),
+    };
+
+    let sub_attribute = match rest {
+        "" => None,
+        rest => match rest.strip_prefix('.') {
+            Some(sub_attribute) if !sub_attribute.is_empty() => Some(sub_attribute),
+            Some(_) | None => {
+                return Err(AttributeError::invalid_path(format!(
+                    "{path} is not a valid members path"
+                )));
+            }
+        },
+    };
+
+    Ok(Some(MembersPath {
+        filter,
+        sub_attribute,
+    }))
+}
+
+fn strip_prefix_ignore_ascii_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| s.get(prefix.len()..))
+        .flatten()
+}
+
+/// The member user ids in a `members` value: an array of member objects or a
+/// single one, each carrying a string `value`.
+fn member_ids(path: &str, value: &serde_json::Value) -> Result<Vec<String>, AttributeError> {
+    let entries = match value {
+        serde_json::Value::Array(entries) => entries.as_slice(),
+        serde_json::Value::Object(_) => std::slice::from_ref(value),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {
+            return Err(AttributeError::invalid_value(format!(
+                "{path} must be an array of member objects"
+            )));
+        }
+    };
+    let mut ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(id) = get_attribute(entry, "value").and_then(serde_json::Value::as_str) else {
+            return Err(AttributeError::invalid_value(format!(
+                "{path} entries must carry a string value"
+            )));
+        };
+        ids.push(id.to_string());
+    }
+    Ok(ids)
+}
+
+/// Applies one operation addressing `members` to the member set
+/// (RFC 7644 §3.5.2.1–§3.5.2.3).
+///
+/// - `add` adds the presented members; one already present changes nothing.
+/// - `replace` without a filter replaces the whole set. With a filter it
+///   replaces the matched member, and "If the target location is a
+///   multi-valued attribute for which a value selection filter ("valuePath")
+///   has been supplied and no record match was made, the service provider
+///   SHALL indicate failure by returning HTTP status code 400 and a
+///   "scimType" error code of "noTarget"."
+/// - `remove` with a filter removes the matched member, and with a `value`
+///   list (Entra's form) the members it names; one that is not a member
+///   changes nothing. With neither, "the attribute and all values are
+///   removed".
+/// - `value` is the one member sub-attribute Vouch stores. `display` and
+///   `$ref` are derived on output, so operations on them change nothing;
+///   removing `value` is removing a required sub-attribute, 400 `mutability`.
+fn apply_members_op(
+    members: &mut BTreeSet<String>,
     path: &str,
+    target: &MembersPath<'_>,
     op: &ScimPatchOp,
-) -> Result<(), Response> {
-    match op.op {
-        ScimPatchOpType::Add => {
-            if path.contains('[') {
-                return Ok(());
-            }
-            let Some(members) = op.value.as_ref().and_then(|v| v.as_array()) else {
-                return Ok(());
-            };
-            for member in members {
-                let Some(user_id) = member.get("value").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if let Err(e) = db::add_scim_group_member(db, group_id, org_id, user_id).await {
-                    return Err(member_op_error_response(e));
-                }
-            }
+) -> Result<(), AttributeError> {
+    let targets_value = target
+        .sub_attribute
+        .map(|sub_attribute| sub_attribute.eq_ignore_ascii_case("value"));
+    match (op.op, target.filter, targets_value) {
+        (ScimPatchOpType::Add, None, None) => {
+            members.extend(member_ids(path, required_value(op)?)?);
             Ok(())
         }
-        ScimPatchOpType::Replace => {
-            if path.contains('[') {
-                return Ok(());
-            }
-            let Some(members) = op.value.as_ref().and_then(|v| v.as_array()) else {
-                return Ok(());
-            };
-            let user_ids: Vec<String> = members
-                .iter()
-                .filter_map(|m| m.get("value").and_then(|v| v.as_str()).map(String::from))
-                .collect();
-            if let Err(e) = db::replace_scim_group_members(db, group_id, org_id, &user_ids).await {
-                return Err(member_op_error_response(e));
-            }
+        (ScimPatchOpType::Add, Some(_), _) | (ScimPatchOpType::Add, None, Some(_)) => {
+            Err(AttributeError::invalid_path(format!(
+                "add cannot target {path}; add to members instead"
+            )))
+        }
+        (ScimPatchOpType::Replace, None, None) => {
+            *members = member_ids(path, required_value(op)?)?.into_iter().collect();
             Ok(())
         }
-        ScimPatchOpType::Remove => {
-            // Two forms reach here: a path filter naming one member,
-            // `members[value eq "…"]`, and `path: "members"` carrying the
-            // members to drop in `value`, which is what Entra sends.
-            //
-            // A bare `remove` of `members` with no filter and no value means
-            // "remove every member" in RFC 7644 §3.5.2.2. It stays a no-op:
-            // emptying a group is an authorization change, and one arriving
-            // as an operation with nothing naming what to remove is more
-            // likely a malformed request than an intended purge.
-            let user_ids: Vec<String> = match parse_member_filter(path) {
-                Some(user_id) => vec![user_id],
-                None => op
-                    .value
-                    .as_ref()
-                    .and_then(|v| v.as_array())
-                    .map(|members| {
-                        members
-                            .iter()
-                            .filter_map(|m| m.get("value").and_then(|v| v.as_str()))
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            };
-            for user_id in user_ids {
-                if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
-                    return Err(member_op_error_response(e));
+        (ScimPatchOpType::Replace, None, Some(_)) => Err(AttributeError::invalid_path(format!(
+            "replace cannot target {path} without a member filter"
+        ))),
+        (ScimPatchOpType::Replace, Some(id), targets_value) => {
+            let value = required_value(op)?;
+            if !members.contains(id) {
+                return Err(AttributeError::no_target(format!(
+                    "no member matches {path}"
+                )));
+            }
+            let replacements = match targets_value {
+                None => member_ids(path, value)?,
+                Some(true) => {
+                    let Some(replacement) = value.as_str() else {
+                        return Err(AttributeError::invalid_value(format!(
+                            "{path} must be a string"
+                        )));
+                    };
+                    vec![replacement.to_string()]
                 }
+                Some(false) => return Ok(()),
+            };
+            members.remove(id);
+            members.extend(replacements);
+            Ok(())
+        }
+        (ScimPatchOpType::Remove, _, Some(true)) => Err(AttributeError::mutability(format!(
+            "{path} is required and cannot be removed"
+        ))),
+        (ScimPatchOpType::Remove, _, Some(false)) => Ok(()),
+        (ScimPatchOpType::Remove, Some(id), None) => {
+            members.remove(id);
+            Ok(())
+        }
+        (ScimPatchOpType::Remove, None, None) => {
+            match &op.value {
+                Some(value) => {
+                    for id in member_ids(path, value)? {
+                        members.remove(&id);
+                    }
+                }
+                None => members.clear(),
             }
             Ok(())
         }
     }
+}
+
+/// Applies one PATCH operation to a Group: `members` paths to the member
+/// set, every other path through [`GROUP_ATTRIBUTES`]. A pathless `add` or
+/// `replace` may carry `members` among the attributes in its value.
+fn apply_group_op(group: &mut db::ScimGroupState, op: &ScimPatchOp) -> Result<(), AttributeError> {
+    let Some(path) = op.path.as_deref().map(|path| unqualified(path, urn::GROUP)) else {
+        apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, op)?;
+        let presented = required_value(op)?;
+        if let Some(value) = get_attribute(presented, "members") {
+            let target = MembersPath {
+                filter: None,
+                sub_attribute: None,
+            };
+            let op = ScimPatchOp {
+                op: op.op,
+                path: None,
+                value: Some(value.clone()),
+            };
+            apply_members_op(&mut group.members, "members", &target, &op)?;
+        }
+        return Ok(());
+    };
+    match parse_members_path(path)? {
+        Some(target) => apply_members_op(&mut group.members, path, &target, op),
+        None => apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, op),
+    }
+}
+
+/// The `displayName` a Group body presents. RFC 7643 §4.2 makes it required:
+/// omitted, the body does not conform to the schema (`invalidSyntax`); empty
+/// or whitespace, the value is unusable (`invalidValue`).
+fn check_display_name(display_name: Option<&str>) -> Result<&str, AttributeError> {
+    let display_name = required_attribute("displayName", display_name)?;
+    if display_name.trim().is_empty() {
+        return Err(AttributeError::invalid_value(
+            "displayName must not be empty",
+        ));
+    }
+    Ok(display_name)
 }
 
 /// PATCH /scim/v2/Groups/:id (RFC 7644 Section 3.5.2).
 ///
-/// Modifies a Group resource using SCIM PATCH operations (add, replace,
-/// remove) applied against [`GROUP_ATTRIBUTES`], plus member management
-/// via the `members` path.
-/// Audit a group PATCH that failed after `applied` member operations had
-/// already committed. Membership changes are applied one at a time, so an
-/// error part-way through leaves real state behind; the audit row must
-/// reflect it even though the request fails. No-op when nothing committed.
-async fn record_partial_group_update(
-    state: &AppState,
-    auth: &super::ScimAuth,
-    group_id: &str,
-    applied: usize,
-) {
-    if applied == 0 {
-        return;
-    }
-    db::record_scim_audit(
-        &state.audit,
-        &db::ScimAuditData {
-            operation: "update",
-            resource_type: "Group",
-            resource_id: group_id,
-            actor_token_id: Some(&auth.token_id),
-            details: Some(
-                &serde_json::json!({"partial": true, "memberOpsApplied": applied}).to_string(),
-            ),
-            refusal: None,
-        },
-        auth.org_domain.as_deref(),
-    )
-    .await;
-}
-
+/// Applies the operations in order to the stored group and commits the
+/// result in one transaction: an operation that fails leaves the group, its
+/// attributes and its members, exactly as it was.
 pub(crate) async fn patch_group(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(patch): Json<ScimPatchRequest>,
+    ScimJson(patch): ScimJson<ScimPatchRequest>,
 ) -> Response {
-    // Validate resource ID before any processing
-    if let Err((status, json)) = super::validate_resource_id(&id) {
-        return (status, json).into_response();
-    }
-
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
@@ -515,111 +571,117 @@ pub(crate) async fn patch_group(
         return (status, json).into_response();
     }
 
-    // Get existing group
-    let group = match db::get_scim_group(&state.store, &id, &auth.org_id).await {
-        Ok(Some(g)) => g,
-        Ok(None) => {
+    let result = db::update_scim_group(&state.store, &id, &auth.org_id, |group| {
+        patch
+            .operations
+            .iter()
+            .try_for_each(|op| apply_group_op(group, op))
+    })
+    .await;
+    group_write_response(&state, &auth, &id, result, "update").await
+}
+
+/// PUT /scim/v2/Groups/:id (RFC 7644 Section 3.5.1).
+///
+/// Replaces a Group's attributes in one transaction. PUT never creates: an
+/// unknown id is 404. `displayName` is required. `externalId` and `members`
+/// are `readWrite`, so each takes the presented value and an omitted one is
+/// cleared — §3.5.1 lets the service provider "assume that any existing
+/// values are to be cleared" — which for `members` removes every member.
+/// `id`, `meta`, and `schemas` are ignored.
+pub(crate) async fn put_group(
+    arrival: ArrivalTime,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ScimJson(group): ScimJson<ScimGroup>,
+) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    let display_name = match check_display_name(group.display_name.as_deref()) {
+        Ok(display_name) => display_name.to_string(),
+        Err(invalid) => return invalid.into_response(),
+    };
+
+    let auth = match authenticate_scim(&state, &headers, arrival).await {
+        Ok(auth) => auth,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsWrite) {
+        return (status, json).into_response();
+    }
+
+    let replacement = db::ScimGroupState {
+        display_name,
+        external_id: group.external_id,
+        members: group
+            .members
+            .unwrap_or_default()
+            .into_iter()
+            .map(|member| member.value)
+            .collect(),
+    };
+    let result = db::update_scim_group(&state.store, &id, &auth.org_id, |stored| {
+        stored.clone_from(&replacement);
+        Ok::<(), AttributeError>(())
+    })
+    .await;
+    group_write_response(&state, &auth, &id, result, "replace").await
+}
+
+/// Maps the outcome of a Group PATCH or PUT onto its response: the error, or
+/// an audit row and the stored resource. `operation` names the request in
+/// the audit row.
+async fn group_write_response(
+    state: &AppState,
+    auth: &ScimAuth,
+    id: &str,
+    result: Result<bool, db::ScimGroupUpdateError<AttributeError>>,
+    operation: &'static str,
+) -> Response {
+    match result {
+        Ok(true) => {}
+        Ok(false) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(ScimError::new(404, "Group not found")),
             )
                 .into_response();
         }
-        Err(e) => {
-            tracing::error!("Failed to get group: {e}");
+        Err(db::ScimGroupUpdateError::Rejected(rejection)) => return rejection.into_response(),
+        Err(db::ScimGroupUpdateError::OccConflict) => {
+            // Concurrent writes to one group collide on its document and
+            // retry; exhausting the budget is transient backpressure, not a
+            // fault. Mirrors the User update path.
+            tracing::warn!("SCIM group update exhausted OCC retries");
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ScimError::new(500, "Failed to get group")),
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(ScimError::new(
+                    503,
+                    "Concurrent modification, retry the request",
+                )),
             )
                 .into_response();
         }
-    };
-
-    // Apply patch operations
-    let mut patched = GroupPatch {
-        display_name: group.display_name.clone(),
-        external_id: group.external_id.clone(),
-    };
-
-    // Every attribute operation is validated before any membership is
-    // written. Membership writes go straight to the database while attribute
-    // operations accumulate in `patched`, so applying them as they were read
-    // would let an operation rejected later in the request — removing the
-    // required `displayName`, say — return 400 with group membership already
-    // changed. Members are collected here and applied below, in request order.
-    let mut member_ops = Vec::new();
-    for op in &patch.operations {
-        // A value filter may follow the attribute name, as in
-        // `members[value eq "…"]`.
-        let members_path = op.path.as_deref().filter(|path| {
-            path.split('[')
-                .next()
-                .is_some_and(|attribute| attribute.eq_ignore_ascii_case("members"))
-        });
-        if let Some(path) = members_path {
-            member_ops.push((path, op));
-            continue;
-        }
-        if let Err(invalid) = apply_patch_op(GROUP_ATTRIBUTES, &mut patched, op) {
-            return invalid.into_response();
-        }
-    }
-
-    // Member operations commit one at a time, so a failure part-way leaves
-    // the earlier ones applied. Every error exit past the first applied
-    // operation audits what committed before returning, so a membership
-    // change never lands without an `update` event.
-    let mut applied_member_ops = 0usize;
-    for (path, op) in member_ops {
-        if let Err(response) = apply_member_op(&state.store, &id, &auth.org_id, path, op).await {
-            record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
-            return response;
-        }
-        applied_member_ops = applied_member_ops.saturating_add(1);
-    }
-
-    // Update group in database
-    if patched.display_name != group.display_name || patched.external_id != group.external_id {
-        match db::update_scim_group(
-            &state.store,
-            &id,
-            &auth.org_id,
-            &patched.display_name,
-            patched.external_id.as_deref(),
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ScimError::new(404, "Group not found")),
-                )
-                    .into_response();
+        Err(db::ScimGroupUpdateError::Other(e)) => {
+            if let Some(resp) = super::invalid_index_value_response(&e) {
+                return resp.into_response();
             }
-            Err(e) => {
-                record_partial_group_update(&state, &auth, &id, applied_member_ops).await;
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return resp.into_response();
-                }
-                tracing::error!("Failed to update group: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ScimError::new(500, "Failed to update group")),
-                )
-                    .into_response();
-            }
+            tracing::error!("Failed to update group: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to update group")),
+            )
+                .into_response();
         }
     }
 
-    // Audit log
     db::record_scim_audit(
         &state.audit,
         &db::ScimAuditData {
-            operation: "update",
+            operation,
             resource_type: "Group",
-            resource_id: &id,
+            resource_id: id,
             actor_token_id: Some(&auth.token_id),
             details: None,
             refusal: None,
@@ -628,8 +690,7 @@ pub(crate) async fn patch_group(
     )
     .await;
 
-    // Return updated group
-    let updated = match db::get_scim_group(&state.store, &id, &auth.org_id).await {
+    let updated = match db::get_scim_group(&state.store, id, &auth.org_id).await {
         Ok(Some(g)) => g,
         Ok(None) | Err(_) => {
             return (
@@ -659,11 +720,6 @@ pub(crate) async fn delete_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    // Validate resource ID before any processing
-    if let Err((status, json)) = super::validate_resource_id(&id) {
-        return (status, json).into_response();
-    }
-
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
         Ok(auth) => auth,
@@ -769,7 +825,7 @@ pub(crate) fn db_group_to_scim(
         schemas: vec![urn::GROUP.to_string()],
         id: Some(group.id.clone()),
         external_id: group.external_id,
-        display_name: group.display_name,
+        display_name: Some(group.display_name),
         members: if members.is_empty() {
             None
         } else {
@@ -784,103 +840,116 @@ pub(crate) fn db_group_to_scim(
     }
 }
 
-/// Parse members filter path like "members[value eq \"user-id\"]".
-///
-/// RFC 7643 §2.1 makes ABNF strings — including the `compareOp` token
-/// (`eq`) and the attribute name (`value`) — case-insensitive, so a
-/// path such as `members[value EQ "user-id"]` must be accepted.
-///
-/// The needle is pure ASCII, so it is matched ASCII-case-insensitively
-/// against `path` itself. Case-folding the input and mapping the offset back
-/// is what this must not do: Unicode lowercasing preserves neither byte
-/// length (`ß` → `ss`) nor character count (`İ` U+0130 → two chars), so an
-/// offset measured in the folded copy can land mid-value in the original and
-/// truncate the extracted id. Matching in place needs no remap at all, and
-/// the resulting byte offset is always a character boundary because every
-/// matched byte is ASCII. Slicing the value out of `path` preserves its case.
-fn parse_member_filter(path: &str) -> Option<String> {
-    let needle = b"value eq \"";
-    let start = path
-        .as_bytes()
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle))?
-        .saturating_add(needle.len());
-
-    let rest = path.get(start..)?;
-    let end = rest.find('"')?;
-    rest.get(..end).map(String::from)
-}
-
 #[cfg(test)]
-mod parse_member_filter_tests {
-    use super::parse_member_filter;
+mod members_path_tests {
+    use super::{MembersPath, parse_members_path};
+
+    fn parsed(path: &str) -> Option<MembersPath<'_>> {
+        parse_members_path(path).ok().flatten()
+    }
 
     #[test]
-    fn lowercase_eq_matches() {
+    fn plain_members_path() {
         assert_eq!(
-            parse_member_filter(r#"members[value eq "abc-123"]"#),
-            Some("abc-123".to_string())
+            parsed("Members"),
+            Some(MembersPath {
+                filter: None,
+                sub_attribute: None
+            })
+        );
+        assert_eq!(parse_members_path("displayName").ok(), Some(None));
+    }
+
+    // RFC 7643 §2.1 and RFC 7644 §3.4.2.2: attribute names and operators are
+    // case insensitive; the filtered value keeps its case.
+    #[test]
+    fn value_filter_is_case_insensitive_and_preserves_the_id() {
+        for path in [
+            r#"members[value eq "AbC-123"]"#,
+            r#"members[VALUE EQ "AbC-123"]"#,
+            r#"MEMBERS[ Value Eq "AbC-123" ]"#,
+            // RFC 7644 §3.5.2.2's own example has no space before the quote.
+            r#"members[value eq"AbC-123"]"#,
+        ] {
+            assert_eq!(
+                parsed(path),
+                Some(MembersPath {
+                    filter: Some("AbC-123"),
+                    sub_attribute: None
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_filter_with_sub_attribute() {
+        assert_eq!(
+            parsed(r#"members[value eq "u1"].display"#),
+            Some(MembersPath {
+                filter: Some("u1"),
+                sub_attribute: Some("display")
+            })
+        );
+        assert_eq!(
+            parsed("members.value"),
+            Some(MembersPath {
+                filter: None,
+                sub_attribute: Some("value")
+            })
         );
     }
 
     #[test]
-    fn uppercase_eq_matches() {
-        // RFC 7643 §2.1: ABNF `compareOp` tokens are case-insensitive, so
-        // `EQ` must parse identically to `eq` — the regression this fixes.
+    fn non_ascii_before_the_filter_is_rejected_not_mis_sliced() {
+        // Matching is positional, so no case folding can shift the slice
+        // and truncate the id; anything but `value eq` is unsupported.
+        for path in [
+            "members[\u{0130} value eq \"victim\"]",
+            "members[\u{00DF} value EQ \"victim\"]",
+        ] {
+            assert_eq!(
+                parse_members_path(path).err().map(|e| e.scim_type),
+                Some("invalidFilter"),
+                "{path}"
+            );
+        }
         assert_eq!(
-            parse_member_filter(r#"members[value EQ "abc-123"]"#),
-            Some("abc-123".to_string())
+            parsed("members[value eq \"İstanbul-user\"]"),
+            Some(MembersPath {
+                filter: Some("İstanbul-user"),
+                sub_attribute: None
+            })
         );
     }
 
+    // RFC 7644 §3.12 Table 9: `invalidFilter` covers "the specified attribute
+    // and filter comparison combination is not supported".
     #[test]
-    fn uppercase_value_attribute_matches() {
-        // RFC 7644 §3.10: attribute names are case-insensitive.
-        assert_eq!(
-            parse_member_filter(r#"members[VALUE eq "abc-123"]"#),
-            Some("abc-123".to_string())
-        );
-        assert_eq!(
-            parse_member_filter(r#"members[Value EQ "abc-123"]"#),
-            Some("abc-123".to_string())
-        );
+    fn other_filters_are_invalid_filter() {
+        for path in [
+            "members[]",
+            r#"members[display eq "Babs"]"#,
+            r#"members[value co "u"]"#,
+            r#"members[value eq "u1" and display eq "x"]"#,
+            r#"members[value eq "u1""#,
+        ] {
+            assert_eq!(
+                parse_members_path(path).err().map(|e| e.scim_type),
+                Some("invalidFilter"),
+                "{path}"
+            );
+        }
     }
 
     #[test]
-    fn preserves_value_case() {
-        // The extracted id is sliced from the original (non-lowercased)
-        // path, so its case is preserved verbatim.
-        assert_eq!(
-            parse_member_filter(r#"members[value EQ "AbCdEf"]"#),
-            Some("AbCdEf".to_string())
-        );
-    }
-
-    #[test]
-    fn bare_members_path_returns_none() {
-        assert_eq!(parse_member_filter("members"), None);
-        assert_eq!(parse_member_filter("members[]"), None);
-    }
-
-    #[test]
-    fn value_survives_length_changing_case_folding() {
-        // Matching happens on the original path, so a character whose
-        // lowercase form is a different byte length (`ß` -> `ss`) or a
-        // different character count (`İ` U+0130 -> two chars) cannot shift
-        // the extracted id. Folding the path first and remapping the offset
-        // truncated the value to "ictim-user-id" for the U+0130 case.
-        assert_eq!(
-            parse_member_filter("members[\u{0130} value eq \"victim-user-id\"]"),
-            Some("victim-user-id".to_string())
-        );
-        assert_eq!(
-            parse_member_filter("members[\u{00DF} value EQ \"victim-user-id\"]"),
-            Some("victim-user-id".to_string())
-        );
-        // Non-ASCII inside the value itself is returned verbatim.
-        assert_eq!(
-            parse_member_filter("members[value eq \"İstanbul-user\"]"),
-            Some("İstanbul-user".to_string())
-        );
+    fn trailing_garbage_is_invalid_path() {
+        for path in [r#"members[value eq "u1"]x"#, "members."] {
+            assert_eq!(
+                parse_members_path(path).err().map(|e| e.scim_type),
+                Some("invalidPath"),
+                "{path}"
+            );
+        }
     }
 }

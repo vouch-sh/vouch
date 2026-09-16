@@ -494,9 +494,11 @@ async fn test_scim_patch_group_remove_display_name_rejected() {
     )
     .await;
 
+    // RFC 7644 §3.5.2.2: removing a required attribute returns "a "scimType"
+    // error code of "mutability"", and RFC 7643 §4.2 requires displayName.
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(error["scimType"], "mutability");
 
     let (status, body) = http_get(
         &app,
@@ -1010,25 +1012,6 @@ async fn test_scim_get_group_not_found() {
 }
 
 #[tokio::test]
-async fn test_scim_get_group_invalid_id() {
-    // Non-UUID id should return 400
-    let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-group-invalid-id", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
-
-    let (status, body) = http_get(
-        &app,
-        "/scim/v2/Groups/not-a-uuid",
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
-}
-
-#[tokio::test]
 async fn test_scim_delete_group_not_found() {
     // DELETE on a valid UUID that doesn't exist returns 404
     let (app, state) = test_app().await;
@@ -1046,26 +1029,6 @@ async fn test_scim_delete_group_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["status"], "404");
-}
-
-#[tokio::test]
-async fn test_scim_delete_group_invalid_id() {
-    // DELETE with non-UUID id returns 400
-    let (app, state) = test_app().await;
-    let token =
-        create_test_scim_token(&state.store, "test-delete-group-invalid-id", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
-
-    let (status, body) = http_delete(
-        &app,
-        "/scim/v2/Groups/not-a-uuid",
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
 }
 
 #[tokio::test]
@@ -1273,33 +1236,12 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
 }
 
 // ========================================================================
-// Audit ordering: a committed change must have its audit row even when a
-// later step of the same request fails (the class behind the missing
-// `Enrollment` event in CLI-initiated WebAuthn enrollment).
+// Atomic group writes: a failing request commits nothing and audits nothing
 // ========================================================================
 
-#[tokio::test]
-async fn test_scim_create_group_audits_committed_group_when_member_add_fails() {
-    // The group row commits before members are added one at a time. A
-    // rejected member fails the request, but the group exists, so its
-    // `create` audit row must exist too.
-    let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-create-audit-partial", "test-org").await;
-    let auth_header = format!("Bearer {token}");
-
-    let (status, body) = http_post_json(
-        &app,
-        "/scim/v2/Groups",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamAudit","members":[{"value":"bad\u0000member"}]}"#,
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-    assert!(
-        !status.is_success(),
-        "a NUL-bearing member must fail the request, got {status}: {body}"
-    );
-
-    let events: Vec<serde_json::Value> = state
+/// The `scim_operation` audit rows recorded so far, parsed.
+async fn scim_audit_rows(state: &crate::AppState) -> Vec<serde_json::Value> {
+    state
         .audit
         .query_events(&crate::db::AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
@@ -1309,31 +1251,55 @@ async fn test_scim_create_group_audits_committed_group_when_member_add_fails() {
         .expect("query audit events")
         .into_iter()
         .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
-        .collect();
-    let creates: Vec<_> = events
-        .iter()
-        .filter(|e| e["operation"] == "create" && e["resource_type"] == "Group")
-        .collect();
-    assert_eq!(
-        creates.len(),
-        1,
-        "the committed group must have its create audit row, got {events:?}"
-    );
+        .collect()
 }
 
 #[tokio::test]
-async fn test_scim_patch_group_audits_partially_applied_member_ops() {
-    // Member operations commit one at a time. When a later one fails, the
-    // earlier ones are already applied, so the request must leave an
-    // `update` audit row that says so.
+async fn test_scim_create_group_with_a_rejected_member_creates_nothing() {
+    // The group and its members commit in one transaction, so a member the
+    // store rejects leaves no group behind for a retried POST to duplicate.
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-audit-partial", "test-org").await;
+    let token = create_test_scim_token(&state.store, "test-create-atomic", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamAtomic","members":[{"value":"bad\u0000member"}]}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "invalidValue",
+        "rejected by the store: {body}"
+    );
+
+    let (_, listed) = http_get(&app, "/scim/v2/Groups", &[("Authorization", &auth_header)]).await;
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("Valid JSON");
+    assert_eq!(listed["totalResults"], 0, "no group was created: {listed}");
+    let rows = scim_audit_rows(&state).await;
+    assert!(
+        !rows.iter().any(|row| row["operation"] == "create"),
+        "nothing was created, so nothing is audited: {rows:?}"
+    );
+}
+
+// RFC 7644 §3.5.2: "A PATCH request, regardless of the number of operations,
+// SHALL be treated as atomic. If a single operation encounters an error
+// condition, the original SCIM resource MUST be restored, and a failure
+// status SHALL be returned."
+#[tokio::test]
+async fn test_scim_patch_group_failing_member_write_restores_the_group() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-atomic", "test-org").await;
     let auth_header = format!("Bearer {token}");
 
     let (_, user_body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"partial-patch@test-org.example.com"}"#,
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"atomic-patch@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1343,7 +1309,7 @@ async fn test_scim_patch_group_audits_partially_applied_member_ops() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Groups",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamPartial"}"#,
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamAtomic"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1351,9 +1317,10 @@ async fn test_scim_patch_group_audits_partially_applied_member_ops() {
     let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let group_id = created["id"].as_str().expect("group id");
 
-    // First op adds a real member (commits); second names an unknown one.
+    // The first operations are valid; the last member id is one the store
+    // rejects when the membership row is written.
     let patch_body = format!(
-        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"add","path":"members","value":[{{"value":"{user_id}"}}]}},{{"op":"add","path":"members","value":[{{"value":"bad\u0000member"}}]}}]}}"#
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"replace","path":"displayName","value":"Renamed"}},{{"op":"add","path":"members","value":[{{"value":"{user_id}"}}]}},{{"op":"add","path":"members","value":[{{"value":"bad\u0000member"}}]}}]}}"#
     );
     let (status, body) = http_request(
         &app,
@@ -1366,12 +1333,13 @@ async fn test_scim_patch_group_audits_partially_applied_member_ops() {
         ],
     )
     .await;
-    assert!(
-        !status.is_success(),
-        "the NUL-bearing member must fail the request, got {status}: {body}"
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "invalidValue",
+        "rejected by the store: {body}"
     );
 
-    // The first op really committed.
     let (_, body) = http_get(
         &app,
         &format!("/scim/v2/Groups/{group_id}"),
@@ -1379,31 +1347,484 @@ async fn test_scim_patch_group_audits_partially_applied_member_ops() {
     )
     .await;
     let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(group["displayName"], "TeamAtomic", "rename rolled back");
     assert!(
-        group["members"]
-            .as_array()
-            .is_some_and(|m| m.iter().any(|m| m["value"] == user_id)),
-        "the first member op must have been applied: {group}"
+        group.get("members").is_none(),
+        "member add rolled back: {group}"
     );
+    let rows = scim_audit_rows(&state).await;
+    assert!(
+        !rows.iter().any(|row| row["operation"] == "update"),
+        "nothing changed, so no update is audited: {rows:?}"
+    );
+}
 
-    let events: Vec<serde_json::Value> = state
+// ========================================================================
+// RFC 7644 Section 3.5.1 — PUT Group
+// ========================================================================
+
+const GROUP_URN: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
+
+/// Creates a user through `POST /scim/v2/Users` and returns its id.
+async fn post_member(app: &axum::Router, auth_header: &str, email: &str) -> String {
+    let (status, body) = http_post_json(
+        app,
+        "/scim/v2/Users",
+        &serde_json::json!({"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": email}).to_string(),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    created["id"].as_str().expect("user id").to_string()
+}
+
+/// Creates a group through `POST /scim/v2/Groups` and returns its id.
+async fn post_group(app: &axum::Router, auth_header: &str, body: serde_json::Value) -> String {
+    let (status, body) = http_post_json(
+        app,
+        "/scim/v2/Groups",
+        &body.to_string(),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    created["id"].as_str().expect("group id").to_string()
+}
+
+/// Sends `PUT` with `body` and returns the status and parsed body.
+async fn put_group_json(
+    app: &axum::Router,
+    auth_header: &str,
+    group_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = http_put_json(
+        app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &body.to_string(),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+fn member_ids(group: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = group["members"]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|member| member["value"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+// RFC 7644 §3.5.1: readWrite "Any values provided SHALL replace the existing
+// attribute values", and a successful PUT "returns a 200 OK response code and
+// the entire resource within the response body".
+#[tokio::test]
+async fn test_rfc7644_put_group_replaces_attributes_and_members() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-group", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let alice = post_member(&app, &auth_header, "alice@test-org.example.com").await;
+    let bob = post_member(&app, &auth_header, "bob@test-org.example.com").await;
+    let group_id = post_group(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Old", "externalId": "old", "members": [{"value": alice}]}),
+    )
+    .await;
+
+    let (status, body) = put_group_json(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "New", "externalId": "new", "members": [{"value": bob}]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], group_id.as_str());
+    assert_eq!(body["displayName"], "New");
+    assert_eq!(body["externalId"], "new");
+    assert_eq!(member_ids(&body), vec![bob]);
+}
+
+// RFC 7644 §3.5.1: omitted readWrite attributes — "The service provider MAY
+// assume that any existing values are to be cleared".
+#[tokio::test]
+async fn test_rfc7644_put_group_clears_omitted_attributes_and_members() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-group-clear", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let alice = post_member(&app, &auth_header, "alice@test-org.example.com").await;
+    let group_id = post_group(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Team", "externalId": "ext", "members": [{"value": alice}]}),
+    )
+    .await;
+
+    let (status, body) = put_group_json(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Team"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("externalId").is_none(), "{body}");
+    assert!(member_ids(&body).is_empty(), "{body}");
+}
+
+// RFC 7644 §3.5.1: "HTTP PUT MUST NOT be used to create new resources."
+#[tokio::test]
+async fn test_rfc7644_put_group_unknown_id_is_404() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-group-404", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = put_group_json(
+        &app,
+        &auth_header,
+        "00000000-0000-7000-0000-0000000000cc",
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Ghost"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (_, listed) = http_get(
+        &app,
+        "/scim/v2/Groups?filter=displayName%20eq%20%22Ghost%22",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("Valid JSON");
+    assert_eq!(listed["totalResults"], 0, "PUT must not create a group");
+}
+
+// RFC 7644 §3.5.1: "If an attribute is "required", clients MUST specify the
+// attribute in the PUT request"; an empty displayName is checked before
+// authentication, as on create.
+#[tokio::test]
+async fn test_rfc7644_put_group_requires_display_name() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-group-name", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let group_id = post_group(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Keep"}),
+    )
+    .await;
+
+    let (status, error) = put_group_json(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!({"schemas": [GROUP_URN], "externalId": "x"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["scimType"], "invalidSyntax");
+
+    let (status, error) = put_group_json(
+        &app,
+        "",
+        &group_id,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "  "}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "400 before 401: {error}");
+    assert_eq!(error["scimType"], "invalidValue");
+}
+
+#[tokio::test]
+async fn test_put_group_audits_a_replace() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-group-audit", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let group_id = post_group(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Audited"}),
+    )
+    .await;
+
+    let (status, _) = put_group_json(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Audited 2"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let events = state
         .audit
         .query_events(&crate::db::AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
             ..crate::db::AuditEventFilter::default()
         })
         .await
-        .expect("query audit events")
-        .into_iter()
-        .map(|e| serde_json::from_str(&e.data).expect("scim audit data is JSON"))
-        .collect();
-    let partial = events.iter().find(|e| {
-        e["operation"] == "update" && e["resource_type"] == "Group" && e["resource_id"] == group_id
+        .expect("query audit events");
+    assert!(
+        events.iter().any(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.data).is_ok_and(|data| {
+                data["operation"] == "replace" && data["resource_id"] == group_id.as_str()
+            })
+        }),
+        "a replace audit row names the group: {:?}",
+        events.iter().map(|event| &event.data).collect::<Vec<_>>()
+    );
+}
+
+// ========================================================================
+// RFC 7644 §3.5.2 — PATCH Group member paths and operation rules
+// ========================================================================
+
+/// Sends `PATCH` with `operations` to the group and returns the status and
+/// parsed body.
+async fn patch_group_ops(
+    app: &axum::Router,
+    auth_header: &str,
+    group_id: &str,
+    operations: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": operations,
     });
-    let details: serde_json::Value = partial
-        .and_then(|e| e["details"].as_str())
-        .map(|d| serde_json::from_str(d).expect("details JSON"))
-        .expect("the partially applied PATCH must leave an update audit row");
-    assert_eq!(details["partial"], true);
-    assert_eq!(details["memberOpsApplied"], 1);
+    let (status, body) = http_request(
+        app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(body.to_string()),
+        &[
+            ("Authorization", auth_header),
+            ("Content-Type", "application/scim+json"),
+        ],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+/// A group with members alice and bob, and a third user carol outside it.
+async fn group_with_members(
+    app: &axum::Router,
+    auth_header: &str,
+) -> (String, String, String, String) {
+    let alice = post_member(app, auth_header, "alice@test-org.example.com").await;
+    let bob = post_member(app, auth_header, "bob@test-org.example.com").await;
+    let carol = post_member(app, auth_header, "carol@test-org.example.com").await;
+    let group_id = post_group(
+        app,
+        auth_header,
+        serde_json::json!({"schemas": [GROUP_URN], "displayName": "Team", "members": [{"value": alice}, {"value": bob}]}),
+    )
+    .await;
+    (group_id, alice, bob, carol)
+}
+
+// RFC 7644 §3.5.2.2: "If the target location is a multi-valued attribute and
+// no filter is specified, the attribute and all values are removed".
+#[tokio::test]
+async fn test_rfc7644_patch_group_remove_members_without_filter_removes_all() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-remove-all", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, ..) = group_with_members(&app, &auth_header).await;
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "remove", "path": "members"}]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(member_ids(&body).is_empty(), "{body}");
+}
+
+// RFC 7644 §3.5.2.3: with a value filter, "all matching record values SHALL
+// be replaced", and with no match the service provider "SHALL indicate
+// failure by returning HTTP status code 400 and a "scimType" error code of
+// "noTarget"."
+#[tokio::test]
+async fn test_rfc7644_patch_group_replace_filtered_member() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-replace-filter", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, alice, bob, carol) = group_with_members(&app, &auth_header).await;
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "replace", "path": format!("members[value eq \"{alice}\"]"), "value": {"value": carol}}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut expected = vec![bob.clone(), carol.clone()];
+    expected.sort();
+    assert_eq!(member_ids(&body), expected);
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "replace", "path": format!("members[value eq \"{bob}\"].value"), "value": alice}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut expected = vec![alice.clone(), carol.clone()];
+    expected.sort();
+    assert_eq!(member_ids(&body), expected);
+
+    let (status, error) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "replace", "path": format!("members[value eq \"{bob}\"]"), "value": {"value": bob}}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["scimType"], "noTarget");
+}
+
+#[tokio::test]
+async fn test_patch_group_member_path_errors() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-member-path", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, alice, ..) = group_with_members(&app, &auth_header).await;
+
+    for (operations, scim_type) in [
+        // RFC 7644 §3.12 Table 9 `invalidFilter`: "the specified attribute
+        // and filter comparison combination is not supported".
+        (
+            serde_json::json!([{"op": "remove", "path": "members[display eq \"Alice\"]"}]),
+            "invalidFilter",
+        ),
+        // `add` appends to the attribute; a filter selects existing values.
+        (
+            serde_json::json!([{"op": "add", "path": format!("members[value eq \"{alice}\"]"), "value": {"value": alice}}]),
+            "invalidPath",
+        ),
+        // RFC 7644 §3.5.2.1: "The operation MUST contain a "value" member".
+        (
+            serde_json::json!([{"op": "add", "path": "members"}]),
+            "invalidValue",
+        ),
+        (
+            serde_json::json!([{"op": "add", "path": "members", "value": [{"display": "no value"}]}]),
+            "invalidValue",
+        ),
+        // RFC 7644 §3.5.2.2: a pathless remove "fails with HTTP status code
+        // 400 and a "scimType" error code of "noTarget"".
+        (serde_json::json!([{"op": "remove"}]), "noTarget"),
+    ] {
+        let (status, error) =
+            patch_group_ops(&app, &auth_header, &group_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], scim_type, "{operations}");
+    }
+
+    let (_, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        member_ids(&group).len(),
+        2,
+        "rejected requests change nothing"
+    );
+}
+
+// RFC 7644 §3.5.2.3: a pathless replace's "value" attribute "SHALL contain a
+// list of one or more attributes that are to be replaced", `members`
+// included; RFC 7643 §2.1 makes the attribute names case insensitive.
+#[tokio::test]
+async fn test_rfc7644_patch_group_pathless_value_carries_members() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-pathless-members", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, _alice, _bob, carol) = group_with_members(&app, &auth_header).await;
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "replace", "value": {"DisplayName": "Renamed", "Members": [{"Value": carol}]}}]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["displayName"], "Renamed");
+    assert_eq!(member_ids(&body), vec![carol]);
+}
+
+// RFC 7644 §3.10: "Clients MAY omit core schema attribute URN prefixes", so a
+// fully qualified path addresses the same attribute.
+#[tokio::test]
+async fn test_rfc7644_patch_group_core_urn_qualified_paths() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-urn-paths", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, alice, ..) = group_with_members(&app, &auth_header).await;
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([
+            {"op": "replace", "path": "urn:ietf:params:scim:schemas:core:2.0:Group:displayName", "value": "Qualified"},
+            {"op": "remove", "path": format!("urn:ietf:params:scim:schemas:core:2.0:Group:members[value eq \"{alice}\"]")}
+        ]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["displayName"], "Qualified");
+    assert_eq!(member_ids(&body).len(), 1);
+}
+
+// RFC 7644 §3.5.2.1: "If the target location already contains the value
+// specified, no changes SHOULD be made to the resource ... this operation
+// SHALL NOT change the modify timestamp of the resource."
+#[tokio::test]
+async fn test_rfc7644_patch_group_adding_existing_member_keeps_last_modified() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-noop-group", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, alice, ..) = group_with_members(&app, &auth_header).await;
+    let (_, before) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let before: serde_json::Value = serde_json::from_str(&before).expect("Valid JSON");
+
+    let (status, body) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "add", "path": "members", "value": [{"value": alice}]}]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["meta"]["lastModified"], before["meta"]["lastModified"]);
 }

@@ -191,7 +191,7 @@ impl DocumentType for UserDoc {
 /// `is_unique_violation` and surfaced as the existing "UNIQUE
 /// constraint failed" error, so the SCIM handler still returns
 /// `409 Conflict`. Because the output is a valid `Uuid`, it passes
-/// `validate_resource_id` and can be used in SCIM resource paths
+/// the UUID check in `get_scim_user` and can be used in SCIM resource paths
 /// (`GET /scim/v2/Users/:id`).
 ///
 /// This is the same TOCTOU-closing pattern — and the same
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn deterministic_user_id_is_a_valid_uuid() {
         // SCIM resource IDs must parse as `uuid::Uuid` (see
-        // `handlers::scim::validate_resource_id`). A deterministic ID
+        // `db::scim::get_scim_user`). A deterministic ID
         // that fails to parse would make the user it identifies
         // unaddressable via GET/PATCH/PUT/DELETE.
         let id = deterministic_user_id(&Email::new("uuid-shape@example.com"));
