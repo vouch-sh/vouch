@@ -61,6 +61,13 @@ pub(crate) struct ResourceSchema {
     pub attributes: &'static [SchemaAttribute],
 }
 
+/// `userName` and `emails` are `immutable`: Vouch keys a user by their email
+/// and cannot change it, so a PUT or PATCH presenting a different one is 400
+/// `mutability` (RFC 7644 §3.5.1, §3.5.2) rather than a silently ignored write.
+///
+/// `active` is `required`: it has no absent state, so removing it is 400
+/// `mutability` (RFC 7644 §3.5.2.2). Create and PUT still default an omitted
+/// `active` to `true`.
 const USER_ATTRIBUTES: &[SchemaAttribute] = &[
     SchemaAttribute {
         name: "userName",
@@ -68,7 +75,7 @@ const USER_ATTRIBUTES: &[SchemaAttribute] = &[
         multi_valued: false,
         required: true,
         case_exact: false,
-        mutability: "readWrite",
+        mutability: "immutable",
         returned: "default",
         uniqueness: "server",
     },
@@ -88,7 +95,7 @@ const USER_ATTRIBUTES: &[SchemaAttribute] = &[
         multi_valued: true,
         required: false,
         case_exact: false,
-        mutability: "readWrite",
+        mutability: "immutable",
         returned: "default",
         uniqueness: "none",
     },
@@ -96,7 +103,7 @@ const USER_ATTRIBUTES: &[SchemaAttribute] = &[
         name: "active",
         attr_type: "boolean",
         multi_valued: false,
-        required: false,
+        required: true,
         case_exact: false,
         mutability: "readWrite",
         returned: "default",
@@ -104,6 +111,8 @@ const USER_ATTRIBUTES: &[SchemaAttribute] = &[
     },
 ];
 
+/// `displayName` uniqueness is `none`: Vouch does not refuse two groups with
+/// the same name, and RFC 7643 §7 `server` would claim it does.
 const GROUP_ATTRIBUTES: &[SchemaAttribute] = &[
     SchemaAttribute {
         name: "displayName",
@@ -113,7 +122,7 @@ const GROUP_ATTRIBUTES: &[SchemaAttribute] = &[
         case_exact: false,
         mutability: "readWrite",
         returned: "default",
-        uniqueness: "server",
+        uniqueness: "none",
     },
     SchemaAttribute {
         name: "members",

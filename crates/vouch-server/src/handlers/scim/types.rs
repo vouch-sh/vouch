@@ -52,7 +52,11 @@ pub(crate) struct ScimUser {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
-    pub user_name: String,
+    /// Required (RFC 7643 §4.1.1), but `Option` so a request that omits it
+    /// is answered as the schema violation it is — see
+    /// `patch::required_attribute` — rather than as unparsable JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<ScimName>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,7 +242,10 @@ pub(crate) struct ScimGroup {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
-    pub display_name: String,
+    /// Required (RFC 7643 §4.2), but `Option` for the same reason as
+    /// [`ScimUser::user_name`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<ScimGroupMember>>,
     #[serde(skip_serializing_if = "Option::is_none")]

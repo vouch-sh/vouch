@@ -1,9 +1,9 @@
 name: SCIM Conformance
 
 # Runs SCIM Verify (https://verify.scim.dev) against the SCIM API served by
-# crates/vouch-tests/src/bin/scim-conformance-server.rs. Not a required
-# check: it fails while known gaps are open (#1411, #1412, #1413) and turns
-# green when the last one lands.
+# crates/vouch-tests/src/bin/scim-conformance-server.rs, through
+# crates/vouch-tests/scim-verify/run.sh, which corrects one assertion in the
+# suite that contradicts RFC 7644 §3.12 (see the script).
 
 on:
   push:
@@ -75,15 +75,13 @@ jobs:
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/scim-verify"
           docker run --rm --network host \
-            --entrypoint node \
+            --entrypoint sh \
             -v "$GITHUB_WORKSPACE/crates/vouch-tests/scim-verify:/config:ro" \
             -v "$RUNNER_TEMP/scim-verify:/out" \
+            -e SCIM_BASE_URL="http://$SCIM_ADDR/scim/v2" \
+            -e SCIM_AUTH_HEADER="Bearer $(cat "$RUNNER_TEMP/scim-token")" \
             "$SCIM_VERIFY_IMAGE" \
-            bin/scimverify.js \
-            --base-url "http://$SCIM_ADDR/scim/v2" \
-            --auth-header "Bearer $(cat "$RUNNER_TEMP/scim-token")" \
-            --config /config/config.yaml \
-            --har-file /out/scim-verify.har \
+            /config/run.sh \
             | tee "$RUNNER_TEMP/scim-verify/results.tap"
       - name: Summarize results
         if: always()

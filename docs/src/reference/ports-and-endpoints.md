@@ -105,7 +105,7 @@ revocation list without holding credentials.
 | `/api/v1/org/scim-tokens` | GET/POST | Admin | General |
 | `/api/v1/org/scim-tokens/{id}` | DELETE | Admin | General |
 | `/api/v1/org/policies/validate` | POST | Admin | General |
-| `/scim/v2/*` | GET/POST/PATCH/DELETE | SCIM token | General |
+| `/scim/v2/*` | GET/POST/PUT/PATCH/DELETE | SCIM token | General |
 | `/api/v1/applications*` | various | Bearer/DPoP | General |
 | `/api/webhooks/github` | POST | HMAC | General |
 

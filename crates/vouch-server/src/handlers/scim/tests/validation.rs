@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Input validation: resource-ID format, filter length, startIndex
+//! Input validation: unknown resource IDs, filter length, startIndex
 //! bounds, validation-before-auth ordering, and NUL-byte rejection.
 #![expect(
     clippy::expect_used,
@@ -10,98 +10,68 @@
 use super::*;
 
 // ========================================================================
-// Input Validation Tests — Resource ID Format
+// Resource IDs Vouch never issued
 // ========================================================================
 
-#[tokio::test]
-async fn test_validation_get_user_invalid_uuid_returns_400() {
-    // Non-UUID resource IDs must be rejected with 400 before hitting the DB
+/// Sends `method` to `uri` with a valid token and asserts the SCIM 404 body.
+async fn assert_unknown_resource_is_404(method: &str, uri: &str, body: Option<&str>) {
     let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-unknown-id", "test-org").await;
+    let auth_header = format!("Bearer {token}");
 
-    let token = create_test_scim_token(&state.store, "test-invalid-uuid", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
-
-    let (status, body) = http_get(
+    let (status, response) = http_request(
         &app,
-        "/scim/v2/Users/not-a-uuid",
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
-    assert!(
-        error["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Invalid resource ID"),
-        "Error detail should mention invalid resource ID"
-    );
-}
-
-#[tokio::test]
-async fn test_validation_get_group_invalid_uuid_returns_400() {
-    let (app, state) = test_app().await;
-
-    let token = create_test_scim_token(&state.store, "test-invalid-group-uuid", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
-
-    let (status, body) = http_get(
-        &app,
-        "/scim/v2/Groups/not-a-valid-id",
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
-}
-
-#[tokio::test]
-async fn test_validation_patch_user_invalid_uuid_returns_400() {
-    let (app, state) = test_app().await;
-
-    let token = create_test_scim_token(&state.store, "test-patch-invalid-uuid", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
-
-    let (status, body) = http_request(
-        &app,
-        "PATCH",
-        "/scim/v2/Users/xyz-not-uuid",
-        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        method,
+        uri,
+        body.map(String::from),
         &[
             ("Authorization", &auth_header),
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/scim+json"),
         ],
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
+    assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {response}");
+    let error: serde_json::Value = serde_json::from_str(&response).expect("Valid JSON");
+    assert_eq!(
+        error["schemas"][0],
+        "urn:ietf:params:scim:api:messages:2.0:Error"
+    );
+    assert_eq!(error["status"], "404");
+}
+
+// RFC 7644 §3.12: 404 is "Specified resource (e.g., User) or endpoint does
+// not exist." Ids are assigned by the service provider, so an id that is not
+// a UUID names a resource that does not exist rather than a malformed request.
+#[tokio::test]
+async fn test_non_uuid_user_id_returns_404_for_every_method() {
+    let patch = r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#;
+    let put = r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "a@example.com"}"#;
+    assert_unknown_resource_is_404("GET", "/scim/v2/Users/9876543210123456", None).await;
+    assert_unknown_resource_is_404("PATCH", "/scim/v2/Users/xyz-not-uuid", Some(patch)).await;
+    assert_unknown_resource_is_404("PUT", "/scim/v2/Users/xyz-not-uuid", Some(put)).await;
+    assert_unknown_resource_is_404("DELETE", "/scim/v2/Users/drop-table-users", None).await;
+}
+
+// RFC 7644 §3.12: 404 for a resource that does not exist, as for Users.
+#[tokio::test]
+async fn test_non_uuid_group_id_returns_404_for_every_method() {
+    let patch = r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "displayName", "value": "x"}]}"#;
+    let put = r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "x"}"#;
+    assert_unknown_resource_is_404("GET", "/scim/v2/Groups/9876543210123456", None).await;
+    assert_unknown_resource_is_404("PATCH", "/scim/v2/Groups/not-a-uuid", Some(patch)).await;
+    assert_unknown_resource_is_404("PUT", "/scim/v2/Groups/not-a-uuid", Some(put)).await;
+    assert_unknown_resource_is_404("DELETE", "/scim/v2/Groups/not-a-uuid", None).await;
 }
 
 #[tokio::test]
-async fn test_validation_delete_user_invalid_uuid_returns_400() {
-    let (app, state) = test_app().await;
+async fn test_non_uuid_id_without_token_returns_401() {
+    // The unknown-id answer is only given to an authenticated caller.
+    let (app, _state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-delete-invalid-uuid", "test-org").await;
-    let auth_header = format!("Bearer {}", token);
+    let (status, body) = http_get(&app, "/scim/v2/Users/not-a-uuid", &[]).await;
 
-    let (status, body) = http_request(
-        &app,
-        "DELETE",
-        "/scim/v2/Users/drop-table-users",
-        None,
-        &[("Authorization", &auth_header)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["status"], "400");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 }
 
 #[tokio::test]
@@ -838,7 +808,7 @@ async fn test_scim_patch_group_replace_members() {
 /// must return 200 OK (the operation is idempotent).
 ///
 /// Exercises the full axum router → SCIM auth middleware → handler →
-/// `add_scim_group_member` → `DocumentStore::insert_with_id` path, verifying
+/// `update_scim_group` → `StoreTransaction::insert_with_id` path, verifying
 /// the deterministic-ID fix holds end-to-end and not just at the DB layer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_scim_patch_group_add_member_concurrent_same_user() {
@@ -1126,8 +1096,8 @@ async fn test_scim_patch_group_remove_members_by_value_list() {
 // ========================================================================
 //
 // A NUL byte in `user_id` is a client error (400 invalidValue), tested
-// above. But `add_scim_group_member` / `remove_scim_group_member` also
-// call `find_by_indexes`, which can fail with non-retryable infrastructure
+// above. But `update_scim_group` also reads the group's membership rows
+// with `find_all`, which can fail with non-retryable infrastructure
 // errors: HPKE decryption failure, JSON parse failure on a corrupted
 // document, or timestamp parse failure. These must surface as 500
 // INTERNAL_SERVER_ERROR, not be swallowed into a 200 OK with stale
@@ -1135,11 +1105,11 @@ async fn test_scim_patch_group_remove_members_by_value_list() {
 // operation leaves the record untouched.
 //
 // Each test corrupts a membership document's `data` column in the DB so
-// `find_by_indexes` hits a JSON parse error, then verifies the PATCH
+// the membership read hits a JSON parse error, then verifies the PATCH
 // returns 500 through the full axum router.
 
 /// Corrupt every `scim_group_member` document for `group_id` so that
-/// `find_by_indexes` fails with a deserialization (infrastructure) error
+/// the membership read fails with a deserialization (infrastructure) error
 /// rather than an `InvalidIndexValue` client error.
 async fn corrupt_group_member_docs(state: &crate::AppState, group_id: &str) {
     use crate::db::Pool;
@@ -1161,7 +1131,7 @@ async fn corrupt_group_member_docs(state: &crate::AppState, group_id: &str) {
 
 #[tokio::test]
 async fn test_scim_patch_group_add_member_infrastructure_error_returns_500() {
-    // If `find_by_indexes` fails with a deserialization error while
+    // If the membership read fails with a deserialization error while
     // checking whether the member already exists, the PATCH must return
     // 500 — not 200 OK with the member silently absent.
     let (app, state) = test_app().await;
@@ -1194,11 +1164,11 @@ async fn test_scim_patch_group_add_member_infrastructure_error_returns_500() {
     let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let group_id = created["id"].as_str().expect("group id");
 
-    // Corrupt the membership document so `find_by_indexes` fails.
+    // Corrupt the membership document so the membership read fails.
     corrupt_group_member_docs(&state, group_id).await;
 
-    // PATCH add the same member — `add_scim_group_member` calls
-    // `find_by_indexes` which hits the corrupted doc and fails.
+    // PATCH add the same member — `update_scim_group` reads the
+    // membership rows, hits the corrupted doc, and fails.
     let patch = serde_json::json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
         "Operations": [{"op": "add", "path": "members", "value": [{"value": user_id}]}]
@@ -1230,7 +1200,7 @@ async fn test_scim_patch_group_add_member_infrastructure_error_returns_500() {
 
 #[tokio::test]
 async fn test_scim_patch_group_remove_member_infrastructure_error_returns_500() {
-    // If `find_by_indexes` fails with a deserialization error while
+    // If the membership read fails with a deserialization error while
     // locating the member to remove, the PATCH must return 500 — not
     // 200 OK with the member silently left in place.
     let (app, state) = test_app().await;
@@ -1263,11 +1233,11 @@ async fn test_scim_patch_group_remove_member_infrastructure_error_returns_500() 
     let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let group_id = created["id"].as_str().expect("group id");
 
-    // Corrupt the membership document so `find_by_indexes` fails.
+    // Corrupt the membership document so the membership read fails.
     corrupt_group_member_docs(&state, group_id).await;
 
-    // PATCH remove the member — `remove_scim_group_member` calls
-    // `find_by_indexes` which hits the corrupted doc and fails.
+    // PATCH remove the member — `update_scim_group` reads the
+    // membership rows, hits the corrupted doc, and fails.
     let patch = format!(
         r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"remove","path":"members[value eq \"{user_id}\"]"}}]}}"#
     );
@@ -1298,10 +1268,10 @@ async fn test_scim_patch_group_remove_member_infrastructure_error_returns_500() 
 
 #[tokio::test]
 async fn test_scim_patch_group_replace_members_infrastructure_error_returns_500() {
-    // `replace_scim_group_members` deletes existing members by index and
-    // inserts new ones. Corrupting an existing membership document's data
-    // makes the `delete_by_index` scan fail to deserialize it, surfacing
-    // as 500 rather than 200 OK with a partial replacement.
+    // `update_scim_group` reads existing members before replacing them.
+    // Corrupting an existing membership document's data makes that read fail
+    // to deserialize it, surfacing as 500 rather than 200 OK with a partial
+    // replacement.
     let (app, state) = test_app().await;
     let token =
         create_test_scim_token(&state.store, "test-infra-replace-members", "test-org").await;
@@ -1334,7 +1304,7 @@ async fn test_scim_patch_group_replace_members_infrastructure_error_returns_500(
     let group_id = created["id"].as_str().expect("group id");
 
     // Corrupt the membership document so deserialization fails during
-    // `replace_scim_group_members`'s `delete_by_index` scan.
+    // `update_scim_group`'s membership read.
     corrupt_group_member_docs(&state, group_id).await;
 
     // PATCH replace members with a new (valid) user_id.

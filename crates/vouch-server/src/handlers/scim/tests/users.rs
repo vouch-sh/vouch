@@ -1123,9 +1123,9 @@ async fn test_patch_user_add_and_replace_agree_on_single_valued_attributes() {
     assert_eq!(results[0]["active"], false);
 }
 
-/// `active` is a stored boolean with no absent state, so a removal has no
-/// value to fall back to and is rejected rather than guessing (RFC 7644
-/// §3.12 `invalidValue`).
+// RFC 7644 §3.5.2.2: "If an attribute is removed or becomes unassigned and
+// is defined as a required attribute ..., the server SHALL return ... a
+// "scimType" error code of "mutability"." `active` is advertised as required.
 #[tokio::test]
 async fn test_patch_user_remove_active_rejected() {
     let (app, state) = test_app().await;
@@ -1157,7 +1157,7 @@ async fn test_patch_user_remove_active_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["scimType"], "invalidValue");
+    assert_eq!(error["scimType"], "mutability");
 
     let (status, body) = http_get(
         &app,
@@ -2372,4 +2372,603 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         details.get("refusal").is_none(),
         "the refusal is recorded top-level, not inside details: {details}",
     );
+}
+
+// ========================================================================
+// RFC 7644 Section 3.5.1 - PUT User Tests
+// ========================================================================
+
+const USER_URN: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
+
+/// Creates a user through `POST /scim/v2/Users` and returns its id.
+async fn post_user(app: &axum::Router, auth_header: &str, body: serde_json::Value) -> String {
+    let (status, body) = http_post_json(
+        app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    created["id"].as_str().expect("user id").to_string()
+}
+
+/// Sends `PATCH` with `operations` and returns the status and parsed body.
+async fn patch_user_ops(
+    app: &axum::Router,
+    auth_header: &str,
+    user_id: &str,
+    operations: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": operations,
+    });
+    let (status, body) = http_request(
+        app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(body.to_string()),
+        &[
+            ("Authorization", auth_header),
+            ("Content-Type", "application/scim+json"),
+        ],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+/// Sends `PUT` with `body` and returns the status and parsed body.
+async fn put_user_json(
+    app: &axum::Router,
+    auth_header: &str,
+    user_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = http_put_json(
+        app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &body.to_string(),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+// RFC 7644 §3.5.1: readWrite "Any values provided SHALL replace the existing
+// attribute values", and "a successful PUT operation returns a 200 OK
+// response code and the entire resource within the response body".
+#[tokio::test]
+async fn test_rfc7644_put_user_replaces_attributes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-user", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "bjensen@test-org.example.com", "externalId": "old", "name": {"formatted": "Old Name"}}),
+    )
+    .await;
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({
+            "schemas": [USER_URN],
+            "userName": "bjensen@test-org.example.com",
+            "externalId": "bjensen",
+            "name": {"givenName": "Barbara", "familyName": "Jensen"},
+            "emails": [{"value": "bjensen@test-org.example.com", "type": "work", "primary": true}],
+            "active": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], user_id.as_str());
+    assert_eq!(body["externalId"], "bjensen");
+    assert_eq!(body["name"]["formatted"], "Barbara Jensen");
+    assert_eq!(body["userName"], "bjensen@test-org.example.com");
+
+    let (status, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(
+        fetched["externalId"], "bjensen",
+        "the replacement was stored"
+    );
+}
+
+// RFC 7644 §3.5.1: omitted readWrite attributes — "The service provider MAY
+// assume that any existing values are to be cleared".
+#[tokio::test]
+async fn test_rfc7644_put_user_clears_omitted_attributes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-clear", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "clear@test-org.example.com", "externalId": "ext", "name": {"formatted": "Named"}}),
+    )
+    .await;
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "userName": "clear@test-org.example.com"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("externalId").is_none(), "{body}");
+    assert!(body.get("name").is_none(), "{body}");
+    assert_eq!(body["active"], true);
+}
+
+// RFC 7644 §3.5.1: "HTTP PUT MUST NOT be used to create new resources."
+#[tokio::test]
+async fn test_rfc7644_put_user_unknown_id_is_404_and_creates_nothing() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-unknown", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        "00000000-0000-7000-0000-0000000000aa",
+        serde_json::json!({"schemas": [USER_URN], "userName": "ghost@test-org.example.com"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (_, listed) = http_get(
+        &app,
+        "/scim/v2/Users?filter=userName%20eq%20%22ghost@test-org.example.com%22",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("Valid JSON");
+    assert_eq!(listed["totalResults"], 0, "PUT must not create a user");
+}
+
+// RFC 7644 §3.5.1: immutable "If one or more values are already set for the
+// attribute, the input value(s) MUST match, or HTTP status code 400 SHOULD be
+// returned with a "scimType" error code of "mutability"."
+#[tokio::test]
+async fn test_rfc7644_put_user_immutable_mismatch_is_400_mutability() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-immutable", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "fixed@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    for body in [
+        serde_json::json!({"schemas": [USER_URN], "userName": "renamed@test-org.example.com"}),
+        serde_json::json!({"schemas": [USER_URN], "userName": "fixed@test-org.example.com", "emails": [{"value": "other@test-org.example.com"}]}),
+        serde_json::json!({"schemas": [USER_URN], "userName": "fixed@test-org.example.com", "emails": []}),
+    ] {
+        let (status, error) = put_user_json(&app, &auth_header, &user_id, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} -> {error}");
+        assert_eq!(error["scimType"], "mutability", "{body}");
+    }
+
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(
+        fetched["externalId"], "keep",
+        "a rejected PUT writes nothing"
+    );
+}
+
+// RFC 7643 §4.1.1: userName "is case insensitive", so a matching value that
+// differs only in case is the same value for the immutable check.
+#[tokio::test]
+async fn test_put_user_immutable_match_is_case_insensitive() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-case", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "casey@test-org.example.com"}),
+    )
+    .await;
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "userName": "Casey@Test-Org.Example.com", "emails": [{"value": "CASEY@test-org.example.com"}]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+// RFC 7644 §3.5.1: readOnly "Any values provided SHALL be ignored."
+#[tokio::test]
+async fn test_rfc7644_put_user_ignores_read_only_attributes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-readonly", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "ro@test-org.example.com"}),
+    )
+    .await;
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({
+            "schemas": [USER_URN],
+            "id": "00000000-0000-7000-0000-0000000000bb",
+            "userName": "ro@test-org.example.com",
+            "meta": {"resourceType": "Group", "created": "2000-01-01T00:00:00Z", "location": "https://evil.example.com"},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], user_id.as_str());
+    assert_eq!(body["meta"]["resourceType"], "User");
+}
+
+// RFC 7644 §3.5.1: "If an attribute is "required", clients MUST specify the
+// attribute in the PUT request"; a body without it "did not conform to the
+// request schema", RFC 7644 §3.12 Table 9 `invalidSyntax`.
+#[tokio::test]
+async fn test_rfc7644_put_user_without_user_name_is_400_invalid_syntax() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-required", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "req@test-org.example.com"}),
+    )
+    .await;
+
+    let (status, error) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "active": true}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["scimType"], "invalidSyntax");
+}
+
+#[tokio::test]
+async fn test_put_user_deactivation_revokes_access() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-deactivate", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "leaver@test-org.example.com"}),
+    )
+    .await;
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(8))
+        .expect("future timestamp");
+    crate::db::record_ssh_certificate_issuance(
+        &state.store,
+        42_000_411,
+        &user_id,
+        "leaver@test-org.example.com",
+        &["user".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("record issuance");
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "userName": "leaver@test-org.example.com", "active": false}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["active"], false);
+    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        .await
+        .expect("list revoked");
+    assert_eq!(revoked.len(), 1, "a deactivating PUT revokes like PATCH");
+}
+
+#[tokio::test]
+async fn test_put_user_omitting_active_defaults_to_true() {
+    // RFC 7644 §3.5.1 lets an omitted readWrite attribute take a default;
+    // `active` takes `true`, the default create applies.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-default", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "returning@test-org.example.com", "active": false}),
+    )
+    .await;
+
+    let (status, body) = put_user_json(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "userName": "returning@test-org.example.com"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["active"], true);
+}
+
+#[tokio::test]
+async fn test_put_user_refuses_to_deactivate_the_last_active_admin() {
+    use crate::db::documents::session::SessionDoc;
+
+    let (app, state) = test_app().await;
+    let (admin, _session) = create_test_org_admin(&state).await;
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "put-last-admin",
+        admin.org_id.as_deref().expect("admin has org"),
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+    let sessions_before = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions");
+
+    let (status, error) = put_user_json(
+        &app,
+        &auth_header,
+        &admin.id,
+        serde_json::json!({"schemas": [USER_URN], "userName": admin.email, "active": false}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["scimType"], "mutability");
+    let sessions_after = state
+        .store
+        .count::<SessionDoc>("user_id", &admin.id)
+        .await
+        .expect("count sessions");
+    assert_eq!(sessions_after, sessions_before, "refused before revoking");
+}
+
+#[tokio::test]
+async fn test_put_user_requires_users_write_scope() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-put-scope", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "scoped@test-org.example.com"}),
+    )
+    .await;
+    let read_only = create_test_org_token_with_scope(
+        &state.store,
+        "read-only",
+        "test-org",
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersRead]),
+    )
+    .await;
+
+    let (status, _) = put_user_json(
+        &app,
+        &format!("Bearer {read_only}"),
+        &user_id,
+        serde_json::json!({"schemas": [USER_URN], "userName": "scoped@test-org.example.com"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// RFC 7644 §3.5.2: "a client MUST NOT modify an attribute that has mutability
+// "readOnly" or "immutable"", and "An operation that is not compatible with an
+// attribute's mutability or schema SHALL return the appropriate HTTP response
+// status code and a JSON detail error response".
+#[tokio::test]
+async fn test_rfc7644_patch_user_immutable_attributes_reject_changes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-immutable", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "stay@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    for operations in [
+        serde_json::json!([{"op": "replace", "path": "userName", "value": "moved@test-org.example.com"}]),
+        serde_json::json!([{"op": "replace", "value": {"userName": "moved@test-org.example.com"}}]),
+        serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"].value", "value": "moved@test-org.example.com"}]),
+        serde_json::json!([{"op": "add", "path": "emails", "value": [{"value": "second@test-org.example.com"}]}]),
+        serde_json::json!([{"op": "replace", "path": "emails", "value": []}]),
+        serde_json::json!([{"op": "remove", "path": "emails"}]),
+        serde_json::json!([{"op": "remove", "path": "userName"}]),
+        // A rejected operation fails the request after an accepted one, and
+        // the accepted one is not written.
+        serde_json::json!([
+            {"op": "replace", "path": "externalId", "value": "changed"},
+            {"op": "replace", "path": "userName", "value": "moved@test-org.example.com"}
+        ]),
+    ] {
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], "mutability", "{operations}");
+    }
+
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(fetched["userName"], "stay@test-org.example.com");
+    assert_eq!(fetched["externalId"], "keep");
+}
+
+#[tokio::test]
+async fn test_patch_user_immutable_attributes_accept_the_stored_value() {
+    // Entra sends `emails[type eq "work"].value` and `userName` with the
+    // unchanged address on ordinary syncs; those change nothing and succeed.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-same", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "same@test-org.example.com"}),
+    )
+    .await;
+
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([
+            {"op": "replace", "path": "userName", "value": "SAME@test-org.example.com"},
+            {"op": "replace", "path": "emails[type eq \"work\"].value", "value": "same@test-org.example.com"},
+            {"op": "add", "path": "emails", "value": [{"value": "same@test-org.example.com", "type": "work", "primary": true}]},
+            {"op": "replace", "path": "externalId", "value": "synced"}
+        ]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["externalId"], "synced");
+}
+
+// RFC 7644 §3.5.2.1: re-adding a value already present "SHALL NOT change the
+// modify timestamp of the resource."
+#[tokio::test]
+async fn test_rfc7644_patch_user_unchanged_value_keeps_last_modified() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-noop-user", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "noop@test-org.example.com", "externalId": "same"}),
+    )
+    .await;
+    let (_, before) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let before: serde_json::Value = serde_json::from_str(&before).expect("Valid JSON");
+
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "add", "path": "externalId", "value": "same"}, {"op": "replace", "path": "active", "value": true}]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["meta"]["lastModified"], before["meta"]["lastModified"]);
+}
+
+// RFC 7644 §3.10: "Clients MAY omit core schema attribute URN prefixes", and
+// every facet of the fully encoded name is case insensitive.
+#[tokio::test]
+async fn test_rfc7644_patch_user_core_urn_qualified_paths() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-user-urn", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "urn@test-org.example.com"}),
+    )
+    .await;
+
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "replace", "path": "urn:ietf:params:scim:schemas:core:2.0:User:externalId", "value": "qualified"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["externalId"], "qualified");
+
+    let (status, error) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "replace", "path": "URN:IETF:params:scim:schemas:core:2.0:User:emails[type eq \"work\"].value", "value": "other@test-org.example.com"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["scimType"], "mutability");
+}
+
+// RFC 7644 §3.5.2.2: a pathless remove "fails with HTTP status code 400 and a
+// "scimType" error code of "noTarget""; RFC 7644 §3.5.2.1: an add "MUST
+// contain a "value" member".
+#[tokio::test]
+async fn test_rfc7644_patch_user_operation_shape_errors() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-user-shape", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "shape@test-org.example.com"}),
+    )
+    .await;
+
+    for (operations, scim_type) in [
+        (serde_json::json!([{"op": "remove"}]), "noTarget"),
+        (
+            serde_json::json!([{"op": "add", "path": "externalId"}]),
+            "invalidValue",
+        ),
+        (serde_json::json!([{"op": "replace"}]), "invalidValue"),
+    ] {
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], scim_type, "{operations}");
+    }
 }

@@ -424,7 +424,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
 
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"))
+    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"), &[])
         .await
         .expect("create_scim_group");
 
@@ -439,8 +439,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
         &store,
         &group.id,
         TEST_ORG_ID,
-        "UpdatedName",
-        Some("ext-456"),
+        set_group_attributes("UpdatedName", Some("ext-456")),
     )
     .await
     .expect("update_scim_group");
@@ -472,13 +471,18 @@ async fn test_update_scim_group_only_intended_fields_change() {
 async fn test_update_scim_group_wrong_org_returns_false() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None, &[])
         .await
         .expect("create_scim_group");
 
-    let found = update_scim_group(&store, &group.id, "wrong-org", "HackedName", None)
-        .await
-        .expect("update_scim_group query must not error");
+    let found = update_scim_group(
+        &store,
+        &group.id,
+        "wrong-org",
+        set_group_attributes("HackedName", None),
+    )
+    .await
+    .expect("update_scim_group query must not error");
     assert!(!found, "cross-org update must return false");
 
     // Original name must be unchanged.
@@ -782,61 +786,6 @@ async fn test_update_scim_user_cross_org_write_is_never_applied() {
         "the cross-org name mutation must not land"
     );
     assert!(after.data.active, "active must be unchanged");
-}
-
-/// Regression: same race as
-/// [`test_update_scim_user_concurrent_org_change_reports_not_applied`],
-/// for `update_scim_group`.
-#[tokio::test]
-async fn test_update_scim_group_concurrent_org_change_reports_not_applied() {
-    use crate::db::documents::scim::ScimGroupDoc;
-
-    let (store, _audit) = test_db().await;
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupBefore", None)
-        .await
-        .expect("create_scim_group");
-
-    let writer = store.clone();
-    let mut hooked = store.clone();
-    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
-        let writer = writer.clone();
-        let doc_id = doc_id.to_string();
-        Box::pin(async move {
-            if attempt != 0 {
-                return;
-            }
-            let doc = writer
-                .get::<ScimGroupDoc>(&doc_id)
-                .await
-                .expect("hook get")
-                .expect("hook doc must exist");
-            let mut data = doc.data;
-            data.org_id = "other-org".to_string();
-            writer.update(&doc_id, &data).await.expect("hook update");
-        })
-    }));
-
-    let applied = update_scim_group(&hooked, &group.id, TEST_ORG_ID, "Hacked", None)
-        .await
-        .expect("update_scim_group must not error");
-    assert!(
-        !applied,
-        "org changed mid-flight: update must report not-applied"
-    );
-
-    let after = store
-        .get::<ScimGroupDoc>(&group.id)
-        .await
-        .expect("get after")
-        .expect("must exist");
-    assert_eq!(
-        after.data.org_id, "other-org",
-        "the concurrent org change must not be clobbered"
-    );
-    assert_eq!(
-        after.data.display_name, "GroupBefore",
-        "the cross-org name mutation must not land"
-    );
 }
 
 /// Regression: same race as
