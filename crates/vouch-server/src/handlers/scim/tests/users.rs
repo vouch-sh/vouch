@@ -3122,3 +3122,69 @@ async fn test_rfc7644_patch_user_operation_shape_errors() {
         assert_eq!(error["scimType"], scim_type, "{operations}");
     }
 }
+
+// RFC 7644 §3.5.2.1: "The operation MUST contain a 'value' member". An
+// `add`/`replace` whose `path` explicitly addresses `emails` — the
+// attribute itself, a value filter, or its `value` sub-attribute (the
+// Entra shape) — but omits `value` is `400 invalidValue`, exactly like
+// every other attribute. `patch_user` routes explicit `emails` paths
+// through `apply_emails_op` (not the generic `apply_patch_op` table that
+// enforces `required_value`); this guards that the special case still
+// enforces the value-presence rule and does not silently no-op with
+// `200 OK`.
+#[tokio::test]
+async fn test_rfc7644_patch_user_emails_without_value_is_invalid_value() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-emails-no-value", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "emails-no-value@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    let cases = [
+        // The `emails` attribute itself.
+        serde_json::json!([{"op": "add", "path": "emails"}]),
+        serde_json::json!([{"op": "replace", "path": "emails"}]),
+        // A value filter on `emails`.
+        serde_json::json!([{"op": "add", "path": "emails[type eq \"work\"]"}]),
+        serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"]"}]),
+        // The `value` sub-attribute (the Entra shape).
+        serde_json::json!([{"op": "add", "path": "emails[type eq \"work\"].value"}]),
+        serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"].value"}]),
+        // RFC 7643 §2.1: attribute names are case insensitive.
+        serde_json::json!([{"op": "add", "path": "Emails"}]),
+        // RFC 7644 §3.10: a core-URN-qualified path is unqualified first,
+        // then routed through the same `emails` special case.
+        serde_json::json!([{"op": "replace", "path": "urn:ietf:params:scim:schemas:core:2.0:User:emails"}]),
+        // A sub-attribute other than `value` is still a valueless `add`/
+        // `replace` on `emails` and must be rejected before the
+        // sub-attribute is inspected.
+        serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"].type"}]),
+    ];
+    for operations in cases {
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], "invalidValue", "{operations}");
+        // RFC 7644 §3.12: the body is a SCIM error object.
+        assert_eq!(error["status"], "400", "{operations} -> {error}");
+    }
+
+    // A rejected PATCH writes nothing: the user is unchanged.
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(fetched["userName"], "emails-no-value@test-org.example.com");
+    assert_eq!(fetched["externalId"], "keep");
+    assert_eq!(
+        fetched["emails"][0]["value"],
+        "emails-no-value@test-org.example.com"
+    );
+}

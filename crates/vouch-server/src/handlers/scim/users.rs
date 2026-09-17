@@ -463,7 +463,9 @@ fn apply_emails_op(email: &Email, path: &str, op: &ScimPatchOp) -> Result<(), At
         )));
     }
     let Some(value) = &op.value else {
-        return Ok(());
+        return Err(AttributeError::invalid_value(format!(
+            "add and replace operations on {path} require a value"
+        )));
     };
     let sub_attribute = path
         .rsplit_once(']')
