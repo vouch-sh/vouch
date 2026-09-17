@@ -792,11 +792,9 @@ async fn test_fido2_challenge_rp_id_matches_config() {
 
 #[tokio::test]
 async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay() {
-    // RFC 7523 §4: Each JWT assertion MUST have a unique JTI. The server commits
-    // the JTI only when a grant succeeds (by design, so retryable errors like
-    // use_dpop_nonce can be retried with the same assertion). Two successful
-    // authorization_code exchanges with the same client assertion JTI must result
-    // in the second being rejected with invalid_client.
+    // RFC 7523 §3 item 7: "The authorization server MAY ensure that JWTs are
+    // not replayed". Two authorization_code exchanges with the same client
+    // assertion JTI: the second is rejected with invalid_client.
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jti-replay-ac@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;

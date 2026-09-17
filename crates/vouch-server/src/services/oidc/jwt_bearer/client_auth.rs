@@ -18,19 +18,17 @@ use crate::services::oidc::token::ClientAuthError;
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 
-/// A JTI that has been validated but not yet committed to the database.
+/// A JTI from a validated assertion, about to be committed to the database.
 ///
-/// Call [`PendingJti::commit`] immediately before any grant-state
-/// persistence (`exchange_*` / `store_par_request`) so concurrent replays
-/// serialize on the JTI uniqueness constraint. The commit MUST run after
-/// any validator that returns a retryable error (in particular DPoP
-/// `use_dpop_nonce`, RFC 9449 §4.3) so that those failures leave the JTI
-/// unconsumed and the client can retry with the same assertion.
-///
-/// `PendingJti` is not `Clone` and `commit` takes `self` by value, so the
-/// type system prevents double-commit and ensures the value is either
-/// committed or dropped — dropping without committing is the correct
-/// behavior for retryable error paths.
+/// [`authenticate_client_jwt`] commits it before returning, so an assertion
+/// that authenticates is spent whatever the request's outcome, and
+/// concurrent replays serialize on the JTI uniqueness constraint. RFC 7523
+/// §3 item 7 (a MAY): "The authorization server MAY ensure that JWTs are
+/// not replayed by maintaining the set of used "jti" values for the length
+/// of time for which the JWT would be considered valid based on the
+/// applicable "exp" instant." The assertion audience is the issuer, shared
+/// by every endpoint that accepts one, so a JTI left uncommitted by a
+/// rejected request would stay valid at the others.
 ///
 /// The replay-prevention record's retention horizon is derived from the
 /// validated assertion's own `exp` claim (see [`PendingJti::commit`]),
@@ -41,7 +39,7 @@ use std::sync::Arc;
 /// max_lifetime` instead would let the record become cleanup-eligible
 /// while the validator still accepts the assertion, opening a replay
 /// window (see `commit` for the arithmetic).
-pub struct PendingJti {
+struct PendingJti {
     jti: Option<String>,
     client_id: String,
     /// The validated assertion's `exp` claim (seconds since the Unix
@@ -74,12 +72,7 @@ impl PendingJti {
     ///
     /// On success returns a [`JwtAssertionJtiClaim`] witness — proof that
     /// the atomic INSERT serialized this caller as the first to claim the
-    /// JTI. The witness is `#[must_use]` so callers must bind it (typically
-    /// to thread it to a downstream consumer like token issuance).
-    ///
-    /// Consumes `self` by value — a `PendingJti` can be committed at most
-    /// once, and dropping it without committing is the intended behavior
-    /// for retryable error paths.
+    /// JTI.
     ///
     /// Returns `Ok(Some(claim))` when the assertion carried a `jti` and
     /// the atomic insert succeeded, `Ok(None)` when the assertion omitted
@@ -107,7 +100,7 @@ impl PendingJti {
     /// (already folded into `exp = iat + lifetime`) — are both covered,
     /// because `exp` is the assertion's actual expiry, not a server-now
     /// proxy that diverges from it.
-    pub async fn commit(
+    async fn commit(
         self,
         state: &Arc<AppState>,
     ) -> Result<Option<JwtAssertionJtiClaim>, ClientAuthError> {
@@ -163,11 +156,10 @@ impl PendingJti {
 /// # Returns
 /// On success, returns:
 /// - `OAuthClient` — the resolved OAuth client record;
-/// - `PendingJti` — caller MUST `.commit()` it immediately before grant-state
-///   persistence (`exchange_*` / `store_par_request`). If a later validator
-///   returns a retryable error (notably DPoP `use_dpop_nonce`, RFC 9449 §4.3),
-///   drop the [`PendingJti`] without committing so the client can retry with
-///   the same assertion;
+/// - the committed [`JwtAssertionJtiClaim`], or `None` when the assertion
+///   carried no `jti`. The JTI is spent by the time this returns, so a
+///   caller that wants a retryable error to leave the assertion reusable
+///   (DPoP `use_dpop_nonce`, RFC 9449 §4.3) must raise it before calling;
 /// - [`JwtAuthSucceeded`] — the structural witness that RFC 7523 §3 validation
 ///   passed. Thread it forward to construct
 ///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of
@@ -177,7 +169,7 @@ pub async fn authenticate_client_jwt(
     client_assertion: &str,
     client_id_hint: Option<&str>,
     arrival: ArrivalTime,
-) -> Result<(OAuthClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
+) -> Result<(OAuthClient, Option<JwtAssertionJtiClaim>, JwtAuthSucceeded), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
         tracing::debug!("JWT assertion header parse failed: {e}");
@@ -292,20 +284,18 @@ pub async fn authenticate_client_jwt(
         return Err(ClientAuthError::InvalidCredentials);
     }
 
-    // 8. Build a PendingJti for the caller to commit after the full
-    //    request succeeds. This avoids consuming the JTI on retryable
-    //    errors like `use_dpop_nonce`.
-    //
-    // The record's retention horizon is derived from the validated `exp`
-    // (see `PendingJti::commit`), not from `now + max_lifetime`, so the
-    // record outlives the validator's `exp + CLOCK_SKEW_SECONDS`
-    // acceptance window and a cleanup tick can never open a replay
-    // window (RFC 7523 §3 item 7).
-    let pending_jti = PendingJti {
+    // 8. Spend the JTI. The record's retention horizon is derived from the
+    //    validated `exp` (see `PendingJti::commit`), not from
+    //    `now + max_lifetime`, so the record outlives the validator's
+    //    `exp + CLOCK_SKEW_SECONDS` acceptance window and a cleanup tick can
+    //    never open a replay window (RFC 7523 §3 item 7).
+    let jti_claim = PendingJti {
         jti: validated.claims.jti.clone(),
         client_id: client.client_id.clone(),
         assertion_exp: validated.claims.exp,
-    };
+    }
+    .commit(state)
+    .await?;
 
     // Update last used timestamp
     if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
@@ -317,7 +307,7 @@ pub async fn authenticate_client_jwt(
         client.client_id
     );
 
-    Ok((client, pending_jti, JwtAuthSucceeded { _private: () }))
+    Ok((client, jti_claim, JwtAuthSucceeded { _private: () }))
 }
 
 /// RFC 7523 Section 3: For client authentication, `iss` and `sub` MUST both
@@ -455,7 +445,7 @@ mod tests {
     /// Build a minimal `Arc<AppState>` backed by an in-memory SQLite database
     /// with migrations applied.
     ///
-    /// Only `state.store` (used by `commit_jti`) is exercised by these tests.
+    /// Only `state.store` (used by `PendingJti::commit`) is exercised by these tests.
     async fn make_state() -> Arc<crate::AppState> {
         let pool = Pool::connect("sqlite::memory:", &db::pool::PoolConfig::default())
             .await
@@ -570,11 +560,7 @@ mod tests {
     }
 
     // ========================================================================
-    // PendingJti — commit_jti replay prevention
-    //
-    // The PendingJti pattern delays JTI commitment until after the full
-    // request succeeds, so that retryable errors (e.g. use_dpop_nonce) do
-    // not consume the JTI and prevent the client from retrying.
+    // PendingJti — replay prevention
     // ========================================================================
 
     #[tokio::test]
@@ -640,41 +626,6 @@ mod tests {
         assert!(
             matches!(result, Ok(None)),
             "commit with None jti must return Ok(None): {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_uncommitted_pending_jti_does_not_prevent_later_commit() {
-        // Simulates the use_dpop_nonce retry scenario:
-        // 1. authenticate_client_jwt returns a PendingJti.
-        // 2. The handler returns use_dpop_nonce WITHOUT calling commit.
-        // 3. The client retries with the same assertion.
-        // 4. commit on the retry must succeed because the JTI was never stored.
-        let state = make_state().await;
-
-        let jti = "retry-jti-001".to_string();
-
-        // First attempt: PendingJti is built but NOT committed (dropped here).
-        let first_pending = PendingJti {
-            jti: Some(jti.clone()),
-            client_id: "client-retry".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
-        };
-        // Intentionally do NOT call commit — simulates a retryable error path.
-        drop(first_pending);
-
-        // Second attempt (retry): commit is called with the same JTI.
-        // Because the first PendingJti was never committed, this must succeed.
-        let second_pending = PendingJti {
-            jti: Some(jti),
-            client_id: "client-retry".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
-        };
-        let result = second_pending.commit(&state).await;
-
-        assert!(
-            matches!(result, Ok(Some(_))),
-            "commit on retry must succeed when the first PendingJti was not committed: {result:?}"
         );
     }
 

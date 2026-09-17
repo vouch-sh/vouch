@@ -3,7 +3,7 @@
 
 use super::client_auth::{
     ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, client_auth_proof,
-    commit_optional_jti, complete_client_auth, extract_client_auth, extract_client_credentials,
+    complete_client_auth, extract_client_auth, extract_client_credentials,
     with_client_auth_challenge,
 };
 use crate::AppState;
@@ -653,37 +653,10 @@ async fn handle_authorization_code_grant(
     auth: ClientAuthParams,
     params: AuthorizationCodeParams,
 ) -> Response {
-    // Extract client credentials from headers or body (including JWT assertion)
-    let has_jwt_assertion = auth.client_assertion.is_some();
-
-    // For JWT assertion, authenticate and extract the client
-    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = if has_jwt_assertion {
-        let client_auth = match extract_client_auth(&headers, &auth) {
-            Ok(auth) => auth,
-            Err(resp) => return resp,
-        };
-        if let ExtractedClientAuth::JwtAssertion {
-            client_assertion,
-            client_id,
-        } = client_auth
-        {
-            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
-                .await
-            {
-                Ok((client, pending_jti, auth)) => (Some(client), Some(pending_jti), Some(auth)),
-                Err(e) => return e.into_service_error().into_oauth_response().into_response(),
-            }
-        } else {
-            (None, None, None)
-        }
-    } else {
-        (None, None, None)
-    };
-
-    // RFC 9449 Section 5: Validate DPoP proof if present. Must happen
-    // BEFORE client-auth resolution so the `use_dpop_nonce` recovery
-    // path (nonce header in the response) fires regardless of whether
-    // the request also has invalid client auth.
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
     let dpop_header = headers
         .get(protocol::HEADER_DPOP)
         .and_then(|v| v.to_str().ok());
@@ -712,6 +685,33 @@ async fn handle_authorization_code_grant(
         }
     };
 
+    // Extract client credentials from headers or body (including JWT assertion)
+    let has_jwt_assertion = auth.client_assertion.is_some();
+
+    // For JWT assertion, authenticate and extract the client
+    let (jwt_authenticated, jti_claim, jwt_auth) = if has_jwt_assertion {
+        let client_auth = match extract_client_auth(&headers, &auth) {
+            Ok(auth) => auth,
+            Err(resp) => return resp,
+        };
+        if let ExtractedClientAuth::JwtAssertion {
+            client_assertion,
+            client_id,
+        } = client_auth
+        {
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
+                .await
+            {
+                Ok((client, jti_claim, auth)) => (Some(client), jti_claim, Some(auth)),
+                Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+            }
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
     // For non-JWT auth, resolve `(OAuthClient, ClientAuthProof)`
     // directly. The handler runs ALL non-JWT authentication itself so
     // the constructed `ClientAuthProof` is fully resolved before the
@@ -733,15 +733,11 @@ async fn handle_authorization_code_grant(
         }
     };
 
-    // Commit the JTI (if any) and resolve `(authenticated_client,
-    // client_auth)` in one move from both auth paths. Each branch
-    // carries a sealed witness produced by the upstream auth step —
-    // there is no path that produces a `ClientAuthProof` without a real
-    // witness, which is the chokepoint guarantee.
-    let jti_claim = match commit_optional_jti(&state, jwt_pending_jti, "authorization_code").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
+    // Resolve `(authenticated_client, client_auth)` in one move from both
+    // auth paths. Each branch carries a sealed witness produced by the
+    // upstream auth step — there is no path that produces a
+    // `ClientAuthProof` without a real witness, which is the chokepoint
+    // guarantee.
     // RFC 7523 §3: `jti` is OPTIONAL. Gate on `jwt_auth` (the auth-succeeded
     // witness), not on `jti_claim` — a non-FAPI client may legitimately omit
     // `jti`, in which case `jti_claim == None` but JWT auth still succeeded.
@@ -853,6 +849,38 @@ async fn handle_client_credentials_grant(
     auth: ClientAuthParams,
     params: ClientCredentialsParams,
 ) -> Response {
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // RFC 6749 Section 4.4.2: Client authentication is REQUIRED
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
@@ -903,36 +931,6 @@ async fn handle_client_credentials_grant(
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
-    // RFC 9449 Section 5: Validate the DPoP proof if present so the issued
-    // token carries a `cnf.jkt` binding.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
-
     // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
     // (DPoP or mTLS), same as every other grant a FAPI client can reach.
     let sender_constraint = match SenderConstraintProof::validate(
@@ -946,14 +944,7 @@ async fn handle_client_credentials_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    let client_auth = match client_auth_proof(
-        &state,
-        witnesses,
-        &authenticated_client,
-        "client_credentials",
-    )
-    .await
-    {
+    let client_auth = match client_auth_proof(witnesses, &authenticated_client) {
         Ok(proof) => proof,
         Err(resp) => return resp,
     };
@@ -1034,7 +1025,6 @@ async fn handle_device_code_grant(
         &auth,
         &client_cert,
         arrival,
-        "device_code",
     )
     .await
     {
@@ -1162,6 +1152,38 @@ async fn handle_token_exchange_grant(
     params: TokenExchangeRequestParams,
 ) -> Response {
     // Extract client authentication (supports secret-based and JWT assertion)
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
@@ -1208,35 +1230,6 @@ async fn handle_token_exchange_grant(
     ) {
         Ok(client) => client,
         Err(e) => return e.into_oauth_response().into_response(),
-    };
-
-    // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
     };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
@@ -1290,11 +1283,10 @@ async fn handle_token_exchange_grant(
     // Token exchange does not mandate confidential clients (RFC 8693), so a
     // public client passes with a `NoAuth` proof; a confidential one must
     // have authenticated.
-    let client_auth =
-        match client_auth_proof(&state, witnesses, &authenticated_client, "token_exchange").await {
-            Ok(proof) => proof,
-            Err(resp) => return resp,
-        };
+    let client_auth = match client_auth_proof(witnesses, &authenticated_client) {
+        Ok(proof) => proof,
+        Err(resp) => return resp,
+    };
     let proof = TokenIssuanceProof {
         grant: GrantProof::TokenExchange,
         client_auth,
@@ -1374,13 +1366,45 @@ async fn handle_fido2_assertion_grant(
     let assertion = params.assertion;
     let presentation = ClientAuthPresentation::of(&headers, &auth);
 
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // Extract and authenticate client via private_key_jwt
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
 
-    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = match client_auth {
+    let (jwt_authenticated, jti_claim, jwt_auth) = match client_auth {
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
@@ -1388,7 +1412,7 @@ async fn handle_fido2_assertion_grant(
             match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
                 .await
             {
-                Ok((client, pending_jti, auth)) => (client, pending_jti, auth),
+                Ok((client, jti_claim, auth)) => (client, jti_claim, auth),
                 Err(e) => return e.into_service_error().into_oauth_response().into_response(),
             }
         }
@@ -1417,35 +1441,6 @@ async fn handle_fido2_assertion_grant(
             Ok(client) => client,
             Err(e) => return e.into_oauth_response().into_response(),
         };
-
-    // Validate DPoP proof if present
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
 
     let has_mtls_cert = client_cert.0.is_some();
 
@@ -1480,11 +1475,6 @@ async fn handle_fido2_assertion_grant(
     // `Some` — but the proof construction does not depend on it:
     // `jwt_auth` is the structural witness for "RFC 7523 §3 validation
     // passed", and `jti` is an additive replay-prevention witness.
-    let jti_claim =
-        match commit_optional_jti(&state, Some(jwt_pending_jti), "fido2_assertion").await {
-            Ok(c) => c,
-            Err(r) => return r,
-        };
     let client_auth = ClientAuthProof::PrivateKeyJwt(
         crate::services::auth::JwtClientAuthProof::new(jwt_auth, jti_claim),
     );

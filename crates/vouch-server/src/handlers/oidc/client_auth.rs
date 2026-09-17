@@ -11,7 +11,7 @@ use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth};
 use crate::services::oidc::{
-    jwt_bearer::client_auth::{JwtAuthSucceeded, PendingJti, authenticate_client_jwt},
+    jwt_bearer::client_auth::{JwtAuthSucceeded, authenticate_client_jwt},
     token::{
         ClientCredentials, ClientSecretVerification, MtlsCertVerification, authenticate_client,
         authenticate_client_mtls,
@@ -290,11 +290,12 @@ pub(crate) struct ClientAuthOutcome {
 }
 
 /// What a successful dispatch verified, separable from the client record so
-/// a handler can validate the client first and commit the proof later.
+/// a handler can validate the client first and build the proof later.
 pub(crate) struct ClientAuthWitnesses {
-    /// `Some` only for JWT-authenticated clients — caller must commit.
-    pub(crate) pending_jti: Option<PendingJti>,
-    /// `Some` only for JWT-authenticated clients — pair with `pending_jti.commit()`
+    /// The committed JTI of a JWT-authenticated client whose assertion
+    /// carried one.
+    pub(crate) jti_claim: Option<JwtAssertionJtiClaim>,
+    /// `Some` only for JWT-authenticated clients — pair with `jti_claim`
     /// to construct `ClientAuthProof::PrivateKeyJwt`. Independent of jti presence
     /// because RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI clients.
     pub(crate) jwt_auth: Option<JwtAuthSucceeded>,
@@ -342,13 +343,13 @@ pub(crate) async fn complete_client_auth(
             )
             .await
             {
-                Ok((client, pending_jti, jwt_auth)) => {
+                Ok((client, jti_claim, jwt_auth)) => {
                     let cid = client.client_id.clone();
                     Ok(Some(ClientAuthOutcome {
                         client,
                         client_id: cid,
                         witnesses: ClientAuthWitnesses {
-                            pending_jti: Some(pending_jti),
+                            jti_claim,
                             jwt_auth: Some(jwt_auth),
                             secret_verification: None,
                             mtls_verification: None,
@@ -394,7 +395,7 @@ pub(crate) async fn complete_client_auth(
         client,
         client_id,
         witnesses: ClientAuthWitnesses {
-            pending_jti: None,
+            jti_claim: None,
             jwt_auth: None,
             secret_verification,
             mtls_verification,
@@ -402,34 +403,8 @@ pub(crate) async fn complete_client_auth(
     }))
 }
 
-/// Commit an optional pending JTI and translate failures to a response-ready
-/// `Response`. Shared by the token-issuance handlers so per-grant logging and
-/// error mapping stay consistent across grants.
-///
-/// The MUST-run-before-grant-state-persistence invariant (issue #391) is
-/// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
-/// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
-/// only path to a `TokenIssuanceProof` carrying that client-auth method.
-#[expect(
-    clippy::result_large_err,
-    reason = "Err is an HTTP Response; size is acceptable in error path"
-)]
-pub(crate) async fn commit_optional_jti(
-    state: &Arc<AppState>,
-    pending: Option<PendingJti>,
-    grant_name: &'static str,
-) -> Result<Option<JwtAssertionJtiClaim>, Response> {
-    let Some(p) = pending else {
-        return Ok(None);
-    };
-    p.commit(state).await.map_err(|e| {
-        tracing::warn!("JTI commit failed for {grant_name}: {e:?}");
-        e.into_service_error().into_oauth_response().into_response()
-    })
-}
-
 /// Turn the witnesses of a successful dispatch into the [`ClientAuthProof`]
-/// token issuance requires, committing the assertion's JTI on the way.
+/// token issuance requires.
 ///
 /// Every proof carries the witness the dispatched method produced; a client
 /// with no witness must be registered public (RFC 6749 §2.1), which
@@ -438,19 +413,17 @@ pub(crate) async fn commit_optional_jti(
     clippy::result_large_err,
     reason = "Err is an HTTP Response; size is acceptable in error path"
 )]
-pub(crate) async fn client_auth_proof(
-    state: &Arc<AppState>,
+pub(crate) fn client_auth_proof(
     witnesses: ClientAuthWitnesses,
     client: &crate::db::OAuthClient,
-    grant_name: &'static str,
 ) -> Result<ClientAuthProof, Response> {
-    let jti_claim = commit_optional_jti(state, witnesses.pending_jti, grant_name).await?;
     // RFC 7523 §3: `jti` is OPTIONAL. Gate on the auth-succeeded witness, not
     // on the claim — a non-FAPI client may omit `jti` and still have
     // authenticated.
     if let Some(auth) = witnesses.jwt_auth {
         return Ok(ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(
-            auth, jti_claim,
+            auth,
+            witnesses.jti_claim,
         )));
     }
     match (witnesses.secret_verification, witnesses.mtls_verification) {

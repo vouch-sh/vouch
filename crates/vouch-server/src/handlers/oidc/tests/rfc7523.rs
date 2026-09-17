@@ -1059,15 +1059,10 @@ async fn test_rfc7523_token_exchange_grant_accepts_non_fapi_jwt_without_jti() {
 // ========================================================================
 // Issue #391 — concurrent JTI replay must not produce multiple tokens.
 //
-// Before the fix, `commit_jti()` ran AFTER `exchange_*()`, so N concurrent
-// requests with the same JWT assertion could each persist a token before any
-// of them committed the JTI. One won the JTI insert and returned 200; the
-// others returned `invalid_client` but their tokens remained valid in the DB.
-//
-// The fix moves `commit_jti()` to immediately before `exchange_*()`, so the
-// atomic `(jti, client_id)` insert is the serialization point. Concurrent
-// replayers either win the JTI and proceed to exchange, or lose and return
-// `invalid_client` before any token is persisted.
+// `authenticate_client_jwt` commits the JTI, so the atomic `(jti, client_id)`
+// insert is the serialization point. Concurrent replayers either win the JTI
+// and proceed to exchange, or lose and return `invalid_client` before any
+// token is persisted.
 //
 // Each test below fires N concurrent requests with the same JWT assertion
 // (fixed `jti`) and asserts that AT MOST one HTTP 200 is returned and AT MOST
@@ -1329,10 +1324,10 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
     // The fido2-assertion grant requires a real WebAuthn signature, which
     // can't be faked in unit tests. We use a garbage assertion so that
     // `exchange_fido2_assertion` will fail with `invalid_grant` for any
-    // request that reaches it. The point of THIS test is to prove that
-    // `commit_jti` runs BEFORE `exchange_fido2_assertion`: with the fix, at
-    // most one of N concurrent requests can pass the JTI commit, so at most
-    // one can reach (and fail at) the exchange step, returning `invalid_grant`.
+    // request that reaches it. The JTI is committed before
+    // `exchange_fido2_assertion`, so at most one of N concurrent requests
+    // can pass the JTI commit and reach (and fail at) the exchange step,
+    // returning `invalid_grant`.
     // The other N-1 lose the JTI race and return `invalid_client`.
     let (app, state) = test_app().await;
 
@@ -1363,12 +1358,8 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
 
     // No request can succeed (garbage assertion), but the SHAPE of errors
     // tells us where the JTI commit sat:
-    //   - With the fix: at most one `invalid_grant` (reached exchange), the
-    //     rest `invalid_client` (lost JTI race).
-    //   - Without the fix: all N would return `invalid_grant` because every
-    //     request reaches exchange before any one of them tries to commit,
-    //     and exchange fails for all of them on the garbage assertion before
-    //     `commit_jti` ever runs.
+    //   At most one `invalid_grant` (reached exchange); the rest
+    //   `invalid_client` (lost the JTI race).
     let invalid_grants = results
         .iter()
         .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
@@ -1383,13 +1374,11 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
 }
 
 // ========================================================================
-// Issue #391 — DPoP nonce retry MUST still leave the JTI unconsumed.
+// DPoP nonce retry leaves the JTI unconsumed.
 //
-// The fix moves `commit_jti()` to before `exchange_*()`, but DPoP nonce
-// validation runs even earlier in the handler. If a request is rejected
-// with `use_dpop_nonce` (RFC 9449 §4.3), the JTI must NOT have been
-// committed — so the client can retry with the same JWT assertion and a
-// DPoP proof that carries the new nonce.
+// DPoP validation runs before client authentication, so a request rejected
+// with `use_dpop_nonce` has not committed the JTI, and the client can retry
+// with the same JWT assertion and a DPoP proof that carries the new nonce.
 //
 // The pre-existing `test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds`
 // covers this for basic_auth clients. This test seals the contract for the
@@ -1469,8 +1458,7 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
 
-    // The SAME JTI is used for both attempts. If `commit_jti` ran before
-    // DPoP validation, the second attempt would be rejected as a replay.
+    // The SAME JTI is used for both attempts.
     let fixed_jti = "dpop-retry-jti-12345";
     let assertion = build_client_assertion(
         &client.client_id,
@@ -1505,10 +1493,8 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
         .expect("DPoP-Nonce must be valid UTF-8")
         .to_string();
 
-    // Step 2: Retry with the server-provided nonce, SAME JWT assertion
-    // (same jti). If `commit_jti` had run on the first attempt, this would
-    // fail with `invalid_client` (replay). With the fix, the JTI is committed
-    // only after DPoP validation, so the retry succeeds.
+    // Step 2: Retry with the server-provided nonce and the SAME JWT
+    // assertion (same jti).
     let nonce_proof = create_dpop_proof(
         &dpop_key,
         &dpop_jwk,

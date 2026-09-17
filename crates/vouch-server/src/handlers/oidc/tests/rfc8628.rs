@@ -1268,15 +1268,10 @@ async fn test_device_grant_malformed_code_poll_commits_jti() {
 }
 
 // ========================================================================
-// Cross-endpoint JTI single-use (RFC 7523 §3 item 7): the assertion audience
-// is the issuer, shared across /oauth/device, /oauth/par, /oauth/revoke, and
-// /oauth/introspect. Once an assertion is accepted for authentication, its
-// jti MUST be committed (subject to the DPoP retry window) so a replay at
-// any other shared-audience endpoint is rejected as `invalid_client`. The
-// two tests below exercise the cross-endpoint shape the within-endpoint
-// rfc7523 replay tests do not cover: endpoint A authenticates then rejects
-// on a non-retryable post-auth check, and the SAME assertion is then
-// presented at endpoint B.
+// Cross-endpoint JTI single use: the assertion audience is the issuer, shared
+// across /oauth/device, /oauth/par, /oauth/revoke, and /oauth/introspect.
+// Endpoint A authenticates and then rejects the request; the SAME assertion
+// presented at endpoint B is `invalid_client`.
 // ========================================================================
 
 /// The PKCE code challenge shared by the PAR bodies below (S256 of the
@@ -1301,14 +1296,9 @@ fn par_body_with_assertion(client_id: &str, redirect_uri: &str, assertion: &str)
     )
 }
 
-/// Device instance: a `private_key_jwt` client that is NOT registered for
-/// the `device_code` grant authenticates at `/oauth/device`, then is rejected
-/// by `ValidatedOAuthClient::for_grant(DeviceCode)` (`unauthorized_client`).
-/// The fix commits the assertion's JTI *before* that grant-authorization
-/// check, so reusing the SAME assertion at `/oauth/par` — a shared-audience
-/// endpoint — MUST be rejected as `invalid_client`. On the buggy tree the
-/// `for_grant` rejection ran before the only commit path, the JTI stayed
-/// uncommitted, and the replayed assertion returned `201` at PAR.
+/// A `private_key_jwt` client not registered for the `device_code` grant is
+/// rejected at `/oauth/device` (`unauthorized_client`); the same assertion
+/// at `/oauth/par` is `invalid_client`.
 #[tokio::test]
 async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
     let (app, state) = test_app().await;
@@ -1386,13 +1376,9 @@ async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
     assert!(json["request_uri"].is_string(), "control: {resp}");
 }
 
-/// PAR instance: a `private_key_jwt` client authenticates at `/oauth/par`,
-/// then is rejected by the `redirect_uri` registration check (`invalid_request`).
-/// The fix moves the JTI commit ahead of that non-retryable check, so reusing
-/// the SAME assertion at `/oauth/device` — a shared-audience endpoint — MUST be
-/// rejected as `invalid_client`. On the buggy tree PAR committed the JTI only
-/// on its success tail, so the `redirect_uri` rejection left the JTI
-/// uncommitted and the replayed assertion returned `200` at `/oauth/device`.
+/// A `private_key_jwt` client is rejected at `/oauth/par` for an
+/// unregistered `redirect_uri` (`invalid_request`); the same assertion at
+/// `/oauth/device` is `invalid_client`.
 #[tokio::test]
 async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device() {
     let (app, state) = test_app().await;
@@ -1406,8 +1392,7 @@ async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device()
     let assertion = build_client_assertion(&client.client_id, &base_url, &pkcs8, Some(fixed_jti));
 
     // (1) POST /oauth/par with an UNREGISTERED redirect_uri. The assertion
-    // authenticates, then is_valid_redirect_uri rejects invalid_request. The
-    // fix commits the JTI before that check, so this rejection consumes it.
+    // authenticates, then is_valid_redirect_uri rejects invalid_request.
     let par_body = par_body_with_assertion(
         &client.client_id,
         "https://attacker.example/callback",
@@ -1458,4 +1443,66 @@ async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device()
     assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert!(json.get("device_code").is_some(), "control: {resp}");
+}
+
+/// A `private_key_jwt` client not registered for `client_credentials` is
+/// rejected at `/oauth/token` (`unauthorized_client`); the same assertion at
+/// `/oauth/introspect` is `invalid_client`.
+#[tokio::test]
+async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "token-xintrospect@example.com").await;
+    let (pkcs8, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            with_secret: false,
+            grant_types: Some(vec![
+                vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE.to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let base_url = state.config().base_url.clone();
+    let assertion_body = |assertion: &str| {
+        format!(
+            "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+            client.client_id,
+            vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        )
+    };
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &base_url,
+        &pkcs8,
+        Some("token-xintrospect-fixed"),
+    );
+
+    let body = format!(
+        "grant_type=client_credentials&{}",
+        assertion_body(&assertion)
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "token rejection ({status}): {resp}"
+    );
+
+    let body = format!("token=unknown&{}", assertion_body(&assertion));
+    let (status, resp) = http_post_form(&app, "/oauth/introspect", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "introspect replay: {resp}"
+    );
+
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let body = format!("token=unknown&{}", assertion_body(&fresh));
+    let (status, resp) = http_post_form(&app, "/oauth/introspect", &body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
 }
