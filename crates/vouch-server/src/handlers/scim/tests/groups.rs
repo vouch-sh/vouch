@@ -178,6 +178,62 @@ async fn test_scim_delete_group() {
 }
 
 #[tokio::test]
+async fn test_scim_delete_group_writes_success_audit_event() {
+    // A successful DELETE returns 204 and records exactly one
+    // `scim_operation` delete audit row with `refusal` absent (OCSF Success).
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-delete-group-audit", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a group to delete.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "AuditMe"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id").to_string();
+
+    // Delete it.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Exactly one `scim_operation` delete row for the target, with `refusal`
+    // absent (the operation happened).
+    let rows = scim_audit_rows(&state).await;
+    let delete_rows: Vec<_> = rows
+        .iter()
+        .filter(|e| {
+            e.get("operation").and_then(|o| o.as_str()) == Some("delete")
+                && e.get("resource_id").and_then(|r| r.as_str()) == Some(&group_id)
+        })
+        .collect();
+    assert_eq!(
+        delete_rows.len(),
+        1,
+        "one scim_operation delete audit event must be written on success; got {}",
+        delete_rows
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    assert!(
+        delete_rows[0].get("refusal").is_none(),
+        "success delete audit row must omit `refusal` (operation happened); got {}",
+        delete_rows[0],
+    );
+}
+
+#[tokio::test]
 async fn test_scim_patch_group_replace_display_name() {
     // PATCH replace displayName, verify the change is persisted
     let (app, state) = test_app().await;
@@ -1029,6 +1085,97 @@ async fn test_scim_delete_group_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["status"], "404");
+}
+
+/// A group deleted between the handler's existence check and
+/// `delete_scim_group` yields 404 and no `scim_operation` delete audit event.
+/// The `delete_test_hook` deletes the group from a separate transaction
+/// inside `delete_scim_group`, before its own existence check.
+#[tokio::test]
+async fn test_scim_delete_group_returns_404_when_target_vanishes_mid_delete() {
+    use std::sync::{Arc, Mutex};
+
+    let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&target_slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_delete_test_hook(Arc::new(move |group_id: &str| {
+            let writer = writer.clone();
+            let group_id = group_id.to_string();
+            let slot = Arc::clone(&slot);
+            Box::pin(async move {
+                let is_target =
+                    slot.lock().expect("slot lock").as_deref() == Some(group_id.as_str());
+                if is_target {
+                    writer
+                        .delete(&group_id)
+                        .await
+                        .expect("delete target group doc mid-race");
+                }
+            })
+        }));
+    })
+    .await;
+
+    let token = create_test_scim_token(&state.store, "test-race-delete-group", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a group to delete.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "RaceDelete"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id").to_string();
+    *target_slot.lock().expect("slot lock") = Some(group_id.clone());
+
+    // Delete the group. The delete hook races the deletion; the handler must
+    // observe the miss and return 404.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "SCIM delete: a group deleted mid-delete must produce 404, got {status}: {body}"
+    );
+
+    // No `delete` scim_operation audit event may be logged when the delete
+    // did not occur.
+    let rows = scim_audit_rows(&state).await;
+    let delete_events: Vec<_> = rows
+        .iter()
+        .filter(|e| {
+            e.get("operation").and_then(|o| o.as_str()) == Some("delete")
+                && e.get("resource_id").and_then(|r| r.as_str()) == Some(&group_id)
+        })
+        .collect();
+    assert!(
+        delete_events.is_empty(),
+        "SCIM delete: no scim_operation delete audit event may be logged when the delete did not occur; got {}",
+        delete_events
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    // The group is gone (the hook deleted it), so a follow-up GET is 404 —
+    // confirms no phantom row remains.
+    let (status, _body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

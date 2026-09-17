@@ -1442,6 +1442,10 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Test-only seam: a concurrent delete landing before the existence check.
+        #[cfg(test)]
+        store.run_delete_test_hook(id).await;
+
         let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
             return Ok(false);
         };
