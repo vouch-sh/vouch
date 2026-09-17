@@ -205,13 +205,24 @@
                             {% endif %}
                             <span class="ml-2 text-xs text-gray-400">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
                         </div>
-                        {% if secret.active && secrets_count > 1 %}
-                        <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
-                            <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
-                                class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
-                                {{ self.tr("apps-detail-revoke") }}
-                            </button>
-                        </form>
+                        {% if secret.active %}
+                            {% if app.can_add_secret %}
+                                {% if secrets_count > 1 %}
+                                <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
+                                    <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
+                                        class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
+                                        {{ self.tr("apps-detail-revoke") }}
+                                    </button>
+                                </form>
+                                {% endif %}
+                            {% else %}
+                                <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
+                                    <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
+                                        class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
+                                        {{ self.tr("apps-detail-revoke") }}
+                                    </button>
+                                </form>
+                            {% endif %}
                         {% endif %}
                     </div>
                     {% endfor %}

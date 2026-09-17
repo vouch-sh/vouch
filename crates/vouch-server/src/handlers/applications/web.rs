@@ -885,10 +885,22 @@ mod tests {
             },
         )
         .await;
-        let body = page(native_secret.app_id).await;
+        let body = page(native_secret.app_id.clone()).await;
         assert!(
             body.contains("Add Secret"),
             "native client_secret_post: {body}"
+        );
+        let native_secrets =
+            crate::db::get_oauth_client_secrets(&state.store, &native_secret.app_id)
+                .await
+                .expect("db query ok");
+        let native_secret_id = native_secrets.first().expect("one secret").id.clone();
+        assert!(
+            !body.contains(&format!(
+                "/applications/{}/secrets/{}/delete",
+                native_secret.app_id, native_secret_id
+            )),
+            "lone active secret on a secret-using (can_add_secret) client must not show Revoke: {body}"
         );
 
         let pkjwt_with_secret = create_test_client(
@@ -903,7 +915,7 @@ mod tests {
             },
         )
         .await;
-        let body = page(pkjwt_with_secret.app_id).await;
+        let body = page(pkjwt_with_secret.app_id.clone()).await;
         assert!(
             body.contains(">Client Secrets</h2>"),
             "stray secret listed: {body}"
@@ -911,6 +923,18 @@ mod tests {
         assert!(
             !body.contains("Add Secret"),
             "no add for private_key_jwt: {body}"
+        );
+        let pkjwt_secrets =
+            crate::db::get_oauth_client_secrets(&state.store, &pkjwt_with_secret.app_id)
+                .await
+                .expect("db query ok");
+        let pkjwt_secret_id = pkjwt_secrets.first().expect("one secret").id.clone();
+        assert!(
+            body.contains(&format!(
+                "/applications/{}/secrets/{}/delete",
+                pkjwt_with_secret.app_id, pkjwt_secret_id
+            )),
+            "lone stray secret on a private_key_jwt client must show Revoke: {body}"
         );
 
         let pkjwt = create_test_client(
@@ -2295,6 +2319,310 @@ mod tests {
             "the client's own org must be attributed even though the owning user \
              has no org and the client doc is already deleted by the time the \
              event is recorded"
+        );
+    }
+
+    async fn mint_extra_secret(store: &crate::db::store::DocumentStore, app_id: &str) {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let raw = format!("extra-secret-{n}");
+        let hash = super::hash_token(&raw);
+        crate::db::create_oauth_client_secret(store, app_id, &hash, Some("extra"), None)
+            .await
+            .expect("mint extra secret");
+    }
+
+    fn delete_path(app_id: &str, secret_id: &str) -> String {
+        format!("/applications/{app_id}/secrets/{secret_id}/delete")
+    }
+
+    fn fresh_es256_jwks() -> serde_json::Value {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
+        let signer = EcdsaP256Signer::generate("test-upgrade-key").expect("generate test key");
+        let pk = signer.public_key_bytes();
+        let x = URL_SAFE_NO_PAD.encode(pk.get(1..33).expect("x coordinate"));
+        let y = URL_SAFE_NO_PAD.encode(pk.get(33..65).expect("y coordinate"));
+        serde_json::json!({
+            "keys": [{"kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "test-upgrade-key", "x": x, "y": y}]
+        })
+    }
+
+    fn fapi_pkjwt_with_secret_spec() -> TestClientSpec {
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detail_page_revoke_floor_protects_can_add_secret_clients() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-floor@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let page_body = |app_id: String| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                http_get_full(
+                    &app,
+                    &format!("/applications/{app_id}"),
+                    &[("Cookie", &cookie)],
+                )
+                .await
+                .body
+            }
+        };
+
+        let web_basic = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let a_secrets = crate::db::get_oauth_client_secrets(&state.store, &web_basic.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(a_secrets.len(), 1, "one secret seeded");
+        let body = page_body(web_basic.app_id.clone()).await;
+        assert!(
+            body.contains("Add Secret"),
+            "can_add_secret shows Add: {body}"
+        );
+        assert!(
+            !body.contains(&delete_path(
+                &web_basic.app_id,
+                &a_secrets.first().expect("one secret").id
+            )),
+            "lone secret on a can_add_secret client must not show Revoke: {body}"
+        );
+
+        mint_extra_secret(&state.store, &web_basic.app_id).await;
+        let b_secrets = crate::db::get_oauth_client_secrets(&state.store, &web_basic.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(b_secrets.len(), 2, "two active secrets");
+        let body = page_body(web_basic.app_id.clone()).await;
+        for s in &b_secrets {
+            assert!(
+                body.contains(&delete_path(&web_basic.app_id, &s.id)),
+                "each active secret with two actives shows Revoke: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detail_page_revoke_renders_for_non_addable_secret_clients() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-fapi@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let page_body = |app_id: String| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                http_get_full(
+                    &app,
+                    &format!("/applications/{app_id}"),
+                    &[("Cookie", &cookie)],
+                )
+                .await
+                .body
+            }
+        };
+
+        let lone = create_test_client(&state.store, &user.id, fapi_pkjwt_with_secret_spec()).await;
+        let lone_secrets = crate::db::get_oauth_client_secrets(&state.store, &lone.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(lone_secrets.len(), 1, "one stray secret");
+        let body = page_body(lone.app_id.clone()).await;
+        assert!(
+            body.contains(">Client Secrets</h2>"),
+            "section shown: {body}"
+        );
+        assert!(!body.contains("Add Secret"), "no Add for FAPI: {body}");
+        assert!(
+            body.contains(&delete_path(
+                &lone.app_id,
+                &lone_secrets.first().expect("one secret").id
+            )),
+            "lone stray secret on a non-addable client must show Revoke: {body}"
+        );
+
+        let two = create_test_client(&state.store, &user.id, fapi_pkjwt_with_secret_spec()).await;
+        mint_extra_secret(&state.store, &two.app_id).await;
+        let two_secrets = crate::db::get_oauth_client_secrets(&state.store, &two.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(two_secrets.len(), 2, "two active secrets");
+        let body = page_body(two.app_id.clone()).await;
+        for s in &two_secrets {
+            assert!(
+                body.contains(&delete_path(&two.app_id, &s.id)),
+                "each active secret on a non-addable client shows Revoke: {body}"
+            );
+        }
+
+        let mixed = create_test_client(&state.store, &user.id, fapi_pkjwt_with_secret_spec()).await;
+        mint_extra_secret(&state.store, &mixed.app_id).await;
+        let before = crate::db::get_oauth_client_secrets(&state.store, &mixed.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(before.len(), 2, "two secrets before revoke");
+        let revoked_id = before.first().expect("two secrets").id.clone();
+        crate::db::revoke_oauth_client_secret(&state.store, &revoked_id, &mixed.app_id)
+            .await
+            .expect("revoke one secret");
+        let after = crate::db::get_oauth_client_secrets(&state.store, &mixed.app_id)
+            .await
+            .expect("db query ok");
+        let active_id = after
+            .iter()
+            .find(|s| s.revoked_at.is_none())
+            .expect("one secret still active")
+            .id
+            .clone();
+        let body = page_body(mixed.app_id.clone()).await;
+        assert!(
+            body.contains(&delete_path(&mixed.app_id, &active_id)),
+            "the active secret shows Revoke: {body}"
+        );
+        assert!(
+            !body.contains(&delete_path(&mixed.app_id, &revoked_id)),
+            "the revoked secret must not show Revoke: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_web_standard_to_fapi_upgrade_renders_revoke_for_stranded_secret() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "std-to-fapi@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let seeded = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            seeded.len(),
+            1,
+            "Standard web app is created with one secret"
+        );
+        let stranded_secret_id = seeded.first().expect("one secret").id.clone();
+
+        let jwks = fresh_es256_jwks();
+        let jwks_str = serde_json::to_string(&jwks).expect("serialize jwks");
+        let form_body = format!(
+            "name=Standard%20to%20FAPI&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&\
+             access_scope=public&fapi_profile=fapi2_security&jwks={}",
+            urlencoding::encode(&jwks_str)
+        );
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            &form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert!(
+            status.is_redirection(),
+            "upgrade to FAPI must succeed and redirect, got {status}: {body}"
+        );
+
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(record.fapi_profile, crate::db::FapiProfile::Fapi2Security);
+        assert_eq!(
+            record.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+        );
+        let after = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(after.len(), 1, "upgrade must not drop or add secret rows");
+        assert_eq!(after.first().expect("one secret").id, stranded_secret_id);
+        assert!(
+            after.first().expect("one secret").revoked_at.is_none(),
+            "upgrade must leave the pre-existing secret row active (stranded)"
+        );
+
+        let detail = http_get_full(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            &[("Cookie", &cookie)],
+        )
+        .await
+        .body;
+        assert!(
+            detail.contains(">Client Secrets</h2>"),
+            "stranded secret section must be visible: {detail}"
+        );
+        assert!(
+            !detail.contains("Add Secret"),
+            "FAPI private_key_jwt must not show Add Secret: {detail}"
+        );
+        assert!(
+            detail.contains(&format!(
+                "/applications/{}/secrets/{}/delete",
+                client.app_id, stranded_secret_id
+            )),
+            "the stranded lone secret must render a Revoke button: {detail}"
+        );
+
+        let (revoke_status, revoke_body) = http_post_form(
+            &app,
+            &format!(
+                "/applications/{}/secrets/{}/delete",
+                client.app_id, stranded_secret_id
+            ),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert!(
+            revoke_status.is_redirection(),
+            "the handler must accept the revoke of the stranded secret, got {revoke_status}: {revoke_body}"
+        );
+        let revoked = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert!(
+            revoked.first().expect("one secret").revoked_at.is_some(),
+            "the stranded secret must be revoked after the POST"
         );
     }
 }
