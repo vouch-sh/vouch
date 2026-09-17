@@ -1034,6 +1034,7 @@ async fn handle_device_code_grant(
         &auth,
         &client_cert,
         arrival,
+        "device_code",
     )
     .await
     {

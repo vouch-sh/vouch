@@ -319,6 +319,48 @@ pub(crate) async fn par(
         };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
+    // RFC 7523 §3 item 7 single-use gate: commit the assertion's JTI now that
+    // every *retryable* validator (DPoP `use_dpop_nonce` above, RFC 9449 §4.3)
+    // has run, and before the *non-retryable* request validations that follow
+    // (the `dpop_jkt` param match below, `validate_request_object`,
+    // `validate_authorize_request`, PKCE, `redirect_uri`, `resource`, and
+    // `response_mode`). A non-retryable rejection after this point consumes
+    // the JTI, so probing PAR with an unregistered `redirect_uri` /
+    // `resource` / etc. can no longer preserve the assertion to spend at
+    // another shared-audience endpoint (`/oauth/device`, `/oauth/revoke`,
+    // `/oauth/introspect`) — closing the free-probe window. The assertion
+    // audience is the issuer (shared across those endpoints), so an
+    // uncommitted JTI would otherwise stay live for the assertion's
+    // lifetime. The commit is placed *after* the DPoP block specifically so a
+    // `use_dpop_nonce` retry leaves the JTI unconsumed and the client can
+    // retry with the same assertion plus the issued nonce.
+    let jti_claim = match pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for PAR: {e:?}");
+                // Distinguish replay (client-auth failure) from transient DB
+                // error (server problem). Returning 401 for a DB outage tells
+                // well-behaved clients to abandon credentials they should reuse
+                // on retry; returning 500 for a replay tempts them to
+                // retry-loop with a consumed JTI.
+                return match e {
+                    ClientAuthError::InvalidCredentials => par_error_response(
+                        OAuthErrorCode::InvalidClient,
+                        presentation,
+                        "Client authentication failed",
+                    ),
+                    _ => par_error_response(
+                        OAuthErrorCode::ServerError,
+                        presentation,
+                        "Failed to complete client authentication",
+                    ),
+                };
+            }
+        },
+        None => None,
+    };
+
     // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
     // parameter are present, the JWK thumbprints MUST match.
     if let (Some(proof_jkt), Some(param_jkt)) = (dpop_jkt, &params.dpop_jkt) {
@@ -503,31 +545,6 @@ pub(crate) async fn par(
         response_mode,
     };
 
-    let jti_claim = match pending_jti {
-        Some(p) => match p.commit(&state).await {
-            Ok(claim) => claim,
-            Err(e) => {
-                tracing::warn!("JTI commit failed for PAR: {e:?}");
-                // Distinguish replay (client-auth failure) from transient DB error
-                // (server problem). Returning 401 for a DB outage tells well-behaved
-                // clients to abandon credentials they should reuse on retry; returning
-                // 500 for a replay tempts them to retry-loop with a consumed JTI.
-                return match e {
-                    ClientAuthError::InvalidCredentials => par_error_response(
-                        OAuthErrorCode::InvalidClient,
-                        presentation,
-                        "Client authentication failed",
-                    ),
-                    _ => par_error_response(
-                        OAuthErrorCode::ServerError,
-                        presentation,
-                        "Failed to complete client authentication",
-                    ),
-                };
-            }
-        },
-        None => None,
-    };
     // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
     // none succeeded, fall back to `for_public_client` against the loaded
     // client — fails for confidential clients that should have authed.
@@ -535,7 +552,9 @@ pub(crate) async fn par(
     // RFC 7523 §3 makes `jti` OPTIONAL — so JWT auth can succeed with
     // `jti_claim == None`. We gate on the `jwt_auth` witness, not on
     // `jti_claim`, to avoid silently rejecting a non-FAPI client that
-    // legitimately omitted `jti`.
+    // legitimately omitted `jti`. The `jti_claim` was committed above,
+    // after the retryable DPoP `use_dpop_nonce` validator and before the
+    // non-retryable request validations.
     let par_client_auth = if let Some(auth) = jwt_auth {
         ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
             auth, jti_claim,

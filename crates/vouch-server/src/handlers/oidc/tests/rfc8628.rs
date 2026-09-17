@@ -1266,3 +1266,196 @@ async fn test_device_grant_malformed_code_poll_commits_jti() {
 
     assert_replay_rejected_at_device(&app, &client_a.client_id, &assertion).await;
 }
+
+// ========================================================================
+// Cross-endpoint JTI single-use (RFC 7523 §3 item 7): the assertion audience
+// is the issuer, shared across /oauth/device, /oauth/par, /oauth/revoke, and
+// /oauth/introspect. Once an assertion is accepted for authentication, its
+// jti MUST be committed (subject to the DPoP retry window) so a replay at
+// any other shared-audience endpoint is rejected as `invalid_client`. The
+// two tests below exercise the cross-endpoint shape the within-endpoint
+// rfc7523 replay tests do not cover: endpoint A authenticates then rejects
+// on a non-retryable post-auth check, and the SAME assertion is then
+// presented at endpoint B.
+// ========================================================================
+
+/// The PKCE code challenge shared by the PAR bodies below (S256 of the
+/// well-known RFC 7636 §B verifier).
+const PAR_PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+/// A `/oauth/par` form body that authenticates `client_id` with `assertion`
+/// and carries a registered `redirect_uri` + PKCE, so the only rejection
+/// that can fire is the one a test deliberately triggers.
+fn par_body_with_assertion(client_id: &str, redirect_uri: &str, assertion: &str) -> String {
+    format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &scope=openid\
+         &code_challenge={}\
+         &code_challenge_method=S256\
+         &client_assertion_type={}\
+         &client_assertion={assertion}",
+        sha256_base64url(PAR_PKCE_VERIFIER),
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    )
+}
+
+/// Device instance: a `private_key_jwt` client that is NOT registered for
+/// the `device_code` grant authenticates at `/oauth/device`, then is rejected
+/// by `ValidatedOAuthClient::for_grant(DeviceCode)` (`unauthorized_client`).
+/// The fix commits the assertion's JTI *before* that grant-authorization
+/// check, so reusing the SAME assertion at `/oauth/par` — a shared-audience
+/// endpoint — MUST be rejected as `invalid_client`. On the buggy tree the
+/// `for_grant` rejection ran before the only commit path, the JTI stayed
+/// uncommitted, and the replayed assertion returned `201` at PAR.
+#[tokio::test]
+async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-xpar-grant@example.com").await;
+
+    // Drop `device_code` from the client's grants so `for_grant(DeviceCode)`
+    // rejects the authenticated client. It keeps `authorization_code` (and the
+    // rest) so the PAR control step is otherwise entitled to succeed.
+    let (pkcs8, jwk) = generate_es256_signing_key();
+    let grants_without_device: Vec<String> = all_supported_grant_types()
+        .into_iter()
+        .filter(|g| g != vouch_common::protocol::GRANT_TYPE_DEVICE_CODE)
+        .collect();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            with_secret: false,
+            grant_types: Some(grants_without_device),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let base_url = state.config().base_url.clone();
+    let fixed_jti = "device-xpar-grant-fixed";
+    let assertion = build_client_assertion(&client.client_id, &base_url, &pkcs8, Some(fixed_jti));
+
+    // (1) POST /oauth/device authenticated as the private_key_jwt client. It
+    // is not registered for device_code, so for_grant rejects unauthorized_client.
+    let device_body = format!(
+        "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "device rejection: {resp}");
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "device rejection: {resp}"
+    );
+
+    // (2) Reuse the SAME assertion (same jti) at /oauth/par. The failed device
+    // call already committed the JTI, so the replay MUST be invalid_client.
+    let par_body = par_body_with_assertion(
+        &client.client_id,
+        "https://example.com/callback",
+        &assertion,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replayed assertion at PAR MUST be rejected (replay): {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client", "PAR replay: {resp}");
+
+    // (3) Control: a fresh assertion authenticates at /oauth/par and returns
+    // 201, proving the client is otherwise entitled to PAR and the rejection
+    // above was the replay, not a misconfigured client.
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let par_body =
+        par_body_with_assertion(&client.client_id, "https://example.com/callback", &fresh);
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "fresh assertion control: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(json["request_uri"].is_string(), "control: {resp}");
+}
+
+/// PAR instance: a `private_key_jwt` client authenticates at `/oauth/par`,
+/// then is rejected by the `redirect_uri` registration check (`invalid_request`).
+/// The fix moves the JTI commit ahead of that non-retryable check, so reusing
+/// the SAME assertion at `/oauth/device` — a shared-audience endpoint — MUST be
+/// rejected as `invalid_client`. On the buggy tree PAR committed the JTI only
+/// on its success tail, so the `redirect_uri` rejection left the JTI
+/// uncommitted and the replayed assertion returned `200` at `/oauth/device`.
+#[tokio::test]
+async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-xdevice-redir@example.com").await;
+    // Registered for every grant (incl. device_code) so /oauth/device succeeds
+    // for a fresh assertion — the only thing that fails is the PAR redirect_uri.
+    let (client, pkcs8) = private_key_jwt_client(&state, &user.id, false).await;
+
+    let base_url = state.config().base_url.clone();
+    let fixed_jti = "par-xdevice-redir-fixed";
+    let assertion = build_client_assertion(&client.client_id, &base_url, &pkcs8, Some(fixed_jti));
+
+    // (1) POST /oauth/par with an UNREGISTERED redirect_uri. The assertion
+    // authenticates, then is_valid_redirect_uri rejects invalid_request. The
+    // fix commits the JTI before that check, so this rejection consumes it.
+    let par_body = par_body_with_assertion(
+        &client.client_id,
+        "https://attacker.example/callback",
+        &assertion,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "PAR redirect_uri rejection: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "PAR redirect_uri rejection: {resp}"
+    );
+
+    // (2) Reuse the SAME assertion (same jti) at /oauth/device. The failed PAR
+    // call already committed the JTI, so the replay MUST be invalid_client.
+    let device_body = format!(
+        "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replayed assertion at /oauth/device MUST be rejected (replay): {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client", "device replay: {resp}");
+    assert!(
+        !resp.contains("device_code"),
+        "no device flow may be started by a replayed assertion: {resp}",
+    );
+
+    // (3) Control: a fresh assertion starts a device flow, proving the client
+    // is otherwise entitled to /oauth/device and the rejection above was the
+    // replay, not a misconfigured client.
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let device_body = format!(
+        "client_id={}&client_assertion={fresh}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(json.get("device_code").is_some(), "control: {resp}");
+}

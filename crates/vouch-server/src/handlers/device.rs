@@ -6,12 +6,12 @@ use crate::arrival::ArrivalTime;
 use crate::db::{self, DeviceAuthState};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::handlers::oidc::client_auth::{
-    ClientAuthFields, ClientAuthPresentation, ClientAuthWitnesses, client_auth_proof,
-    complete_client_auth, extract_client_auth, with_client_auth_challenge,
+    ClientAuthFields, ClientAuthPresentation, client_auth_proof, complete_client_auth,
+    extract_client_auth, with_client_auth_challenge,
 };
 use crate::services::auth::{
-    CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::dpop::DpopError;
@@ -108,11 +108,12 @@ impl ClientAuthFields for DeviceCodeRequest {
 }
 
 /// A client authenticated at a device-flow endpoint and authorized for the
-/// `device_code` grant, with the witnesses that become its
-/// [`crate::services::auth::ClientAuthProof`].
+/// `device_code` grant, carrying the already-committed
+/// [`ClientAuthProof`] (whose JTI, if any, was committed before the
+/// `device_code` grant-authorization check — see [`authenticate_device_client`]).
 pub(crate) struct DeviceClient {
     client: ValidatedOAuthClient,
-    witnesses: ClientAuthWitnesses,
+    client_auth: ClientAuthProof,
 }
 
 /// Authenticate the caller of a device-flow endpoint.
@@ -131,6 +132,19 @@ pub(crate) struct DeviceClient {
 /// RFC 7591 §2 `grant_types`: the client must also be registered for the
 /// `device_code` grant, checked here so an unauthorized client neither gets
 /// a usable `user_code` nor burns a single-use device code.
+///
+/// The assertion's JTI is committed (via [`client_auth_proof`]) **before**
+/// the `device_code` grant-authorization check. `client_auth_proof` is the
+/// only [`PendingJti::commit`](crate::services::oidc::jwt_bearer::PendingJti)
+/// path, and the `private_key_jwt` assertion audience is the issuer shared
+/// with `/oauth/par`, `/oauth/revoke`, and `/oauth/introspect`. Committing
+/// only on the success tail — as the prior ordering did — left the JTI
+/// uncommitted when `for_grant(DeviceCode)` rejected an authenticated but
+/// unauthorized client, so the same assertion was replayable at any of those
+/// other shared-audience endpoints (RFC 7523 §3 item 7 single-use gate).
+/// `grant_name` threads the per-endpoint audit distinction
+/// (`"device_authorization"` for `POST /oauth/device`, `"device_code"` for
+/// the poll) through the single commit site.
 #[expect(
     clippy::result_large_err,
     reason = "Err is an HTTP Response; size is acceptable in error path"
@@ -141,6 +155,7 @@ pub(crate) async fn authenticate_device_client<T: ClientAuthFields>(
     params: &T,
     client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
+    grant_name: &'static str,
 ) -> Result<DeviceClient, Response> {
     let presentation = ClientAuthPresentation::of(headers, params);
     let auth = extract_client_auth(headers, params)?;
@@ -155,11 +170,19 @@ pub(crate) async fn authenticate_device_client<T: ClientAuthFields>(
             .into_response(),
         ));
     };
+    // Commit the JTI before the grant-authorization check so a
+    // `private_key_jwt` assertion that authenticates but is rejected by
+    // `for_grant(DeviceCode)` (`unauthorized_client`) still consumes its
+    // single-use JTI. An uncommitted JTI would stay valid at `/oauth/par`,
+    // `/oauth/revoke`, and `/oauth/introspect` for the assertion's lifetime
+    // (the audience is the issuer, shared across those endpoints).
+    let client_auth =
+        client_auth_proof(state, outcome.witnesses, &outcome.client, grant_name).await?;
     let client = ValidatedOAuthClient::for_grant(outcome.client, OAuthGrantType::DeviceCode)
         .map_err(|e| e.into_oauth_response().into_response())?;
     Ok(DeviceClient {
         client,
-        witnesses: outcome.witnesses,
+        client_auth,
     })
 }
 
@@ -177,23 +200,21 @@ pub(crate) async fn device_code(
 ) -> Response {
     tracing::info!("Device authorization request");
 
-    let device_client =
-        match authenticate_device_client(&state, &headers, &req, &client_cert, arrival).await {
-            Ok(client) => client,
-            Err(resp) => return resp,
-        };
-    // Commit the assertion's JTI before any state is written, so a replayed
-    // assertion cannot start a second flow. The proof itself has no consumer
-    // here: this endpoint issues no token.
-    let _client_auth = match client_auth_proof(
+    // `authenticate_device_client` commits the assertion's JTI before any
+    // state is written (and before the grant-authorization check), so a
+    // replayed assertion cannot start a second flow. The committed proof has
+    // no consumer here: this endpoint issues no token.
+    let device_client = match authenticate_device_client(
         &state,
-        device_client.witnesses,
-        &device_client.client,
+        &headers,
+        &req,
+        &client_cert,
+        arrival,
         "device_authorization",
     )
     .await
     {
-        Ok(proof) => proof,
+        Ok(client) => client,
         Err(resp) => return resp,
     };
 
@@ -338,22 +359,17 @@ pub(crate) async fn device_token(
     device_client: DeviceClient,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
-    // Every authenticated poll commits its assertion's JTI before any
-    // grant-specific check, so an assertion authenticates exactly one request
-    // even when this poll returns `invalid_grant`. `PendingJti` documents
-    // dropping it uncommitted on a retryable error such as `use_dpop_nonce`;
-    // here each poll is an independent request and the assertion's audience
-    // is not endpoint-specific, so an uncommitted one would stay valid at PAR,
+    // The assertion's JTI was already committed by `authenticate_device_client`
+    // before the `device_code` grant-authorization check, so an assertion
+    // authenticates exactly one request even when this poll returns
+    // `invalid_grant`. `PendingJti` documents dropping it uncommitted on a
+    // retryable error such as `use_dpop_nonce`; here each poll is an
+    // independent request and the assertion's audience is not
+    // endpoint-specific, so an uncommitted one would stay valid at PAR,
     // revoke, and introspect for its lifetime. The CLI signs a new assertion
     // for every poll, including the immediate retry after `use_dpop_nonce`.
     let oauth_client = device_client.client;
-    let client_auth = client_auth_proof(
-        &state,
-        device_client.witnesses,
-        &oauth_client,
-        "device_code",
-    )
-    .await?;
+    let client_auth = device_client.client_auth;
 
     // Validate device_code format before hashing and DB lookup.
     // Generated codes are 32 random bytes base64url-encoded (43 chars).
