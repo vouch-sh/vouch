@@ -2414,9 +2414,9 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce, &jiff::Timestamp::now())
+    crate::db::delete_dpop_nonce(&state.store, &nonce)
         .await
-        .expect("consume nonce");
+        .expect("delete nonce");
 
     // DPoP proof reuses the consumed nonce.
     let register_uri = format!("{}/oauth/register", state.config().base_url);

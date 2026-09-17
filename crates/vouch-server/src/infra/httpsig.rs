@@ -170,23 +170,19 @@ impl KeyResolver for OAuthClientKeyResolver {
     }
 
     async fn generate_nonce(&self) -> Option<String> {
-        crate::db::generate_dpop_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
+        crate::db::generate_signature_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
             .await
             .ok()
     }
 
     /// Validate and consume a signature nonce against the shared nonce store.
     ///
-    /// HTTP signature nonces deliberately share the DPoP nonce store and
-    /// issuance path (`generate_dpop_nonce`): both are opaque random values
-    /// with the same validity window. A signature nonce is single-use — the
-    /// signature carries no `jti`, so the nonce is its only replay defense —
-    /// and the atomic delete-if-not-expired gives that on every backend. The
-    /// DPoP path accepts its nonce until expiry instead, because a DPoP
-    /// proof's `jti` is what prevents replay there. A signed `/v1` request
-    /// therefore deletes a nonce a DPoP client may still hold, which costs
-    /// that client one `use_dpop_nonce` round trip (RFC 9449 §8: "this
-    /// situation is self-correcting").
+    /// A signature nonce is single-use: the signature carries no `jti`, so
+    /// the nonce is its only replay defense, and the atomic
+    /// delete-if-not-expired gives that on every backend. It has its own
+    /// document type, so consuming one cannot retire a DPoP nonce, which is
+    /// accepted until it expires because a DPoP proof's `jti` prevents replay
+    /// there.
     ///
     /// Unlike the DPoP path, the expiry comparison here reads an ambient
     /// clock: `vouch_httpsig`'s `NonceValidator` trait passes only the nonce,
@@ -207,7 +203,8 @@ impl KeyResolver for OAuthClientKeyResolver {
         )]
         let now = jiff::Timestamp::now();
         async move {
-            match crate::db::validate_and_consume_dpop_nonce(&self.state.store, &nonce, &now).await
+            match crate::db::validate_and_consume_signature_nonce(&self.state.store, &nonce, &now)
+                .await
             {
                 Ok(()) => NonceValidation::Valid,
                 Err(

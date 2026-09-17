@@ -175,16 +175,18 @@ async fn scim_token_lookup_reads_the_callers_instant() {
 }
 
 #[tokio::test]
-async fn dpop_nonce_consume_reads_the_callers_instant() {
+async fn signature_nonce_consume_reads_the_callers_instant() {
     use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // The nonce's expiry is stamped from the wall clock at generation, so it
     // is live now and expired at any instant past that 300-second window.
-    let nonce = generate_dpop_nonce(&store, 300).await.expect("seed nonce");
+    let nonce = generate_signature_nonce(&store, 300)
+        .await
+        .expect("seed nonce");
     let past_window: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let err = validate_and_consume_dpop_nonce(&store, &nonce, &past_window)
+    let err = validate_and_consume_signature_nonce(&store, &nonce, &past_window)
         .await
         .expect_err("a nonce expired at the caller's instant must be rejected");
     assert!(
@@ -196,7 +198,7 @@ async fn dpop_nonce_consume_reads_the_callers_instant() {
     // still works when judged against an instant inside its window. This is
     // the direction that matters — an ambient clock here would be later than
     // the request's arrival and could reject a nonce that was still live.
-    validate_and_consume_dpop_nonce(&store, &nonce, &jiff::Timestamp::now())
+    validate_and_consume_signature_nonce(&store, &nonce, &jiff::Timestamp::now())
         .await
         .expect("a nonce live at the caller's instant must be consumable");
 }
