@@ -286,7 +286,7 @@ validation.
 
 ```mermaid
 flowchart TB
-  par0["POST /oauth/par"] --> pauth["client auth"] --> pproof["ParCreationProof"] --> pstore[("PAR record")]
+  par0["POST /oauth/par"] --> pdpop["validate_dpop_if_present"] --> pauth["client auth"] --> pproof["ParCreationProof"] --> pstore[("PAR record")]
   authz["GET /oauth/authorize"] --> resolve{"parameter source"}
   resolve -- "request_uri, urn prefix" --> pstore
   resolve -- "request, inline JWT" --> jar["validate_request_object<br/>RFC 9101"]
@@ -303,9 +303,9 @@ flowchart TB
   mode -- "jwt, query.jwt, form_post.jwt" --> jarm["build_jarm_success_jwt"]
   plainredir --> tok["POST /oauth/token"]
   jarm --> tok
-  tok --> tauth["authenticate_client / _mtls / _jwt"]
-  tauth --> tdpop["validate_dpop_if_present"]
-  tdpop --> tsc["SenderConstraintProof::validate"]
+  tok --> tdpop["validate_dpop_if_present"]
+  tdpop --> tauth["authenticate_client / _mtls / _jwt"]
+  tauth --> tsc["SenderConstraintProof::validate"]
   tsc --> tex["exchange_authorization_code<br/>claims the code, verifies PKCE"]
   tex --> tproof["TokenIssuanceProof"] --> out["access token + id_token"]
 ```
