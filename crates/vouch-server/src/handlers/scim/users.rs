@@ -466,6 +466,23 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
         PatchOp::Add(value) => (value, true),
         PatchOp::Replace(value) => (value, false),
     };
+    if let Some((_, rest)) = path.split_once('[') {
+        let Some((filter, _)) = rest.split_once(']') else {
+            return Err(AttributeError::invalid_filter(format!(
+                "{path} has an unterminated value filter"
+            )));
+        };
+        // RFC 7644 §3.5.2.3: "If the target location is a multi-valued
+        // attribute for which a value selection filter ("valuePath") has been
+        // supplied and no record match was made, the service provider SHALL
+        // indicate failure by returning HTTP status code 400 and a "scimType"
+        // error code of "noTarget"."
+        if !email_filter_matches(email, path, filter)? {
+            return Err(AttributeError::no_target(format!(
+                "no email matches {path}"
+            )));
+        }
+    }
     let sub_attribute = path
         .rsplit_once(']')
         .map_or(path, |(_, rest)| rest)
@@ -482,6 +499,47 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
             check_user_name(email, path, presented)
         }
         Some(_) => Ok(()),
+    }
+}
+
+/// Whether a `valuePath` filter on `emails` matches the one email Vouch
+/// presents: `value` is the stored email, `type` is `work`, and `primary` is
+/// `true` (see `user_to_scim`). Vouch supports a single `eq` comparison.
+fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool, AttributeError> {
+    let unsupported = || {
+        AttributeError::invalid_filter(format!(
+            "{path}: emails supports only a [value|type|primary eq <literal>] filter"
+        ))
+    };
+    let mut parts = filter.trim().splitn(3, char::is_whitespace);
+    let (Some(attribute), Some(operator), Some(literal)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(unsupported());
+    };
+    if !operator.eq_ignore_ascii_case("eq") {
+        return Err(unsupported());
+    }
+    let literal = literal.trim();
+    let string = || {
+        literal
+            .strip_prefix('"')
+            .and_then(|l| l.strip_suffix('"'))
+            .filter(|l| !l.contains('"'))
+            .ok_or_else(unsupported)
+    };
+    if attribute.eq_ignore_ascii_case("value") {
+        Ok(Email::new(string()?) == *email)
+    } else if attribute.eq_ignore_ascii_case("type") {
+        Ok(string()?.eq_ignore_ascii_case("work"))
+    } else if attribute.eq_ignore_ascii_case("primary") {
+        match literal {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(unsupported()),
+        }
+    } else {
+        Err(unsupported())
     }
 }
 
@@ -607,14 +665,14 @@ pub(crate) async fn patch_user(
     let mut patched = user_seed.clone();
 
     let applied = patch.operations.iter().try_for_each(|op| {
-        let operation = PatchOperation::try_from(op)?;
+        let operation = PatchOperation::parse(op, urn::USER)?;
         match operation.path.map(|path| unqualified(path, urn::USER)) {
             Some(path) if is_emails_path(path) => {
                 apply_emails_op(&patched.email, path, operation.op)
             }
             Some(_) => apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation),
             None => {
-                if let Some(emails) = operation.op.attribute("emails") {
+                if let Some(emails) = operation.attribute("emails") {
                     apply_emails_op(&patched.email, "emails", emails)?;
                 }
                 apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation)

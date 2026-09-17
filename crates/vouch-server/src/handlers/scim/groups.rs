@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
     Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, get_attribute,
-    optional_string, required_attribute, unqualified,
+    optional_string, required_attribute, strip_prefix_ignore_ascii_case, unqualified,
 };
 use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
@@ -388,13 +388,6 @@ fn parse_members_path(path: &str) -> Result<Option<MembersPath<'_>>, AttributeEr
     }))
 }
 
-fn strip_prefix_ignore_ascii_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
-    let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| s.get(prefix.len()..))
-        .flatten()
-}
-
 /// The member user ids in a `members` value: an array of member objects or a
 /// single one, each carrying a string `value`.
 fn member_ids(path: &str, value: &serde_json::Value) -> Result<Vec<String>, AttributeError> {
@@ -513,10 +506,10 @@ fn apply_members_op(
 /// set, every other path through [`GROUP_ATTRIBUTES`]. A pathless `add` or
 /// `replace` may carry `members` among the attributes in its value.
 fn apply_group_op(group: &mut db::ScimGroupState, op: &ScimPatchOp) -> Result<(), AttributeError> {
-    let operation = PatchOperation::try_from(op)?;
+    let operation = PatchOperation::parse(op, urn::GROUP)?;
     let Some(path) = operation.path.map(|path| unqualified(path, urn::GROUP)) else {
         apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, &operation)?;
-        if let Some(members) = operation.op.attribute("members") {
+        if let Some(members) = operation.attribute("members") {
             let target = MembersPath {
                 filter: None,
                 sub_attribute: None,

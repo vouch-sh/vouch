@@ -3170,3 +3170,141 @@ async fn test_rfc7644_patch_user_emails_without_value_is_invalid_value() {
         "emails-no-value@test-org.example.com"
     );
 }
+
+// RFC 7644 §3.5.2.3: without a path, "the "value" attribute SHALL contain a
+// list of one or more attributes"; RFC 7644 §3.10: "Clients MAY omit core
+// schema attribute URN prefixes", so a prefixed name is the same attribute and
+// may appear once.
+#[tokio::test]
+async fn test_rfc7644_patch_user_pathless_value_shape() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-pathless-shape", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "pathless-shape@test-org.example.com"}),
+    )
+    .await;
+
+    for (operations, scim_type) in [
+        (
+            serde_json::json!([{"op": "add", "value": "x"}]),
+            "invalidValue",
+        ),
+        (
+            serde_json::json!([{"op": "add", "value": []}]),
+            "invalidValue",
+        ),
+        (
+            serde_json::json!([{"op": "replace", "value": {}}]),
+            "invalidValue",
+        ),
+        (
+            serde_json::json!([{"op": "replace", "value": {"urn:ietf:params:scim:schemas:core:2.0:User:emails": [{"value": "other@test-org.example.com"}]}}]),
+            "mutability",
+        ),
+        (
+            serde_json::json!([{"op": "replace", "value": {"urn:ietf:params:scim:schemas:core:2.0:User:userName": "other@test-org.example.com"}}]),
+            "mutability",
+        ),
+        (
+            serde_json::json!([{"op": "replace", "value": {"emails": [], "Emails": [{"value": "other@test-org.example.com"}]}}]),
+            "invalidSyntax",
+        ),
+        (
+            serde_json::json!([{"op": "replace", "value": {"externalId": "a", "urn:ietf:params:scim:schemas:core:2.0:User:externalId": "b"}}]),
+            "invalidSyntax",
+        ),
+    ] {
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], scim_type, "{operations} -> {error}");
+    }
+
+    let (status, patched) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "replace", "value": {"urn:ietf:params:scim:schemas:core:2.0:User:externalId": "qualified"}}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["externalId"], "qualified");
+}
+
+// RFC 7644 §3.5.2.3: "If the target location is a multi-valued attribute for
+// which a value selection filter ("valuePath") has been supplied and no record
+// match was made, the service provider SHALL indicate failure by returning
+// HTTP status code 400 and a "scimType" error code of "noTarget"." Vouch
+// presents one email: the stored address, `type` `work`, `primary` `true`.
+#[tokio::test]
+async fn test_rfc7644_patch_user_emails_value_filter() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-emails-filter", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let email = "emails-filter@test-org.example.com";
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": email}),
+    )
+    .await;
+
+    for path in [
+        "emails[type eq \"work\"].value",
+        "emails[TYPE EQ \"Work\"].value",
+        "emails[primary eq true].value",
+        "emails[value eq \"EMAILS-FILTER@test-org.example.com\"].value",
+    ] {
+        let operations = serde_json::json!([{"op": "replace", "path": path, "value": email}]);
+        let (status, body) = patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{operations} -> {body}");
+    }
+
+    for (path, scim_type) in [
+        ("emails[type eq \"home\"].value", "noTarget"),
+        ("emails[primary eq false].value", "noTarget"),
+        (
+            "emails[value eq \"other@test-org.example.com\"]",
+            "noTarget",
+        ),
+        ("emails[type ne \"home\"].value", "invalidFilter"),
+        ("emails[display eq \"x\"].value", "invalidFilter"),
+        ("emails[type eq work].value", "invalidFilter"),
+        ("emails[type eq \"work\"", "invalidFilter"),
+    ] {
+        let operations = serde_json::json!([{"op": "replace", "path": path, "value": email}]);
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], scim_type, "{operations} -> {error}");
+    }
+}
+
+// Entra ID sends capitalized operation names (`Replace`, `Add`).
+#[tokio::test]
+async fn test_patch_user_operation_name_is_case_insensitive() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-op-case", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "op-case@test-org.example.com"}),
+    )
+    .await;
+
+    for op in ["Replace", "ADD"] {
+        let (status, patched) = patch_user_ops(
+            &app,
+            &auth_header,
+            &user_id,
+            serde_json::json!([{"op": op, "path": "externalId", "value": op}]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{op}: {patched}");
+        assert_eq!(patched["externalId"], op);
+    }
+}
