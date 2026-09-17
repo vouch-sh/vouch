@@ -3,7 +3,7 @@
 
 use super::claim::ClaimError;
 use super::document_type::DocumentType;
-use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc};
+use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc, SignatureNonceDoc};
 use super::store::DocumentStore;
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -27,67 +27,121 @@ pub(crate) fn deterministic_dpop_jti_id(jti: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// Derive a deterministic document ID from a DPoP nonce. Separate domain
-/// from JTIs so the two types' IDs can never collide.
-fn deterministic_dpop_nonce_id(nonce: &str) -> String {
+/// Derive a deterministic document ID from a nonce, under `domain` so the
+/// nonce kinds and the JTIs can never collide on an ID.
+fn deterministic_nonce_id(domain: &[u8], nonce: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
 
     let mut ctx = digest::Context::new(&SHA256);
-    ctx.update(b"dpop_nonce\0");
+    ctx.update(domain);
+    ctx.update(b"\0");
     ctx.update(nonce.as_bytes());
     hex::encode(ctx.finish().as_ref())
 }
 
+fn deterministic_dpop_nonce_id(nonce: &str) -> String {
+    deterministic_nonce_id(b"dpop_nonce", nonce)
+}
+
+fn deterministic_signature_nonce_id(nonce: &str) -> String {
+    deterministic_nonce_id(b"signature_nonce", nonce)
+}
+
+/// A fresh random nonce and the instant it expires.
+#[expect(clippy::disallowed_methods, reason = "stamps the nonce's expires_at")]
+fn new_nonce(validity_seconds: i64) -> Result<(String, Timestamp)> {
+    let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+    let expires_at = Timestamp::now()
+        .checked_add(validity_seconds.seconds())
+        .context("nonce expiry timestamp overflow")?;
+    Ok((nonce, expires_at))
+}
+
 /// Generate and store a DPoP nonce. Returns the nonce string.
 ///
-/// Stores the nonce under a deterministic document ID derived from the
-/// nonce itself, so [`validate_and_consume_dpop_nonce`] can perform an
-/// atomic primary-key DELETE without a find-then-delete TOCTOU window.
-#[expect(clippy::disallowed_methods, reason = "stamps the nonce's expires_at")]
+/// Stored under a deterministic document ID derived from the nonce itself, so
+/// [`validate_dpop_nonce`] reads it by primary key.
 pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -> Result<String> {
-    let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
-    let now = Timestamp::now();
-    let expires_at = now
-        .checked_add(validity_seconds.seconds())
-        .context("DPoP nonce expiry timestamp overflow")?;
-
-    let id = deterministic_dpop_nonce_id(&nonce);
+    let (nonce, expires_at) = new_nonce(validity_seconds)?;
     let doc = DpopNonceDoc {
         nonce: nonce.clone(),
         expires_at,
     };
-    store.insert_with_id(&id, &doc).await?;
+    store
+        .insert_with_id(&deterministic_dpop_nonce_id(&nonce), &doc)
+        .await?;
     Ok(nonce)
 }
 
-/// Atomically validate and consume a DPoP nonce, judged against `now`.
+/// Validate a DPoP nonce without consuming it, judged against `now`.
 ///
-/// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
-/// outcome is decided by the database row count — no find-then-delete race.
-/// On a "lost" race (nonce not found, expired, or already consumed by a
-/// concurrent caller) returns [`ClaimError::AlreadyConsumed`]. The three
-/// lost cases are deliberately indistinguishable: each is rejected the
-/// same way by RFC 9449.
+/// RFC 9449 §11.1: "Unlike cryptographic nonces, it is acceptable for clients
+/// to use the same nonce multiple times and for the server to accept the same
+/// nonce multiple times.  As long as the jti value is tracked and duplicates
+/// are rejected for the lifetime of the nonce, there is no additional risk of
+/// token replay." `validate_dpop_common` commits the `jti` first, and
+/// `nonce_validity_seconds` keeps a nonce's lifetime inside the JTI retention
+/// window, so that condition holds. Deleting the nonce on first use instead
+/// would cost a `use_dpop_nonce` round trip on every second request of a
+/// sequence, such as a device-code poll.
 ///
-/// `now` decides the expiry comparison, so a request-path caller passes the
-/// request's [`crate::arrival::ArrivalTime`] instant: this comparison is one
-/// of three serving a single DPoP decision, alongside the JTI retention
-/// commit and the freshness check, and all three must read one instant. A
-/// clock stamped here instead is always ≥ arrival, which makes the predicate
-/// strictly stricter and rejects a nonce that was still valid when the
-/// request arrived but expired during the intervening awaits.
-///
-/// No witness type is returned because `ValidatedDpopProof` already
-/// carries the "DPoP validation succeeded" marker at the call site
-/// ([`crate::services::oidc::dpop::validate_dpop_common`]); a separate
-/// `DpopNonceClaim` would duplicate that guarantee without any
-/// downstream consumer requiring it.
-pub async fn validate_and_consume_dpop_nonce(
+/// Returns [`ClaimError::AlreadyConsumed`] when the nonce is unknown or
+/// expired; the two are deliberately indistinguishable, as RFC 9449 rejects
+/// each the same way.
+pub async fn validate_dpop_nonce(
     store: &DocumentStore,
     nonce: &str,
     now: &Timestamp,
 ) -> std::result::Result<(), ClaimError> {
     let id = deterministic_dpop_nonce_id(nonce);
+    let doc = store
+        .get::<DpopNonceDoc>(&id)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    match doc {
+        Some(doc) if doc.data.expires_at > *now => Ok(()),
+        Some(_) | None => Err(ClaimError::AlreadyConsumed),
+    }
+}
+
+/// Generate and store a nonce for RFC 9421 signed requests. Returns the nonce.
+pub async fn generate_signature_nonce(
+    store: &DocumentStore,
+    validity_seconds: i64,
+) -> Result<String> {
+    let (nonce, expires_at) = new_nonce(validity_seconds)?;
+    let doc = SignatureNonceDoc {
+        nonce: nonce.clone(),
+        expires_at,
+    };
+    store
+        .insert_with_id(&deterministic_signature_nonce_id(&nonce), &doc)
+        .await?;
+    Ok(nonce)
+}
+
+/// Atomically validate and consume a signature nonce, judged against `now`.
+///
+/// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
+/// outcome is decided by the database row count — no find-then-delete race.
+/// An HTTP message signature carries no `jti`, so its nonce is the only
+/// replay defense and is spent on use; that is the difference from
+/// [`validate_dpop_nonce`], where the proof's `jti` plays that part.
+///
+/// On a "lost" race (nonce not found, expired, or already consumed by a
+/// concurrent caller) returns [`ClaimError::AlreadyConsumed`]. The three lost
+/// cases are deliberately indistinguishable.
+///
+/// `now` decides the expiry comparison. The caller is the signature
+/// validator, whose trait carries no request instant and so reads an ambient
+/// clock; that clock is always ≥ arrival, which makes the predicate strictly
+/// stricter.
+pub async fn validate_and_consume_signature_nonce(
+    store: &DocumentStore,
+    nonce: &str,
+    now: &Timestamp,
+) -> std::result::Result<(), ClaimError> {
+    let id = deterministic_signature_nonce_id(nonce);
     let won = store
         .delete_if_not_expired(&id, now)
         .await
@@ -97,6 +151,17 @@ pub async fn validate_and_consume_dpop_nonce(
     } else {
         Err(ClaimError::AlreadyConsumed)
     }
+}
+
+/// Delete a DPoP nonce, for tests that need the server to have forgotten one.
+#[cfg(test)]
+pub async fn delete_dpop_nonce(store: &DocumentStore, nonce: &str) -> Result<()> {
+    store.delete(&deterministic_dpop_nonce_id(nonce)).await
+}
+
+/// Delete expired signature nonces. Returns count deleted.
+pub async fn delete_expired_signature_nonces(store: &DocumentStore) -> Result<u64> {
+    store.delete_expired(SignatureNonceDoc::DOC_TYPE).await
 }
 
 /// Witness that a DPoP JTI (RFC 9449 §11.1) was atomically committed by

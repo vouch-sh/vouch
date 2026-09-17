@@ -13,7 +13,6 @@ use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
-use crate::services::oidc::token::ClientAuthError;
 use axum::{
     Json,
     extract::State,
@@ -168,47 +167,19 @@ pub(crate) async fn revoke(
         Err(response) => return response,
     };
 
-    let (caller_client_id, pending_jti) =
-        match complete_client_auth(&state, auth, &client_cert, arrival).await {
-            Ok(Some(a)) => (a.client_id, a.witnesses.pending_jti),
-            Ok(None) => {
-                // No credentials provided → 401 with the shared challenge.
-                return with_client_auth_challenge(
-                    ClientAuthPresentation::of(&headers, &params),
-                    StatusCode::UNAUTHORIZED.into_response(),
-                );
-            }
-            Err(response) => return response,
-        };
-
-    // Commit the JTI (if any) BEFORE the destructive revocation. The
-    // `revoke` endpoint authenticates via `private_key_jwt` (RFC 7523), and
-    // `PendingJti::commit` is the replay-prevention gate: a replayed
-    // assertion MUST be rejected before `svc_revoke` runs, otherwise a replay
-    // deletes all of the victim user's sessions and only *then* returns 401
-    // (a TOCTOU). There is no DPoP nonce validation on this endpoint, so
-    // deferred commitment provides no retry benefit — the JTI is committed
-    // up front, matching the ordering the token-issuance and PAR handlers
-    // enforce (PR #407 / df5c59bb) and the invariant documented on
-    // `PendingJti` itself.
-    if let Some(p) = pending_jti {
-        match p.commit(&state).await {
-            Ok(_claim) => {}
-            Err(ClientAuthError::InvalidCredentials) => {
-                // JTI was already used — replay. No revocation has run, so no
-                // session state was mutated. Reject so the client mints a new
-                // assertion.
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(e) => {
-                // Transient DB error. Revocation has NOT run yet — return 500
-                // so the client retries the whole request rather than the
-                // server silently succeeding without the replay guard.
-                tracing::warn!("JTI commit failed for revoke: {e:?}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+    // A replayed `private_key_jwt` assertion fails here, before `svc_revoke`
+    // deletes anything.
+    let caller_client_id = match complete_client_auth(&state, auth, &client_cert, arrival).await {
+        Ok(Some(a)) => a.client_id,
+        Ok(None) => {
+            // No credentials provided → 401 with the shared challenge.
+            return with_client_auth_challenge(
+                ClientAuthPresentation::of(&headers, &params),
+                StatusCode::UNAUTHORIZED.into_response(),
+            );
         }
-    }
+        Err(response) => return response,
+    };
 
     let _result = svc_revoke(
         &state,
@@ -242,18 +213,18 @@ pub(crate) async fn introspect(
         Err(response) => return response,
     };
 
-    let (authenticated_client, pending_jti) =
-        match complete_client_auth(&state, auth, &client_cert, arrival).await {
-            Ok(Some(a)) => (a.client, a.witnesses.pending_jti),
-            Ok(None) => {
-                // No credentials provided → 401 with the shared challenge.
-                return with_client_auth_challenge(
-                    ClientAuthPresentation::of(&headers, &params),
-                    StatusCode::UNAUTHORIZED.into_response(),
-                );
-            }
-            Err(response) => return response,
-        };
+    let authenticated_client = match complete_client_auth(&state, auth, &client_cert, arrival).await
+    {
+        Ok(Some(a)) => a.client,
+        Ok(None) => {
+            // No credentials provided → 401 with the shared challenge.
+            return with_client_auth_challenge(
+                ClientAuthPresentation::of(&headers, &params),
+                StatusCode::UNAUTHORIZED.into_response(),
+            );
+        }
+        Err(response) => return response,
+    };
 
     let wants_jwt = authenticated_client
         .introspection_signed_response_alg
@@ -277,23 +248,6 @@ pub(crate) async fn introspect(
             return introspect_error_response(e);
         }
     };
-
-    // Commit JTI after introspection so clients can retry on failure.
-    if let Some(p) = pending_jti {
-        match p.commit(&state).await {
-            Ok(_claim) => {}
-            Err(ClientAuthError::InvalidCredentials) => {
-                // JTI was already used — reject so the client generates a new assertion.
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(e) => {
-                // Transient DB error. Introspection already succeeded — return the
-                // result per defense-in-depth: prefer denying replay over dropping
-                // a valid response. Log for ops visibility.
-                tracing::warn!("JTI commit failed for introspect (returning result anyway): {e:?}");
-            }
-        }
-    }
 
     if wants_jwt {
         let jwt_result =

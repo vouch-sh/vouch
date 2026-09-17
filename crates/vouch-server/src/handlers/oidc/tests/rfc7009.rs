@@ -700,7 +700,7 @@ async fn issue_token_to_private_key_jwt_client(
 }
 
 /// Regression for the TOCTOU in the `revoke` handler: a replayed
-/// `private_key_jwt` assertion MUST be rejected at `PendingJti::commit`
+/// `private_key_jwt` assertion MUST be rejected during client authentication
 /// *before* `svc_revoke` runs, so the replay cannot delete the victim's
 /// sessions while still returning 401.
 ///

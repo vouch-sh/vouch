@@ -26,6 +26,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-14 | 3 | 3 | 0 | 0 | 3 | 3 of 3 | 3 amended, merged | 1 of 3 | 0 |
 | 2026-09-15 | 6 | 6 | 7 | 1 | 6 | 6 of 6 fix, 2 of 7 dead-code | dead-code: 5 merged, 2 superseded (#1393, #1394); fix: 3 amended, 1 superseded (#1396), 2 closed | 1 of 6 | `wire-format-compat-on-persisted-structs`, synced #1395 |
 | 2026-09-16 | 4 | 3 | 0 | 2 | 4 | 3 of 3 | 3 amended, merged; #1406 fixed by #1409; siblings in `fix/secret-ui-and-scim-refusal` | 2 of 4 | client-type rule requested (`rcr_3b87ceaa…`), not synced |
+| 2026-09-17 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | 1 amended (#1427), 3 reworked into class fixes (#1424, #1426, #1428), 1 folded (#1425 → #1428) | 1 of 5 (contradicted 09-16 record) | `secret-gate-must-key-on-auth-method` created 09-16, not synced; #1421 was in its scope |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -451,3 +452,31 @@ after rollout. The wire-format rule was synced in #1395.
 Queued branches reject pushes; sibling hunts must reach templates and audit
 readers; a gap a review notices is a decision for the user, not residue; search
 test files before reporting a test missing.
+
+## 2026-09-17 — three class fixes became types
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 98 | 2 | 194 | **56** | 30 |
+
+**Self-caused: 5 of 5.** Blame: #1399 (device-flow client auth), #1410 (secret
+UI gate and SCIM `Refusal`), and #1415 (SCIM PUT and PATCH rules) twice. This is
+the fourth batch in a row made entirely of our own class fixes.
+
+### Classes
+
+- **JTI commit placement per handler** (#1419). #1424 moved the commit in two
+  of six handlers and missed two PAR rejections. Fixed by committing inside
+  `authenticate_client_jwt`; the token grants and PAR check DPoP before client
+  auth. This reverses the 09-16 judgement that a failed request may leave its
+  assertion uncommitted.
+- **SCIM `emails` split from the attribute table** (#1420, #1423). Two rules
+  (a missing `value`, and the pathless form) were each dropped once. Fixed with
+  the `PatchOp` type, so `add` and `replace` always hold a value. #1428's test
+  comment quoted a sentence that is not in RFC 7644.
+- **Secret-eligibility predicate re-derived** (#1421). Written by hand at four
+  Rust sites, with a fifth encoding in the template. Fixed with
+  `TokenEndpointAuthMethod::secret_is_credential`. A Detail rule already covered
+  templates but was never synced.
+- **#1422** was isolated. Its one sibling (key rename ignored a `false` write
+  result) was fixed in the same PR.

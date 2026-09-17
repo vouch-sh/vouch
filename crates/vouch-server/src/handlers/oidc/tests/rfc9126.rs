@@ -2808,6 +2808,30 @@ async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
         json["error_description"],
         "Authorization server requires nonce in DPoP proof"
     );
+
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value". The retry reuses the same client assertion, whose `jti`
+    // the nonce rejection did not spend.
+    let nonce = response
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header")
+        .to_string();
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let retry = crate::test_utils::http_post_form_full(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("DPoP", proof.as_str())],
+    )
+    .await;
+    assert_eq!(
+        retry.status,
+        StatusCode::CREATED,
+        "nonce retry with the same assertion: {}",
+        retry.body
+    );
 }
 
 #[tokio::test]

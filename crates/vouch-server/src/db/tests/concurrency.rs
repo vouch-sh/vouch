@@ -135,14 +135,14 @@ async fn test_device_auth_consume_concurrent() {
 }
 
 #[tokio::test]
-async fn test_dpop_nonce_consume_concurrent() {
+async fn test_signature_nonce_consume_concurrent() {
     use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // Seed a fresh nonce; the function returns the nonce string.
-    let nonce = generate_dpop_nonce(&store, 300)
+    let nonce = generate_signature_nonce(&store, 300)
         .await
-        .expect("generate_dpop_nonce");
+        .expect("generate_signature_nonce");
 
     let store_a = store.clone();
     let store_b = store.clone();
@@ -150,10 +150,10 @@ async fn test_dpop_nonce_consume_concurrent() {
     let nonce_b = nonce.clone();
     let (result_a, result_b) = tokio::join!(
         async move {
-            validate_and_consume_dpop_nonce(&store_a, &nonce_a, &jiff::Timestamp::now()).await
+            validate_and_consume_signature_nonce(&store_a, &nonce_a, &jiff::Timestamp::now()).await
         },
         async move {
-            validate_and_consume_dpop_nonce(&store_b, &nonce_b, &jiff::Timestamp::now()).await
+            validate_and_consume_signature_nonce(&store_b, &nonce_b, &jiff::Timestamp::now()).await
         },
     );
 
@@ -161,7 +161,7 @@ async fn test_dpop_nonce_consume_concurrent() {
     let b_won = result_b.is_ok();
     assert!(
         a_won ^ b_won,
-        "exactly one DPoP-nonce consume must win, got a={a_won}, b={b_won}"
+        "exactly one signature-nonce consume must win, got a={a_won}, b={b_won}"
     );
     for r in [result_a, result_b] {
         if let Err(e) = r {

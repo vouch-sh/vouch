@@ -1358,7 +1358,7 @@ async fn register_cli_shape_client(app: &axum::Router, grant_types: &[&str]) -> 
 }
 
 /// The CLI's pre-fix registration (`grant_types` without `token-exchange`) MUST
-/// be rejected by the gate with HTTP 401 `unauthorized_client` — pinning the
+/// be rejected by the gate with `unauthorized_client` — pinning the
 /// exact regression that broke WIF credential commands. This is the CLI's real
 /// grant vector (`device_code` + `fido2-assertion`), driven through
 /// `/oauth/register`, not the harness-minted default.
@@ -1403,7 +1403,7 @@ async fn test_wif_token_exchange_rejected_when_cli_grant_vector_omits_token_exch
     let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "omitting token-exchange from the CLI grant vector must be rejected: {resp}"
     );
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");

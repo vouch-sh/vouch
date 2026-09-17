@@ -21,8 +21,21 @@ use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::db::{self, store::DocumentStore};
 
-/// Nonce validity in seconds (5 minutes).
+/// Nonce validity in seconds (5 minutes), before the JTI-retention cap below.
 const NONCE_VALIDITY_SECONDS: i64 = 300;
+
+/// How long a nonce issued against `config_max_age` stays valid.
+///
+/// A nonce may be reused, which RFC 9449 §11.1 permits on one condition:
+/// "Unlike cryptographic nonces, it is acceptable for clients to use the same
+/// nonce multiple times and for the server to accept the same nonce multiple
+/// times.  As long as the jti value is tracked and duplicates are rejected
+/// for the lifetime of the nonce, there is no additional risk of token
+/// replay." A JTI is retained for `config_max_age + PROOF_SKEW_SECONDS`, so a
+/// nonce never outlives that, whatever `VOUCH_DPOP_MAX_AGE` is set to.
+pub(crate) fn nonce_validity_seconds(config_max_age: i64) -> i64 {
+    NONCE_VALIDITY_SECONDS.min(config_max_age.saturating_add(PROOF_SKEW_SECONDS))
+}
 
 /// Forward clock-skew tolerance for a DPoP proof's `iat` (RFC 9449 §4.3),
 /// in seconds.
@@ -581,7 +594,7 @@ async fn validate_dpop_common(
         };
 
     if nonce_policy.requires_nonce() && claims.nonce.is_none() {
-        let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
+        let new_nonce = db::generate_dpop_nonce(store, nonce_validity_seconds(config_max_age))
             .await
             .map_err(|e| DpopError::Database(format!("nonce generation failed: {e}")))?;
         return Err(DpopError::UseNonce(new_nonce));
@@ -605,18 +618,19 @@ async fn validate_dpop_common(
         },
     )?;
 
-    // Atomically consume the nonce via the database. A successful return
-    // means a single DELETE statement decided the outcome — no TOCTOU
-    // window between read and consume. The "this DPoP proof validated
-    // successfully" guarantee is carried forward by the returned
-    // `ValidatedDpopProof`.
+    // The nonce is accepted until it expires, so a sequence of requests
+    // (a device-code poll) reuses the one nonce it holds. Proof replay is
+    // prevented by the `jti` consumed above.
     if let Some(nonce) = claims.nonce.as_deref() {
-        match db::validate_and_consume_dpop_nonce(store, nonce, &now).await {
+        match db::validate_dpop_nonce(store, nonce, &now).await {
             Ok(()) => {}
             Err(db::claim::ClaimError::AlreadyConsumed) => {
-                let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
-                    .await
-                    .map_err(|e| DpopError::Database(format!("nonce generation failed: {e}")))?;
+                let new_nonce =
+                    db::generate_dpop_nonce(store, nonce_validity_seconds(config_max_age))
+                        .await
+                        .map_err(|e| {
+                            DpopError::Database(format!("nonce generation failed: {e}"))
+                        })?;
                 return Err(DpopError::UseNonce(new_nonce));
             }
             Err(db::claim::ClaimError::InvalidInput(msg)) => {

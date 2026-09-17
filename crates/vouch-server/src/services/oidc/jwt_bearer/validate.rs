@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// systems should not drift beyond this.
 ///
 /// Exposed `pub(crate)` so the JTI replay-prevention record
-/// ([`crate::services::oidc::jwt_bearer::client_auth::PendingJti::commit`])
+/// (`PendingJti::commit` in `jwt_bearer::client_auth`)
 /// can derive its retention horizon from the *same* skew the validator
 /// applies to `exp`. The record must outlive the validator's
 /// `exp + CLOCK_SKEW_SECONDS` acceptance window, so the two values must

@@ -142,7 +142,7 @@ flowchart TB
   store -- "try_consume_authorization_code" --> w2["AuthCodeClaim"]
   store -- "try_consume_device_auth" --> w3["DeviceCodeClaim"]
   store -- "try_consume_oidc_state" --> w4["OidcStateClaim"]
-  store -- "PendingJti::commit" --> w5["JwtAssertionJtiClaim<br/>optional"]
+  store -- "store_jwt_assertion_jti<br/>inside authenticate_client_jwt" --> w5["JwtAssertionJtiClaim<br/>optional"]
   store -. "race loser, expired,<br/>never existed" .-> ce["ClaimError::AlreadyConsumed"]
   w1 & w2 & w3 & w4 --> gp["GrantProof<br/>one variant per grant"]
   jwta["authenticate_client_jwt"] --> jas["JwtAuthSucceeded"] --> jw["JwtClientAuthProof"]
@@ -174,6 +174,10 @@ browser login, the two enrollment steps, and the certification bypass. Like
 optional because the `jti` is. RFC 7523 §3: *"The JWT MAY contain a "jti" (JWT ID)
 claim"* (`specs/rfc/rfc7523.txt`). `authenticate_client_jwt` rejects a FAPI client's
 assertion without one, so a FAPI client cannot reach the proof without a committed jti.
+`authenticate_client_jwt` commits the jti before it returns, so an assertion that
+authenticates is spent whatever the request's outcome. The one error a client retries
+with the same request, DPoP `use_dpop_nonce`, is raised before client authentication at
+every endpoint that checks DPoP.
 
 | `GrantProof` variant | Replay primitive consumed first |
 |---|---|
@@ -282,7 +286,7 @@ validation.
 
 ```mermaid
 flowchart TB
-  par0["POST /oauth/par"] --> pauth["client auth"] --> pproof["ParCreationProof"] --> pstore[("PAR record")]
+  par0["POST /oauth/par"] --> pdpop["validate_dpop_if_present"] --> pauth["client auth"] --> pproof["ParCreationProof"] --> pstore[("PAR record")]
   authz["GET /oauth/authorize"] --> resolve{"parameter source"}
   resolve -- "request_uri, urn prefix" --> pstore
   resolve -- "request, inline JWT" --> jar["validate_request_object<br/>RFC 9101"]
@@ -299,9 +303,9 @@ flowchart TB
   mode -- "jwt, query.jwt, form_post.jwt" --> jarm["build_jarm_success_jwt"]
   plainredir --> tok["POST /oauth/token"]
   jarm --> tok
-  tok --> tauth["authenticate_client / _mtls / _jwt"]
-  tauth --> tdpop["validate_dpop_if_present"]
-  tdpop --> tsc["SenderConstraintProof::validate"]
+  tok --> tdpop["validate_dpop_if_present"]
+  tdpop --> tauth["authenticate_client / _mtls / _jwt"]
+  tauth --> tsc["SenderConstraintProof::validate"]
   tsc --> tex["exchange_authorization_code<br/>claims the code, verifies PKCE"]
   tex --> tproof["TokenIssuanceProof"] --> out["access token + id_token"]
 ```
@@ -367,8 +371,12 @@ DPoP validation differs by endpoint, and the difference is which mechanism binds
 proof. At `/oauth/token`, `NoncePolicy::Required` rejects a proof with no nonce and
 returns a fresh one, so a client cannot precompute proofs. At a resource endpoint
 `NoncePolicy::Optional` applies. The `ath` claim, the SHA-256 of the presented access
-token, already binds the proof to one token. Both paths insert the `jti` atomically and
-consume any nonce with a single statement. Nonces live 300 s. Proofs older than
+token, already binds the proof to one token. Both paths insert the `jti` atomically,
+which is what prevents proof replay; a nonce is accepted until it expires, so one nonce
+serves a sequence of requests such as a device-code poll. RFC 9449 §11.1 allows that
+"as long as the jti value is tracked and duplicates are rejected for the lifetime of the
+nonce", so a nonce's validity is capped at the jti retention window. Nonces live 300 s,
+or `VOUCH_DPOP_MAX_AGE` + 60 s when that is shorter. Proofs older than
 `VOUCH_DPOP_MAX_AGE` (default 300 s) are rejected, as are proofs dated more than 60 s
 in the future.
 

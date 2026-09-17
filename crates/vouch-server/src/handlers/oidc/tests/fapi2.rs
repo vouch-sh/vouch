@@ -1828,11 +1828,12 @@ async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
     assert_eq!(error["error"], "invalid_request", "body: {resp_body}");
 }
 
-/// Every authenticated poll commits its assertion's JTI, so the retry after
-/// `use_dpop_nonce` needs a fresh assertion; re-sending the committed one is
-/// refused.
+/// RFC 9449 §8: "The client will typically retry the request with the new
+/// nonce value supplied upon receiving a use_dpop_nonce error". The poll checks
+/// DPoP before client authentication, so the retry reuses the assertion; once
+/// that retry authenticates, the assertion is spent.
 #[tokio::test]
-async fn test_fapi2_device_flow_poll_assertion_is_single_use() {
+async fn test_fapi2_device_flow_poll_nonce_retry_reuses_assertion() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "fapi2-dev-jti@example.com").await;
@@ -1863,23 +1864,70 @@ async fn test_fapi2_device_flow_poll_assertion_is_single_use() {
         .to_str()
         .expect("nonce UTF-8")
         .to_string();
-    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
-    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+    let retry = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
     assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "committed assertion: {resp}"
+        retry.status,
+        StatusCode::OK,
+        "nonce retry, same assertion: {}",
+        retry.body
     );
+
+    // Without a DPoP header the request reaches client authentication.
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "spent assertion: {resp}");
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_client", "{resp}");
+}
 
-    let (status, resp) = http_post_form(
-        &app,
-        "/oauth/token",
-        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
-        &[("DPoP", &proof)],
+/// Consecutive polls of an unapproved device code, each carrying a DPoP proof
+/// with the nonce the client holds, all answer `authorization_pending`. A
+/// nonce consumed by the first poll would make every second poll a
+/// `use_dpop_nonce` round trip and double the time to notice approval.
+#[tokio::test]
+async fn test_fapi2_device_flow_pending_polls_reuse_one_nonce() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi2-pending-nonce@example.com").await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+
+    let device_code = "pending-poll-nonce";
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    crate::db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(device_code),
+        "PENDNONCE",
+        &client.client_id,
+        expires_at,
+        0,
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "fresh assertion: {resp}");
+    .await
+    .expect("create device authorization request");
+
+    // The first poll has no nonce and is answered with one.
+    let body = fapi_device_token_body(&state, &client.client_id, &pkcs8, device_code);
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
+    let challenge = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+    let nonce = challenge
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header")
+        .to_string();
+
+    for poll in 0..3 {
+        let body = fapi_device_token_body(&state, &client.client_id, &pkcs8, device_code);
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "poll {poll}: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(
+            json["error"], "authorization_pending",
+            "poll {poll}: {resp}"
+        );
+    }
 }

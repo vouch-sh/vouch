@@ -232,6 +232,10 @@ pub async fn run_cleanup(
         "expired DPoP nonces"
     );
     cleanup_and_log!(
+        db::delete_expired_signature_nonces(store),
+        "expired signature nonces"
+    );
+    cleanup_and_log!(
         db::delete_expired_dpop_jtis(store, &now_str),
         "expired DPoP JTIs"
     );

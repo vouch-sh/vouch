@@ -2379,7 +2379,7 @@ async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
 // ========================================================================
 // RFC 9449 §7.2 — DPoP nonce refresh at the registration endpoint
 //
-// A DPoP-bound token (cnf.jkt) presented with a replayed nonce at
+// A DPoP-bound token (cnf.jkt) presented with a nonce the server no longer holds at
 // POST /oauth/register MUST get a 401 `use_dpop_nonce` response carrying a
 // fresh `DPoP-Nonce` header so the client can retry. Before the fix,
 // `ServiceError::ApiWithHeaders` (returned by `extract_resource_token`) fell
@@ -2410,13 +2410,13 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     )
     .await;
 
-    // Generate and consume a nonce to simulate replay.
+    // Delete the nonce so the request presents one the server does not hold.
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce, &jiff::Timestamp::now())
+    crate::db::delete_dpop_nonce(&state.store, &nonce)
         .await
-        .expect("consume nonce");
+        .expect("delete nonce");
 
     // DPoP proof reuses the consumed nonce.
     let register_uri = format!("{}/oauth/register", state.config().base_url);
@@ -2488,11 +2488,11 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     );
 }
 
-/// RFC 9449 retry flow at the registration endpoint: a valid request
-/// consumes the nonce; replaying the nonce yields `401 use_dpop_nonce` + a
-/// fresh nonce; retrying with the fresh nonce succeeds with 201 Created.
+/// RFC 9449 retry flow at the registration endpoint: a nonce the server does
+/// not know yields `401 use_dpop_nonce` and a fresh nonce, and retrying with
+/// that nonce succeeds with 201 Created.
 #[tokio::test]
-async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
+async fn test_rfc7591_dpop_unknown_nonce_retry_flow_succeeds() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "rfc7591-dpop-retry@example.com").await;
@@ -2549,7 +2549,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         resp1.body
     );
 
-    // 2. Replay the same nonce (fresh jti) → 401 use_dpop_nonce + fresh nonce.
+    // 2. An unknown nonce → use_dpop_nonce + a fresh nonce.
     let body2 = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_name": "DPoP Retry 2"
@@ -2559,7 +2559,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         &jwk,
         "POST",
         &register_uri,
-        Some(&nonce),
+        Some("unknown-nonce"),
         Some(&token),
     );
     let resp2 = http_request_full(
@@ -2577,7 +2577,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
     assert_eq!(
         resp2.status,
         StatusCode::UNAUTHORIZED,
-        "replayed nonce must be rejected with 401: {}",
+        "an unknown nonce must be rejected: {}",
         resp2.body
     );
     let fresh_nonce = resp2
@@ -2587,7 +2587,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         .expect("DPoP-Nonce header on use_dpop_nonce");
     assert_ne!(
         fresh_nonce, nonce,
-        "fresh nonce must differ from replayed one"
+        "fresh nonce must differ from the one held"
     );
 
     // 3. Retry with the fresh nonce (fresh jti) → 201 Created.

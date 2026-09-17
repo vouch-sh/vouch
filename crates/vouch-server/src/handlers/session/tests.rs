@@ -390,13 +390,13 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
     let (key, jwk, token, resource_uri) =
         setup_dpop_resource_token(&state, "dpop-usenonce@example.com").await;
 
-    // Generate a nonce and consume it, simulating a replayed nonce.
+    // Delete the nonce so the request presents one the server does not hold.
     let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce, &jiff::Timestamp::now())
+    crate::db::delete_dpop_nonce(&state.store, &nonce)
         .await
-        .expect("consume nonce");
+        .expect("delete nonce");
 
     // DPoP proof reuses the consumed nonce.
     let proof = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
@@ -437,12 +437,41 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
     );
 }
 
-/// RFC 9449 retry flow at a resource endpoint: a valid request consumes
-/// the nonce; replaying the nonce yields `use_dpop_nonce` + a fresh nonce;
-/// retrying with the fresh nonce succeeds. This is the end-to-end contract
-/// the bug broke.
+/// RFC 9449 §8: "The intent is that clients need to keep only one nonce value
+/// and servers need to keep a window of recent nonces." One nonce serves a
+/// sequence of requests, each with its own `jti`, until it expires.
 #[tokio::test]
-async fn test_dpop_nonce_replay_retry_flow_succeeds() {
+async fn test_dpop_nonce_serves_repeated_requests_until_it_expires() {
+    let (app, state) = test_app().await;
+    let (key, jwk, token, resource_uri) =
+        setup_dpop_resource_token(&state, "dpop-nonce-window@example.com").await;
+    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    let auth = format!("DPoP {token}");
+
+    for request in 0..3 {
+        let proof = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
+        let response = http_get_full(
+            &app,
+            "/api/v1/applications",
+            &[("Authorization", &auth), ("DPoP", &proof)],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "request {request} with the held nonce: {}",
+            response.body
+        );
+    }
+}
+
+/// RFC 9449 retry flow at a resource endpoint: a request with a nonce the
+/// server does not know yields `use_dpop_nonce` and a fresh nonce, and
+/// retrying with that nonce succeeds.
+#[tokio::test]
+async fn test_dpop_unknown_nonce_retry_flow_succeeds() {
     let (app, state) = test_app().await;
     let (key, jwk, token, resource_uri) =
         setup_dpop_resource_token(&state, "dpop-retry@example.com").await;
@@ -466,8 +495,15 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
         resp1.body
     );
 
-    // 2. Replay the same nonce (fresh jti) → 401 use_dpop_nonce + fresh nonce.
-    let proof2 = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
+    // 2. An unknown nonce → use_dpop_nonce + a fresh nonce.
+    let proof2 = create_dpop_proof(
+        &key,
+        &jwk,
+        "GET",
+        &resource_uri,
+        Some("unknown-nonce"),
+        Some(&token),
+    );
     let resp2 = http_get_full(
         &app,
         "/api/v1/applications",
@@ -477,7 +513,7 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
     assert_eq!(
         resp2.status,
         StatusCode::UNAUTHORIZED,
-        "replayed nonce must be rejected with 401: {}",
+        "an unknown nonce must be rejected: {}",
         resp2.body
     );
     let fresh_nonce = resp2
@@ -487,7 +523,7 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
         .expect("DPoP-Nonce header on use_dpop_nonce");
     assert_ne!(
         fresh_nonce, nonce,
-        "fresh nonce must differ from replayed one"
+        "fresh nonce must differ from the one held"
     );
     let body2: serde_json::Value =
         serde_json::from_str(&resp2.body).expect("valid JSON error body");

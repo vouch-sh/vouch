@@ -171,8 +171,9 @@ async fn poll_device_token(
         app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-             &device_code={device_code}"
+            "grant_type={}\
+             &device_code={device_code}",
+            vouch_common::protocol::GRANT_TYPE_DEVICE_CODE
         ),
         &[("Authorization", client.basic_auth_header().as_str())],
     )
@@ -378,7 +379,7 @@ async fn test_rfc8628_device_code_replay_revokes_only_that_code_s_token() {
 // sender-constraint enforcement, so the metadata needed to enforce
 // `grant_types` is available. These tests pin the fix: a client restricted to
 // `["authorization_code"]` (the dynamic-registration default when `grant_types`
-// is omitted) MUST receive HTTP 401 `unauthorized_client` at redemption, while
+// is omitted) MUST receive `unauthorized_client` at redemption, while
 // registered clients and the built-in CLI flow keep working (no regression).
 // Mirrors the `grant_types` enforcement tests in `rfc7523.rs`.
 // ========================================================================
@@ -432,7 +433,7 @@ async fn test_device_grant_rejects_redemption_for_client_not_registered_for_devi
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device_code grant must reject a client not registered for it: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -492,13 +493,13 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
 
     // First poll: rejected by the grant_types gate. The code is NOT consumed.
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "gate must reject: {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "gate must reject: {body}");
 
     // Re-authorize the client for device_code (toggle the gate off).
     set_grant_types(
         &state.store,
         &client.client_id,
-        Some(&["urn:ietf:params:oauth:grant-type:device_code"]),
+        Some(&[vouch_common::protocol::GRANT_TYPE_DEVICE_CODE]),
     )
     .await;
 
@@ -535,7 +536,7 @@ async fn test_device_grant_rejects_redemption_for_client_with_no_grant_types() {
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device_code grant must reject a client with no grant_types: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -571,7 +572,7 @@ async fn test_device_code_creation_rejects_client_not_registered_for_device_code
     .await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device code creation must reject a client not registered for device_code: {body}"
     );
     let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -879,6 +880,7 @@ async fn test_device_code_assertion_audience_may_be_device_endpoint() {
 /// refused; the code is not consumed, so the authenticated retry redeems it.
 #[tokio::test]
 async fn test_device_grant_requires_client_authentication() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-auth-req@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -886,7 +888,7 @@ async fn test_device_grant_requires_client_authentication() {
     let device_code =
         setup_authorized_device(&state, &user, &auth, "authreq", &client.client_id).await;
     let form = format!(
-        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+        "grant_type={grant}&device_code={device_code}\
          &client_id={}",
         client.client_id
     );
@@ -910,6 +912,7 @@ async fn test_device_grant_requires_client_authentication() {
 /// interval is untouched.
 #[tokio::test]
 async fn test_device_grant_bound_to_issuing_client() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-bound@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -923,7 +926,7 @@ async fn test_device_grant_bound_to_issuing_client() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             other.client_id
         ),
@@ -961,7 +964,7 @@ async fn test_device_grant_bound_to_issuing_client() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             owner.client_id
         ),
@@ -1026,6 +1029,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
 /// response: the caller learns nothing about the code.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_poll_of_pending_code() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-pending-anon@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
@@ -1047,9 +1051,7 @@ async fn test_device_grant_unauthenticated_poll_of_pending_code() {
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
-        &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
-        ),
+        &format!("grant_type={grant}&device_code={device_code}"),
         &[],
     )
     .await;
@@ -1066,6 +1068,7 @@ async fn test_device_grant_unauthenticated_poll_of_pending_code() {
 /// revocation is reserved for the code's own client.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-replay-anon@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -1084,7 +1087,7 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             client.client_id
         ),
@@ -1162,9 +1165,7 @@ async fn test_device_grant_cross_client_poll_commits_jti_regression() {
     );
 
     // (1) Poll /oauth/token authenticated as A with B's device code. The
-    // cross-client binding check rejects this with `invalid_grant`. On the
-    // buggy tree this path returned before the JTI commit, leaving the
-    // assertion un-burned.
+    // cross-client binding check rejects this with `invalid_grant`.
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -1265,4 +1266,250 @@ async fn test_device_grant_malformed_code_poll_commits_jti() {
     );
 
     assert_replay_rejected_at_device(&app, &client_a.client_id, &assertion).await;
+}
+
+// ========================================================================
+// Cross-endpoint JTI single use: the assertion audience is the issuer, shared
+// across /oauth/device, /oauth/par, /oauth/revoke, and /oauth/introspect.
+// Endpoint A authenticates and then rejects the request; the SAME assertion
+// presented at endpoint B is `invalid_client`.
+// ========================================================================
+
+/// The PKCE code challenge shared by the PAR bodies below (S256 of the
+/// well-known RFC 7636 §B verifier).
+const PAR_PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+/// A `/oauth/par` form body that authenticates `client_id` with `assertion`
+/// and carries a registered `redirect_uri` + PKCE, so the only rejection
+/// that can fire is the one a test deliberately triggers.
+fn par_body_with_assertion(client_id: &str, redirect_uri: &str, assertion: &str) -> String {
+    format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &scope=openid\
+         &code_challenge={}\
+         &code_challenge_method=S256\
+         &client_assertion_type={}\
+         &client_assertion={assertion}",
+        sha256_base64url(PAR_PKCE_VERIFIER),
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    )
+}
+
+/// A `private_key_jwt` client not registered for the `device_code` grant is
+/// rejected at `/oauth/device` (`unauthorized_client`); the same assertion
+/// at `/oauth/par` is `invalid_client`.
+#[tokio::test]
+async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-xpar-grant@example.com").await;
+
+    // Drop `device_code` from the client's grants so `for_grant(DeviceCode)`
+    // rejects the authenticated client. It keeps `authorization_code` (and the
+    // rest) so the PAR control step is otherwise entitled to succeed.
+    let (pkcs8, jwk) = generate_es256_signing_key();
+    let grants_without_device: Vec<String> = all_supported_grant_types()
+        .into_iter()
+        .filter(|g| g != vouch_common::protocol::GRANT_TYPE_DEVICE_CODE)
+        .collect();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            with_secret: false,
+            grant_types: Some(grants_without_device),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let base_url = state.config().base_url.clone();
+    let fixed_jti = "device-xpar-grant-fixed";
+    let assertion = build_client_assertion(&client.client_id, &base_url, &pkcs8, Some(fixed_jti));
+
+    // (1) POST /oauth/device authenticated as the private_key_jwt client. It
+    // is not registered for device_code, so for_grant rejects unauthorized_client.
+    let device_body = format!(
+        "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "device rejection: {resp}");
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "device rejection: {resp}"
+    );
+
+    // (2) Reuse the SAME assertion (same jti) at /oauth/par. The failed device
+    // call already committed the JTI, so the replay MUST be invalid_client.
+    let par_body = par_body_with_assertion(
+        &client.client_id,
+        "https://example.com/callback",
+        &assertion,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replayed assertion at PAR MUST be rejected (replay): {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client", "PAR replay: {resp}");
+
+    // (3) Control: a fresh assertion authenticates at /oauth/par and returns
+    // 201, proving the client is otherwise entitled to PAR and the rejection
+    // above was the replay, not a misconfigured client.
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let par_body =
+        par_body_with_assertion(&client.client_id, "https://example.com/callback", &fresh);
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "fresh assertion control: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(json["request_uri"].is_string(), "control: {resp}");
+}
+
+/// A `private_key_jwt` client is rejected at `/oauth/par` for an
+/// unregistered `redirect_uri` (`invalid_request`); the same assertion at
+/// `/oauth/device` is `invalid_client`.
+#[tokio::test]
+async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-xdevice-redir@example.com").await;
+    // Registered for every grant (incl. device_code) so /oauth/device succeeds
+    // for a fresh assertion — the only thing that fails is the PAR redirect_uri.
+    let (client, pkcs8) = private_key_jwt_client(&state, &user.id, false).await;
+
+    let base_url = state.config().base_url.clone();
+    let fixed_jti = "par-xdevice-redir-fixed";
+    let assertion = build_client_assertion(&client.client_id, &base_url, &pkcs8, Some(fixed_jti));
+
+    // (1) POST /oauth/par with an UNREGISTERED redirect_uri. The assertion
+    // authenticates, then is_valid_redirect_uri rejects invalid_request.
+    let par_body = par_body_with_assertion(
+        &client.client_id,
+        "https://attacker.example/callback",
+        &assertion,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/par", &par_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "PAR redirect_uri rejection: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "PAR redirect_uri rejection: {resp}"
+    );
+
+    // (2) Reuse the SAME assertion (same jti) at /oauth/device. The failed PAR
+    // call already committed the JTI, so the replay MUST be invalid_client.
+    let device_body = format!(
+        "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replayed assertion at /oauth/device MUST be rejected (replay): {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client", "device replay: {resp}");
+    assert!(
+        !resp.contains("device_code"),
+        "no device flow may be started by a replayed assertion: {resp}",
+    );
+
+    // (3) Control: a fresh assertion starts a device flow, proving the client
+    // is otherwise entitled to /oauth/device and the rejection above was the
+    // replay, not a misconfigured client.
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let device_body = format!(
+        "client_id={}&client_assertion={fresh}&client_assertion_type={}",
+        client.client_id,
+        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(json.get("device_code").is_some(), "control: {resp}");
+}
+
+/// A `private_key_jwt` client not registered for `client_credentials` is
+/// rejected at `/oauth/token` (`unauthorized_client`); the same assertion at
+/// `/oauth/introspect` is `invalid_client`.
+#[tokio::test]
+async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "token-xintrospect@example.com").await;
+    let (pkcs8, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            with_secret: false,
+            grant_types: Some(vec![
+                vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE.to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let base_url = state.config().base_url.clone();
+    let assertion_body = |assertion: &str| {
+        format!(
+            "client_id={}&client_assertion={assertion}&client_assertion_type={}",
+            client.client_id,
+            vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        )
+    };
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &base_url,
+        &pkcs8,
+        Some("token-xintrospect-fixed"),
+    );
+
+    let body = format!(
+        "grant_type=client_credentials&{}",
+        assertion_body(&assertion)
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "token rejection: {resp}");
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "token rejection: {resp}"
+    );
+
+    let body = format!("token=unknown&{}", assertion_body(&assertion));
+    let (status, resp) = http_post_form(&app, "/oauth/introspect", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "introspect replay: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "introspect replay: {resp}"
+    );
+
+    let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
+    let body = format!("token=unknown&{}", assertion_body(&fresh));
+    let (status, resp) = http_post_form(&app, "/oauth/introspect", &body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
 }

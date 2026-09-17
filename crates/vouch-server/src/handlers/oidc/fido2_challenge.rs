@@ -99,7 +99,11 @@ pub(crate) async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Respo
     // in the token request, avoiding a use_dpop_nonce round-trip in the
     // common case. If the nonce expires before the token request (e.g.
     // very slow touch), the existing use_dpop_nonce retry path handles it.
-    let dpop_nonce = db::generate_dpop_nonce(&state.store, 300).await;
+    let dpop_nonce = db::generate_dpop_nonce(
+        &state.store,
+        crate::services::oidc::dpop::nonce_validity_seconds(state.config().dpop_max_age_seconds),
+    )
+    .await;
 
     let mut response = (
         StatusCode::OK,

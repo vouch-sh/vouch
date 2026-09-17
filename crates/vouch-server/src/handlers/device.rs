@@ -14,10 +14,9 @@ use crate::services::auth::{
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::ValidatedDpopProof;
 use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::grant_type::OAuthGrantType;
-use crate::services::oidc::token::validate_dpop_if_present;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -31,12 +30,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
-use vouch_common::{
-    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError, protocol,
-};
+use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError};
 
 use crate::error::{OAuthErrorCode, ServiceError};
-use crate::handlers::oidc::dpop_use_nonce_response;
 use crate::redact_email;
 
 /// Characters used for user code generation (no ambiguous characters).
@@ -182,17 +178,9 @@ pub(crate) async fn device_code(
             Ok(client) => client,
             Err(resp) => return resp,
         };
-    // Commit the assertion's JTI before any state is written, so a replayed
-    // assertion cannot start a second flow. The proof itself has no consumer
-    // here: this endpoint issues no token.
-    let _client_auth = match client_auth_proof(
-        &state,
-        device_client.witnesses,
-        &device_client.client,
-        "device_authorization",
-    )
-    .await
-    {
+    // The proof has no consumer here, since this endpoint issues no token,
+    // but a client with no credential must still be registered public.
+    let _client_auth = match client_auth_proof(device_client.witnesses, &device_client.client) {
         Ok(proof) => proof,
         Err(resp) => return resp,
     };
@@ -333,27 +321,13 @@ pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
     client_cert: OptionalClientCert,
-    headers: HeaderMap,
     device_code: &str,
     device_client: DeviceClient,
+    dpop_proof: Option<ValidatedDpopProof>,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
-    // Every authenticated poll commits its assertion's JTI before any
-    // grant-specific check, so an assertion authenticates exactly one request
-    // even when this poll returns `invalid_grant`. `PendingJti` documents
-    // dropping it uncommitted on a retryable error such as `use_dpop_nonce`;
-    // here each poll is an independent request and the assertion's audience
-    // is not endpoint-specific, so an uncommitted one would stay valid at PAR,
-    // revoke, and introspect for its lifetime. The CLI signs a new assertion
-    // for every poll, including the immediate retry after `use_dpop_nonce`.
     let oauth_client = device_client.client;
-    let client_auth = client_auth_proof(
-        &state,
-        device_client.witnesses,
-        &oauth_client,
-        "device_code",
-    )
-    .await?;
+    let client_auth = client_auth_proof(device_client.witnesses, &oauth_client)?;
 
     // Validate device_code format before hashing and DB lookup.
     // Generated codes are 32 random bytes base64url-encoded (43 chars).
@@ -438,47 +412,6 @@ pub(crate) async fn device_token(
             ))
         }
         DeviceAuthState::Authorized(stale_approval) => {
-            // RFC 9449 / FAPI 2.0: Validate the DPoP proof if present.
-            // This happens BEFORE consuming the device code so that a
-            // `use_dpop_nonce` or `invalid_dpop_proof` response does not
-            // burn the single-use code — the client can retry with a
-            // corrected proof. Consistent with the authorization code
-            // grant, which validates DPoP before exchanging the code.
-            let dpop_header = headers
-                .get(protocol::HEADER_DPOP)
-                .and_then(|v| v.to_str().ok());
-            let dpop_proof = match validate_dpop_if_present(
-                &state,
-                dpop_header,
-                "POST",
-                "/oauth/token",
-                arrival,
-            )
-            .await
-            {
-                Ok(proof) => proof,
-                Err(DpopError::UseNonce(nonce)) => {
-                    return Err(dpop_use_nonce_response(&nonce));
-                }
-                Err(e @ DpopError::Database(_)) => {
-                    return Err(oauth_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        OAuthError {
-                            error: OAuthErrorCode::ServerError.as_str().to_string(),
-                            error_description: Some(e.to_string()),
-                        },
-                    ));
-                }
-                Err(e) => {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: OAuthErrorCode::InvalidDpopProof.as_str().to_string(),
-                            error_description: Some(e.to_string()),
-                        },
-                    ));
-                }
-            };
             // Every sender-constraint requirement registered for this client.
             let sender_constraint = match SenderConstraintProof::validate(
                 &oauth_client,
@@ -2028,7 +1961,7 @@ mod tests {
     /// creates a Native application in the dashboard — which stores no
     /// `grant_types` — and the client posts its `client_id` to `/oauth/device`.
     /// Resolving an absent list as RFC 7591 §2's registration default made
-    /// that first request `401 unauthorized_client`.
+    /// that first request `unauthorized_client`.
     #[tokio::test]
     async fn test_self_service_native_app_may_start_the_device_flow() {
         let (app, state) = test_app().await;
@@ -2070,7 +2003,7 @@ mod tests {
             } else {
                 assert_eq!(
                     status,
-                    StatusCode::UNAUTHORIZED,
+                    StatusCode::BAD_REQUEST,
                     "{app_type:?} is not a device-flow application: {resp}"
                 );
             }

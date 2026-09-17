@@ -20,7 +20,7 @@ use crate::services::oidc::authorization::{
 };
 use crate::services::oidc::fapi::validate_fapi_client_auth_method;
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
-use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
+use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,
     extract::State,
@@ -215,6 +215,53 @@ pub(crate) async fn par(
         );
     }
 
+    // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
+    // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
+    // that the same key must be used at the token endpoint.
+    //
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(
+                        axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                        nonce.to_string(),
+                    )],
+                    Json(OAuthErrorResponse {
+                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
+                        error_description: Some(
+                            "Authorization server requires nonce in DPoP proof".to_string(),
+                        ),
+                        error_uri: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return par_error_response(
+                    OAuthErrorCode::ServerError,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+            Err(e) => {
+                return par_error_response(
+                    OAuthErrorCode::InvalidDpopProof,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+        };
+
     // Extract and authenticate the client (required for PAR)
     let client_auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
@@ -235,7 +282,7 @@ pub(crate) async fn par(
         );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.witnesses.pending_jti;
+    let jti_claim = any_auth.witnesses.jti_claim;
     let jwt_auth = any_auth.witnesses.jwt_auth;
     let secret_verification = any_auth.witnesses.secret_verification;
     let mtls_verification = any_auth.witnesses.mtls_verification;
@@ -276,47 +323,6 @@ pub(crate) async fn par(
         );
     }
 
-    // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
-    // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
-    // that the same key must be used at the token endpoint.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par", arrival).await {
-            Ok(proof) => proof,
-            Err(DpopError::UseNonce(nonce)) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    [(
-                        axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
-                        nonce.to_string(),
-                    )],
-                    Json(OAuthErrorResponse {
-                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                        error_description: Some(
-                            "Authorization server requires nonce in DPoP proof".to_string(),
-                        ),
-                        error_uri: None,
-                    }),
-                )
-                    .into_response();
-            }
-            Err(e @ DpopError::Database(_)) => {
-                return par_error_response(
-                    OAuthErrorCode::ServerError,
-                    presentation,
-                    &e.to_string(),
-                );
-            }
-            Err(e) => {
-                return par_error_response(
-                    OAuthErrorCode::InvalidDpopProof,
-                    presentation,
-                    &e.to_string(),
-                );
-            }
-        };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
     // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
@@ -503,31 +509,6 @@ pub(crate) async fn par(
         response_mode,
     };
 
-    let jti_claim = match pending_jti {
-        Some(p) => match p.commit(&state).await {
-            Ok(claim) => claim,
-            Err(e) => {
-                tracing::warn!("JTI commit failed for PAR: {e:?}");
-                // Distinguish replay (client-auth failure) from transient DB error
-                // (server problem). Returning 401 for a DB outage tells well-behaved
-                // clients to abandon credentials they should reuse on retry; returning
-                // 500 for a replay tempts them to retry-loop with a consumed JTI.
-                return match e {
-                    ClientAuthError::InvalidCredentials => par_error_response(
-                        OAuthErrorCode::InvalidClient,
-                        presentation,
-                        "Client authentication failed",
-                    ),
-                    _ => par_error_response(
-                        OAuthErrorCode::ServerError,
-                        presentation,
-                        "Failed to complete client authentication",
-                    ),
-                };
-            }
-        },
-        None => None,
-    };
     // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
     // none succeeded, fall back to `for_public_client` against the loaded
     // client — fails for confidential clients that should have authed.
