@@ -225,13 +225,16 @@ pub(crate) async fn rename_key(
         return Err(ServiceError::NotFound("Key"));
     }
 
-    // Update the name
-    db::update_authenticator_name(store, key_id, name)
+    // The key can be deleted between the ownership read and this write.
+    let renamed = db::update_authenticator_name(store, key_id, name)
         .await
         .map_err(|e| {
             tracing::error!("Failed to rename authenticator {key_id}: {e}");
             ServiceError::Internal("Failed to rename key".to_string())
         })?;
+    if !renamed {
+        return Err(ServiceError::NotFound("Key"));
+    }
 
     tracing::info!("Renamed key {key_id} to '{name}' for user {user_id}");
 
@@ -474,6 +477,41 @@ mod tests {
         assert!(
             matches!(missing, ServiceError::NotFound("Key")),
             "a nonexistent key must be reported as not found, got: {missing:?}"
+        );
+    }
+
+    /// A key deleted after the ownership read is not reported as renamed.
+    #[tokio::test]
+    async fn rename_of_key_deleted_mid_rename_is_not_found() {
+        let state = crate::test_utils::build_test_app_state(Vec::new(), |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(std::sync::Arc::new(move |id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let id = id.to_string();
+                Box::pin(async move {
+                    if attempt == 0 {
+                        writer.delete(&id).await.unwrap();
+                    }
+                })
+            }));
+        })
+        .await;
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "rename-race@example.com").await;
+        let key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+
+        let err = rename_key(
+            &state.store,
+            &owner.id,
+            &key,
+            &ResourceLabel::parse("renamed").unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ServiceError::NotFound("Key")),
+            "a key deleted before the write must be reported as not found, got: {err:?}"
         );
     }
 

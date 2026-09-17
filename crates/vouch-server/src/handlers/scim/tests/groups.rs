@@ -180,10 +180,7 @@ async fn test_scim_delete_group() {
 #[tokio::test]
 async fn test_scim_delete_group_writes_success_audit_event() {
     // A successful DELETE returns 204 and records exactly one
-    // `scim_operation` delete audit row for the target with `refusal` absent
-    // (OCSF `status_id: Success`). Guards the audit contract on the happy
-    // path so the `Ok(false)` 404 / skip-audit arm added to `delete_group`
-    // cannot regress the success-audit write.
+    // `scim_operation` delete audit row with `refusal` absent (OCSF Success).
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-delete-group-audit", "test-org").await;
     let auth_header = format!("Bearer {token}");
@@ -1090,17 +1087,10 @@ async fn test_scim_delete_group_not_found() {
     assert_eq!(error["status"], "404");
 }
 
-/// A group deleted between the SCIM existence check and `delete_scim_group`
-/// must yield 404 (not 204) and no `scim_operation` delete audit event.
-///
-/// `delete_scim_group` returns `Result<bool>`; the SCIM handler must honor a
-/// `false` return instead of unconditionally reporting a successful delete
-/// and writing a fraudulent audit entry. The `delete_test_hook` deletes the
-/// target's group document from a separate transaction inside
-/// `delete_scim_group`, after the handler's existence check but before
-/// `delete_scim_group`'s own existence check — deterministically forcing the
-/// miss without relying on task-scheduling races. Mirrors
-/// `test_scim_delete_user_returns_404_when_target_vanishes_mid_delete`.
+/// A group deleted between the handler's existence check and
+/// `delete_scim_group` yields 404 and no `scim_operation` delete audit event.
+/// The `delete_test_hook` deletes the group from a separate transaction
+/// inside `delete_scim_group`, before its own existence check.
 #[tokio::test]
 async fn test_scim_delete_group_returns_404_when_target_vanishes_mid_delete() {
     use std::sync::{Arc, Mutex};
