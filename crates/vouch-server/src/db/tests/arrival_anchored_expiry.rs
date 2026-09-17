@@ -200,3 +200,29 @@ async fn dpop_nonce_consume_reads_the_callers_instant() {
         .await
         .expect("a nonce live at the caller's instant must be consumable");
 }
+
+/// A nonce is accepted until its `expires_at`, and not after. The DPoP path
+/// reads the nonce without consuming it, so this comparison is the only thing
+/// retiring it: the background sweep runs every 15 minutes against a 300 s
+/// nonce, so an expired-but-present row is the ordinary case.
+#[tokio::test]
+async fn dpop_nonce_is_rejected_once_it_expires() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    let nonce = generate_dpop_nonce(&store, 300)
+        .await
+        .expect("generate nonce");
+
+    validate_dpop_nonce(&store, &nonce, &jiff::Timestamp::now())
+        .await
+        .expect("a nonce inside its window is accepted");
+
+    let past_window: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let err = validate_dpop_nonce(&store, &nonce, &past_window)
+        .await
+        .expect_err("an expired nonce is rejected");
+    assert!(
+        matches!(err, ClaimError::AlreadyConsumed),
+        "expired and unknown are indistinguishable, got: {err:?}"
+    );
+}

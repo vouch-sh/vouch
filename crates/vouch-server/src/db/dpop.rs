@@ -62,12 +62,15 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
 
 /// Validate a DPoP nonce without consuming it, judged against `now`.
 ///
-/// RFC 9449 §8: "The intent is that clients need to keep only one nonce value
-/// and servers need to keep a window of recent nonces." The nonce bounds how
-/// long a proof can be precomputed; replay of a proof is prevented by its
-/// `jti`, which is consumed. Deleting the nonce on first use instead would
-/// cost a `use_dpop_nonce` round trip on every second request of a sequence,
-/// such as a device-code poll.
+/// RFC 9449 §11.1: "Unlike cryptographic nonces, it is acceptable for clients
+/// to use the same nonce multiple times and for the server to accept the same
+/// nonce multiple times.  As long as the jti value is tracked and duplicates
+/// are rejected for the lifetime of the nonce, there is no additional risk of
+/// token replay." `validate_dpop_common` commits the `jti` first, and
+/// `nonce_validity_seconds` keeps a nonce's lifetime inside the JTI retention
+/// window, so that condition holds. Deleting the nonce on first use instead
+/// would cost a `use_dpop_nonce` round trip on every second request of a
+/// sequence, such as a device-code poll.
 ///
 /// Returns [`ClaimError::AlreadyConsumed`] when the nonce is unknown or
 /// expired; the two are deliberately indistinguishable, as RFC 9449 rejects
@@ -97,13 +100,10 @@ pub async fn validate_dpop_nonce(
 /// lost cases are deliberately indistinguishable: each is rejected the
 /// same way by RFC 9449.
 ///
-/// `now` decides the expiry comparison, so a request-path caller passes the
-/// request's [`crate::arrival::ArrivalTime`] instant: this comparison is one
-/// of three serving a single DPoP decision, alongside the JTI retention
-/// commit and the freshness check, and all three must read one instant. A
-/// clock stamped here instead is always ≥ arrival, which makes the predicate
-/// strictly stricter and rejects a nonce that was still valid when the
-/// request arrived but expired during the intervening awaits.
+/// `now` decides the expiry comparison. The remaining caller is the RFC 9421
+/// signature path, whose validator trait carries no request instant and so
+/// reads an ambient clock; that clock is always ≥ arrival, which makes the
+/// predicate strictly stricter.
 ///
 /// No witness type is returned because `ValidatedDpopProof` already
 /// carries the "DPoP validation succeeded" marker at the call site

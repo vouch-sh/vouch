@@ -178,9 +178,15 @@ impl KeyResolver for OAuthClientKeyResolver {
     /// Validate and consume a signature nonce against the shared nonce store.
     ///
     /// HTTP signature nonces deliberately share the DPoP nonce store and
-    /// issuance path (`generate_dpop_nonce`): both are opaque random
-    /// single-use values with the same validity window, and the atomic
-    /// delete-if-not-expired gives single-use semantics on every backend.
+    /// issuance path (`generate_dpop_nonce`): both are opaque random values
+    /// with the same validity window. A signature nonce is single-use — the
+    /// signature carries no `jti`, so the nonce is its only replay defense —
+    /// and the atomic delete-if-not-expired gives that on every backend. The
+    /// DPoP path accepts its nonce until expiry instead, because a DPoP
+    /// proof's `jti` is what prevents replay there. A signed `/v1` request
+    /// therefore deletes a nonce a DPoP client may still hold, which costs
+    /// that client one `use_dpop_nonce` round trip (RFC 9449 §8: "this
+    /// situation is self-correcting").
     ///
     /// Unlike the DPoP path, the expiry comparison here reads an ambient
     /// clock: `vouch_httpsig`'s `NonceValidator` trait passes only the nonce,
