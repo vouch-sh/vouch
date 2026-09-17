@@ -60,6 +60,34 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
     Ok(nonce)
 }
 
+/// Validate a DPoP nonce without consuming it, judged against `now`.
+///
+/// RFC 9449 §8: "The intent is that clients need to keep only one nonce value
+/// and servers need to keep a window of recent nonces." The nonce bounds how
+/// long a proof can be precomputed; replay of a proof is prevented by its
+/// `jti`, which is consumed. Deleting the nonce on first use instead would
+/// cost a `use_dpop_nonce` round trip on every second request of a sequence,
+/// such as a device-code poll.
+///
+/// Returns [`ClaimError::AlreadyConsumed`] when the nonce is unknown or
+/// expired; the two are deliberately indistinguishable, as RFC 9449 rejects
+/// each the same way.
+pub async fn validate_dpop_nonce(
+    store: &DocumentStore,
+    nonce: &str,
+    now: &Timestamp,
+) -> std::result::Result<(), ClaimError> {
+    let id = deterministic_dpop_nonce_id(nonce);
+    let doc = store
+        .get::<DpopNonceDoc>(&id)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    match doc {
+        Some(doc) if doc.data.expires_at > *now => Ok(()),
+        Some(_) | None => Err(ClaimError::AlreadyConsumed),
+    }
+}
+
 /// Atomically validate and consume a DPoP nonce, judged against `now`.
 ///
 /// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the

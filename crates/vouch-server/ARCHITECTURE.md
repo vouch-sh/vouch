@@ -371,8 +371,10 @@ DPoP validation differs by endpoint, and the difference is which mechanism binds
 proof. At `/oauth/token`, `NoncePolicy::Required` rejects a proof with no nonce and
 returns a fresh one, so a client cannot precompute proofs. At a resource endpoint
 `NoncePolicy::Optional` applies. The `ath` claim, the SHA-256 of the presented access
-token, already binds the proof to one token. Both paths insert the `jti` atomically and
-consume any nonce with a single statement. Nonces live 300 s. Proofs older than
+token, already binds the proof to one token. Both paths insert the `jti` atomically,
+which is what prevents proof replay; a nonce is accepted until it expires, so one nonce
+serves a sequence of requests such as a device-code poll (RFC 9449 §8: "servers need to
+keep a window of recent nonces"). Nonces live 300 s. Proofs older than
 `VOUCH_DPOP_MAX_AGE` (default 300 s) are rejected, as are proofs dated more than 60 s
 in the future.
 

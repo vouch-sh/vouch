@@ -605,13 +605,11 @@ async fn validate_dpop_common(
         },
     )?;
 
-    // Atomically consume the nonce via the database. A successful return
-    // means a single DELETE statement decided the outcome — no TOCTOU
-    // window between read and consume. The "this DPoP proof validated
-    // successfully" guarantee is carried forward by the returned
-    // `ValidatedDpopProof`.
+    // The nonce is accepted until it expires, so a sequence of requests
+    // (a device-code poll) reuses the one nonce it holds. Proof replay is
+    // prevented by the `jti` consumed above.
     if let Some(nonce) = claims.nonce.as_deref() {
-        match db::validate_and_consume_dpop_nonce(store, nonce, &now).await {
+        match db::validate_dpop_nonce(store, nonce, &now).await {
             Ok(()) => {}
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
