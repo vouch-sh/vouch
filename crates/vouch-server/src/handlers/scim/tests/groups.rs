@@ -1975,3 +1975,35 @@ async fn test_rfc7644_patch_group_adding_existing_member_keeps_last_modified() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["meta"]["lastModified"], before["meta"]["lastModified"]);
 }
+
+// RFC 7644 §3.10: "Clients MAY omit core schema attribute URN prefixes", so a
+// pathless value keyed by the prefixed `members` name replaces the members;
+// RFC 7644 §3.5.2.3: without a path, the value "SHALL contain a list of one or
+// more attributes".
+#[tokio::test]
+async fn test_rfc7644_patch_group_pathless_value_shape() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-pathless", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let (group_id, _, _, _) = group_with_members(&app, &auth_header).await;
+
+    for operations in [
+        serde_json::json!([{"op": "add", "value": "x"}]),
+        serde_json::json!([{"op": "replace", "value": {}}]),
+    ] {
+        let (status, error) =
+            patch_group_ops(&app, &auth_header, &group_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], "invalidValue", "{operations} -> {error}");
+    }
+
+    let (status, group) = patch_group_ops(
+        &app,
+        &auth_header,
+        &group_id,
+        serde_json::json!([{"op": "replace", "value": {"urn:ietf:params:scim:schemas:core:2.0:Group:members": []}}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{group}");
+    assert!(member_ids(&group).is_empty(), "members replaced: {group}");
+}

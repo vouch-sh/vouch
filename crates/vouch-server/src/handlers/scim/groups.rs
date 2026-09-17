@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
-    Attribute, AttributeError, apply_patch_op, get_attribute, optional_string, required_attribute,
-    required_value, unqualified,
+    Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, get_attribute,
+    optional_string, required_attribute, strip_prefix_ignore_ascii_case, unqualified,
 };
 use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
-    ScimPatchOpType, ScimPatchRequest,
+    ScimPatchRequest,
 };
 use super::{ScimAuth, authenticate_scim, urn};
 use crate::AppState;
@@ -388,13 +388,6 @@ fn parse_members_path(path: &str) -> Result<Option<MembersPath<'_>>, AttributeEr
     }))
 }
 
-fn strip_prefix_ignore_ascii_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
-    let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| s.get(prefix.len()..))
-        .flatten()
-}
-
 /// The member user ids in a `members` value: an array of member objects or a
 /// single one, each carrying a string `value`.
 fn member_ids(path: &str, value: &serde_json::Value) -> Result<Vec<String>, AttributeError> {
@@ -443,30 +436,29 @@ fn apply_members_op(
     members: &mut BTreeSet<String>,
     path: &str,
     target: &MembersPath<'_>,
-    op: &ScimPatchOp,
+    op: PatchOp<'_>,
 ) -> Result<(), AttributeError> {
     let targets_value = target
         .sub_attribute
         .map(|sub_attribute| sub_attribute.eq_ignore_ascii_case("value"));
-    match (op.op, target.filter, targets_value) {
-        (ScimPatchOpType::Add, None, None) => {
-            members.extend(member_ids(path, required_value(op)?)?);
+    match (op, target.filter, targets_value) {
+        (PatchOp::Add(value), None, None) => {
+            members.extend(member_ids(path, value)?);
             Ok(())
         }
-        (ScimPatchOpType::Add, Some(_), _) | (ScimPatchOpType::Add, None, Some(_)) => {
+        (PatchOp::Add(_), Some(_), _) | (PatchOp::Add(_), None, Some(_)) => {
             Err(AttributeError::invalid_path(format!(
                 "add cannot target {path}; add to members instead"
             )))
         }
-        (ScimPatchOpType::Replace, None, None) => {
-            *members = member_ids(path, required_value(op)?)?.into_iter().collect();
+        (PatchOp::Replace(value), None, None) => {
+            *members = member_ids(path, value)?.into_iter().collect();
             Ok(())
         }
-        (ScimPatchOpType::Replace, None, Some(_)) => Err(AttributeError::invalid_path(format!(
+        (PatchOp::Replace(_), None, Some(_)) => Err(AttributeError::invalid_path(format!(
             "replace cannot target {path} without a member filter"
         ))),
-        (ScimPatchOpType::Replace, Some(id), targets_value) => {
-            let value = required_value(op)?;
+        (PatchOp::Replace(value), Some(id), targets_value) => {
             if !members.contains(id) {
                 return Err(AttributeError::no_target(format!(
                     "no member matches {path}"
@@ -488,16 +480,16 @@ fn apply_members_op(
             members.extend(replacements);
             Ok(())
         }
-        (ScimPatchOpType::Remove, _, Some(true)) => Err(AttributeError::mutability(format!(
+        (PatchOp::Remove(_), _, Some(true)) => Err(AttributeError::mutability(format!(
             "{path} is required and cannot be removed"
         ))),
-        (ScimPatchOpType::Remove, _, Some(false)) => Ok(()),
-        (ScimPatchOpType::Remove, Some(id), None) => {
+        (PatchOp::Remove(_), _, Some(false)) => Ok(()),
+        (PatchOp::Remove(_), Some(id), None) => {
             members.remove(id);
             Ok(())
         }
-        (ScimPatchOpType::Remove, None, None) => {
-            match &op.value {
+        (PatchOp::Remove(value), None, None) => {
+            match value {
                 Some(value) => {
                     for id in member_ids(path, value)? {
                         members.remove(&id);
@@ -514,26 +506,21 @@ fn apply_members_op(
 /// set, every other path through [`GROUP_ATTRIBUTES`]. A pathless `add` or
 /// `replace` may carry `members` among the attributes in its value.
 fn apply_group_op(group: &mut db::ScimGroupState, op: &ScimPatchOp) -> Result<(), AttributeError> {
-    let Some(path) = op.path.as_deref().map(|path| unqualified(path, urn::GROUP)) else {
-        apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, op)?;
-        let presented = required_value(op)?;
-        if let Some(value) = get_attribute(presented, "members") {
+    let operation = PatchOperation::parse(op, urn::GROUP)?;
+    let Some(path) = operation.path.map(|path| unqualified(path, urn::GROUP)) else {
+        apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, &operation)?;
+        if let Some(members) = operation.attribute("members") {
             let target = MembersPath {
                 filter: None,
                 sub_attribute: None,
             };
-            let op = ScimPatchOp {
-                op: op.op,
-                path: None,
-                value: Some(value.clone()),
-            };
-            apply_members_op(&mut group.members, "members", &target, &op)?;
+            apply_members_op(&mut group.members, "members", &target, members)?;
         }
         return Ok(());
     };
     match parse_members_path(path)? {
-        Some(target) => apply_members_op(&mut group.members, path, &target, op),
-        None => apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, op),
+        Some(target) => apply_members_op(&mut group.members, path, &target, operation.op),
+        None => apply_patch_op(GROUP_ATTRIBUTES, urn::GROUP, group, &operation),
     }
 }
 

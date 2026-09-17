@@ -11,11 +11,12 @@ use std::sync::Arc;
 
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
-    Attribute, AttributeError, apply_patch_op, optional_string, required_attribute, unqualified,
+    Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, optional_string,
+    required_attribute, unqualified,
 };
 use super::types::{
-    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchOp,
-    ScimPatchOpType, ScimPatchRequest, ScimUser,
+    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchRequest,
+    ScimUser,
 };
 use super::{ScimAuth, authenticate_scim, urn};
 use crate::AppState;
@@ -455,22 +456,42 @@ fn check_emails(
 /// return the appropriate HTTP response status code and a JSON detail error
 /// response". A removal or a differing value is that modification; a value
 /// equal to the stored email changes nothing and succeeds.
-fn apply_emails_op(email: &Email, path: &str, op: &ScimPatchOp) -> Result<(), AttributeError> {
-    if op.op == ScimPatchOpType::Remove {
-        return Err(AttributeError::mutability(format!(
-            "{path} is immutable and cannot be removed"
-        )));
-    }
-    let Some(value) = &op.value else {
-        return Ok(());
+fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), AttributeError> {
+    let (value, allow_empty) = match op {
+        PatchOp::Remove(_) => {
+            return Err(AttributeError::mutability(format!(
+                "{path} is immutable and cannot be removed"
+            )));
+        }
+        PatchOp::Add(value) => (value, true),
+        PatchOp::Replace(value) => (value, false),
     };
+    if let Some((_, rest)) = path.split_once('[') {
+        let Some((filter, _)) = rest.split_once(']') else {
+            return Err(AttributeError::invalid_filter(format!(
+                "{path} has an unterminated value filter"
+            )));
+        };
+        // RFC 7644 §3.5.2.3, for `replace`: "If the target location is a
+        // multi-valued attribute for which a value selection filter
+        // ("valuePath") has been supplied and no record match was made, the
+        // service provider SHALL indicate failure by returning HTTP status
+        // code 400 and a "scimType" error code of "noTarget"." §3.5.2.1 says
+        // nothing about a filter that matches nothing on an `add`; the two
+        // forms answer alike rather than one silently succeeding.
+        if !email_filter_matches(email, path, filter)? {
+            return Err(AttributeError::no_target(format!(
+                "no email matches {path}"
+            )));
+        }
+    }
     let sub_attribute = path
         .rsplit_once(']')
         .map_or(path, |(_, rest)| rest)
         .split_once('.')
         .map(|(_, sub_attribute)| sub_attribute);
     match sub_attribute {
-        None => check_emails(email, path, value, op.op == ScimPatchOpType::Add),
+        None => check_emails(email, path, value, allow_empty),
         Some(sub_attribute) if sub_attribute.eq_ignore_ascii_case("value") => {
             let Some(presented) = value.as_str() else {
                 return Err(AttributeError::invalid_value(format!(
@@ -483,6 +504,48 @@ fn apply_emails_op(email: &Email, path: &str, op: &ScimPatchOp) -> Result<(), At
     }
 }
 
+/// Whether a `valuePath` filter on `emails` matches the one email Vouch
+/// presents: `value` is the stored email, `type` is `work`, and `primary` is
+/// `true` (see `user_to_scim`).
+///
+/// Vouch supports a single `eq` comparison. RFC 7644 §3.12 Table 9 lists
+/// `invalidFilter` for "PATCH (Path Filter - Section 3.5.2)" when "the
+/// specified attribute and filter comparison combination is not supported",
+/// which is what a compound or other-operator filter gets.
+fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool, AttributeError> {
+    let unsupported = || {
+        AttributeError::invalid_filter(format!(
+            "{path}: emails supports only a [value|type|primary eq <literal>] filter"
+        ))
+    };
+    let mut parts = filter.trim().splitn(3, char::is_whitespace);
+    let (Some(attribute), Some(operator), Some(literal)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(unsupported());
+    };
+    if !operator.eq_ignore_ascii_case("eq") {
+        return Err(unsupported());
+    }
+    let literal = literal.trim();
+    // A filter's string literal is a JSON string (RFC 7644 §3.4.2.2), so it
+    // is parsed as one and may carry escapes.
+    let string = || serde_json::from_str::<String>(literal).map_err(|_| unsupported());
+    if attribute.eq_ignore_ascii_case("value") {
+        Ok(Email::new(&string()?) == *email)
+    } else if attribute.eq_ignore_ascii_case("type") {
+        Ok(string()?.eq_ignore_ascii_case("work"))
+    } else if attribute.eq_ignore_ascii_case("primary") {
+        match literal {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(unsupported()),
+        }
+    } else {
+        Err(unsupported())
+    }
+}
+
 /// Whether a PATCH path addresses the `emails` attribute, with or without a
 /// value filter or sub-attribute.
 fn is_emails_path(path: &str) -> bool {
@@ -491,9 +554,14 @@ fn is_emails_path(path: &str) -> bool {
         .is_some_and(|attribute| attribute.eq_ignore_ascii_case("emails"))
 }
 
-/// The single-valued User attributes Vouch stores (RFC 7643 §4.1), plus the
-/// immutable `userName` and `emails`, which a pathless PATCH can present.
-/// `displayName` addresses the same stored name as `name.formatted`.
+/// The single-valued User attributes Vouch stores (RFC 7643 §4.1), with the
+/// immutable `userName` a pathless PATCH can also present. `displayName`
+/// addresses the same stored name as `name.formatted`.
+///
+/// `emails` has no entry: an empty `add` changes nothing while an empty
+/// `replace` clears, and a table entry does not see the operation.
+/// `patch_user` sends it to [`apply_emails_op`] for both the path-qualified
+/// and pathless forms.
 const USER_ATTRIBUTES: &[Attribute<UserUpdate>] = &[
     Attribute {
         paths: &["active"],
@@ -562,15 +630,6 @@ const USER_ATTRIBUTES: &[Attribute<UserUpdate>] = &[
             )))
         },
     },
-    Attribute {
-        paths: &["emails"],
-        set: |user, path, value| check_emails(&user.email, path, value, false),
-        remove: |_, path| {
-            Err(AttributeError::mutability(format!(
-                "{path} is immutable and cannot be removed"
-            )))
-        },
-    },
 ];
 
 /// PATCH /scim/v2/Users/:id (RFC 7644 Section 3.5.2).
@@ -608,14 +667,23 @@ pub(crate) async fn patch_user(
     };
     let mut patched = user_seed.clone();
 
-    for op in &patch.operations {
-        let applied = match op.path.as_deref().map(|path| unqualified(path, urn::USER)) {
-            Some(path) if is_emails_path(path) => apply_emails_op(&patched.email, path, op),
-            Some(_) | None => apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, op),
-        };
-        if let Err(invalid) = applied {
-            return invalid.into_response();
+    let applied = patch.operations.iter().try_for_each(|op| {
+        let operation = PatchOperation::parse(op, urn::USER)?;
+        match operation.path.map(|path| unqualified(path, urn::USER)) {
+            Some(path) if is_emails_path(path) => {
+                apply_emails_op(&patched.email, path, operation.op)
+            }
+            Some(_) => apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation),
+            None => {
+                if let Some(emails) = operation.attribute("emails") {
+                    apply_emails_op(&patched.email, "emails", emails)?;
+                }
+                apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation)
+            }
         }
+    });
+    if let Err(invalid) = applied {
+        return invalid.into_response();
     }
 
     persist_user_update(&state, &auth, &id, &user_seed, patched, "update").await

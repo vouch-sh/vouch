@@ -13,7 +13,9 @@
 //! - `add` and `replace` both store the presented value: on a single-valued
 //!   attribute an `add` replaces (§3.5.2.1).
 //! - `add` and `replace` carry a `value`; one without is 400 `invalidValue`
-//!   (§3.5.2.1: "The operation MUST contain a "value" member").
+//!   (§3.5.2.1: "The operation MUST contain a "value" member"). Every
+//!   applier takes a [`PatchOp`], which cannot hold an `add` or `replace`
+//!   without one.
 //! - `remove` clears the stored value (§3.5.2.2). Removing a required
 //!   attribute is 400 `mutability`, as §3.5.2.2 requires; the attribute's
 //!   `remove` entry says so.
@@ -139,11 +141,87 @@ pub(crate) fn required_attribute<'v>(
     value.ok_or_else(|| AttributeError::invalid_syntax(format!("{name} is required")))
 }
 
-/// The `value` of an `add` or `replace`, which RFC 7644 §3.5.2.1 requires.
-pub(crate) fn required_value(op: &ScimPatchOp) -> Result<&serde_json::Value, AttributeError> {
-    op.value
-        .as_ref()
-        .ok_or_else(|| AttributeError::invalid_value("add and replace operations require a value"))
+/// A PATCH operation and its value, in the shape RFC 7644 §3.5.2 gives it.
+///
+/// An `add` "MUST contain a "value" member" (§3.5.2.1) and a `replace`
+/// writes the value it carries (§3.5.2.3), so both hold one. A `remove` may
+/// carry one: Entra names the members to remove in it.
+#[derive(Clone, Copy)]
+pub(crate) enum PatchOp<'v> {
+    Add(&'v serde_json::Value),
+    Replace(&'v serde_json::Value),
+    Remove(Option<&'v serde_json::Value>),
+}
+
+/// A request's PATCH operation after its shape is checked: the only way to
+/// obtain a [`PatchOp`] from a request body.
+pub(crate) struct PatchOperation<'v> {
+    pub path: Option<&'v str>,
+    pub op: PatchOp<'v>,
+    schema_urn: &'static str,
+}
+
+impl<'v> PatchOperation<'v> {
+    /// Checks `operation` against the resource whose core schema is
+    /// `schema_urn`.
+    ///
+    /// A pathless `add` or `replace` targets the resource itself: RFC 7644
+    /// §3.5.2.3 for `replace`, "In this case, the "value" attribute SHALL
+    /// contain a list of one or more attributes that are to be replaced", and
+    /// §3.5.2.1 for `add`, "The "value" parameter contains a set of attributes
+    /// to be added to the resource". Its value must be an object naming each
+    /// attribute once; a name may carry the core schema URN prefix (§3.10).
+    pub(crate) fn parse(
+        operation: &'v ScimPatchOp,
+        schema_urn: &'static str,
+    ) -> Result<Self, AttributeError> {
+        let op = match (operation.op, operation.value.as_ref()) {
+            (ScimPatchOpType::Add, Some(value)) => PatchOp::Add(value),
+            (ScimPatchOpType::Replace, Some(value)) => PatchOp::Replace(value),
+            (ScimPatchOpType::Remove, value) => PatchOp::Remove(value),
+            (ScimPatchOpType::Add | ScimPatchOpType::Replace, None) => {
+                return Err(AttributeError::invalid_value(
+                    "add and replace operations require a value",
+                ));
+            }
+        };
+        if operation.path.is_none()
+            && let PatchOp::Add(value) | PatchOp::Replace(value) = op
+        {
+            let Some(attributes) = value.as_object().filter(|a| !a.is_empty()) else {
+                return Err(AttributeError::invalid_value(
+                    "an add or replace without a path requires an object of one or more attributes",
+                ));
+            };
+            let mut names = std::collections::HashSet::new();
+            for key in attributes.keys() {
+                if !names.insert(unqualified(key, schema_urn).to_ascii_lowercase()) {
+                    return Err(AttributeError::invalid_syntax(format!(
+                        "{key} names an attribute the value already presents"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            path: operation.path.as_deref(),
+            op,
+            schema_urn,
+        })
+    }
+
+    /// The same operation applied to attribute `name` of a pathless `add` or
+    /// `replace` value object, if the object presents it.
+    pub(crate) fn attribute(&self, name: &str) -> Option<PatchOp<'v>> {
+        match self.op {
+            PatchOp::Add(value) => {
+                get_top_level_attribute(value, self.schema_urn, name).map(PatchOp::Add)
+            }
+            PatchOp::Replace(value) => {
+                get_top_level_attribute(value, self.schema_urn, name).map(PatchOp::Replace)
+            }
+            PatchOp::Remove(_) => None,
+        }
+    }
 }
 
 /// Looks up `name` in a JSON object case-insensitively, as RFC 7643 §2.1
@@ -157,6 +235,29 @@ pub(crate) fn get_attribute<'v>(
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))
         .map(|(_, value)| value)
+}
+
+/// Looks up top-level attribute `name` in a value object, accepting a key
+/// that carries the core schema URN prefix (RFC 7644 §3.10: "Clients MAY
+/// omit core schema attribute URN prefixes").
+fn get_top_level_attribute<'v>(
+    value: &'v serde_json::Value,
+    schema_urn: &str,
+    name: &str,
+) -> Option<&'v serde_json::Value> {
+    value
+        .as_object()?
+        .iter()
+        .find(|(key, _)| unqualified(key, schema_urn).eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
+}
+
+/// Strips `prefix` from the start of `s`, comparing ASCII case-insensitively.
+pub(crate) fn strip_prefix_ignore_ascii_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| s.get(prefix.len()..))
+        .flatten()
 }
 
 /// The attribute path with the resource's core schema URN prefix removed.
@@ -181,14 +282,12 @@ pub(crate) fn apply_patch_op<S>(
     table: &[Attribute<S>],
     schema_urn: &str,
     state: &mut S,
-    op: &ScimPatchOp,
+    operation: &PatchOperation<'_>,
 ) -> Result<(), AttributeError> {
-    let Some(path) = op.path.as_deref().map(|path| unqualified(path, schema_urn)) else {
-        return match op.op {
-            ScimPatchOpType::Add | ScimPatchOpType::Replace => {
-                merge(table, state, required_value(op)?)
-            }
-            ScimPatchOpType::Remove => Err(AttributeError::no_target(
+    let Some(path) = operation.path.map(|path| unqualified(path, schema_urn)) else {
+        return match operation.op {
+            PatchOp::Add(value) | PatchOp::Replace(value) => merge(table, schema_urn, state, value),
+            PatchOp::Remove(_) => Err(AttributeError::no_target(
                 "remove operations require a path",
             )),
         };
@@ -201,11 +300,9 @@ pub(crate) fn apply_patch_op<S>(
         return Ok(());
     };
 
-    match op.op {
-        ScimPatchOpType::Add | ScimPatchOpType::Replace => {
-            (attribute.set)(state, path, required_value(op)?)
-        }
-        ScimPatchOpType::Remove => (attribute.remove)(state, path),
+    match operation.op {
+        PatchOp::Add(value) | PatchOp::Replace(value) => (attribute.set)(state, path, value),
+        PatchOp::Remove(_) => (attribute.remove)(state, path),
     }
 }
 
@@ -220,14 +317,19 @@ pub(crate) fn apply_patch_op<S>(
 /// actually stored under.
 fn merge<S>(
     table: &[Attribute<S>],
+    schema_urn: &str,
     state: &mut S,
     value: &serde_json::Value,
 ) -> Result<(), AttributeError> {
     for attribute in table {
         for path in attribute.paths {
-            let presented = path
-                .split('.')
-                .try_fold(value, |current, segment| get_attribute(current, segment));
+            let mut segments = path.split('.');
+            let presented = segments
+                .next()
+                .and_then(|first| get_top_level_attribute(value, schema_urn, first))
+                .and_then(|top| {
+                    segments.try_fold(top, |current, segment| get_attribute(current, segment))
+                });
             if let Some(presented) = presented {
                 (attribute.set)(state, path, presented)?;
                 break;
@@ -314,7 +416,12 @@ mod tests {
 
     fn apply(operation: &ScimPatchOp) -> Result<Resource, AttributeError> {
         let mut resource = Resource::default();
-        apply_patch_op(ATTRIBUTES, RESOURCE_URN, &mut resource, operation)?;
+        apply_patch_op(
+            ATTRIBUTES,
+            RESOURCE_URN,
+            &mut resource,
+            &PatchOperation::parse(operation, RESOURCE_URN)?,
+        )?;
         Ok(resource)
     }
 
@@ -373,7 +480,11 @@ mod tests {
             ATTRIBUTES,
             RESOURCE_URN,
             &mut resource,
-            &patch_op(ScimPatchOpType::Remove, Some("displayName"), None),
+            &PatchOperation {
+                path: Some("displayName"),
+                op: PatchOp::Remove(None),
+                schema_urn: RESOURCE_URN,
+            },
         );
         assert!(cleared.is_ok());
         assert_eq!(resource.label, None);
@@ -382,7 +493,11 @@ mod tests {
             ATTRIBUTES,
             RESOURCE_URN,
             &mut resource,
-            &patch_op(ScimPatchOpType::Remove, Some("enabled"), None),
+            &PatchOperation {
+                path: Some("enabled"),
+                op: PatchOp::Remove(None),
+                schema_urn: RESOURCE_URN,
+            },
         );
         assert!(rejected.is_err(), "a non-removable attribute must reject");
         assert!(resource.enabled, "a rejected removal must change nothing");
