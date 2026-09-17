@@ -512,6 +512,9 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
 /// `invalidFilter` for "PATCH (Path Filter - Section 3.5.2)" when "the
 /// specified attribute and filter comparison combination is not supported",
 /// which is what a compound or other-operator filter gets.
+///
+/// The attribute may carry the core schema URN prefix: §3.4.2.2's ABNF is
+/// `attrPath  = [URI ":"] ATTRNAME *1subAttr`.
 fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool, AttributeError> {
     let unsupported = || {
         AttributeError::invalid_filter(format!(
@@ -531,6 +534,7 @@ fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool,
     // A filter's string literal is a JSON string (RFC 7644 §3.4.2.2), so it
     // is parsed as one and may carry escapes.
     let string = || serde_json::from_str::<String>(literal).map_err(|_| unsupported());
+    let attribute = unqualified(attribute, urn::USER);
     if attribute.eq_ignore_ascii_case("value") {
         Ok(Email::new(&string()?) == *email)
     } else if attribute.eq_ignore_ascii_case("type") {

@@ -323,6 +323,37 @@ async fn test_revoke_last_secret_allowed_for_private_key_jwt_client() {
         .expect("a private_key_jwt client's only secret is revocable");
 }
 
+/// The floor also exempts a FAPI client, whose secret `authenticate_client`
+/// refuses whatever method it registered. No registration path produces this
+/// pairing — `register_client` requires a FAPI-compatible auth method and the
+/// self-service upgrade switches the client to `private_key_jwt` — so the row
+/// can only predate those gates. The exemption is what keeps such a row
+/// removable rather than pinned by the floor.
+#[tokio::test]
+async fn test_revoke_last_secret_allowed_for_fapi_client() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretBasic),
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    let secret = create_oauth_client_secret(&store, &app_id, "hash_legacy_fapi", None, None)
+        .await
+        .expect("create legacy secret");
+
+    revoke_oauth_client_secret(&store, &secret.id, &app_id)
+        .await
+        .expect("a FAPI client's only secret is revocable");
+}
+
 /// Revoking an expired-but-unrevoked secret must succeed while another valid
 /// secret remains: the floor counts *other* active secrets, not the target.
 /// Without excluding the target, the expired row drops `active_count` to 1 and
