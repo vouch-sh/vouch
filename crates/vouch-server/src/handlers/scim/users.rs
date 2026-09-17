@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
-    Attribute, AttributeError, apply_patch_op, get_attribute, optional_string, required_attribute,
-    unqualified,
+    Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, optional_string,
+    required_attribute, unqualified,
 };
 use super::types::{
-    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchOp,
-    ScimPatchOpType, ScimPatchRequest, ScimUser,
+    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchRequest,
+    ScimUser,
 };
 use super::{ScimAuth, authenticate_scim, urn};
 use crate::AppState;
@@ -456,16 +456,15 @@ fn check_emails(
 /// return the appropriate HTTP response status code and a JSON detail error
 /// response". A removal or a differing value is that modification; a value
 /// equal to the stored email changes nothing and succeeds.
-fn apply_emails_op(email: &Email, path: &str, op: &ScimPatchOp) -> Result<(), AttributeError> {
-    if op.op == ScimPatchOpType::Remove {
-        return Err(AttributeError::mutability(format!(
-            "{path} is immutable and cannot be removed"
-        )));
-    }
-    let Some(value) = &op.value else {
-        return Err(AttributeError::invalid_value(format!(
-            "add and replace operations on {path} require a value"
-        )));
+fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), AttributeError> {
+    let (value, allow_empty) = match op {
+        PatchOp::Remove(_) => {
+            return Err(AttributeError::mutability(format!(
+                "{path} is immutable and cannot be removed"
+            )));
+        }
+        PatchOp::Add(value) => (value, true),
+        PatchOp::Replace(value) => (value, false),
     };
     let sub_attribute = path
         .rsplit_once(']')
@@ -473,7 +472,7 @@ fn apply_emails_op(email: &Email, path: &str, op: &ScimPatchOp) -> Result<(), At
         .split_once('.')
         .map(|(_, sub_attribute)| sub_attribute);
     match sub_attribute {
-        None => check_emails(email, path, value, op.op == ScimPatchOpType::Add),
+        None => check_emails(email, path, value, allow_empty),
         Some(sub_attribute) if sub_attribute.eq_ignore_ascii_case("value") => {
             let Some(presented) = value.as_str() else {
                 return Err(AttributeError::invalid_value(format!(
@@ -498,15 +497,10 @@ fn is_emails_path(path: &str) -> bool {
 /// immutable `userName` a pathless PATCH can also present. `displayName`
 /// addresses the same stored name as `name.formatted`.
 ///
-/// `emails` is intentionally absent. It is an immutable multi-valued
-/// attribute that needs op-aware handling — a PATCH `add` of an empty array
-/// is a documented no-op ("a PATCH `add` of nothing changes nothing"), while
-/// a `replace` of one is a clear — which the op-agnostic `Attribute::set`
-/// signature (no operation type) cannot express. A path-qualified `emails`
-/// op is routed to `apply_emails_op` by `is_emails_path`; a pathless
-/// aggregate that includes `emails` is pulled out and routed there in
-/// `patch_user` before this table is merged, so both wire forms honor the
-/// `add`-no-op instead of the table rejecting an empty array op-agnostically.
+/// `emails` has no entry: an empty `add` changes nothing while an empty
+/// `replace` clears, and a table entry does not see the operation.
+/// `patch_user` sends it to [`apply_emails_op`] for both the path-qualified
+/// and pathless forms.
 const USER_ATTRIBUTES: &[Attribute<UserUpdate>] = &[
     Attribute {
         paths: &["active"],
@@ -612,42 +606,23 @@ pub(crate) async fn patch_user(
     };
     let mut patched = user_seed.clone();
 
-    for op in &patch.operations {
-        let applied = match op.path.as_deref().map(|path| unqualified(path, urn::USER)) {
-            Some(path) if is_emails_path(path) => apply_emails_op(&patched.email, path, op),
-            Some(_) | None => {
-                // A pathless aggregate (or a path-qualified non-`emails`
-                // attribute) is applied op-agnostically through the table,
-                // except for `emails`: an immutable multi-valued attribute
-                // needs op-aware handling — a PATCH `add` of an empty array
-                // is a no-op, a `replace` of one is a clear (RFC 7644
-                // §3.5.2.1) — which the op-agnostic `Attribute::set` cannot
-                // express. A pathless `add` therefore lands here carrying an
-                // aggregate `value` that may include `emails`: pull that
-                // `emails` out and route it through `apply_emails_op` before
-                // merging the rest, so the `add`-no-op is honored and a
-                // bundled attribute write (e.g. `externalId`) is not dropped
-                // by a `mutability` rejection that the path-qualified form
-                // would not raise.
-                if op.op != ScimPatchOpType::Remove
-                    && let Some(value) = &op.value
-                    && let Some(emails_value) = get_attribute(value, "emails")
-                {
-                    let emails_op = ScimPatchOp {
-                        op: op.op,
-                        path: Some("emails".to_string()),
-                        value: Some(emails_value.clone()),
-                    };
-                    if let Err(invalid) = apply_emails_op(&patched.email, "emails", &emails_op) {
-                        return invalid.into_response();
-                    }
-                }
-                apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, op)
+    let applied = patch.operations.iter().try_for_each(|op| {
+        let operation = PatchOperation::try_from(op)?;
+        match operation.path.map(|path| unqualified(path, urn::USER)) {
+            Some(path) if is_emails_path(path) => {
+                apply_emails_op(&patched.email, path, operation.op)
             }
-        };
-        if let Err(invalid) = applied {
-            return invalid.into_response();
+            Some(_) => apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation),
+            None => {
+                if let Some(emails) = operation.op.attribute("emails") {
+                    apply_emails_op(&patched.email, "emails", emails)?;
+                }
+                apply_patch_op(USER_ATTRIBUTES, urn::USER, &mut patched, &operation)
+            }
         }
+    });
+    if let Err(invalid) = applied {
+        return invalid.into_response();
     }
 
     persist_user_update(&state, &auth, &id, &user_seed, patched, "update").await

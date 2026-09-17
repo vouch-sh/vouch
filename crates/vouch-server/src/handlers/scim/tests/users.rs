@@ -2875,11 +2875,8 @@ async fn test_patch_user_immutable_attributes_accept_the_stored_value() {
     assert_eq!(body["externalId"], "synced");
 }
 
-// A path-qualified `add` of an empty `emails` array is a documented no-op
-// (RFC 7644 §3.5.2.1: "a PATCH `add` of nothing changes nothing"). A pathless
-// aggregate `add` carrying `emails: []` is the same operation in a different
-// wire form and MUST agree — it is a no-op (200 OK), not a `mutability`
-// rejection of an attempted clear of an immutable attribute.
+// An `add` of an empty `emails` array adds nothing, so it succeeds unchanged
+// whether the operation names `emails` in its path or in a pathless value.
 #[tokio::test]
 async fn test_rfc7644_patch_user_pathless_add_empty_emails_is_a_noop() {
     let (app, state) = test_app().await;
@@ -2892,7 +2889,7 @@ async fn test_rfc7644_patch_user_pathless_add_empty_emails_is_a_noop() {
     )
     .await;
 
-    // Baseline: the path-qualified form is a documented no-op → 200 OK.
+    // Path-qualified form.
     let (status, body) = patch_user_ops(
         &app,
         &auth_header,
@@ -2906,9 +2903,7 @@ async fn test_rfc7644_patch_user_pathless_add_empty_emails_is_a_noop() {
         "path-qualified add emails [] is a no-op: {body}"
     );
 
-    // Pathless equivalent: a pathless aggregate `add` of `emails: []` must
-    // agree with the path-qualified form — a no-op → 200 OK — and must not
-    // reject as a `mutability` clear of an immutable attribute.
+    // Pathless form.
     let (status, body) = patch_user_ops(
         &app,
         &auth_header,
@@ -2937,10 +2932,8 @@ async fn test_rfc7644_patch_user_pathless_add_empty_emails_is_a_noop() {
     assert_eq!(fetched["externalId"], "keep");
 }
 
-// A SCIM PATCH operation is atomic: a rejected attribute aborts the whole op,
-// so a pathless `add` bundling an empty `emails` (a no-op) with a real
-// `externalId` change MUST persist the `externalId` — the empty `emails` add
-// must not reject and silently drop the bundled, unrelated attribute write.
+// A pathless `add` bundling an empty `emails` with an `externalId` change
+// persists the `externalId`.
 #[tokio::test]
 async fn test_rfc7644_patch_user_pathless_add_empty_emails_with_other_attr_persists() {
     let (app, state) = test_app().await;
@@ -2984,11 +2977,9 @@ async fn test_rfc7644_patch_user_pathless_add_empty_emails_with_other_attr_persi
     );
 }
 
-// The fix must not loosen `replace`: a pathless `replace` of `emails: []` is a
-// clear of an immutable attribute and MUST still reject with `mutability`,
-// matching the path-qualified `replace` of an empty array. Bundling it with a
-// real `externalId` change must still reject the whole op (atomic) and leave
-// the `externalId` unchanged.
+// A pathless `replace` of `emails: []` clears an immutable attribute: 400
+// `mutability`, as for the path-qualified form, and the bundled `externalId`
+// change is not written.
 #[tokio::test]
 async fn test_rfc7644_patch_user_pathless_replace_empty_emails_still_rejects() {
     let (app, state) = test_app().await;
@@ -3123,15 +3114,9 @@ async fn test_rfc7644_patch_user_operation_shape_errors() {
     }
 }
 
-// RFC 7644 §3.5.2.1: "The operation MUST contain a 'value' member". An
-// `add`/`replace` whose `path` explicitly addresses `emails` — the
-// attribute itself, a value filter, or its `value` sub-attribute (the
-// Entra shape) — but omits `value` is `400 invalidValue`, exactly like
-// every other attribute. `patch_user` routes explicit `emails` paths
-// through `apply_emails_op` (not the generic `apply_patch_op` table that
-// enforces `required_value`); this guards that the special case still
-// enforces the value-presence rule and does not silently no-op with
-// `200 OK`.
+// RFC 7644 §3.5.2.1: "The operation MUST contain a "value" member". An
+// `add` or `replace` addressing `emails` without one is 400 `invalidValue`,
+// as for every other attribute.
 #[tokio::test]
 async fn test_rfc7644_patch_user_emails_without_value_is_invalid_value() {
     let (app, state) = test_app().await;
@@ -3156,12 +3141,9 @@ async fn test_rfc7644_patch_user_emails_without_value_is_invalid_value() {
         serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"].value"}]),
         // RFC 7643 §2.1: attribute names are case insensitive.
         serde_json::json!([{"op": "add", "path": "Emails"}]),
-        // RFC 7644 §3.10: a core-URN-qualified path is unqualified first,
-        // then routed through the same `emails` special case.
+        // RFC 7644 §3.10: a core-URN-qualified path.
         serde_json::json!([{"op": "replace", "path": "urn:ietf:params:scim:schemas:core:2.0:User:emails"}]),
-        // A sub-attribute other than `value` is still a valueless `add`/
-        // `replace` on `emails` and must be rejected before the
-        // sub-attribute is inspected.
+        // A sub-attribute other than `value`.
         serde_json::json!([{"op": "replace", "path": "emails[type eq \"work\"].type"}]),
     ];
     for operations in cases {
