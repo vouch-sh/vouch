@@ -749,14 +749,28 @@ pub(crate) async fn delete_group(
         }
     };
 
-    // Delete group (cascades to memberships)
-    if let Err(e) = db::delete_scim_group(&state.store, &id, &auth.org_id).await {
-        tracing::error!("Failed to delete group: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to delete group")),
-        )
-            .into_response();
+    // Delete group (cascades to memberships). A `false` return means the
+    // group vanished between the existence check above and the delete (e.g. a
+    // concurrent request deleted it). Surface a 404 and skip the audit event
+    // rather than reporting a successful delete — and logging a fraudulent
+    // audit entry — for a change that never happened. Mirrors `delete_user`.
+    match db::delete_scim_group(&state.store, &id, &auth.org_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "Group not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete group: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to delete group")),
+            )
+                .into_response();
+        }
     }
 
     // Audit log

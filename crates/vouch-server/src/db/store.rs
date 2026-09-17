@@ -578,17 +578,18 @@ impl DocumentStore {
         self.compare_and_update_test_hook = Some(hook);
     }
 
-    /// Install a hook that runs inside `delete_user` after the transaction
-    /// begins but before the existence check. Lets handler tests simulate a
-    /// concurrent delete that wins the race.
+    /// Install a hook that runs inside `delete_user` / `delete_scim_group`
+    /// after the transaction begins but before the existence check. Lets
+    /// handler tests simulate a concurrent delete that wins the race.
     #[cfg(test)]
     pub(crate) fn set_delete_test_hook(&mut self, hook: DeleteTestHook) {
         self.delete_test_hook = Some(hook);
     }
 
     /// Run the installed `delete_test_hook` for `id`, if any. Invoked by
-    /// `delete_user` after the transaction begins and before the existence
-    /// check. No-op in non-test builds and when no hook is installed.
+    /// `delete_user` and `delete_scim_group` after the transaction begins and
+    /// before the existence check. No-op in non-test builds and when no hook
+    /// is installed.
     #[cfg(test)]
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {

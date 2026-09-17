@@ -1442,6 +1442,13 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Test-only seam: let handler tests delete the target from a separate
+        // transaction before the existence check, deterministically simulating
+        // a concurrent delete that wins the race. Compiled out of non-test
+        // builds, so production pays nothing. Mirrors `delete_user`.
+        #[cfg(test)]
+        store.run_delete_test_hook(id).await;
+
         let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
             return Ok(false);
         };
