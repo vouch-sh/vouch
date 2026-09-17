@@ -704,14 +704,13 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    // The floor protects a usable credential. `authenticate_client` refuses a
-    // secret from a FAPI client and from any client not registered for a
-    // `client_secret_*` method, so those rows are dead and must stay
-    // deletable. The authoritative check is the same exemption inside
+    // The floor protects a usable credential; a dead secret stays deletable.
+    // The authoritative check is the same one inside
     // `revoke_oauth_client_secret`'s transaction.
     if other_active == 0
-        && client.token_endpoint_auth_method.uses_client_secret()
-        && !client.is_fapi()
+        && client
+            .token_endpoint_auth_method
+            .secret_is_credential(client.fapi_profile)
     {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,

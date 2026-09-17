@@ -219,6 +219,16 @@ impl TokenEndpointAuthMethod {
         matches!(self, Self::ClientSecretBasic | Self::ClientSecretPost)
     }
 
+    /// Returns `true` when a `client_secret` row authenticates a client
+    /// registered with this method under `fapi_profile`: the method uses a
+    /// secret and the client is not FAPI, whose clients `authenticate_client`
+    /// refuses a secret from. A secret row on any other client is dead, so
+    /// it may be revoked down to zero and no new one is offered.
+    #[must_use]
+    pub fn secret_is_credential(self, fapi_profile: FapiProfile) -> bool {
+        self.uses_client_secret() && fapi_profile == FapiProfile::None
+    }
+
     /// Returns `true` for the auth methods FAPI 2.0 clients may use:
     /// `private_key_jwt` (client-assertion signing) or mTLS
     /// (`tls_client_auth`, `self_signed_tls_client_auth`).

@@ -173,7 +173,7 @@
             {% endif %}
 
             <!-- Client Secrets Section: shown to add a secret, or to revoke ones the client cannot use -->
-            {% if app.can_add_secret || secrets_count > 0 %}
+            {% if app.secret_is_credential || secrets_count > 0 %}
             <div class="border-t border-vouch-border pt-4">
                 <div class="flex items-center justify-between mb-3">
                     {% let secrets_count_str = secrets_count.to_string() %}
@@ -181,7 +181,7 @@
                         <h2 class="inline text-sm text-gray-400 font-normal">{{ self.tr("apps-detail-client-secrets") }}</h2>
                         <span class="text-xs text-gray-400 ml-2">({{ self.tr("apps-detail-secrets-count").arg("count", secrets_count_str.as_str()).arg("max", "2") }})</span>
                     </div>
-                    {% if app.can_add_secret && secrets_count < 2 %}
+                    {% if app.secret_is_credential && secrets_count < 2 %}
                     <form action="/applications/{{ app.id }}/secrets" method="POST">
                         <button type="submit"
                             class="px-3 py-1.5 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded text-xs font-medium transition-colors">
@@ -205,24 +205,13 @@
                             {% endif %}
                             <span class="ml-2 text-xs text-gray-400">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
                         </div>
-                        {% if secret.active %}
-                            {% if app.can_add_secret %}
-                                {% if secrets_count > 1 %}
-                                <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
-                                    <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
-                                        class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
-                                        {{ self.tr("apps-detail-revoke") }}
-                                    </button>
-                                </form>
-                                {% endif %}
-                            {% else %}
-                                <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
-                                    <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
-                                        class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
-                                        {{ self.tr("apps-detail-revoke") }}
-                                    </button>
-                                </form>
-                            {% endif %}
+                        {% if secret.active && (!app.secret_is_credential || secrets_count > 1) %}
+                        <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
+                            <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
+                                class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
+                                {{ self.tr("apps-detail-revoke") }}
+                            </button>
+                        </form>
                         {% endif %}
                     </div>
                     {% endfor %}
