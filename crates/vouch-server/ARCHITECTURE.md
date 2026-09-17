@@ -373,8 +373,10 @@ returns a fresh one, so a client cannot precompute proofs. At a resource endpoin
 `NoncePolicy::Optional` applies. The `ath` claim, the SHA-256 of the presented access
 token, already binds the proof to one token. Both paths insert the `jti` atomically,
 which is what prevents proof replay; a nonce is accepted until it expires, so one nonce
-serves a sequence of requests such as a device-code poll (RFC 9449 §8: "servers need to
-keep a window of recent nonces"). Nonces live 300 s. Proofs older than
+serves a sequence of requests such as a device-code poll. RFC 9449 §11.1 allows that
+"as long as the jti value is tracked and duplicates are rejected for the lifetime of the
+nonce", so a nonce's validity is capped at the jti retention window. Nonces live 300 s,
+or `VOUCH_DPOP_MAX_AGE` + 60 s when that is shorter. Proofs older than
 `VOUCH_DPOP_MAX_AGE` (default 300 s) are rejected, as are proofs dated more than 60 s
 in the future.
 
