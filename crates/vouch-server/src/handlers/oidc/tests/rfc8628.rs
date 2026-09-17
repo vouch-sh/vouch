@@ -171,8 +171,9 @@ async fn poll_device_token(
         app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-             &device_code={device_code}"
+            "grant_type={}\
+             &device_code={device_code}",
+            vouch_common::protocol::GRANT_TYPE_DEVICE_CODE
         ),
         &[("Authorization", client.basic_auth_header().as_str())],
     )
@@ -498,7 +499,7 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
     set_grant_types(
         &state.store,
         &client.client_id,
-        Some(&["urn:ietf:params:oauth:grant-type:device_code"]),
+        Some(&[vouch_common::protocol::GRANT_TYPE_DEVICE_CODE]),
     )
     .await;
 
@@ -879,6 +880,7 @@ async fn test_device_code_assertion_audience_may_be_device_endpoint() {
 /// refused; the code is not consumed, so the authenticated retry redeems it.
 #[tokio::test]
 async fn test_device_grant_requires_client_authentication() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-auth-req@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -886,7 +888,7 @@ async fn test_device_grant_requires_client_authentication() {
     let device_code =
         setup_authorized_device(&state, &user, &auth, "authreq", &client.client_id).await;
     let form = format!(
-        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+        "grant_type={grant}&device_code={device_code}\
          &client_id={}",
         client.client_id
     );
@@ -910,6 +912,7 @@ async fn test_device_grant_requires_client_authentication() {
 /// interval is untouched.
 #[tokio::test]
 async fn test_device_grant_bound_to_issuing_client() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-bound@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -923,7 +926,7 @@ async fn test_device_grant_bound_to_issuing_client() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             other.client_id
         ),
@@ -961,7 +964,7 @@ async fn test_device_grant_bound_to_issuing_client() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             owner.client_id
         ),
@@ -1026,6 +1029,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
 /// response: the caller learns nothing about the code.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_poll_of_pending_code() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-pending-anon@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
@@ -1047,9 +1051,7 @@ async fn test_device_grant_unauthenticated_poll_of_pending_code() {
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
-        &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
-        ),
+        &format!("grant_type={grant}&device_code={device_code}"),
         &[],
     )
     .await;
@@ -1066,6 +1068,7 @@ async fn test_device_grant_unauthenticated_poll_of_pending_code() {
 /// revocation is reserved for the code's own client.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
+    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-replay-anon@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -1084,7 +1087,7 @@ async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
         &app,
         "/oauth/token",
         &format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}\
+            "grant_type={grant}&device_code={device_code}\
              &client_id={}",
             client.client_id
         ),
@@ -1162,9 +1165,7 @@ async fn test_device_grant_cross_client_poll_commits_jti_regression() {
     );
 
     // (1) Poll /oauth/token authenticated as A with B's device code. The
-    // cross-client binding check rejects this with `invalid_grant`. On the
-    // buggy tree this path returned before the JTI commit, leaving the
-    // assertion un-burned.
+    // cross-client binding check rejects this with `invalid_grant`.
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
