@@ -1015,6 +1015,38 @@ async fn handle_device_code_grant(
     auth: ClientAuthParams,
     params: DeviceCodeParams,
 ) -> Response {
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // RFC 8628 §3.4: "If the client was issued client credentials (or
     // assigned other authentication requirements), the client MUST
     // authenticate with the authorization server as described in Section
@@ -1035,9 +1067,9 @@ async fn handle_device_code_grant(
         State(state),
         client_info,
         client_cert,
-        headers,
         &params.device_code,
         device_client,
+        dpop_proof,
         arrival,
     )
     .await

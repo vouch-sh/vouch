@@ -1487,10 +1487,11 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
         assertion_body(&assertion)
     );
     let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_ne!(status, StatusCode::OK, "token rejection: {resp}");
     let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert_eq!(
         error["error"], "unauthorized_client",
-        "token rejection ({status}): {resp}"
+        "token rejection: {resp}"
     );
 
     let body = format!("token=unknown&{}", assertion_body(&assertion));
@@ -1498,6 +1499,11 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
+        "introspect replay: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
         "introspect replay: {resp}"
     );
 

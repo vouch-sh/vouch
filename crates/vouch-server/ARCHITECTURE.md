@@ -142,7 +142,7 @@ flowchart TB
   store -- "try_consume_authorization_code" --> w2["AuthCodeClaim"]
   store -- "try_consume_device_auth" --> w3["DeviceCodeClaim"]
   store -- "try_consume_oidc_state" --> w4["OidcStateClaim"]
-  store -- "PendingJti::commit" --> w5["JwtAssertionJtiClaim<br/>optional"]
+  store -- "store_jwt_assertion_jti<br/>inside authenticate_client_jwt" --> w5["JwtAssertionJtiClaim<br/>optional"]
   store -. "race loser, expired,<br/>never existed" .-> ce["ClaimError::AlreadyConsumed"]
   w1 & w2 & w3 & w4 --> gp["GrantProof<br/>one variant per grant"]
   jwta["authenticate_client_jwt"] --> jas["JwtAuthSucceeded"] --> jw["JwtClientAuthProof"]
@@ -174,6 +174,10 @@ browser login, the two enrollment steps, and the certification bypass. Like
 optional because the `jti` is. RFC 7523 §3: *"The JWT MAY contain a "jti" (JWT ID)
 claim"* (`specs/rfc/rfc7523.txt`). `authenticate_client_jwt` rejects a FAPI client's
 assertion without one, so a FAPI client cannot reach the proof without a committed jti.
+`authenticate_client_jwt` commits the jti before it returns, so an assertion that
+authenticates is spent whatever the request's outcome. The one error a client retries
+with the same request, DPoP `use_dpop_nonce`, is raised before client authentication at
+every endpoint that checks DPoP.
 
 | `GrantProof` variant | Replay primitive consumed first |
 |---|---|

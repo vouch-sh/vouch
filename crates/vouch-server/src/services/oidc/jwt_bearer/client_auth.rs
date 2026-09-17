@@ -159,7 +159,7 @@ impl PendingJti {
 /// - the committed [`JwtAssertionJtiClaim`], or `None` when the assertion
 ///   carried no `jti`. The JTI is spent by the time this returns, so a
 ///   caller that wants a retryable error to leave the assertion reusable
-///   (DPoP `use_dpop_nonce`, RFC 9449 §4.3) must raise it before calling;
+///   (DPoP `use_dpop_nonce`, RFC 9449 §8) must raise it before calling;
 /// - [`JwtAuthSucceeded`] — the structural witness that RFC 7523 §3 validation
 ///   passed. Thread it forward to construct
 ///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of

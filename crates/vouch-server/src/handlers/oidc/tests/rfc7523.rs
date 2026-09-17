@@ -1517,6 +1517,73 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     );
 }
 
+/// The client_credentials, token-exchange, and fido2-assertion grants check
+/// DPoP before client authentication too: the nonce retry with the same
+/// assertion is not refused as a replay. The token-exchange subject token and
+/// the FIDO2 assertion are garbage, so those retries fail later, at the grant.
+#[tokio::test]
+async fn test_jwt_assertion_dpop_use_nonce_retry_reuses_assertion_for_every_grant() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jti-dpop-retry-grants@example.com").await;
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let garbage = URL_SAFE_NO_PAD.encode(b"{}");
+    let grants = [
+        (
+            "client_credentials",
+            "grant_type=client_credentials".to_string(),
+        ),
+        (
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+            format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                 &subject_token={garbage}\
+                 &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+            ),
+        ),
+        (
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion&assertion={garbage}"
+            ),
+        ),
+    ];
+    for (grant, grant_params) in grants {
+        let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+        enable_grant_types(&state.store, &client.client_id, &[grant]).await;
+        let assertion = build_client_assertion(
+            &client.client_id,
+            &token_endpoint,
+            &pkcs8_bytes,
+            Some(&format!("dpop-retry-{}", client.client_id)),
+        );
+        let body = format!(
+            "{grant_params}\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={assertion}"
+        );
+        let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+        let first = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        let json: serde_json::Value = serde_json::from_str(&first.body).expect("Valid JSON");
+        assert_eq!(json["error"], "use_dpop_nonce", "{grant}: {}", first.body);
+        let nonce = first
+            .headers
+            .get("DPoP-Nonce")
+            .and_then(|v| v.to_str().ok())
+            .expect("DPoP-Nonce header")
+            .to_string();
+
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, Some(&nonce));
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+        assert!(
+            status != StatusCode::UNAUTHORIZED && json["error"] != "invalid_client",
+            "{grant}: nonce retry with the same assertion was refused ({status}): {resp}"
+        );
+    }
+}
+
 // ========================================================================
 // RFC 7523 — private_key_jwt + DPoP at the token endpoint
 //
@@ -1961,8 +2028,8 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
          &client_assertion={assertion}"
     );
 
-    // First use: 200 + access_token. PendingJti::commit records the JTI
-    // with `expires_at = exp + CLOCK_SKEW_SECONDS` under the fix.
+    // First use: 200 + access_token. Authentication records the JTI with
+    // `expires_at = exp + CLOCK_SKEW_SECONDS`.
     let (status1, resp1) = http_post_form(&app, "/oauth/token", &body, &[]).await;
     assert_eq!(status1, StatusCode::OK, "first use must succeed: {resp1}");
     let resp1_json: serde_json::Value = serde_json::from_str(&resp1).expect("Valid JSON");

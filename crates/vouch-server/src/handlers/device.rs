@@ -14,10 +14,9 @@ use crate::services::auth::{
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::ValidatedDpopProof;
 use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::grant_type::OAuthGrantType;
-use crate::services::oidc::token::validate_dpop_if_present;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -31,12 +30,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
-use vouch_common::{
-    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError, protocol,
-};
+use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError};
 
 use crate::error::{OAuthErrorCode, ServiceError};
-use crate::handlers::oidc::dpop_use_nonce_response;
 use crate::redact_email;
 
 /// Characters used for user code generation (no ambiguous characters).
@@ -325,14 +321,11 @@ pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
     client_cert: OptionalClientCert,
-    headers: HeaderMap,
     device_code: &str,
     device_client: DeviceClient,
+    dpop_proof: Option<ValidatedDpopProof>,
     arrival: ArrivalTime,
 ) -> Result<Json<DeviceTokenResponse>, Response> {
-    // Authentication already spent the poll's assertion, so the
-    // `use_dpop_nonce` retry below needs a new one; the CLI signs a new
-    // assertion for every poll.
     let oauth_client = device_client.client;
     let client_auth = client_auth_proof(device_client.witnesses, &oauth_client)?;
 
@@ -419,47 +412,6 @@ pub(crate) async fn device_token(
             ))
         }
         DeviceAuthState::Authorized(stale_approval) => {
-            // RFC 9449 / FAPI 2.0: Validate the DPoP proof if present.
-            // This happens BEFORE consuming the device code so that a
-            // `use_dpop_nonce` or `invalid_dpop_proof` response does not
-            // burn the single-use code — the client can retry with a
-            // corrected proof. Consistent with the authorization code
-            // grant, which validates DPoP before exchanging the code.
-            let dpop_header = headers
-                .get(protocol::HEADER_DPOP)
-                .and_then(|v| v.to_str().ok());
-            let dpop_proof = match validate_dpop_if_present(
-                &state,
-                dpop_header,
-                "POST",
-                "/oauth/token",
-                arrival,
-            )
-            .await
-            {
-                Ok(proof) => proof,
-                Err(DpopError::UseNonce(nonce)) => {
-                    return Err(dpop_use_nonce_response(&nonce));
-                }
-                Err(e @ DpopError::Database(_)) => {
-                    return Err(oauth_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        OAuthError {
-                            error: OAuthErrorCode::ServerError.as_str().to_string(),
-                            error_description: Some(e.to_string()),
-                        },
-                    ));
-                }
-                Err(e) => {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: OAuthErrorCode::InvalidDpopProof.as_str().to_string(),
-                            error_description: Some(e.to_string()),
-                        },
-                    ));
-                }
-            };
             // Every sender-constraint requirement registered for this client.
             let sender_constraint = match SenderConstraintProof::validate(
                 &oauth_client,
