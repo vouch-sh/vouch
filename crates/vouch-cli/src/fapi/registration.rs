@@ -82,7 +82,7 @@ impl std::fmt::Debug for RegistrationResponse {
 ///   Vouch-issued ID-token assertion via RFC 8693 token exchange.
 ///
 /// Omitting a grant the CLI uses makes the server reject that grant's requests
-/// with HTTP 401 `unauthorized_client`; commit `45b8de2d` added the
+/// with `unauthorized_client`; commit `45b8de2d` added the
 /// token-exchange gate that first exposed the missing `token-exchange` entry.
 const REGISTERED_GRANT_TYPES: &[&str] = &[
     protocol::GRANT_TYPE_DEVICE_CODE,
@@ -243,7 +243,7 @@ mod tests {
     /// gate — `OAuthClient::is_authorized_for_grant`, which reads the stored
     /// `grant_types` at request time — requires each one to be listed in
     /// [`REGISTERED_GRANT_TYPES`]. Omitting one makes the server reject that
-    /// grant's requests with HTTP 401 `unauthorized_client`. Commit `45b8de2d`
+    /// grant's requests with `unauthorized_client`. Commit `45b8de2d`
     /// added the token-exchange gate that first exposed a missing
     /// `token-exchange` entry, breaking the WIF credential commands
     /// (`vouch credential openai|anthropic`). This pins the full contract so

@@ -2094,7 +2094,7 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_resid
 // All five are covered — `client_credentials` in `exchange_client_credentials`,
 // `device_code` in `handlers/device.rs`, and token-exchange, fido2-assertion,
 // and authorization_code here. A client restricted to a list that omits the
-// grant it requests MUST receive HTTP 401 `unauthorized_client`, and each test
+// grant it requests MUST receive `unauthorized_client`, and each test
 // pairs that with a control proving the gate — not client authentication — is
 // what rejected.
 // ========================================================================
@@ -2162,7 +2162,7 @@ async fn test_grant_types_enforcement_rejects_token_exchange_for_unauthorized_cl
         http_post_form(&app, "/oauth/token", &exchange_body, &[]).await;
     assert_eq!(
         exchange_status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "token_exchange must be rejected for a client not registered for it: {exchange_resp}"
     );
     let exchange_json: serde_json::Value =
@@ -2184,7 +2184,7 @@ async fn test_grant_types_enforcement_rejects_token_exchange_for_unauthorized_cl
     let (cc_status, cc_resp) = http_post_form(&app, "/oauth/token", &cc_body, &[]).await;
     assert_eq!(
         cc_status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "client_credentials should reject a client not registered for it: {cc_resp}"
     );
     let cc_json: serde_json::Value = serde_json::from_str(&cc_resp).expect("Valid JSON");
@@ -2224,7 +2224,7 @@ async fn test_grant_types_enforcement_rejects_fido2_assertion_for_unauthorized_c
     let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "fido2_assertion must be rejected for a client not registered for it: {resp}"
     );
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
@@ -2304,7 +2304,7 @@ async fn test_grant_types_enforcement_rejects_authorization_code_for_unauthorize
     let (status, resp) = http_post_form(&app, "/oauth/token", &redeem(code, assertion), &[]).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "authorization_code must be rejected for a client_credentials-only client: {resp}"
     );
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");

@@ -215,12 +215,16 @@ impl OAuthErrorCode {
             // so neither reaches a client as an HTTP status.
             | Self::LoginRequired
             | Self::AccountSelectionRequired => StatusCode::BAD_REQUEST,
-            Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
+            Self::InvalidClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
             | Self::UnsupportedResponseType
-            | Self::AccessDenied => StatusCode::BAD_REQUEST,
+            | Self::AccessDenied
+            // RFC 6749 §5.2 names 401 only for `invalid_client`: every other
+            // error takes the default, "an HTTP 400 (Bad Request) status code
+            // (unless specified otherwise)".
+            | Self::UnauthorizedClient => StatusCode::BAD_REQUEST,
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UseDpopNonce => StatusCode::BAD_REQUEST,

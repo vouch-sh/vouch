@@ -1961,7 +1961,7 @@ mod tests {
     /// creates a Native application in the dashboard — which stores no
     /// `grant_types` — and the client posts its `client_id` to `/oauth/device`.
     /// Resolving an absent list as RFC 7591 §2's registration default made
-    /// that first request `401 unauthorized_client`.
+    /// that first request `unauthorized_client`.
     #[tokio::test]
     async fn test_self_service_native_app_may_start_the_device_flow() {
         let (app, state) = test_app().await;
@@ -2003,7 +2003,7 @@ mod tests {
             } else {
                 assert_eq!(
                     status,
-                    StatusCode::UNAUTHORIZED,
+                    StatusCode::BAD_REQUEST,
                     "{app_type:?} is not a device-flow application: {resp}"
                 );
             }

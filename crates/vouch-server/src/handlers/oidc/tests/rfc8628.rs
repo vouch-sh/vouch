@@ -378,7 +378,7 @@ async fn test_rfc8628_device_code_replay_revokes_only_that_code_s_token() {
 // sender-constraint enforcement, so the metadata needed to enforce
 // `grant_types` is available. These tests pin the fix: a client restricted to
 // `["authorization_code"]` (the dynamic-registration default when `grant_types`
-// is omitted) MUST receive HTTP 401 `unauthorized_client` at redemption, while
+// is omitted) MUST receive `unauthorized_client` at redemption, while
 // registered clients and the built-in CLI flow keep working (no regression).
 // Mirrors the `grant_types` enforcement tests in `rfc7523.rs`.
 // ========================================================================
@@ -432,7 +432,7 @@ async fn test_device_grant_rejects_redemption_for_client_not_registered_for_devi
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device_code grant must reject a client not registered for it: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -492,7 +492,7 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
 
     // First poll: rejected by the grant_types gate. The code is NOT consumed.
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "gate must reject: {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "gate must reject: {body}");
 
     // Re-authorize the client for device_code (toggle the gate off).
     set_grant_types(
@@ -535,7 +535,7 @@ async fn test_device_grant_rejects_redemption_for_client_with_no_grant_types() {
     let (status, body) = poll_device_token(&app, &device_code, &client).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device_code grant must reject a client with no grant_types: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -571,7 +571,7 @@ async fn test_device_code_creation_rejects_client_not_registered_for_device_code
     .await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         "device code creation must reject a client not registered for device_code: {body}"
     );
     let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -1337,7 +1337,7 @@ async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
         vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
     );
     let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "device rejection: {resp}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "device rejection: {resp}");
     let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert_eq!(
         error["error"], "unauthorized_client",
@@ -1487,7 +1487,7 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
         assertion_body(&assertion)
     );
     let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
-    assert_ne!(status, StatusCode::OK, "token rejection: {resp}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "token rejection: {resp}");
     let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert_eq!(
         error["error"], "unauthorized_client",
