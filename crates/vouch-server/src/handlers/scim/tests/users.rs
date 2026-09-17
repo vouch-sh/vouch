@@ -3256,6 +3256,8 @@ async fn test_rfc7644_patch_user_emails_value_filter() {
         "emails[type eq \"work\"].value",
         "emails[TYPE EQ \"Work\"].value",
         "emails[primary eq true].value",
+        // RFC 7644 §3.4.2.2: `attrPath = [URI ":"] ATTRNAME *1subAttr`.
+        "emails[urn:ietf:params:scim:schemas:core:2.0:User:type eq \"work\"].value",
         "emails[value eq \"EMAILS-FILTER@test-org.example.com\"].value",
     ] {
         let operations = serde_json::json!([{"op": "replace", "path": path, "value": email}]);
