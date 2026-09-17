@@ -472,11 +472,13 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
                 "{path} has an unterminated value filter"
             )));
         };
-        // RFC 7644 §3.5.2.3: "If the target location is a multi-valued
-        // attribute for which a value selection filter ("valuePath") has been
-        // supplied and no record match was made, the service provider SHALL
-        // indicate failure by returning HTTP status code 400 and a "scimType"
-        // error code of "noTarget"."
+        // RFC 7644 §3.5.2.3, for `replace`: "If the target location is a
+        // multi-valued attribute for which a value selection filter
+        // ("valuePath") has been supplied and no record match was made, the
+        // service provider SHALL indicate failure by returning HTTP status
+        // code 400 and a "scimType" error code of "noTarget"." §3.5.2.1 says
+        // nothing about a filter that matches nothing on an `add`; the two
+        // forms answer alike rather than one silently succeeding.
         if !email_filter_matches(email, path, filter)? {
             return Err(AttributeError::no_target(format!(
                 "no email matches {path}"
@@ -504,7 +506,12 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
 
 /// Whether a `valuePath` filter on `emails` matches the one email Vouch
 /// presents: `value` is the stored email, `type` is `work`, and `primary` is
-/// `true` (see `user_to_scim`). Vouch supports a single `eq` comparison.
+/// `true` (see `user_to_scim`).
+///
+/// Vouch supports a single `eq` comparison. RFC 7644 §3.12 Table 9 lists
+/// `invalidFilter` for "PATCH (Path Filter - Section 3.5.2)" when "the
+/// specified attribute and filter comparison combination is not supported",
+/// which is what a compound or other-operator filter gets.
 fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool, AttributeError> {
     let unsupported = || {
         AttributeError::invalid_filter(format!(
@@ -521,15 +528,11 @@ fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool,
         return Err(unsupported());
     }
     let literal = literal.trim();
-    let string = || {
-        literal
-            .strip_prefix('"')
-            .and_then(|l| l.strip_suffix('"'))
-            .filter(|l| !l.contains('"'))
-            .ok_or_else(unsupported)
-    };
+    // A filter's string literal is a JSON string (RFC 7644 §3.4.2.2), so it
+    // is parsed as one and may carry escapes.
+    let string = || serde_json::from_str::<String>(literal).map_err(|_| unsupported());
     if attribute.eq_ignore_ascii_case("value") {
-        Ok(Email::new(string()?) == *email)
+        Ok(Email::new(&string()?) == *email)
     } else if attribute.eq_ignore_ascii_case("type") {
         Ok(string()?.eq_ignore_ascii_case("work"))
     } else if attribute.eq_ignore_ascii_case("primary") {

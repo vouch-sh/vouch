@@ -165,11 +165,12 @@ impl<'v> PatchOperation<'v> {
     /// Checks `operation` against the resource whose core schema is
     /// `schema_urn`.
     ///
-    /// A pathless `add` or `replace` targets the resource itself, and RFC 7644
-    /// §3.5.2.3: "In this case, the "value" attribute SHALL contain a list of
-    /// one or more attributes that are to be replaced." Its value must be an
-    /// object naming each attribute once; a name may carry the core schema URN
-    /// prefix (§3.10).
+    /// A pathless `add` or `replace` targets the resource itself: RFC 7644
+    /// §3.5.2.3 for `replace`, "In this case, the "value" attribute SHALL
+    /// contain a list of one or more attributes that are to be replaced", and
+    /// §3.5.2.1 for `add`, "The "value" parameter contains a set of attributes
+    /// to be added to the resource". Its value must be an object naming each
+    /// attribute once; a name may carry the core schema URN prefix (§3.10).
     pub(crate) fn parse(
         operation: &'v ScimPatchOp,
         schema_urn: &'static str,

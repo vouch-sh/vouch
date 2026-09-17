@@ -3263,6 +3263,14 @@ async fn test_rfc7644_patch_user_emails_value_filter() {
         assert_eq!(status, StatusCode::OK, "{operations} -> {body}");
     }
 
+    let escaped = serde_json::json!([{"op": "replace", "path": "emails[value eq \"quote\\\"inside@test-org.example.com\"].value", "value": email}]);
+    let (status, error) = patch_user_ops(&app, &auth_header, &user_id, escaped.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{escaped} -> {error}");
+    assert_eq!(
+        error["scimType"], "noTarget",
+        "an escaped quote parses as a literal that matches nothing: {error}"
+    );
+
     for (path, scim_type) in [
         ("emails[type eq \"home\"].value", "noTarget"),
         ("emails[primary eq false].value", "noTarget"),
@@ -3273,6 +3281,11 @@ async fn test_rfc7644_patch_user_emails_value_filter() {
         ("emails[type ne \"home\"].value", "invalidFilter"),
         ("emails[display eq \"x\"].value", "invalidFilter"),
         ("emails[type eq work].value", "invalidFilter"),
+        (
+            "emails[type eq \"work\" and primary eq true].value",
+            "invalidFilter",
+        ),
+        ("emails[value pr].value", "invalidFilter"),
         ("emails[type eq \"work\"", "invalidFilter"),
     ] {
         let operations = serde_json::json!([{"op": "replace", "path": path, "value": email}]);
