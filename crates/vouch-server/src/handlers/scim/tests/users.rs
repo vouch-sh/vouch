@@ -2875,6 +2875,156 @@ async fn test_patch_user_immutable_attributes_accept_the_stored_value() {
     assert_eq!(body["externalId"], "synced");
 }
 
+// A path-qualified `add` of an empty `emails` array is a documented no-op
+// (RFC 7644 §3.5.2.1: "a PATCH `add` of nothing changes nothing"). A pathless
+// aggregate `add` carrying `emails: []` is the same operation in a different
+// wire form and MUST agree — it is a no-op (200 OK), not a `mutability`
+// rejection of an attempted clear of an immutable attribute.
+#[tokio::test]
+async fn test_rfc7644_patch_user_pathless_add_empty_emails_is_a_noop() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-pathless-add-empty", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "add-empty@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    // Baseline: the path-qualified form is a documented no-op → 200 OK.
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "add", "path": "emails", "value": []}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "path-qualified add emails [] is a no-op: {body}"
+    );
+
+    // Pathless equivalent: a pathless aggregate `add` of `emails: []` must
+    // agree with the path-qualified form — a no-op → 200 OK — and must not
+    // reject as a `mutability` clear of an immutable attribute.
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "add", "value": {"emails": []}}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pathless add {{emails: []}} must be a no-op: {body}"
+    );
+
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(fetched["userName"], "add-empty@test-org.example.com");
+    assert_eq!(
+        fetched["emails"][0]["value"], "add-empty@test-org.example.com",
+        "an empty emails add changes nothing"
+    );
+    assert_eq!(fetched["externalId"], "keep");
+}
+
+// A SCIM PATCH operation is atomic: a rejected attribute aborts the whole op,
+// so a pathless `add` bundling an empty `emails` (a no-op) with a real
+// `externalId` change MUST persist the `externalId` — the empty `emails` add
+// must not reject and silently drop the bundled, unrelated attribute write.
+#[tokio::test]
+async fn test_rfc7644_patch_user_pathless_add_empty_emails_with_other_attr_persists() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-pathless-add-bundle", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "bundle@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    let (status, body) = patch_user_ops(
+        &app,
+        &auth_header,
+        &user_id,
+        serde_json::json!([{"op": "add", "value": {"emails": [], "externalId": "changed"}}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the bundled op must not reject on the empty emails no-op: {body}"
+    );
+    assert_eq!(body["externalId"], "changed");
+
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(
+        fetched["externalId"], "changed",
+        "the bundled externalId change persisted"
+    );
+    assert_eq!(
+        fetched["emails"][0]["value"], "bundle@test-org.example.com",
+        "the empty emails add changed nothing"
+    );
+}
+
+// The fix must not loosen `replace`: a pathless `replace` of `emails: []` is a
+// clear of an immutable attribute and MUST still reject with `mutability`,
+// matching the path-qualified `replace` of an empty array. Bundling it with a
+// real `externalId` change must still reject the whole op (atomic) and leave
+// the `externalId` unchanged.
+#[tokio::test]
+async fn test_rfc7644_patch_user_pathless_replace_empty_emails_still_rejects() {
+    let (app, state) = test_app().await;
+    let token =
+        create_test_scim_token(&state.store, "test-pathless-replace-empty", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    let user_id = post_user(
+        &app,
+        &auth_header,
+        serde_json::json!({"schemas": [USER_URN], "userName": "replace-empty@test-org.example.com", "externalId": "keep"}),
+    )
+    .await;
+
+    for operations in [
+        serde_json::json!([{"op": "replace", "value": {"emails": []}}]),
+        serde_json::json!([{"op": "replace", "value": {"emails": [], "externalId": "changed"}}]),
+    ] {
+        let (status, error) =
+            patch_user_ops(&app, &auth_header, &user_id, operations.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operations} -> {error}");
+        assert_eq!(error["scimType"], "mutability", "{operations}");
+    }
+
+    let (_, fetched) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let fetched: serde_json::Value = serde_json::from_str(&fetched).expect("Valid JSON");
+    assert_eq!(
+        fetched["externalId"], "keep",
+        "a rejected replace must not persist a bundled externalId change"
+    );
+}
+
 // RFC 7644 §3.5.2.1: re-adding a value already present "SHALL NOT change the
 // modify timestamp of the resource."
 #[tokio::test]
