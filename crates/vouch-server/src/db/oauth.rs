@@ -1370,7 +1370,10 @@ pub async fn get_oauth_client_secret_by_id(
     Ok(doc.map(OAuthClientSecret::from))
 }
 
-/// Revoke a single secret (soft-delete), enforcing the ≥1 active floor.
+/// Revoke a single secret (soft-delete), enforcing the ≥1 active floor for a
+/// client whose secrets are credentials
+/// ([`TokenEndpointAuthMethod::secret_is_credential`]); any other client's
+/// secrets may be revoked down to zero.
 ///
 /// The entire operation runs inside a single transaction wrapped in
 /// `with_dsql_retry!`.  The transaction:
@@ -1381,7 +1384,8 @@ pub async fn get_oauth_client_secret_by_id(
 ///    for all secret-set mutations on this client).
 /// 4. Counts the *other* active secrets — those that would remain after this
 ///    revoke, excluding the target row itself (filter, not SQL COUNT — soft-deleted
-///    rows are retained).  If none remain, returns a terminal 409 `last_secret`.
+///    rows are retained).  If none remain and the client's secrets are
+///    credentials, returns a terminal 409 `last_secret`.
 ///    Excluding the target matters when it is expired-but-unrevoked: revoking it
 ///    must still be allowed while a different valid secret exists.
 /// 5. Soft-deletes the secret (`revoked_at`) inside the transaction.
@@ -1475,17 +1479,13 @@ pub async fn revoke_oauth_client_secret(
             })
             .count();
 
-        // Floor guard: at least one *other* active secret must remain.
-        // Exempt are clients whose secrets `authenticate_client` never
-        // accepts: FAPI clients, and clients not registered for a
-        // `client_secret_*` method. Their rows are dead, and the floor would
-        // pin them instead of protecting a usable credential.
-        let secret_usable = client_doc
+        // Floor guard: at least one *other* active secret must remain, unless
+        // the client's secrets are not credentials at all.
+        let secret_is_credential = client_doc
             .data
             .token_endpoint_auth_method
-            .uses_client_secret()
-            && client_doc.data.fapi_profile == FapiProfile::None;
-        if other_active_count == 0 && secret_usable {
+            .secret_is_credential(client_doc.data.fapi_profile);
+        if other_active_count == 0 && secret_is_credential {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",
