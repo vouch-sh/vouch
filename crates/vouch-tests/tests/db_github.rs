@@ -338,6 +338,219 @@ async fn update_repos_unknown_installation_returns_false() {
 }
 
 // ============================================================================
+// replay / duplicate prevention (deterministic document ID)
+//
+// `create_github_installation` derives a deterministic document ID from
+// `(org_id, installation_id)` and uses `insert_with_id`, so a replayed install
+// callback (or two concurrent connects) for the same installation in the same
+// org collide on the primary key and return `Duplicate` instead of creating a
+// duplicate row. These tests pin that behavior against the real in-memory
+// SQLite backend so the `is_unique_violation` detection is exercised for real.
+// ============================================================================
+
+#[tokio::test]
+async fn create_github_installation_replay_returns_duplicate_and_single_row() {
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "gh-replay.example").await;
+
+    let first = install(&harness, &org_id, 100, "acme", "Organization").await;
+
+    // Replay: same (org_id, installation_id). Before the fix this would insert
+    // a second, byte-equivalent row (random document_id). Now it must collide
+    // on the deterministic primary key and return `Duplicate`.
+    let replay = db::create_github_installation(
+        &harness.state.store,
+        &db::CreateGitHubInstallationParams {
+            org_id: &org_id,
+            installation_id: 100,
+            github_account_login: "acme",
+            github_account_type: "Organization",
+            permissions: &perm(&[("contents", "read")]),
+            repository_selection: "all",
+            installed_by_user_id: Some("admin-user"),
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(replay, Err(db::CreateGitHubInstallationError::Duplicate)),
+        "expected Duplicate on replay, got {replay:?}"
+    );
+
+    // Exactly one row exists — the deterministic ID prevented the duplicate.
+    let listed = db::get_github_installations_by_org(&harness.state.store, &org_id)
+        .await
+        .expect("get by org");
+    assert_eq!(listed.len(), 1, "replay must not create a duplicate row");
+    assert_eq!(listed[0].id, first, "the original row must remain");
+    assert_eq!(listed[0].installation_id, 100);
+    assert_eq!(listed[0].github_account_login, "acme");
+}
+
+#[tokio::test]
+async fn create_github_installation_replay_prevents_orphan_after_delete() {
+    // Regression for scenario B: replay → duplicate → uninstall webhook
+    // (find_one delete) leaves an orphan → credential path hits a deleted
+    // installation. With the deterministic ID there is only ever one row, so a
+    // single `delete_by_installation_id` clears the installation entirely.
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "gh-orphan.example").await;
+    let _ = install(&harness, &org_id, 777, "orphanable", "Organization").await;
+
+    // A replay attempt is rejected; no second row is created.
+    let replay = db::create_github_installation(
+        &harness.state.store,
+        &db::CreateGitHubInstallationParams {
+            org_id: &org_id,
+            installation_id: 777,
+            github_account_login: "orphanable",
+            github_account_type: "Organization",
+            permissions: &perm(&[("contents", "read")]),
+            repository_selection: "all",
+            installed_by_user_id: Some("admin-user"),
+        },
+    )
+    .await;
+    assert!(matches!(
+        replay,
+        Err(db::CreateGitHubInstallationError::Duplicate)
+    ));
+
+    // The `installation.deleted` webhook removes the single row.
+    let deleted = db::delete_github_installation_by_installation_id(&harness.state.store, 777)
+        .await
+        .expect("delete");
+    assert!(deleted);
+
+    // No orphan survives: the org has zero installations, so credential
+    // issuance would take the clean `github_not_connected` path.
+    let after = db::get_github_installations_by_org(&harness.state.store, &org_id)
+        .await
+        .expect("get by org");
+    assert!(
+        after.is_empty(),
+        "no orphan duplicate should survive webhook cleanup"
+    );
+    let by_id = db::get_github_installation_by_installation_id(&harness.state.store, 777)
+        .await
+        .expect("lookup");
+    assert!(by_id.is_none(), "global lookup must find no installation");
+}
+
+#[tokio::test]
+async fn create_github_installation_distinct_installation_ids_same_org_succeed() {
+    // Different installation_ids in the same org must not collide: the
+    // deterministic ID is derived from `(org_id, installation_id)`, so a
+    // multi-account org can still link more than one GitHub installation.
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "gh-multi.example").await;
+
+    let _ = install(&harness, &org_id, 1, "alpha", "Organization").await;
+    let _ = install(&harness, &org_id, 2, "bravo", "Organization").await;
+
+    let listed = db::get_github_installations_by_org(&harness.state.store, &org_id)
+        .await
+        .expect("get by org");
+    let logins: Vec<_> = listed
+        .iter()
+        .map(|i| i.github_account_login.as_str())
+        .collect();
+    assert_eq!(logins, vec!["alpha", "bravo"], "both installs must persist");
+}
+
+#[tokio::test]
+async fn create_github_installation_same_installation_id_different_org_succeed() {
+    // The deterministic ID is scoped to `(org_id, installation_id)`, so the
+    // same GitHub installation_id linked to two different Vouch orgs produces
+    // two distinct documents (no collision). This pins the scoping the
+    // primary fix intentionally uses.
+    let harness = TestHarness::new().await;
+    let org_a = fresh_org_id(&harness, "gh-cross-a.example").await;
+    let org_b = fresh_org_id(&harness, "gh-cross-b.example").await;
+
+    let id_a = install(&harness, &org_a, 42, "shared", "Organization").await;
+    let id_b = install(&harness, &org_b, 42, "shared", "Organization").await;
+    assert_ne!(id_a, id_b, "distinct orgs must get distinct document IDs");
+
+    let listed_a = db::get_github_installations_by_org(&harness.state.store, &org_a)
+        .await
+        .expect("get by org a");
+    assert_eq!(listed_a.len(), 1);
+    let listed_b = db::get_github_installations_by_org(&harness.state.store, &org_b)
+        .await
+        .expect("get by org b");
+    assert_eq!(listed_b.len(), 1);
+}
+
+#[tokio::test]
+async fn create_github_installation_concurrent_same_installation_produces_one_row() {
+    // Race-safety: N concurrent `create_github_installation` calls for the
+    // same `(org_id, installation_id)` must produce exactly one `Ok(id)` and
+    // N-1 `Err(Duplicate)`, leaving exactly one row — the deterministic primary
+    // key collides atomically. Mirrors the challenge-state and SCIM concurrent
+    // tests (`test_challenge_state_concurrent_calls_produce_one_row`,
+    // `test_create_scim_user_concurrent_same_email_produces_one_user`).
+    let harness = TestHarness::new().await;
+    let org_id = fresh_org_id(&harness, "gh-race.example").await;
+
+    const N: usize = 8;
+    let perms = perm(&[("contents", "read")]);
+    let mut handles = Vec::with_capacity(N);
+    for _ in 0..N {
+        let store = harness.state.store.clone();
+        let org_id = org_id.clone();
+        let perms = perms.clone();
+        handles.push(tokio::spawn(async move {
+            db::create_github_installation(
+                &store,
+                &db::CreateGitHubInstallationParams {
+                    org_id: &org_id,
+                    installation_id: 9001,
+                    github_account_login: "racer",
+                    github_account_type: "Organization",
+                    permissions: &perms,
+                    repository_selection: "all",
+                    installed_by_user_id: Some("admin-user"),
+                },
+            )
+            .await
+        }));
+    }
+
+    let mut ok_count = 0usize;
+    let mut dup_count = 0usize;
+    let mut other_err = None;
+    for handle in handles {
+        match handle.await.expect("task join") {
+            Ok(_) => ok_count += 1,
+            Err(db::CreateGitHubInstallationError::Duplicate) => dup_count += 1,
+            Err(e) => other_err = Some(e),
+        }
+    }
+    assert!(
+        other_err.is_none(),
+        "unexpected non-Duplicate error: {other_err:?}"
+    );
+    assert_eq!(
+        ok_count, 1,
+        "exactly one concurrent call must win, got {ok_count}"
+    );
+    assert_eq!(
+        dup_count,
+        N - 1,
+        "exactly N-1 must be Duplicate, got {dup_count}"
+    );
+
+    // Exactly one row exists, with the expected fields.
+    let listed = db::get_github_installations_by_org(&harness.state.store, &org_id)
+        .await
+        .expect("get by org");
+    assert_eq!(listed.len(), 1, "exactly one row must exist after the race");
+    assert_eq!(listed[0].installation_id, 9001);
+    assert_eq!(listed[0].github_account_login, "racer");
+}
+
+// ============================================================================
 // delete + global listing
 // ============================================================================
 
