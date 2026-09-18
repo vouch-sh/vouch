@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use inquire::{Confirm, InquireError, Select, Text};
 use vouch_cli::{tr, tr_args, tr_println};
 
-use crate::config::{AwsIdentityCenter, AwsOrganization};
+use crate::config::{AwsIdentityCenter, AwsOrganization, Config};
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
@@ -484,7 +484,6 @@ async fn run_discover(
     use crate::commands::credential::aws::{
         assume_management_role, exchange_idc_access_token, resolve_identity_center,
     };
-    use crate::config::Config;
     use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
     use vouch_common::http::credential_client;
 
@@ -608,7 +607,7 @@ async fn run_discover(
             BTreeSet::new()
         }
     };
-    validate_existing_profiles(&ctx, &aws_config, &assignments, &probed).await;
+    validate_existing_profiles(&ctx, &vouch_config, &aws_config, &assignments, &probed).await;
 
     if created_count > 0 {
         aws_config.save()?;
@@ -1055,13 +1054,102 @@ fn print_trust_remediation(input: &DiscoveryContext<'_>, target_role_arn: &str) 
     );
 }
 
+/// How the existing-profile sweep should handle one `--role` (optionally
+/// `--via`) profile, given the management role the current discover run holds
+/// a session for (`management_role`) and the org config (`vouch_config`) that
+/// vending resolves against.
+///
+/// This replaces the older `via.is_some_and(|via| via != ctx.management_role)`
+/// skip filter, which was vacuous for `via == None`: in a multi-org config a
+/// `via == None` profile's vend-time hop is decided by account disambiguation
+/// inside [`crate::commands::credential::aws::resolve_management_role_for`],
+/// which may resolve to a *different* org's management role (or to a direct
+/// `AssumeRoleWithWebIdentity`). Probing such a profile through the discover
+/// run's session is a *different* hop than vending performs, so a target that
+/// trusts its own org's management role (or the IdP directly) but not the
+/// discover run's management role is mis-reported as trust-missing, and an
+/// unresolvable target may be mis-reported as verified.
+///
+/// The decision mirrors the hop vending selects — the same call the vend path
+/// makes — so the sweep only probes when its session is the same principal
+/// vending chains through.
+#[derive(Debug, PartialEq, Eq)]
+enum SweepDecision {
+    /// The target *is* `management_role` and vending assumes it directly
+    /// (`AssumeRoleWithWebIdentity`), which is exactly the hop the discover
+    /// run used to obtain the session in hand. Report verified without a
+    /// probe — a true positive regardless of org count.
+    TriviallyAssumable,
+    /// Vending chains `AssumeRole(management_role → target)`, and the sweep
+    /// holds `management_role`'s session. The probe matches vending's hop.
+    Probe,
+    /// Vending resolves the target through a different hop than the sweep's
+    /// session — a *different* org's management role, or a direct
+    /// `AssumeRoleWithWebIdentity` into a role the sweep cannot reach with its
+    /// SigV4 session. The sweep has no matching session; skip without claiming
+    /// anything. Identical to the pre-existing skip for `via == Some(other)`
+    /// pinned profiles.
+    Skip,
+    /// Vending cannot resolve the target under the current config at all (no
+    /// org covers the account, or it is ambiguous across orgs). The profile is
+    /// genuinely broken — surface a distinct diagnostic instead of probing
+    /// (which would report a false trust-missing with a useless remediation,
+    /// or a false verified) or silently dropping it.
+    Unresolved,
+}
+
+/// Decide whether the existing-profile sweep should probe one role-carrying
+/// profile through the discover run's management session. Pure wrapper over
+/// [`crate::commands::credential::aws::resolve_management_role_for`]; see
+/// [`SweepDecision`] for the decision semantics.
+///
+/// `management_role` is the ARN the current discover run assumed (and holds a
+/// session for), i.e. [`DiscoveryContext::management_role`]. Resolution is
+/// performed against `vouch_config` exactly as vending performs it, so the
+/// sweep's hop and vending's hop agree whenever [`SweepDecision::Probe`] is
+/// returned.
+fn sweep_decision_for_role(
+    vouch_config: &Config,
+    role_arn: &str,
+    via: Option<&str>,
+    management_role: &str,
+) -> SweepDecision {
+    use crate::commands::credential::aws::resolve_management_role_for;
+    match resolve_management_role_for(vouch_config, role_arn, via) {
+        // Vending chains through management_role — the sweep holds that
+        // session, so the probe matches vending's hop.
+        Ok(Some(m)) if m == management_role => SweepDecision::Probe,
+        // Vending assumes the target directly via AssumeRoleWithWebIdentity.
+        // This only happens when the target IS some org's management role and
+        // equals it. When that role is the discover run's management role, the
+        // session in hand already proves it is assumable (the discover run
+        // assumed it via that same direct hop) — trivially assumable. When it
+        // is a *different* org's management role, the sweep holds no session
+        // for it, so the sweep cannot replicate the hop → falls through to
+        // Skip below (the `role_arn == management_role` guard selects only the
+        // this-run case here).
+        Ok(None) if role_arn == management_role => SweepDecision::TriviallyAssumable,
+        // Different org's chain, or a direct AssumeRoleWithWebIdentity into a
+        // role the sweep holds no session for — the sweep cannot replicate
+        // vending's hop. Skip without claiming anything.
+        Ok(_) => SweepDecision::Skip,
+        // No org covers the account, or it is ambiguous across orgs — vending
+        // itself fails here, so the profile is genuinely broken.
+        Err(_) => SweepDecision::Unresolved,
+    }
+}
+
 /// Health-check every Vouch-managed profile that discovery did not already
 /// touch this run: role-carrying profiles are probed through the management
-/// session (the same hop vending uses); Identity Center profiles are
-/// checked against the assignments the portal returned. Report-only —
-/// nothing is written or removed.
+/// session *only when that session is the same principal vending chains
+/// through* (decided by [`sweep_decision_for_role`], which mirrors
+/// [`crate::commands::credential::aws::resolve_management_role_for`]);
+/// otherwise they are skipped (different chain) or surfaced as unresolved.
+/// Identity Center profiles are checked against the assignments the portal
+/// returned. Report-only — nothing is written or removed.
 async fn validate_existing_profiles(
     ctx: &DiscoveryContext<'_>,
+    vouch_config: &Config,
     aws_config: &AwsConfig,
     assignments: &BTreeSet<(String, String)>,
     probed: &BTreeSet<String>,
@@ -1085,30 +1173,73 @@ async fn validate_existing_profiles(
                 if !seen.insert(role_arn.clone()) {
                     continue;
                 }
-                // A profile pinned to a different org's management role
-                // cannot be probed with this run's session.
-                if via.is_some_and(|via| via != ctx.management_role) {
-                    tracing::debug!(
-                        "sweep skipped {}: chained via a different management role",
-                        profile.name
-                    );
-                    continue;
+                // Decide whether to probe this profile through the
+                // discover run's management session — and only when that
+                // session is the same principal vending chains through.
+                // Probing with the wrong session (a different org's
+                // management role, or a direct AssumeRoleWithWebIdentity
+                // the sweep cannot replicate with a SigV4 session) is a
+                // different hop than vending performs and yields false
+                // `existing-trust-missing` reports (and, for unresolvable
+                // chains, false `existing-verified` reports).
+                match sweep_decision_for_role(
+                    vouch_config,
+                    &role_arn,
+                    via.as_deref(),
+                    ctx.management_role,
+                ) {
+                    SweepDecision::TriviallyAssumable => {
+                        // The session in hand IS this role — the discover run
+                        // assumed it via the same direct
+                        // AssumeRoleWithWebIdentity hop vending uses for a
+                        // target that is its own management role.
+                        checked = checked.saturating_add(1);
+                        tr_println!(
+                            "setup-aws-entitlements-existing-verified",
+                            profile = profile.name.as_str(),
+                            role_arn = role_arn.as_str()
+                        );
+                        continue;
+                    }
+                    SweepDecision::Probe => {
+                        // Vending chains through ctx.management_role, which
+                        // is the session the sweep holds — probe matches
+                        // vending's hop.
+                        checked = checked.saturating_add(1);
+                        targets.push(ProbeTarget {
+                            role_arn,
+                            profile_name: profile.name,
+                            disposition: Disposition::Existing,
+                        });
+                    }
+                    SweepDecision::Skip => {
+                        // Vending resolves the target through a different
+                        // hop than the sweep's session. The sweep has no
+                        // matching session; claim nothing and skip.
+                        tracing::debug!(
+                            "sweep skipped {}: vending resolves it through \
+                             a different hop than this run's management role",
+                            profile.name,
+                        );
+                        continue;
+                    }
+                    SweepDecision::Unresolved => {
+                        // Vending cannot resolve this target under the current
+                        // config either — the profile is genuinely broken.
+                        // Surface a distinct diagnostic; do not probe (the
+                        // wrong session would report a false trust-missing
+                        // with a useless remediation, or a false verified)
+                        // and do not silently drop it.
+                        checked = checked.saturating_add(1);
+                        issues = issues.saturating_add(1);
+                        tr_println!(
+                            "setup-aws-existing-unresolved",
+                            profile = profile.name.as_str(),
+                            role_arn = role_arn.as_str(),
+                        );
+                        continue;
+                    }
                 }
-                checked = checked.saturating_add(1);
-                if role_arn == ctx.management_role {
-                    // The session in hand is this role — trivially assumable.
-                    tr_println!(
-                        "setup-aws-entitlements-existing-verified",
-                        profile = profile.name.as_str(),
-                        role_arn = role_arn.as_str()
-                    );
-                    continue;
-                }
-                targets.push(ProbeTarget {
-                    role_arn,
-                    profile_name: profile.name,
-                    disposition: Disposition::Existing,
-                });
             }
             CredentialProcessLine::IdentityCenter {
                 application_arn,
@@ -1337,6 +1468,247 @@ mod tests {
         assert_eq!(
             sts_credential_process(vouch_path, mgmt, mgmt),
             format!("\"/usr/local/bin/vouch\" credential aws --role {mgmt}")
+        );
+    }
+
+    // -- sweep_decision_for_role ------------------------------------------------
+    //
+    // The existing-profile sweep's per-profile gate. It must mirror the hop
+    // `credential::aws::resolve_management_role_for` selects at vend time, so
+    // the sweep only probes when its discover-run session is the same principal
+    // vending chains through. Regression coverage for the bug where a
+    // `via == None` profile in a multi-org config resolves (via account
+    // disambiguation) to a *different* org's management role than the discover
+    // run's, so probing through the discover-run session is a different hop
+    // than vending performs.
+
+    /// Fixture matching the one in `credential::aws` tests: a `Config` with the
+    /// given management-role ARNs as organizations (no IdC).
+    fn make_sweep_config(management_roles: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        for mgmt in management_roles {
+            cfg.append_aws_org(AwsOrganization {
+                management_role: (*mgmt).to_string(),
+                identity_center: None,
+            });
+        }
+        cfg
+    }
+
+    /// Single org, `via == None`, target IS the management role -> direct
+    /// `AssumeRoleWithWebIdentity`, which is the hop the discover run used; the
+    /// session in hand already proves assumability. Must be TriviallyAssumable
+    /// (the resolver's `Ok(None)` for the same-ARN case), not Skip.
+    #[test]
+    fn sweep_trivially_assumable_single_org_target_is_management_role() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let cfg = make_sweep_config(&[mgmt]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt, None, mgmt),
+            SweepDecision::TriviallyAssumable,
+        );
+    }
+
+    /// Multi-org, `via == None`, target IS the discover run's management role
+    /// (account disambiguation picks the run's org -> direct assume). Still
+    /// TriviallyAssumable, not Skip.
+    #[test]
+    fn sweep_trivially_assumable_multi_org_target_is_run_management_role() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt_a, None, mgmt_a),
+            SweepDecision::TriviallyAssumable,
+        );
+    }
+
+    /// Multi-org, target IS the run's management role, but pinned `--via` a
+    /// *different* org's management role -> vending chains `AssumeRole(other ->
+    /// run-mgmt)`, a hop the sweep's session cannot represent. Must Skip — NOT
+    /// TriviallyAssumable (the `role_arn == management_role` trivially-assumable
+    /// branch is gated on vending going direct, i.e. `Ok(None)`). This pins the
+    /// regression guard: a naive "short-circuit when role_arn == mgmt before
+    /// resolving" would falsely report verified here.
+    #[test]
+    fn sweep_skips_when_target_is_run_mgmt_but_via_pinned_to_other_org() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt_a, Some(mgmt_b), mgmt_a),
+            SweepDecision::Skip,
+        );
+    }
+
+    /// Single org, `via == None`, target differs from the management role ->
+    /// standard cross-account chain `AssumeRole(mgmt -> target)`, the same hop
+    /// the sweep probes. Preserve the original probe behavior (true positive).
+    #[test]
+    fn sweep_probe_single_org_cross_account() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_sweep_config(&[mgmt]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, None, mgmt),
+            SweepDecision::Probe,
+        );
+    }
+
+    /// Single org, `via == Some(run_mgmt)`, target differs -> probe (matches
+    /// the original `via == Some(ctx.mgmt)` fall-through).
+    #[test]
+    fn sweep_probe_single_org_via_pinned_to_run_mgmt() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_sweep_config(&[mgmt]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, Some(mgmt), mgmt),
+            SweepDecision::Probe,
+        );
+    }
+
+    /// Multi-org, `via == None`, target is a member role in the discover run's
+    /// *own* account -> account disambiguation picks the run's org, chain
+    /// through run-mgmt. Probe (true positive preserved — same-account
+    /// cross-role is a true negative the fix must not mask).
+    #[test]
+    fn sweep_probe_multi_org_target_in_run_org_account() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        // Target in account 111 (the run's account) but a different role.
+        let target = "arn:aws:iam::111:role/Member";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, None, mgmt_a),
+            SweepDecision::Probe,
+        );
+    }
+
+    /// Multi-org, `via == Some(run_mgmt)`, target IS the run's management role
+    /// -> vending goes direct (`AssumeRoleWithWebIdentity`), the hop the
+    /// discover run used. TriviallyAssumable.
+    #[test]
+    fn sweep_trivially_assumable_multi_org_via_run_mgmt_target_is_run_mgmt() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt_a, Some(mgmt_a), mgmt_a),
+            SweepDecision::TriviallyAssumable,
+        );
+    }
+
+    /// BUG Class A (working profile misreported): multi-org, `via == None`,
+    /// target account matches a *different* org's management account (but
+    /// target != that org's management role). Vending chains through the other
+    /// org's management role, but the sweep holds the run's session. Before the
+    /// fix this probed through the wrong session and reported a false
+    /// `existing-trust-missing`. Must Skip.
+    #[test]
+    fn sweep_skip_multi_org_target_resolves_to_other_org_chain() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::999:role/MgmtB";
+        // Target in account 999 -> disambiguation picks org B; MgmtB != target
+        // -> chain through MgmtB, which is not the discover run's management
+        // role.
+        let target = "arn:aws:iam::999:role/ProdRole";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, None, mgmt_a),
+            SweepDecision::Skip,
+        );
+    }
+
+    /// Multi-org, `via == None`, target IS a *different* org's management role
+    /// -> vending assumes it directly via `AssumeRoleWithWebIdentity`, a hop
+    /// the sweep cannot replicate with a SigV4 session for the run's role. Must
+    /// Skip (was misreported before the fix).
+    #[test]
+    fn sweep_skip_multi_org_target_is_other_org_management_role() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::999:role/MgmtB";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt_b, None, mgmt_a),
+            SweepDecision::Skip,
+        );
+    }
+
+    /// Multi-org, `via == Some(other_mgmt)`, target != other_mgmt -> pinned to
+    /// a different org's chain. The original `via.is_some_and` skip handled
+    /// this; the fix must preserve it.
+    #[test]
+    fn sweep_skip_multi_org_via_pinned_to_other_org() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        let target = "arn:aws:iam::222:role/Member";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, Some(mgmt_b), mgmt_a),
+            SweepDecision::Skip,
+        );
+    }
+
+    /// Multi-org, `via == Some(other_mgmt)`, target IS other_mgmt -> vending
+    /// assumes that management role directly; the sweep cannot reach it. Skip
+    /// (preserves the original `via` skip for this sub-case too).
+    #[test]
+    fn sweep_skip_multi_org_via_pinned_to_other_org_target_is_that_mgmt() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, mgmt_b, Some(mgmt_b), mgmt_a),
+            SweepDecision::Skip,
+        );
+    }
+
+    /// BUG Class B (broken profile misreported): multi-org, `via == None`,
+    /// target account covered by NO configured org. Vending fails at
+    /// `resolve_management_role_for` (`aws-err-no-org-covers-account`); the
+    /// sweep must surface Unresolved, not probe (which would report a false
+    /// trust-missing for a target that does not trust the run's mgmt, or a
+    /// false verified for one that happens to).
+    #[test]
+    fn sweep_unresolved_multi_org_no_org_covers_account() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        // Account 888 is covered by neither org.
+        let target = "arn:aws:iam::888:role/OrphanRole";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, None, mgmt_a),
+            SweepDecision::Unresolved,
+        );
+    }
+
+    /// BUG Class B (ambiguous): multi-org, two orgs in the SAME account, target
+    /// in that account with `via == None` -> true ambiguity. Vending fails
+    /// (`aws-err-via-ambiguous`); the sweep must surface Unresolved.
+    #[test]
+    fn sweep_unresolved_multi_org_account_ambiguous() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::111:role/MgmtB";
+        let target = "arn:aws:iam::111:role/Target";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, None, mgmt_a),
+            SweepDecision::Unresolved,
+        );
+    }
+
+    /// `via == Some(unknown_mgmt)` (no org matches) is an unresolved
+    /// configuration error too — vending fails at `aws-err-via-not-found`. The
+    /// sweep surfaces it rather than probing with a session for the run's mgmt.
+    #[test]
+    fn sweep_unresolved_via_pinned_to_unknown_management_role() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_sweep_config(&[mgmt]);
+        assert_eq!(
+            sweep_decision_for_role(&cfg, target, Some("arn:aws:iam::999:role/Unknown"), mgmt),
+            SweepDecision::Unresolved,
         );
     }
 
