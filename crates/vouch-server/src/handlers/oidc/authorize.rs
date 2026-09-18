@@ -1274,17 +1274,13 @@ async fn handle_pending_auth(
             authenticator,
             auth_time: session_auth_time,
         }) => {
-            // Do NOT consume the single-use pending claim here. Spending it
-            // before the post-login validations in `complete_pending_auth`
-            // (client access, max_age, ACR/resource, PAR) meant a rejection
-            // burned the claim, so retrying the same resume link could only
-            // show "session expired" instead of re-rendering the denial. The
-            // claim is now spent as the last step before code issuance, after
-            // every validation has passed — the same check-before-spend
-            // principle the author applied to the PAR claim in this very
-            // function and the team applied to the session gate in #1173. The
-            // pre-read `pending` carries the data the completion path needs:
-            // consuming only sets `consumed_at`, which no validation reads.
+            // The single-use pending claim is spent inside
+            // `complete_pending_auth`, after the post-login validations
+            // (client access, max_age, ACR/resource, PAR), so a rejection
+            // leaves it unspent and a retry of the same resume link renders
+            // the same denial. The pre-read `pending` carries everything the
+            // completion path needs: consuming only sets `consumed_at`, which
+            // no validation reads.
             complete_pending_auth(
                 state,
                 &resolved,
@@ -1332,11 +1328,10 @@ async fn handle_pending_auth(
 /// issue the code.
 ///
 /// The pending claim is spent as the *last* action before code issuance so a
-/// rejection at any of the preceding gates does not burn it — a retry of the
-/// same resume link then re-renders the original denial instead of "session
-/// expired". This is the check-before-spend principle the team already
-/// applied to the session gate in #1173 and the author applied to the PAR
-/// claim in the comment above `validate_code_request_constraints`.
+/// rejection at any of the preceding gates does not burn it, and a retry of
+/// the same resume link renders the original denial instead of "session
+/// expired". The PAR claim above `validate_code_request_constraints` follows
+/// the same check-before-spend order.
 #[expect(
     clippy::too_many_arguments,
     reason = "linear pending-authorization completion: client, pending record, session facts, clock"
