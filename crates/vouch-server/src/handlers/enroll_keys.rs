@@ -120,9 +120,7 @@ pub(crate) async fn rename_key_form(
             // Name-shape failures are handled above with specific messages; the
             // remaining errors get a generic message that surfaces no internal
             // detail.
-            let message = Tr::new("keys-error-rename-failed")
-                .arg("max", ResourceLabel::MAX_CHARS.to_string())
-                .to_string();
+            let message = Tr::new("keys-error-rename-failed").to_string();
             let jar = crate::handlers::admin::flash::set_err_at(
                 jar,
                 &message,

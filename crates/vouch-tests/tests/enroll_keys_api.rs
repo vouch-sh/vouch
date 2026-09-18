@@ -51,6 +51,27 @@ async fn delete_key(harness: &TestHarness, token: &str, key_id: &str) -> HttpRes
     .await
 }
 
+/// Find a `Set-Cookie` header whose name matches `cookie_name`.
+fn find_set_cookie<'a>(resp: &'a HttpResponse, cookie_name: &str) -> Option<&'a str> {
+    let prefix = format!("{cookie_name}=");
+    resp.headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with(&prefix))
+}
+
+/// Decode the value of the named Set-Cookie (URL-decoded), or `None` if the
+/// cookie is absent. The flash cookie value is URL-encoded by the cookie
+/// crate, so assertions compare against the decoded text.
+fn flash_value(resp: &HttpResponse, cookie_name: &str) -> Option<String> {
+    let raw = find_set_cookie(resp, cookie_name)?;
+    // Everything after `name=` up to the first `;` (attributes) or end.
+    let value_part = raw.strip_prefix(&format!("{cookie_name}=")).unwrap_or(raw);
+    let value = value_part.split(';').next().unwrap_or(value_part);
+    Some(urlencoding::decode(value).map_or_else(|_| value.to_string(), |c| c.into_owned()))
+}
+
 #[tokio::test]
 async fn list_returns_user_keys() {
     let harness = TestHarness::new().await;
@@ -218,6 +239,68 @@ async fn rename_rejects_invalid_name_with_redirect() {
         key.get("name").and_then(Value::as_str),
         Some(too_long.as_str()),
         "invalid name must not be applied"
+    );
+}
+
+#[tokio::test]
+async fn rename_non_name_failure_flashes_generic_message() {
+    // Regression for the misleading rename-failed message: the handler's
+    // catch-all `Err` branch is only reachable after `ResourceLabel::parse`
+    // succeeds, so a service-layer failure with an already-valid name (here,
+    // renaming a key the caller does not own / that does not exist, which the
+    // service reports as `NotFound("Key")`) must flash a generic message —
+    // not the length-themed "choose a name between 1 and 100 characters"
+    // hint inherited from the pre-`ResourceLabel` catch-all.
+    let harness = TestHarness::new().await;
+    let (_user, _auth_id, token) = harness
+        .create_authenticated_user("keys-rename-non-name@example.com")
+        .await
+        .expect("create authed user");
+
+    // A valid name and a key_id this user does not own (a fresh, unused UUID).
+    // The service neither rejects the name (it parsed) nor finds the key.
+    let absent_key = uuid::Uuid::now_v7().to_string();
+    let resp = rename_key(&harness, &token, &absent_key, "name=valid-name").await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "non-name rename failure should redirect (PRG), got body: {}",
+        resp.body
+    );
+    assert_eq!(
+        resp.headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "/enroll/keys",
+        "non-name rename failure should redirect back to the keys page"
+    );
+
+    // The flash must carry the generic "try again" message and must NOT
+    // surface the name-length constraint, which is irrelevant to a failure
+    // caused by an absent/foreign key.
+    let flash = flash_value(&resp, "vouch_flash_err")
+        .expect("non-name rename failure must set an error flash");
+    assert!(
+        !flash.contains("characters")
+            && !flash.contains("1 and")
+            && !flash.contains("choose a name"),
+        "generic rename-failed flash must not blame the name length, got: {flash}"
+    );
+    assert!(
+        flash.contains("try again"),
+        "generic rename-failed flash should invite a retry, got: {flash}"
+    );
+
+    // The caller's own key (if any) must be untouched by the failed rename.
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let keys = body.get("keys").and_then(Value::as_array).expect("keys[]");
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.get("name").and_then(Value::as_str) == Some("valid-name")),
+        "a failed rename against an absent key must not rename any of the caller's keys, got {body}"
     );
 }
 
