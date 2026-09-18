@@ -313,8 +313,7 @@ keys-error-name-empty = Name cannot be empty
 keys-error-name-too-long = Name must be { $max } characters or less
 keys-error-last-key = Cannot delete your last key. Register another key first.
 keys-error-delete-conflict = Key deletion conflicted with a concurrent operation. Please try again.
-keys-error-rename-failed =
-    Could not rename key. Please choose a name between 1 and { $max } characters.
+keys-error-rename-failed = Could not rename the key. Please try again.
 enroll-error-session-invalid = Invalid or expired session
 enroll-error-session-lookup-failed = Failed to look up enrollment session
 enroll-error-registration-link-used = This registration link has already been used
