@@ -149,7 +149,10 @@ impl GitHubService<'_> {
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Store installation in database
+        // Store installation in database. A replayed install callback (or two
+        // concurrent connects) for the same `(org_id, installation_id)` collide
+        // on the deterministic document ID and surface as `Duplicate`, which we
+        // map to `InstallationAlreadyConnected` — race-safe, no duplicate row.
         db::create_github_installation(
             self.store,
             &db::CreateGitHubInstallationParams {
@@ -163,7 +166,12 @@ impl GitHubService<'_> {
             },
         )
         .await
-        .map_err(GitHubError::Database)?;
+        .map_err(|e| match e {
+            db::CreateGitHubInstallationError::Duplicate => {
+                GitHubError::InstallationAlreadyConnected
+            }
+            db::CreateGitHubInstallationError::Other(err) => GitHubError::Database(err),
+        })?;
 
         self.store_installation_repositories(
             app,
@@ -247,7 +255,11 @@ impl GitHubService<'_> {
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Store installation in database
+        // Store installation in database. The already-linked guard above is a
+        // fast path; a concurrent reconnect that passes the guard and our own
+        // insert collide on the deterministic document ID and surface as
+        // `Duplicate`, which we map to `InstallationAlreadyConnected` — closing
+        // the guard's TOCTOU window race-free.
         db::create_github_installation(
             self.store,
             &db::CreateGitHubInstallationParams {
@@ -261,7 +273,12 @@ impl GitHubService<'_> {
             },
         )
         .await
-        .map_err(GitHubError::Database)?;
+        .map_err(|e| match e {
+            db::CreateGitHubInstallationError::Duplicate => {
+                GitHubError::InstallationAlreadyConnected
+            }
+            db::CreateGitHubInstallationError::Other(err) => GitHubError::Database(err),
+        })?;
 
         self.store_installation_repositories(
             app,
