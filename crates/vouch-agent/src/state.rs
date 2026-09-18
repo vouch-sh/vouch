@@ -372,13 +372,21 @@ impl AgentState {
     ///
     /// Rejects keys longer than 256 bytes and caps the cache at 128 entries,
     /// evicting the oldest expired entry (or the oldest entry) when full.
-    pub async fn cache_credential(&self, credential_type: String, credential: CachedCredential) {
+    ///
+    /// Returns `true` when the entry was stored. Returns `false` when
+    /// `credential_type` exceeds the 256-byte key limit; in that case nothing is
+    /// cached, so the caller must not log or audit a cache hit.
+    pub async fn cache_credential(
+        &self,
+        credential_type: String,
+        credential: CachedCredential,
+    ) -> bool {
         if credential_type.len() > MAX_CREDENTIAL_TYPE_LEN {
             warn!(
                 "Rejecting credential cache key: length {} exceeds maximum {MAX_CREDENTIAL_TYPE_LEN}",
                 credential_type.len()
             );
-            return;
+            return false;
         }
 
         let mut guard = self.inner.write().await;
@@ -406,6 +414,7 @@ impl AgentState {
         }
 
         guard.credential_cache.insert(credential_type, credential);
+        true
     }
 
     /// Get a cached credential if it is still valid.
@@ -909,5 +918,35 @@ mod tests {
         state.clear_session().await;
         assert!(state.get_session().await.is_none());
         assert!(state.get_cached_credential("aws:role").await.is_none());
+    }
+
+    /// Oversized cache keys are rejected at the state layer: `cache_credential`
+    /// returns `false` and stores nothing, while a key at exactly the limit is
+    /// accepted. This is the state-layer half of the fix for the IPC handler
+    /// that previously reported success and audited a cache hit on rejection.
+    #[tokio::test]
+    async fn test_cache_credential_rejects_oversized_key() {
+        let state = AgentState::new();
+
+        // A key at exactly the maximum length is accepted.
+        let at_limit = "a".repeat(MAX_CREDENTIAL_TYPE_LEN);
+        let cred = CachedCredential::new(serde_json::json!({"k": "v"}), future_timestamp(3600));
+        assert!(
+            state.cache_credential(at_limit.clone(), cred).await,
+            "key at the limit should be stored"
+        );
+        assert!(state.get_cached_credential(&at_limit).await.is_some());
+
+        // One byte over the limit is rejected and must not be cached.
+        let over_limit = "b".repeat(MAX_CREDENTIAL_TYPE_LEN + 1);
+        let cred = CachedCredential::new(serde_json::json!({"k": "v2"}), future_timestamp(3600));
+        assert!(
+            !state.cache_credential(over_limit.clone(), cred).await,
+            "oversized key should be rejected"
+        );
+        assert!(
+            state.get_cached_credential(&over_limit).await.is_none(),
+            "rejected key must not be cached"
+        );
     }
 }
