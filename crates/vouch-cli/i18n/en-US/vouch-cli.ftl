@@ -1175,6 +1175,19 @@ setup-aws-entitlements-trust-remediation =
 setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
 setup-aws-sweep-assignment-stale = Profile [{ $profile }] — its Identity Center assignment ({ $account } / { $permission_set }) no longer exists. The profile was kept; remove it manually if unwanted.
 setup-aws-sweep-summary = Checked { $checked } existing profiles; { $issues } not currently usable.
+# The existing-profile sweep found a `--role` (optionally `--via`) profile whose
+# target account no single configured organization covers, or which is
+# ambiguous across organizations. Credential vending itself fails at
+# `resolve_management_role_for` for the same reason, so this is a genuinely
+# broken profile — NOT a trust-policy defect. Distinct from
+# `setup-aws-entitlements-existing-trust-missing`: the remediation here is to
+# cover the account (pin the profile with `--via`, or add an organization),
+# never to widen the target role's trust policy.
+setup-aws-existing-unresolved =
+    Profile [{ $profile }] → { $role_arn } is not reachable under the current organization configuration: no single management role covers its account, or it is ambiguous across organizations.
+    Credential vending for this profile will fail until the configuration covers the account.
+    Re-create the profile with an explicit chain ('{ -cmd } setup aws --role { $role_arn } --via <management-role-arn>'), or add an organization whose management role covers the account.
+    The profile was kept; remove it manually if unwanted.
 setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
 # Numeric arms ride as FluentValue::Number so locales can plural-form the
 # noun (e.g. "0 profil/1 profil/2 profile" rules).

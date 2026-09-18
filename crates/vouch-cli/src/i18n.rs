@@ -407,4 +407,47 @@ mod tests {
             );
         }
     }
+
+    /// The existing-profile sweep's "unresolved" diagnostic must name the
+    /// profile and role, recommend the `--via` fix (not a trust-policy
+    /// widening), and keep placeables substituted.
+    ///
+    /// The compile-time `i18n_embed_fl::fl!` check inside `tr_println!` (used
+    /// at the call site in `validate_existing_profiles`) guarantees the key
+    /// exists and that `profile`/`role_arn` are supplied. What it cannot see
+    /// is the message body: a future edit could drop the `--via` hint, merge
+    /// the diagnostic into the trust-remediation wording, or leave a stray
+    /// `$profile`/`$role_arn` literal. That is what this test covers.
+    #[test]
+    fn setup_aws_existing_unresolved_diagnostic_rendering() {
+        let profile = "prod-role";
+        let role_arn = "arn:aws:iam::888888888888:role/OrphanRole";
+        let message = crate::tr_args!(
+            "setup-aws-existing-unresolved",
+            profile = profile.to_string(),
+            role_arn = role_arn.to_string(),
+        );
+        assert!(
+            message.contains(profile),
+            "must name the profile, got {message:?}"
+        );
+        assert!(
+            message.contains(role_arn),
+            "must name the role ARN, got {message:?}"
+        );
+        assert!(
+            message.contains("--via"),
+            "must recommend the --via fix (not a trust-policy widening), got {message:?}"
+        );
+        // Distinct from the trust-missing remediation: it should not direct the
+        // operator to edit a trust-policy Statement array.
+        assert!(
+            !message.contains("trust-policy Statement array"),
+            "unresolved must not offer trust-policy remediation, got {message:?}"
+        );
+        assert!(
+            !message.contains("$profile") && !message.contains("$role_arn"),
+            "placeables must be substituted, got {message:?}"
+        );
+    }
 }
