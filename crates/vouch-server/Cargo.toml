@@ -64,7 +64,7 @@ opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["alloc", "ecdsa", "jwk", "pkcs8", "pem"] }
 psl = { workspace = true, features = ["helpers"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
-roxmltree = { workspace = true }
+roxmltree = { workspace = true, features = ["positions"] }
 rust-embed = { workspace = true, features = ["axum-ex", "compression", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
