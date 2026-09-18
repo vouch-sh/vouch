@@ -1599,11 +1599,10 @@ mod tests {
         );
     }
 
-    /// BUG Class A (working profile misreported): multi-org, `via == None`,
-    /// target account matches a *different* org's management account (but
-    /// target != that org's management role). Vending chains through the other
-    /// org's management role, but the sweep holds the run's session. Before the
-    /// fix this probed through the wrong session and reported a false
+    /// Multi-org, `via == None`, target account matches a *different* org's
+    /// management account (but target != that org's management role). Vending
+    /// chains through the other org's management role, which the sweep does
+    /// not hold, so probing through the run's session would report a false
     /// `existing-trust-missing`. Must Skip.
     #[test]
     fn sweep_skip_multi_org_target_resolves_to_other_org_chain() {
@@ -1664,8 +1663,7 @@ mod tests {
         );
     }
 
-    /// BUG Class B (broken profile misreported): multi-org, `via == None`,
-    /// target account covered by NO configured org. Vending fails at
+    /// Multi-org, `via == None`, target account covered by NO configured org. Vending fails at
     /// `resolve_management_role_for` (`aws-err-no-org-covers-account`); the
     /// sweep must surface Unresolved, not probe (which would report a false
     /// trust-missing for a target that does not trust the run's mgmt, or a
@@ -1683,8 +1681,8 @@ mod tests {
         );
     }
 
-    /// BUG Class B (ambiguous): multi-org, two orgs in the SAME account, target
-    /// in that account with `via == None` -> true ambiguity. Vending fails
+    /// Multi-org, two orgs in the SAME account, target in that account with
+    /// `via == None` -> true ambiguity. Vending fails
     /// (`aws-err-via-ambiguous`); the sweep must surface Unresolved.
     #[test]
     fn sweep_unresolved_multi_org_account_ambiguous() {
