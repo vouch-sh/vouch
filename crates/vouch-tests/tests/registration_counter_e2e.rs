@@ -110,10 +110,26 @@ async fn register_mock_device_in_db_with_counter(
     .expect("Failed to create authenticator for mock device")
 }
 
-/// Get a challenge + state JWT from `/oauth/fido2/challenge`.
-async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
+/// Get a challenge + state JWT from `/oauth/fido2/challenge`, authenticating
+/// as `client` via `private_key_jwt` so the returned state is bound to the
+/// client that will redeem it.
+async fn get_challenge(
+    harness: &TestHarness,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+) -> (Vec<u8>, String) {
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
     let response = harness
-        .post_form("/oauth/fido2/challenge", "")
+        .post_form("/oauth/fido2/challenge", &body)
         .await
         .expect("Failed to get challenge");
     assert_eq!(response.status, 200, "Challenge endpoint must return 200");
@@ -237,7 +253,7 @@ async fn test_nonzero_stored_registration_counter_rejects_clone_assertion() {
     .await;
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(
         &harness, &device, &challenge, &state, &user.id, &client, &pkcs8,
@@ -309,7 +325,7 @@ async fn test_zero_stored_registration_counter_accepts_first_assertion() {
     let _auth_id = register_mock_device_in_db_with_counter(&harness, &user.id, &device, 0).await;
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(
         &harness, &device, &challenge, &state, &user.id, &client, &pkcs8,
@@ -410,7 +426,7 @@ async fn test_high_bit_stored_registration_counter_rejects_clone_assertion() {
     );
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(
         &harness, &device, &challenge, &state, &user.id, &client, &pkcs8,

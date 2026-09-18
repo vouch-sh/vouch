@@ -352,9 +352,23 @@ async fn register_mock_device_in_db(
     .expect("Failed to create authenticator for mock device")
 }
 
-async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
+async fn get_challenge(
+    harness: &TestHarness,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+) -> (Vec<u8>, String) {
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
     let response = harness
-        .post_form("/oauth/fido2/challenge", "")
+        .post_form("/oauth/fido2/challenge", &body)
         .await
         .expect("Failed to get challenge");
     assert_eq!(response.status, 200);
@@ -377,7 +391,7 @@ async fn fido2_grant(
     client: &vouch_server::test_utils::TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
-    let (challenge, state_jwt) = get_challenge(harness).await;
+    let (challenge, state_jwt) = get_challenge(harness, client, pkcs8).await;
     let auth_result = device
         .authenticate("test.example.com", &challenge)
         .expect("Mock device authentication failed");

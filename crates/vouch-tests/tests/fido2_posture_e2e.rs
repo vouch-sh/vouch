@@ -100,10 +100,26 @@ async fn register_mock_device_in_db(
     .expect("Failed to create authenticator for mock device")
 }
 
-/// Get a challenge + state JWT from the challenge endpoint.
-async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
+/// Get a challenge + state JWT from `/oauth/fido2/challenge`, authenticating
+/// as `client` via `private_key_jwt` so the returned state is bound to the
+/// client that will redeem it.
+async fn get_challenge(
+    harness: &TestHarness,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+) -> (Vec<u8>, String) {
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
     let response = harness
-        .post_form("/oauth/fido2/challenge", "")
+        .post_form("/oauth/fido2/challenge", &body)
         .await
         .expect("Failed to get challenge");
     assert_eq!(response.status, 200, "Challenge endpoint must return 200");
@@ -254,7 +270,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
 
     // Get a challenge
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Build Windows 11 24H2 posture (4-component os_version + os_build)
     let posture_json = serde_json::json!([{
@@ -315,7 +331,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 11 23H2 (build 22631) — below the 26100 threshold
     let posture_json = serde_json::json!([{
@@ -376,7 +392,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // macOS 15.3.1 posture — os_build is absent on macOS (not collected)
     let posture_json = serde_json::json!([{
@@ -436,7 +452,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // No authorization_details — posture data is required
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
@@ -475,7 +491,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
         harness: &harness,
@@ -553,7 +569,7 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Bracket the exchange with integer-second wall-clock captures.
     // `iat` is stamped from the request's ArrivalTime (captured at middleware
@@ -638,7 +654,7 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
         harness: &harness,
@@ -691,7 +707,7 @@ async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
         harness: &harness,
@@ -744,7 +760,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     .await
     .expect("Failed to activate OsRecency");
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 23H2 fails the os_recency floor (build < 26100).
     let posture_json = serde_json::json!([{
@@ -867,7 +883,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     .expect("Failed to activate custom policy");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the custom policy.
     let posture_json = serde_json::json!([{
@@ -964,7 +980,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     .expect("Failed to activate disk_encryption");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the preconfigured policy.
     let posture_json = serde_json::json!([{

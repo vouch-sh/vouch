@@ -158,6 +158,20 @@ fn reject_oauth_params(description: String) -> axum::response::Response {
 /// request the same way it reads every other failure.
 pub(crate) struct OAuthForm<T>(pub T);
 
+/// RFC 6749 §4.1.3: request parameters are sent "in the HTTP request
+/// entity-body using the application/x-www-form-urlencoded format". The
+/// media type may carry parameters (`; charset=utf-8`), so only the type
+/// itself is compared.
+fn is_form_urlencoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let media_type = v.split(';').next().unwrap_or(v).trim();
+            media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+}
+
 impl<T, S> FromRequest<S> for OAuthForm<T>
 where
     T: serde::de::DeserializeOwned,
@@ -166,19 +180,8 @@ where
     type Rejection = axum::response::Response;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        // RFC 6749 §4.1.3: request parameters are sent "in the HTTP request
-        // entity-body using the application/x-www-form-urlencoded format".
         // Any other media type is unsupported rather than malformed.
-        let is_form = req
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                // The media type may carry parameters (`; charset=utf-8`).
-                let media_type = v.split(';').next().unwrap_or(v).trim();
-                media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-            });
-        if !is_form {
+        if !is_form_urlencoded(req.headers()) {
             return Err((
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 axum::Json(crate::error::OAuthErrorResponse {
@@ -192,6 +195,41 @@ where
                 }),
             )
                 .into_response());
+        }
+
+        let body = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| reject_oauth_params(e.body_text()))?;
+
+        deserialize_present_params(&body)
+            .map(Self)
+            .map_err(reject_oauth_params)
+    }
+}
+
+/// Form-body extractor for `POST /oauth/fido2/challenge` during its staged
+/// client-authentication rollout (see `handlers::oidc::fido2_challenge`).
+///
+/// Unlike [`OAuthForm`], a request whose body is not
+/// `application/x-www-form-urlencoded` — including the JSON `{}` body sent
+/// by CLI versions built before this endpoint accepted client
+/// authentication — is treated as carrying no parameters (`T::default()`)
+/// rather than rejected as an unsupported media type. A form-encoded body is
+/// still parsed and validated exactly as [`OAuthForm`] does. Only the FIDO2
+/// challenge endpoint uses this relaxed extractor; every other OAuth
+/// endpoint keeps `OAuthForm`'s strict media-type check.
+pub(crate) struct OAuthFormOrLegacyEmpty<T>(pub T);
+
+impl<T, S> FromRequest<S> for OAuthFormOrLegacyEmpty<T>
+where
+    T: serde::de::DeserializeOwned + Default,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !is_form_urlencoded(req.headers()) {
+            return Ok(Self(T::default()));
         }
 
         let body = axum::body::Bytes::from_request(req, state)
