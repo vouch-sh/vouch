@@ -2745,6 +2745,107 @@ async fn test_rfc9126_par_rejects_dpop_jkt_jar_claim_mismatch() {
     );
 }
 
+// RFC 9449 Section 10: `dpop_jkt` is a free-form string persisted verbatim into
+// the PAR record, so it is bounded like every other free-form authorization
+// request parameter. With no `DPoP` header the proof cross-check is skipped,
+// isolating the length cap; an oversized form value must be rejected as
+// `invalid_request` before any PAR document is written.
+#[tokio::test]
+async fn test_rfc9126_par_rejects_oversized_dpop_jkt_form_param() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-oversized-dpop-jkt@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &dpop_jkt={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+        "a".repeat(257),
+    );
+
+    // No `DPoP` header: cross-check is skipped, only the length cap fires.
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized dpop_jkt form param must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt exceeds maximum length of 256"
+    );
+}
+
+// RFC 9449 Section 10 / RFC 9101: an oversized `dpop_jkt` carried as a JAR
+// Request Object claim must be rejected when `validate_authorize_request` runs
+// on the rebuilt params. Mirrors `test_rfc9126_par_rejects_nonce_over_max_length_in_request_object`.
+#[tokio::test]
+async fn test_rfc9126_par_rejects_oversized_dpop_jkt_in_request_object() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-oversized-dpop-jkt-jar@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let oversized_dpop_jkt = "a".repeat(257);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            claims["dpop_jkt"] = serde_json::Value::String(oversized_dpop_jkt.clone());
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized dpop_jkt in Request Object must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt exceeds maximum length of 256"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
     // RFC 9449 §8: The token endpoint (and PAR, which shares DPoP enforcement)
