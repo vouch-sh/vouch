@@ -280,6 +280,98 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
     })
 }
 
+/// Throwaway RSA-2048 private key in PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`), the
+/// format GitHub provides for App private keys. Used only to stand up a
+/// `GitHubApp` in tests; the key never signs anything a real GitHub API sees
+/// (outbound installation-token calls are intercepted by an in-process TLS
+/// mock that ignores the `Authorization` header).
+pub const TEST_GITHUB_APP_PRIVATE_KEY_PEM: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAq+Yjk+Vhue6aIzehO/jfoxzc9shrMLZ0T2+Xx5ohsMZJYULo
+DRHUpgWuLaQeXL9pF3vmwG3yZkHAN1bFs7uWpwNcvzIO6Oz7Yym6dRb3cmBCiC5N
+PIPR0nwgH/ZcmPx0KpDmhNeqx2iWl035J0rGQpAK9CfeM4GdzXporoBct9AJxoFH
+34tZ4Ja6R2cLPxH6c/IAp82fMl9k6ji01p5DBwoY6DW0vZk+3q/t0muJHutmXCNO
+rZrH+u+h8lz4ridD3+tuvsjOOmMUX107AKl5zXfFaP5dAsrTqZ2qne09CNrMP0M9
+F/36VkJurwxR0y15umwikM6xnf02xFOCa+6PawIDAQABAoIBAFSmBTIQvFGTmiqq
+e8btFK+diIAsDIDV8Cun372mfF2xHzR6fovlEmrZFD8ceOkiRu2OEYEEA2Bwk2eM
+3tlVkGfZA4SRcX8pJ9falhuPvjWACnNGHbmljh8RCb7DkjCx7MCDT0jubQY6TiHe
+/0jmjP/9L6+wrD5/3wXu9/qqcj3/LxNxXfNI+0JaY0GKo24vZHGYj5mCBUvQHC+4
+rElwlFygaZfnnSchPSCWssFdgMDblkbGpkylje2wSvxvoTTAfkrTsNsr7wZYnKuK
+6Pza3/78OP0w5gS93YDOWNG1WTrxsxR2bMH6MZHH3h/w/EPCFXdztYumcafyYFBC
+SgZjeSUCgYEA8Wy1K8iH+nbVJIy1qTyd/a3t+MvsT1vBYkOxkLXSU2O7zFp68NtX
+FGkrxtEw+r4XEee3UBrLNQF2vmqrNxrYNEncRp5hLUHqnDmHQvC/OlyutPL2FSgN
++rR7/QTMF9MSGsZYtuNAaOVW3maX7ioj1vRY2+zUDQxtUS2FyIW0c60CgYEAtkbk
+COuAEQaknV1kayEcA/fkF9WVs4jiSPL/cdFQhUgt/g0000ZZ2aD1rMXufrNrXNkw
+OAafLn4Cgu5KsE6zEaNcr+M5NeNikljyqxl0c72FrqumDzYwF5c/i/jZWWc+S6yF
+R9eEy5MCp90eqmdn3x6bpIi7L03WqwfZIHbpMncCgYEA58bbsCsXEMhhHHPSO6Ws
+cE049/Ce8BlA8VvX7vv/7nsDYs9C1FVfpoLJulg/U5qHf3McNFVk3YCIRYsW0RJ+
+msSGK24GEXMFD/LS/tsuW5N7TtEqm2kW8qevmVuvrPfAm9/sb7iAr7Pt0Bpipg3i
+1o1DefBGLDjQAm1X0Qk8EwkCgYAAjmbTwCQ76RFHialsykUTngYMLJKwYZKPNm6h
+IkpknbvGMrQekPBlQaB+TnxT1qhVODR1d0+1DJ1lWOTRdOwG+cCmqMLb7z21xJ+4
+9fLtB38I8W0oTroG2GdRPgkrxKzj/jrJ5VZ6aJBxgrM9QeOHQsimz+QCWPJ2wyde
+ef5sMQKBgQDgdb3fIhYhwL4pqD16vDxWrEmKW4UTufkTSHeuXaQvELlMaE01Xcvn
+4E6YbvnQ536ej8Y75DAxPheNxwSORCpg9ZnFZF3HifT5G5h45OvPkZNrR0KVCB0u
+eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
+-----END RSA PRIVATE KEY-----"#;
+
+/// Create a test AppState with a `GitHubApp` loaded from
+/// [`TEST_GITHUB_APP_PRIVATE_KEY_PEM`] and the given outbound HTTP client.
+///
+/// The `http_client` is used both for `AppState.http_client` and for the
+/// `GitHubApp`'s own client, matching production wiring. Tests that exercise
+/// `get_github_token` pass a client whose `api.github.com` resolution is
+/// redirected to an in-process TLS mock so no real egress occurs.
+pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc<AppState> {
+    use crate::services::integrations::github::GitHubApp;
+    use secrecy::SecretString;
+
+    let pool = test_db().await;
+    let mut config = test_config();
+    config.github_app_id = Some(1);
+    config.github_app_key = Some(SecretString::from(
+        TEST_GITHUB_APP_PRIVATE_KEY_PEM.to_string(),
+    ));
+
+    let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
+    let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
+        .expect("Failed to create WebauthnBuilder")
+        .rp_name(&config.rp_name)
+        .build()
+        .expect("Failed to build Webauthn");
+
+    let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
+
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
+
+    register_test_httpsig_client(&store, &config.base_url).await;
+
+    let github_app = GitHubApp::load(&config, http_client.clone())
+        .expect("load GitHub App")
+        .expect("GitHubApp::load returns Some when app_id + key are set");
+
+    Arc::new(AppState {
+        db: pool,
+        store,
+        audit,
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        webauthn,
+        ssh_ca: None,
+        oidc_key,
+        oidc_rsa_key: None,
+        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
+        github_app: Some(Arc::new(github_app)),
+        http_client,
+        session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
+        policy: Default::default(),
+        idps: Vec::new(),
+    })
+}
+
 /// Create a test AppState whose document store **encrypts at rest** (HPKE).
 ///
 /// `is_encrypted()` is `true`, so per-org issuer signing keys are created and
