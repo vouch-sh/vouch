@@ -1388,6 +1388,62 @@ async fn test_update_application_rejects_deactivated_user() {
     assert_eq!(error["message"], "User account is deactivated");
 }
 
+/// Regression for the gate-ordering outlier: a deactivated user holding a
+/// live session who PATCHes an app they do **not** own must get
+/// `401 "User account is deactivated"`, matching `delete_application_api` and
+/// the other state-changing handlers that gate first via
+/// `load_active_owned_client`. Before the fix the ownership check ran before
+/// the active-user gate and returned `404 "Application not found"`, making
+/// `update_application_api` the sole gate-after-ownership outlier among the
+/// write handlers — observable divergence: `PATCH` non-owned → 404 while
+/// `DELETE` on the same app → 401.
+#[tokio::test]
+async fn test_update_non_owned_application_rejects_deactivated_user() {
+    let (app, state) = test_app().await;
+
+    // A second, active user owns the target application.
+    let owner = create_test_user(&state.store, "non-owner-active@example.com").await;
+    let owners_client = create_test_oauth_client(&state.store, &owner.id).await;
+    let original = crate::db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
+        .await
+        .expect("db read")
+        .expect("owner's application exists");
+
+    // A separate user holds a live session, then is deactivated while the
+    // session row stays intact — the deactivated-with-live-session state
+    // from the bug report (the cross-replica `SessionCache` window).
+    let (_deactivated_users_own_app, token) =
+        setup_deactivated_owner_with_app(&state, "deactivated-non-owner@example.com").await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", owners_client.app_id),
+        Some(r#"{"name": "Hostile Takeover"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &bearer(&token)),
+        ],
+    )
+    .await;
+
+    // The active-user gate must reject the deactivated account (401) BEFORE
+    // the ownership check discloses that the app exists or belongs to someone
+    // else (404).
+    assert_deactivated_rejection(status, &body);
+
+    // The target application must survive the rejected update unchanged.
+    let survivor = crate::db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
+        .await
+        .expect("db read")
+        .expect("application must still exist");
+    assert_eq!(survivor.name, original.name, "name must not change");
+    assert_eq!(
+        survivor.user_id, original.user_id,
+        "ownership must not change"
+    );
+}
+
 // ========================================================================
 // DELETE /api/v1/applications/:id — Delete Application
 // ========================================================================

@@ -53,15 +53,33 @@ pub(crate) async fn list_applications_api(
 /// Load the requesting user and enforce account-status and access-scope rules.
 ///
 /// The account must be active, and organization scope requires organization
-/// membership. Shared by the create and update handlers.
+/// membership. Used by the create handler, which has no ownership check and
+/// therefore gates in a single step.
 async fn load_active_user_for_scope(
     state: &AppState,
     user_id: &str,
     wants_org_scope: bool,
 ) -> Result<db::User, ServiceError> {
     let user = crate::handlers::session::load_active_user(state, user_id).await?;
+    validate_org_scope_membership(&user, wants_org_scope)?;
+    Ok(user)
+}
 
-    // Validate: Organization scope requires user to have an org
+/// Reject an organization-scope request when the user is not an organization
+/// member.
+///
+/// Extracted from [`load_active_user_for_scope`] as the half the update
+/// handler must keep *after* its ownership check: the active-user gate (the
+/// rejection inside [`load_active_user`]) moves before ownership in
+/// `update_application_api` to match `load_active_owned_client`, but this
+/// validation stays after it so an active non-org user PATCHing a non-owned
+/// app still hits the ownership `404` rather than the org-scope `400`.
+///
+/// [`load_active_user`]: crate::handlers::session::load_active_user
+fn validate_org_scope_membership(
+    user: &db::User,
+    wants_org_scope: bool,
+) -> Result<(), ServiceError> {
     if wants_org_scope && user.org_id.is_none() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -69,8 +87,7 @@ async fn load_active_user_for_scope(
             "Organization scope requires organization membership",
         ));
     }
-
-    Ok(user)
+    Ok(())
 }
 
 /// Load the requesting user and the application, enforcing the account-active
@@ -303,6 +320,19 @@ pub(crate) async fn update_application_api(
     // extraction fails before touching the store when no credential is sent.
     let AuthenticatedToken(token) = token?;
 
+    // Active-user gate first — match `load_active_owned_client` and every
+    // other state-changing application handler: a deactivated account holding
+    // a live session is rejected (401) before we disclose whether the
+    // application exists or is owned by the caller (404). The org-scope half
+    // of the previous `load_active_user_for_scope` call stays *after* the
+    // ownership check below, so an active non-org user PATCHing a non-owned
+    // app still hits the ownership 404 rather than the org-scope 400 — only
+    // deactivated-user behavior changes (404 → 401 on non-owned/non-existent
+    // apps).
+    let access_scope = validated.access_scope;
+    let wants_org_scope = access_scope == Some(AccessScope::Organization);
+    let user = crate::handlers::session::load_active_user(&state, &token.sub).await?;
+
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -327,14 +357,9 @@ pub(crate) async fn update_application_api(
         ));
     }
 
-    let access_scope = validated.access_scope;
-
-    let user = load_active_user_for_scope(
-        &state,
-        &token.sub,
-        access_scope == Some(AccessScope::Organization),
-    )
-    .await?;
+    // Org-scope validation stays after the ownership check, preserving the
+    // existing behavior for active non-org users.
+    validate_org_scope_membership(&user, wants_org_scope)?;
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == Some(AccessScope::Organization) {
