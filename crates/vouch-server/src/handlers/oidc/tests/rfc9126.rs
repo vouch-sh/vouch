@@ -3947,3 +3947,162 @@ async fn test_pending_auth_gate_rejection_renders_in_stored_mode() {
 
     assert_rejection_is_form_post(&response, "pending-formpost-state");
 }
+
+// ========================================================================
+// Check-before-spend for the pending claim on the PAR consume rejection site
+//
+// `complete_pending_auth` consumes the PAR via `ParConsumptionProof::consume`
+// after `validate_code_request_constraints`. If the PAR is already consumed
+// (e.g. a concurrent resume won the PAR race), the resume rejects with
+// `error=invalid_request`. Before the pending-claim fix, `handle_pending_auth`
+// had already burned the single-use pending id *before* `complete_pending_auth`
+// ran, so a retry of the same resume link rendered the "Authorization session
+// expired" page rather than re-rendering the PAR denial. The pending consume
+// now runs as the last step before code issuance, so the PAR-loser denial
+// leaves the pending claim intact and a retry re-renders the same
+// `error=invalid_request` denial.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9126_pending_resume_retry_re_renders_par_already_consumed_not_session_expired() {
+    // Push a PAR, start authorize with no session → pending stored + /login.
+    // Consume the PAR out-of-band (simulating a concurrent resume that won the
+    // PAR race and issued a code). Resume the pending → the PAR consume in
+    // complete_pending_auth hits AlreadyConsumed → error=invalid_request.
+    // Retry the SAME resume link → the pending claim is still unspent (the
+    // PAR denial did not burn it), so the retry re-renders the same
+    // error=invalid_request denial rather than the "session expired" page.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-retry-race@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let request_uri = create_par_request(&app, &client).await;
+
+    // No session → pending stored (carrying the par_request_uri) + /login.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "unauthenticated PAR authorize must redirect to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "PAR authorize must redirect to /login?pending_auth=: {location}"
+    );
+    let pending_id = location
+        .strip_prefix("/login?pending_auth=")
+        .and_then(|id| urlencoding::decode(id).ok())
+        .map(|s| s.into_owned())
+        .expect("redirect must carry a pending_auth id");
+
+    // Simulate a concurrent resume winning the PAR race: consume the PAR
+    // out-of-band so this resume's PAR consume in complete_pending_auth
+    // returns AlreadyConsumed.
+    let _proof = crate::db::ParConsumptionProof::consume(
+        &state.store,
+        crate::db::ParRef {
+            request_uri: &request_uri,
+            client_id: &client.client_id,
+            mode: crate::db::ParConsumptionMode::SkipExpiry,
+        },
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("out-of-band PAR consume should succeed");
+
+    // Simulate login: create a session.
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    // First resume → PAR already consumed → error=invalid_request redirect.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "first resume must redirect with the authorization error, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+    let first_location = completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        first_location.contains("error=invalid_request"),
+        "first resume must reject an already-consumed PAR with error=invalid_request: {first_location}"
+    );
+    assert!(
+        !first_location.contains("code="),
+        "first resume must NOT issue a code: {first_location}"
+    );
+
+    // Retry the SAME resume link. The pending claim is still unspent (the PAR
+    // denial did not burn it), so the retry re-renders the same
+    // error=invalid_request denial — NOT the "Authorization session expired"
+    // page that a burned id would render (200 OK, no Location redirect).
+    let retry = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        retry.status == StatusCode::FOUND || retry.status == StatusCode::SEE_OTHER,
+        "retry must redirect with the authorization error (not render the session-expired \
+         page), got: {} body: {}",
+        retry.status,
+        retry.body
+    );
+    let retry_location = retry
+        .headers
+        .get("Location")
+        .expect("retry must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        retry_location.contains("error=invalid_request"),
+        "retry must re-render the same PAR already-consumed denial, got: {retry_location}"
+    );
+    assert!(
+        !retry_location.contains("code="),
+        "retry must NOT issue a code: {retry_location}"
+    );
+}

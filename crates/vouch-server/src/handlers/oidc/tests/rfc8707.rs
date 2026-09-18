@@ -688,3 +688,285 @@ async fn test_rfc8707_pending_path_rejects_unsupported_acr_reauth() {
         "pending resume must NOT issue a code for an unsupported ACR: {code_location}"
     );
 }
+
+// ========================================================================
+// Check-before-spend for the pending claim — retry of a denied resume link
+//
+// `complete_pending_auth` runs four post-login rejections (client access,
+// max_age, ACR/resource, PAR) that previously fired AFTER
+// `handle_pending_auth` had already spent the single-use pending id. A retry
+// of the same resume link then rendered "Authorization session expired"
+// instead of re-rendering the original denial. The pending consume now runs
+// as the last step before code issuance, so a denial leaves the id unspent
+// and a retry re-renders the same denial. Two of the four burn sites live
+// here (RFC 8707 resource/ACR + client access); the max_age site is exercised
+// in rfc9470.rs.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc8707_pending_resume_retry_re_renders_invalid_target_not_session_expired() {
+    // Check-before-spend on the `validate_code_request_constraints` rejection
+    // site (RFC 8707 §2.1 `invalid_target`). A pending resume rejected with
+    // `error=invalid_target` must not burn the single-use pending id, so a
+    // retry of the same resume link re-renders the same denial rather than the
+    // "Authorization session expired" page. Before the fix the consume
+    // happened before `validate_code_request_constraints` ran, so the denial
+    // burned the id and the retry could only show "session expired".
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pend-retry-badres@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "pend-retry-badres";
+
+    // No session cookie → NeedsAuth stores the pending and redirects to /login.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256&state={state_param}\
+             &resource={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            urlencoding::encode("https://unregistered.example.com"),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "unauthenticated authorize must redirect to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "NeedsAuth must redirect to /login?pending_auth=: {location}"
+    );
+    let pending_id = pending_id_from_login_redirect(location);
+
+    // Simulate login: create a session.
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    // First resume → unregistered resource rejected with error=invalid_target.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "resume must redirect with the authorization error, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+    let first_location = completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        first_location.contains("error=invalid_target"),
+        "first resume must reject unregistered resource with error=invalid_target: {first_location}"
+    );
+    assert!(
+        !first_location.contains("code="),
+        "first resume must NOT issue a code: {first_location}"
+    );
+    assert!(
+        first_location.contains(&format!("state={state_param}")),
+        "first resume error redirect must echo state: {first_location}"
+    );
+
+    // Retry the SAME resume link. The pending claim is still unspent (the
+    // denial did not burn it), so the retry re-renders the same
+    // invalid_target denial — NOT the "Authorization session expired" page
+    // that a burned id would render (200 OK, no Location redirect).
+    let retry = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        retry.status == StatusCode::FOUND || retry.status == StatusCode::SEE_OTHER,
+        "retry must redirect with the authorization error (not render the session-expired \
+         page), got: {} body: {}",
+        retry.status,
+        retry.body
+    );
+    let retry_location = retry
+        .headers
+        .get("Location")
+        .expect("retry must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        retry_location.contains("error=invalid_target"),
+        "retry must re-render the same invalid_target denial, got: {retry_location}"
+    );
+    assert!(
+        !retry_location.contains("code="),
+        "retry must NOT issue a code: {retry_location}"
+    );
+    assert!(
+        retry_location.contains(&format!("state={state_param}")),
+        "retry error redirect must echo state: {retry_location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8707_pending_resume_retry_re_renders_access_denied_not_session_expired() {
+    // Check-before-spend on the `check_client_access` rejection site. A
+    // Personal-scope client owned by user A, resumed after login as user B, is
+    // denied with the access-denied page. The denial must not burn the
+    // single-use pending id, so a retry re-renders the same access-denied page
+    // rather than the "Authorization session expired" page. `check_client_access`
+    // is deferred to the resume (it needs an authenticated `User`), so a
+    // Personal client still stores the pending on the NeedsAuth leg.
+    let (app, state) = test_app().await;
+
+    // Application owner (user A) and Personal-scope client.
+    let owner = create_test_user(&state.store, "pend-retry-owner@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Personal,
+            org_id: None,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Authenticated user B — has no access to A's Personal client.
+    let user = create_test_user(&state.store, "pend-retry-other@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    // No session cookie → NeedsAuth stores the pending and redirects to /login.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "unauthenticated authorize must redirect to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "NeedsAuth must redirect to /login?pending_auth=: {location}"
+    );
+    let pending_id = pending_id_from_login_redirect(location);
+
+    // Simulate login as user B.
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    // First resume → access-denied page (Personal client, user B ≠ owner A).
+    // The denial renders the AuthorizeDeniedTemplate HTML page, so a burned
+    // id would instead render the (also-200) "session expired" page; the body
+    // is what distinguishes them.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        !completion.body.contains("session expired"),
+        "first resume must render the access-denied page, not the session-expired page: {}",
+        completion.body
+    );
+    assert!(
+        completion.body.contains("have access to this application"),
+        "first resume must render the access-denied reason: {}",
+        completion.body
+    );
+
+    // Retry the SAME resume link. The denial did not burn the pending id, so
+    // the retry re-renders the same access-denied page — not "session expired".
+    let retry = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        !retry.body.contains("session expired"),
+        "retry must re-render the access-denied page, not the session-expired page: {}",
+        retry.body
+    );
+    assert!(
+        retry.body.contains("have access to this application"),
+        "retry must re-render the same access-denied reason: {}",
+        retry.body
+    );
+}

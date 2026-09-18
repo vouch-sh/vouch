@@ -1274,36 +1274,17 @@ async fn handle_pending_auth(
             authenticator,
             auth_time: session_auth_time,
         }) => {
-            // The session is acceptable — spend the single-use claim. The
-            // `_claim` witness is bound to satisfy `#[must_use]`; completion
-            // uses `pending` (the consumed record's data), not the pre-read.
-            let (pending, _claim) = match db::consume_pending_oauth_authorization(
-                &state.store,
-                pending_id,
-                arrival.timestamp(),
-            )
-            .await
-            {
-                Ok(pair) => pair,
-                // Lost the claim race to a concurrent submission of the
-                // same id, or the record expired between read and claim.
-                Err(db::claim::ClaimError::AlreadyConsumed) => {
-                    tracing::warn!(pending_id, "Pending OAuth authorization already consumed");
-                    return AuthorizeDeniedTemplate {
-                        client_name: resolved.client.name.clone(),
-                        error_message: Tr::new("authorize-denied-session-expired"),
-                    }
-                    .into_response();
-                }
-                Err(e) => {
-                    tracing::error!("Failed to consume pending OAuth authorization: {}", e);
-                    return AuthorizeDeniedTemplate {
-                        client_name: resolved.client.name.clone(),
-                        error_message: Tr::new("authorize-denied-generic"),
-                    }
-                    .into_response();
-                }
-            };
+            // Do NOT consume the single-use pending claim here. Spending it
+            // before the post-login validations in `complete_pending_auth`
+            // (client access, max_age, ACR/resource, PAR) meant a rejection
+            // burned the claim, so retrying the same resume link could only
+            // show "session expired" instead of re-rendering the denial. The
+            // claim is now spent as the last step before code issuance, after
+            // every validation has passed — the same check-before-spend
+            // principle the author applied to the PAR claim in this very
+            // function and the team applied to the session gate in #1173. The
+            // pre-read `pending` carries the data the completion path needs:
+            // consuming only sets `consumed_at`, which no validation reads.
             complete_pending_auth(
                 state,
                 &resolved,
@@ -1346,7 +1327,16 @@ async fn handle_pending_auth(
 // Pending auth completion (extracted to keep handle_pending_auth under 100 lines)
 // ---------------------------------------------------------------------------
 
-/// Complete the pending auth flow: check access, check max_age, issue code.
+/// Complete the pending auth flow: check access, check max_age, validate
+/// ACR/resource, consume the PAR, spend the single-use pending claim, and
+/// issue the code.
+///
+/// The pending claim is spent as the *last* action before code issuance so a
+/// rejection at any of the preceding gates does not burn it — a retry of the
+/// same resume link then re-renders the original denial instead of "session
+/// expired". This is the check-before-spend principle the team already
+/// applied to the session gate in #1173 and the author applied to the PAR
+/// claim in the comment above `validate_code_request_constraints`.
 #[expect(
     clippy::too_many_arguments,
     reason = "linear pending-authorization completion: client, pending record, session facts, clock"
@@ -1518,6 +1508,46 @@ async fn complete_pending_auth(
         authorization_details: pending.authorization_details.as_ref(),
         auth_time: session_auth_time,
         par: par_proof,
+    };
+
+    // Spend the single-use pending claim as the last action before issuing
+    // the code. Moved here from `handle_pending_auth`, where it ran before
+    // the validations above, so that a rejection — client access, max_age,
+    // ACR/resource, or a PAR race — does not burn the claim: retrying the
+    // same resume link re-renders the original denial instead of "session
+    // expired". The PAR consume above is the serialization point for
+    // concurrent resume attempts sharing this pending record, so only the
+    // PAR-winner (or, for a non-PAR pending, the claim-winner) reaches this
+    // spend; a loser returns early with the pending intact.
+    let _claim = match db::consume_pending_oauth_authorization(
+        &state.store,
+        &pending.id,
+        arrival.timestamp(),
+    )
+    .await
+    {
+        Ok((_consumed, claim)) => claim,
+        // A concurrent submission won the single-use claim, or the record
+        // expired between the pre-read and this spend. The user's retry of
+        // this resume link will see "session expired" here, but that is now
+        // reachable only via a true race or genuine expiry — never via a
+        // spec-correct denial, which returns above with the claim unspent.
+        Err(db::claim::ClaimError::AlreadyConsumed) => {
+            tracing::warn!(pending_id = %pending.id, "Pending OAuth authorization already consumed");
+            return AuthorizeDeniedTemplate {
+                client_name: resolved.client.name.clone(),
+                error_message: Tr::new("authorize-denied-session-expired"),
+            }
+            .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to consume pending OAuth authorization: {}", e);
+            return AuthorizeDeniedTemplate {
+                client_name: resolved.client.name.clone(),
+                error_message: Tr::new("authorize-denied-generic"),
+            }
+            .into_response();
+        }
     };
 
     issue_code_and_redirect(

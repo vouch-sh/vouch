@@ -1526,3 +1526,149 @@ fn pending_id_from_login_redirect(response: &HttpResponse) -> Option<String> {
     let id = location.strip_prefix("/login?pending_auth=")?;
     Some(urlencoding::decode(id).ok()?.into_owned())
 }
+
+#[tokio::test]
+async fn test_rfc9470_pending_resume_retry_re_renders_login_required_not_session_expired() {
+    // Check-before-spend for the pending claim on the `max_age` rejection
+    // site (OIDC Core §3.1.2.1 `login_required`). A pending resume whose
+    // session exceeds `max_age` is rejected with `error=login_required`. The
+    // rejection must not burn the single-use pending id, so a retry of the
+    // same resume link re-renders the same `login_required` denial rather than
+    // the "Authorization session expired" page. Before the fix the consume
+    // happened before the `max_age` check in `complete_pending_auth`, so the
+    // denial burned the id and a retry could only show "session expired".
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pend-retry-maxage@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Mint a session already 5 seconds old (well past max_age=1).
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now().as_second() - 5),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "pend-retry-maxage";
+    let cookie = format!("__Host-vouch_session={session}");
+
+    // max_age=1 with a 5-second-old session: the direct path re-authenticates
+    // and stores a pending record carrying max_age=1.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&max_age=1&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "stale session with max_age=1 must redirect for re-auth, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "stale session must redirect to /login with pending_auth: {location}"
+    );
+    let pending_id =
+        pending_id_from_login_redirect(&response).expect("redirect must carry a pending_auth id");
+
+    // First resume with the SAME stale session (still > 1 second old). The
+    // post-login `max_age` check must reject it with error=login_required.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "first resume must redirect with the authorization error, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+    let first_location = completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        first_location.contains("error=login_required"),
+        "first resume must reject a session exceeding max_age with error=login_required: {first_location}"
+    );
+    assert!(
+        !first_location.contains("code="),
+        "first resume must NOT issue a code: {first_location}"
+    );
+    assert!(
+        first_location.contains(&format!("state={state_param}")),
+        "first resume error redirect must echo state: {first_location}"
+    );
+
+    // Retry the SAME resume link with the same stale session. The pending
+    // claim is still unspent (the denial did not burn it), so the retry
+    // re-renders the same login_required denial — NOT the "Authorization
+    // session expired" page that a burned id would render (200 OK, no
+    // Location redirect).
+    let retry = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        retry.status == StatusCode::FOUND || retry.status == StatusCode::SEE_OTHER,
+        "retry must redirect with the authorization error (not render the session-expired \
+         page), got: {} body: {}",
+        retry.status,
+        retry.body
+    );
+    let retry_location = retry
+        .headers
+        .get("Location")
+        .expect("retry must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        retry_location.contains("error=login_required"),
+        "retry must re-render the same login_required denial, got: {retry_location}"
+    );
+    assert!(
+        !retry_location.contains("code="),
+        "retry must NOT issue a code: {retry_location}"
+    );
+    assert!(
+        retry_location.contains(&format!("state={state_param}")),
+        "retry error redirect must echo state: {retry_location}"
+    );
+}
