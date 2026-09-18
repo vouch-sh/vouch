@@ -150,7 +150,6 @@ fn build_status(
 /// Handle sign-out (clears session cookie).
 /// POST /logout
 pub(crate) async fn logout(
-    _arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     jar: CookieJar,
@@ -490,51 +489,6 @@ mod tests {
     // logout handler — `Logout` audit event coverage
     // ====================================================================
 
-    /// Drive the real `POST /logout` handler with a cookie whose session row
-    /// already expired in the DB but has not been reaped. Returns the
-    /// `(token, token_hash)` so each assertion below can re-derive the hash.
-    ///
-    /// The session cookie need not be a decodable JWT for the logout path:
-    /// `logout` only hashes the cookie value and looks up/deletes the row by
-    /// `token_hash` (it never decodes a JWT), so an arbitrary opaque string
-    /// keyed to the row is the minimal faithful fixture. The row's
-    /// `expires_at` is stamped one second in the past so the
-    /// expiry-filtering `get_session_by_token_hash` returns `None` — the
-    /// exact "expired-but-present" window the bug report describes.
-    async fn seed_expired_session_row(
-        state: &crate::AppState,
-        user_id: &str,
-        email: &str,
-    ) -> (String, String) {
-        use crate::db::{CreateSessionParams, SessionPurpose, create_session};
-
-        let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
-        let token_hash = crate::crypto::hash_token(&token);
-        let now = jiff::Timestamp::now();
-        let expires_at = now
-            .checked_sub(jiff::Span::new().seconds(1))
-            .expect("backdate session row by 1s");
-        create_session(
-            &state.store,
-            &CreateSessionParams {
-                user_id,
-                user_email: email,
-                token_hash: &token_hash,
-                authenticator_id: None,
-                expires_at,
-                session_type: SessionPurpose::OAuthAccessToken,
-                authorization_details: None,
-                hardware_aaguid: None,
-                org_domain: None,
-                client_id: None,
-                source_code_hash: None,
-            },
-        )
-        .await
-        .expect("create expired session row");
-        (token, token_hash)
-    }
-
     /// Query the audit store for `Logout` events for `user_id`, the way the
     /// `logout_invalidates_exchange` policy and any audit-analytics consumer
     /// would.
@@ -565,7 +519,8 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "logout-expired@example.com").await;
 
-        let (token, token_hash) = seed_expired_session_row(&state, &user.id, &user.email).await;
+        let (token, token_hash) =
+            create_test_expired_session_row(&state, &user.id, &user.email).await;
 
         // Sanity: the expiry-filtering lookup returns `None` for this row, so
         // a fix that still gated the audit on that lookup would skip the

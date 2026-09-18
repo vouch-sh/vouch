@@ -24,7 +24,6 @@
 //! - <https://openid.net/specs/openid-connect-rpinitiated-1_0.html>
 
 use crate::AppState;
-use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::ClientInfo;
 use crate::handlers::{clear_session_cookie, hash_token};
@@ -325,7 +324,6 @@ pub(crate) async fn logout(
 /// redirects to the validated `post_logout_redirect_uri` (with `state` echoed as
 /// a query parameter) or renders the local done page.
 pub(crate) async fn logout_post(
-    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
@@ -344,14 +342,7 @@ pub(crate) async fn logout_post(
     // Clear the browser session first (DB deletion + cache invalidation + audit
     // event). The user asked to log out, so a later redirect-validation database
     // error must not prevent logout.
-    clear_user_session(
-        &state,
-        &jar,
-        &headers,
-        verified_client_id.as_deref(),
-        arrival,
-    )
-    .await;
+    clear_user_session(&state, &jar, &headers, verified_client_id.as_deref()).await;
 
     let clear_cookie = clear_session_cookie().to_string();
 
@@ -468,7 +459,6 @@ async fn clear_user_session(
     jar: &CookieJar,
     headers: &HeaderMap,
     rp_client_id: Option<&str>,
-    _arrival: ArrivalTime,
 ) {
     let Some(token) = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
@@ -537,8 +527,8 @@ mod tests {
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
         TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
-        create_test_session_with, create_test_user, http_get, http_post_form, test_app,
-        test_app_state, test_app_state_with_rsa_key,
+        create_test_expired_session_row, create_test_session_with, create_test_user, http_get,
+        http_post_form, test_app, test_app_state, test_app_state_with_rsa_key,
     };
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
@@ -943,43 +933,6 @@ mod tests {
     // the fix: the audit fires for both expired and live rows, and only when
     // a row was actually deleted.
 
-    /// Seed an already-expired session row for `user_id`/`email` keyed to an
-    /// arbitrary cookie value (the logout path hashes the cookie and matches
-    /// by `token_hash`; it never decodes a JWT, so the cookie need not be a
-    /// real token). Returns `(token, token_hash)`.
-    async fn seed_expired_session_row(
-        state: &crate::AppState,
-        user_id: &str,
-        email: &str,
-    ) -> (String, String) {
-        use crate::db::{CreateSessionParams, SessionPurpose, create_session};
-
-        let token = format!("expired-rp-{}", uuid::Uuid::now_v7());
-        let token_hash = crate::crypto::hash_token(&token);
-        let expires_at = jiff::Timestamp::now()
-            .checked_sub(jiff::Span::new().seconds(1))
-            .unwrap();
-        create_session(
-            &state.store,
-            &CreateSessionParams {
-                user_id,
-                user_email: email,
-                token_hash: &token_hash,
-                authenticator_id: None,
-                expires_at,
-                session_type: SessionPurpose::OAuthAccessToken,
-                authorization_details: None,
-                hardware_aaguid: None,
-                org_domain: None,
-                client_id: None,
-                source_code_hash: None,
-            },
-        )
-        .await
-        .unwrap();
-        (token, token_hash)
-    }
-
     async fn logout_audit_events(
         state: &crate::AppState,
         user_id: &str,
@@ -1002,7 +955,8 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "rp-logout-expired@example.com").await;
 
-        let (token, token_hash) = seed_expired_session_row(&state, &user.id, &user.email).await;
+        let (token, token_hash) =
+            create_test_expired_session_row(&state, &user.id, &user.email).await;
 
         // Sanity: the expiry-filtering lookup returns `None` — the
         // precondition the bug report describes.
