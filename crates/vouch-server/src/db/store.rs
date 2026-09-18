@@ -880,6 +880,8 @@ impl DocumentStore {
             statement_count: 0,
             #[cfg(test)]
             update_by_index_stale_once: self.update_by_index_stale_once.clone(),
+            #[cfg(test)]
+            compare_and_update_test_hook: self.compare_and_update_test_hook.clone(),
         })
     }
 
@@ -1822,6 +1824,12 @@ pub struct StoreTransaction<'a> {
     /// non-test builds.
     #[cfg(test)]
     update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Test-only hook forwarded from [`DocumentStore::compare_and_update_test_hook`]
+    /// so the transactional [`Self::compare_and_update`] path can deterministically
+    /// interleave a concurrent write into the OCC window. Compiled out of
+    /// non-test builds. See [`DocumentStore::set_compare_and_update_test_hook`].
+    #[cfg(test)]
+    compare_and_update_test_hook: Option<CompareAndUpdateTestHook>,
 }
 
 impl StoreTransaction<'_> {
@@ -2434,6 +2442,13 @@ impl StoreTransaction<'_> {
     /// was modified by another request since it was read (optimistic
     /// concurrency control).
     ///
+    /// On a test build, fires the [`DocumentStore::compare_and_update_test_hook`]
+    /// right before the version-guarded `UPDATE` runs — the same seam the
+    /// standalone [`DocumentStore::compare_and_update`] exposes, so the
+    /// transactional caller can deterministically interleave a concurrent
+    /// writer that bumps the document's version and forces `Ok(false)` without
+    /// relying on task-scheduling races.
+    ///
     /// # Errors
     ///
     /// Returns an error if serialization, encryption, or the database
@@ -2460,6 +2475,17 @@ impl StoreTransaction<'_> {
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
         let expires_str = expires.map(|ts| ts.to_string());
         let expires_ref: Option<&str> = expires_str.as_deref();
+
+        // Test seam: let a hookless concurrent writer bump this row's
+        // version (or otherwise mutate it) before the guarded UPDATE runs,
+        // so the CAS observes a version mismatch and returns `Ok(false)`.
+        // No-op in non-test builds and when no hook is set. Mirrors the
+        // standalone `DocumentStore::compare_and_update` seam so the
+        // transactional path is deterministically exercisable too.
+        #[cfg(test)]
+        if let Some(hook) = &self.compare_and_update_test_hook {
+            hook(id).await;
+        }
 
         let update_stmt = {
             let mut q = Query::update();

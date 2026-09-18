@@ -5,6 +5,7 @@
 use super::document_type::{Document, DocumentType};
 use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc, SshRevokedCertDoc};
 use super::documents::oauth::TokenExchangeDoc;
+use super::documents::user::UserDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -144,6 +145,25 @@ impl From<Document<SshIssuedCertDoc>> for IssuedSshCertificate {
 }
 
 /// Record an SSH certificate issuance for revocation tracking.
+///
+/// The issued-cert insert and a version bump of the owning [`UserDoc`] run in
+/// a single transaction so that a concurrent
+/// [`revoke_all_ssh_certificates_for_user`] — which bumps the same owner row
+/// inside its revocation transaction — collides with this write via optimistic
+/// concurrency. Whichever commits first causes the other's
+/// `compare_and_update` to lose the version race; `with_dsql_retry!` then
+/// re-runs the loser against the fresh row.
+///
+/// On each (re-)attempt the issuer re-reads the user doc and rejects when
+/// `active` is `false`: a deactivation that persisted `active = false` since
+/// the caller's `load_active_user` gate makes the retried attempt refuse to
+/// record the certificate, closing the window in which a certificate issued
+/// concurrently with deactivation escaped revocation.
+///
+/// # Errors
+///
+/// Returns an error if the user doc is missing, the user is not `active`, or
+/// the database write fails after retries.
 pub async fn record_ssh_certificate_issuance(
     store: &DocumentStore,
     serial: u64,
@@ -152,15 +172,56 @@ pub async fn record_ssh_certificate_issuance(
     principals: &[String],
     expires_at: Timestamp,
 ) -> Result<String> {
-    let doc = SshIssuedCertDoc {
-        serial: serial.to_string(),
-        user_id: user_id.to_string(),
-        user_email: user_email.to_string(),
-        principals: principals.to_vec(),
-        expires_at,
-    };
-    let result = store.insert(&doc).await?;
-    Ok(result.id)
+    let user_id = user_id.to_string();
+    let user_email = user_email.to_string();
+    let principals = principals.to_vec();
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+
+        // The user doc is the OCC owner row shared with revocation. Reading
+        // it in-transaction also re-validates `active` on every attempt: a
+        // revocation whose `persist` step committed `active = false` since
+        // the caller's gate makes this attempt reject, so a cert issued
+        // concurrently with a deactivation is never left unrevoked.
+        let user_doc = tx.get::<UserDoc>(&user_id).await?.ok_or_else(|| {
+            anyhow::anyhow!("user {user_id} not found during SSH certificate issuance")
+        })?;
+        if !user_doc.data.active {
+            anyhow::bail!(
+                "user {user_id} is not active; refusing to record SSH certificate issuance"
+            );
+        }
+        let version = user_doc.version;
+
+        // Version-bump the owner row before inserting the issued-cert row.
+        // This is the OCC collision point: a concurrent revocation that
+        // already bumped the user doc makes this `compare_and_update` return
+        // `Ok(false)`, which is surfaced as a `VersionConflict` so the macro
+        // re-runs the whole block (re-reading `active`). Bumping first also
+        // keeps this transaction's first write at the CAS, so a test seam
+        // firing here cannot deadlock against a concurrent hookless writer.
+        let ok = tx
+            .compare_and_update::<UserDoc>(&user_id, version, &user_doc.data)
+            .await?;
+        if !ok {
+            return Err(super::store::VersionConflict {
+                id: user_id.clone(),
+                expected: version,
+            }
+            .into());
+        }
+
+        let cert_doc = SshIssuedCertDoc {
+            serial: serial.to_string(),
+            user_id: user_id.clone(),
+            user_email: user_email.clone(),
+            principals: principals.clone(),
+            expires_at,
+        };
+        let inserted = tx.insert(&cert_doc).await?;
+        tx.commit().await?;
+        Ok(inserted.id)
+    })
 }
 
 /// Get all non-expired issued SSH certificates for a user.
@@ -241,8 +302,28 @@ pub async fn get_revoked_ssh_certificates(
         .collect())
 }
 
-/// Revoke all SSH certificates for a user by looking up issued certs
-/// and inserting a revocation record for each real serial.
+/// Revoke all SSH certificates for a user by looking up issued certs and
+/// inserting a revocation record for each real serial.
+///
+/// The issued-certs snapshot is read **inside** the revocation transaction,
+/// and the transaction also version-bumps the owning [`UserDoc`]. That owner
+/// row is the same row [`record_ssh_certificate_issuance`] bumps, so issuance
+/// and revocation serialize through optimistic concurrency: whichever commits
+/// first causes the other's `compare_and_update` to lose the version race, and
+/// `with_dsql_retry!` re-runs the loser. On a retry the revoker re-reads the
+/// snapshot, which now includes any serial a racing issuer committed before
+/// the owner-row bump — closing the TOCTOU window where a certificate issued
+/// between a stale (out-of-transaction) snapshot and the revocation commit was
+/// left off the revocation list.
+///
+/// A missing user doc (e.g. a user hard-deleted before this call) skips the
+/// owner-row bump: no concurrent issuance can be authenticating for a
+/// hard-deleted user, so the snapshot alone is authoritative and the existing
+/// issued certs are still revoked.
+///
+/// # Errors
+///
+/// Returns an error if the database read or write fails after retries.
 #[expect(
     clippy::disallowed_methods,
     reason = "OCC retry re-reads the clock per attempt to stamp the revocation rows"
@@ -253,27 +334,62 @@ pub(in crate::db) async fn revoke_all_ssh_certificates_for_user(
     reason: Option<&str>,
     revoked_by: Option<&str>,
 ) -> Result<u64> {
-    let issued = get_issued_ssh_certificates_for_user(store, user_id).await?;
-    if issued.is_empty() {
-        return Ok(0);
-    }
-
+    let user_id = user_id.to_string();
+    let reason = reason.map(String::from);
+    let revoked_by = revoked_by.map(String::from);
     crate::with_dsql_retry!(async {
-        let now = Timestamp::now();
         let mut tx = store.begin().await?;
+
+        // The user doc is the OCC owner row shared with issuance. Bumping
+        // its version inside this transaction forces a concurrent
+        // `record_ssh_certificate_issuance` that read an earlier version to
+        // lose its `compare_and_update` and retry (re-reading `active`).
+        let user_doc = tx.get::<UserDoc>(&user_id).await?;
+
+        let now = Timestamp::now();
+        // Read the issued-certs snapshot inside the transaction; a concurrent
+        // issuance that commits before the owner-row bump is visible on the
+        // retry's re-read rather than escaping through a stale snapshot taken
+        // outside the transaction.
+        let docs = tx.find_all::<SshIssuedCertDoc>("user_id", &user_id).await?;
+
+        // Bump the owner row before inserting revocation rows so this
+        // transaction's first write is the CAS — a test seam firing there
+        // cannot deadlock against a concurrent hookless writer, and a racing
+        // issuer that already bumped the row makes this CAS lose (retrying
+        // against a fresh snapshot that includes its serial).
+        if let Some(user_doc) = user_doc.as_ref() {
+            let ok = tx
+                .compare_and_update::<UserDoc>(&user_id, user_doc.version, &user_doc.data)
+                .await?;
+            if !ok {
+                return Err(super::store::VersionConflict {
+                    id: user_id.clone(),
+                    expected: user_doc.version,
+                }
+                .into());
+            }
+        }
+
         let mut count: u64 = 0;
-        for cert in &issued {
-            let doc = SshRevokedCertDoc {
-                serial: cert.serial.clone(),
-                user_id: user_id.to_string(),
-                reason: reason.map(String::from),
+        for doc in &docs {
+            // Skip already-expired certs — they cannot be used, so no
+            // revocation row is needed. Matches `get_issued_ssh_certificates_for_user`.
+            if doc.data.expires_at <= now {
+                continue;
+            }
+            let revoked = SshRevokedCertDoc {
+                serial: doc.data.serial.clone(),
+                user_id: user_id.clone(),
+                reason: reason.clone(),
                 revoked_at: now,
-                expires_at: cert.expires_at,
-                revoked_by: revoked_by.map(String::from),
+                expires_at: doc.data.expires_at,
+                revoked_by: revoked_by.clone(),
             };
-            tx.insert(&doc).await?;
+            tx.insert(&revoked).await?;
             count = count.saturating_add(1);
         }
+
         tx.commit().await?;
         Ok(count)
     })
@@ -331,7 +447,9 @@ mod tests {
     use crate::crypto::document_crypto::PlaintextDocumentCrypto;
     use crate::db::pool::Pool;
     use crate::db::store::DocumentStore;
+    use crate::db::upsert_user;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Create an in-memory test store with SQLite migrations applied.
     async fn test_store() -> DocumentStore {
@@ -348,6 +466,52 @@ mod tests {
         let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
             Arc::new(PlaintextDocumentCrypto);
         DocumentStore::new(pool, crypto)
+    }
+
+    /// Create a file-backed SQLite test store with WAL journaling, kept alive
+    /// for the test's duration by the returned [`tempfile::TempDir`].
+    ///
+    /// The TOCTOU race tests need a reader transaction and a concurrent writer
+    /// (driven by the `compare_and_update_test_hook` seam) to both make
+    /// progress at once. In-memory SQLite falls back to MEMORY journaling (WAL
+    /// is silently ignored for in-memory databases), where a read
+    /// transaction's SHARED lock blocks the concurrent hook writer's EXCLUSIVE
+    /// commit — a deadlock instead of the OCC retry the test wants to force.
+    /// A file-backed database honors WAL, whose readers do not block writers,
+    /// so the hook's commit lands and the revoker's CAS loses, deterministically
+    /// exercising the `with_dsql_retry!` re-read of the snapshot.
+    async fn test_store_wal() -> (DocumentStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("vouch-ssh-occ.db");
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .pragma("analysis_limit", "400");
+        let sqlite_pool = sqlx::SqlitePool::connect_with(opts)
+            .await
+            .expect("connect wal store");
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&sqlite_pool)
+            .await
+            .expect("migrate");
+        let pool = Pool::Sqlite(sqlite_pool);
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        (DocumentStore::new(pool, crypto), dir)
+    }
+
+    /// Helper: create an active test user and return its id. `UserDoc` is the
+    /// OCC owner row shared by issuance and revocation, so every test that
+    /// records or revokes a cert needs a real user doc.
+    async fn create_user(store: &DocumentStore, email: &str) -> String {
+        let (user_id, _created) = upsert_user(store, email, Some("Test User"))
+            .await
+            .expect("create test user");
+        user_id
     }
 
     /// Helper: insert an issued SSH certificate and return its serial as a string.
@@ -375,13 +539,14 @@ mod tests {
     #[tokio::test]
     async fn test_record_ssh_certificate_issuance_stores_correct_serial() {
         let store = test_store().await;
+        let user_id = create_user(&store, "stores-correct@example.com").await;
         let serial: u64 = 9_876_543_210;
-        let stored_serial = insert_issued(&store, "user-1", serial).await;
+        let stored_serial = insert_issued(&store, &user_id, serial).await;
 
         assert_eq!(stored_serial, serial.to_string());
 
         // Verify the record is retrievable.
-        let certs = get_issued_ssh_certificates_for_user(&store, "user-1")
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
         assert_eq!(certs.len(), 1);
@@ -393,10 +558,11 @@ mod tests {
         // The core invariant: serials must be stored as decimal u64 strings,
         // never as synthetic "user:{id}" values or any non-numeric form.
         let store = test_store().await;
+        let user_id = create_user(&store, "numeric@example.com").await;
         let serial: u64 = 12_345;
-        insert_issued(&store, "user-numeric", serial).await;
+        insert_issued(&store, &user_id, serial).await;
 
-        let certs = get_issued_ssh_certificates_for_user(&store, "user-numeric")
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
 
@@ -411,10 +577,11 @@ mod tests {
     #[tokio::test]
     async fn test_record_ssh_certificate_issuance_max_u64() {
         let store = test_store().await;
+        let user_id = create_user(&store, "max@example.com").await;
         let serial = u64::MAX;
-        insert_issued(&store, "user-max", serial).await;
+        insert_issued(&store, &user_id, serial).await;
 
-        let certs = get_issued_ssh_certificates_for_user(&store, "user-max")
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
         assert_eq!(certs[0].serial, u64::MAX.to_string());
@@ -427,6 +594,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_issued_ssh_certificates_filters_expired() {
         let store = test_store().await;
+        let user_id = create_user(&store, "issued-filters@example.com").await;
 
         // Insert one expired cert (in the past)
         let expired_at = Timestamp::now()
@@ -435,7 +603,7 @@ mod tests {
         record_ssh_certificate_issuance(
             &store,
             1001,
-            "user-exp",
+            &user_id,
             "user@example.com",
             &["user".to_string()],
             expired_at,
@@ -444,9 +612,9 @@ mod tests {
         .expect("record expired");
 
         // Insert one valid cert (in the future)
-        insert_issued(&store, "user-exp", 1002).await;
+        insert_issued(&store, &user_id, 1002).await;
 
-        let certs = get_issued_ssh_certificates_for_user(&store, "user-exp")
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
 
@@ -469,13 +637,14 @@ mod tests {
     #[tokio::test]
     async fn test_get_issued_ssh_certificates_multiple_certs() {
         let store = test_store().await;
+        let user_id = create_user(&store, "multi@example.com").await;
 
         let serials = [111_u64, 222, 333];
         for &s in &serials {
-            insert_issued(&store, "user-multi", s).await;
+            insert_issued(&store, &user_id, s).await;
         }
 
-        let certs = get_issued_ssh_certificates_for_user(&store, "user-multi")
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
 
@@ -500,13 +669,14 @@ mod tests {
         // serial stored in the SSH certificate.  The fix must look up issued
         // certificate records and revoke each real serial.
         let store = test_store().await;
+        let user_id = create_user(&store, "revoke@example.com").await;
 
         let serial_a: u64 = 5_000_000;
         let serial_b: u64 = 9_999_999;
-        insert_issued(&store, "user-revoke", serial_a).await;
-        insert_issued(&store, "user-revoke", serial_b).await;
+        insert_issued(&store, &user_id, serial_a).await;
+        insert_issued(&store, &user_id, serial_b).await;
 
-        let count = revoke_all_ssh_certificates_for_user(&store, "user-revoke", None, None)
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
             .await
             .expect("revoke all");
 
@@ -519,7 +689,7 @@ mod tests {
 
         let mut revoked_serials: Vec<u64> = revoked
             .iter()
-            .filter(|r| r.user_id == "user-revoke")
+            .filter(|r| r.user_id == user_id)
             .map(|r| r.serial.parse::<u64>().expect("serial must be numeric u64"))
             .collect();
         revoked_serials.sort_unstable();
@@ -532,10 +702,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_revoke_all_bumps_user_doc_version() {
+        // The revoker must version-bump the owning `UserDoc` (the OCC owner
+        // row shared with issuance) even when there are no issued certs to
+        // revoke, so a concurrent `record_ssh_certificate_issuance` that read
+        // an earlier version loses its CAS and retries against `active`.
+        let store = test_store().await;
+        let user_id = create_user(&store, "bump@example.com").await;
+
+        let before = store
+            .get::<UserDoc>(&user_id)
+            .await
+            .expect("read user before")
+            .expect("user exists")
+            .version;
+
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
+            .await
+            .expect("revoke all");
+        assert_eq!(count, 0, "no certs to revoke");
+
+        let after = store
+            .get::<UserDoc>(&user_id)
+            .await
+            .expect("read user after")
+            .expect("user still exists")
+            .version;
+
+        assert!(
+            after > before,
+            "revocation must bump the user doc version (the OCC owner row) so a concurrent issuance collides"
+        );
+    }
+
+    #[tokio::test]
     async fn test_revoke_all_returns_zero_when_no_issued_certs() {
         let store = test_store().await;
+        let user_id = create_user(&store, "no-certs@example.com").await;
 
-        let count = revoke_all_ssh_certificates_for_user(&store, "user-none", None, None)
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
             .await
             .expect("revoke all");
 
@@ -544,9 +749,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_all_does_not_revoke_expired_certs() {
-        // Expired certs are filtered by get_issued_ssh_certificates_for_user
-        // and must not generate revocation records (they have already expired).
+        // Expired certs are filtered by the snapshot read and must not
+        // generate revocation records (they have already expired).
         let store = test_store().await;
+        let user_id = create_user(&store, "exp-revoke@example.com").await;
 
         let expired_at = Timestamp::now()
             .checked_sub(jiff::Span::new().hours(1))
@@ -554,7 +760,7 @@ mod tests {
         record_ssh_certificate_issuance(
             &store,
             7001,
-            "user-exp-revoke",
+            &user_id,
             "user@example.com",
             &["user".to_string()],
             expired_at,
@@ -562,7 +768,7 @@ mod tests {
         .await
         .expect("record expired");
 
-        let count = revoke_all_ssh_certificates_for_user(&store, "user-exp-revoke", None, None)
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
             .await
             .expect("revoke all");
 
@@ -572,11 +778,12 @@ mod tests {
     #[tokio::test]
     async fn test_revoke_all_propagates_reason_and_revoked_by() {
         let store = test_store().await;
-        insert_issued(&store, "user-meta", 42).await;
+        let user_id = create_user(&store, "meta@example.com").await;
+        insert_issued(&store, &user_id, 42).await;
 
         revoke_all_ssh_certificates_for_user(
             &store,
-            "user-meta",
+            &user_id,
             Some("scim_deprovisioning"),
             Some("admin@example.com"),
         )
@@ -589,7 +796,7 @@ mod tests {
 
         let record = revoked
             .iter()
-            .find(|r| r.user_id == "user-meta")
+            .find(|r| r.user_id == user_id)
             .expect("revocation record must exist");
 
         assert_eq!(record.reason.as_deref(), Some("scim_deprovisioning"));
@@ -605,10 +812,11 @@ mod tests {
         // After revoke_all, each real serial must be visible through
         // is_ssh_certificate_revoked (the check used by SSH servers).
         let store = test_store().await;
+        let user_id = create_user(&store, "krl@example.com").await;
         let serial: u64 = 1_234_567_890;
-        insert_issued(&store, "user-krl", serial).await;
+        insert_issued(&store, &user_id, serial).await;
 
-        revoke_all_ssh_certificates_for_user(&store, "user-krl", None, None)
+        revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
             .await
             .expect("revoke all");
 
@@ -640,6 +848,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_expired_ssh_issued_certs_removes_expired() {
         let store = test_store().await;
+        let user_id = create_user(&store, "cleanup@example.com").await;
 
         // Insert expired cert
         let expired_at = Timestamp::now()
@@ -648,7 +857,7 @@ mod tests {
         record_ssh_certificate_issuance(
             &store,
             8001,
-            "user-cleanup",
+            &user_id,
             "user@example.com",
             &["user".to_string()],
             expired_at,
@@ -657,7 +866,7 @@ mod tests {
         .expect("record expired");
 
         // Insert valid cert
-        insert_issued(&store, "user-cleanup", 8002).await;
+        insert_issued(&store, &user_id, 8002).await;
 
         let deleted = delete_expired_ssh_issued_certs(&store)
             .await
@@ -666,10 +875,259 @@ mod tests {
         assert_eq!(deleted, 1, "only the expired cert record should be removed");
 
         // Valid cert is still there
-        let remaining = get_issued_ssh_certificates_for_user(&store, "user-cleanup")
+        let remaining = get_issued_ssh_certificates_for_user(&store, &user_id)
             .await
             .expect("get issued");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].serial, "8002");
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // TOCTOU race: issuance concurrent with revocation (the bug)
+    // ────────────────────────────────────────────────────────────
+
+    /// Regression for the TOCTOU race this change fixes.
+    ///
+    /// `revoke_all_ssh_certificates_for_user` used to read the issued-certs
+    /// snapshot with an autocommit `find_all` OUTSIDE the revocation
+    /// transaction, then insert revocation rows inside a separate transaction
+    /// for only that stale list. An SSH certificate issued concurrently —
+    /// whose `record_ssh_certificate_issuance` insert committed after the
+    /// snapshot — was never written to the revocation table, so it stayed
+    /// valid for the full cert lifetime and was absent from both the KRL and
+    /// the per-serial revocation endpoint.
+    ///
+    /// The fix moves the snapshot inside the transaction and version-bumps the
+    /// owning `UserDoc` so issuance and revocation collide via OCC. This test
+    /// deterministically reproduces the race with the
+    /// `compare_and_update_test_hook` seam: right when the revoker's owner-row
+    /// CAS runs, a hookless writer commits a new issued cert and bumps the
+    /// user doc — exactly what a concurrent `record_ssh_certificate_issuance`
+    /// that won the version race looks like to the revoker. The revoker's CAS
+    /// must lose and `with_dsql_retry!` must re-run it against a fresh
+    /// snapshot that now includes the racing serial.
+    #[tokio::test]
+    async fn test_revoke_all_re_reads_snapshot_when_issuance_wins_occ_race() {
+        let (mut store, _dir) = test_store_wal().await;
+        let user_id = create_user(&store, "occ-race@example.com").await;
+        // Pre-existing cert, present in the revoker's first snapshot.
+        insert_issued(&store, &user_id, 100).await;
+
+        // Hookless writer the hook drives to simulate the winning issuer.
+        let writer = store.clone();
+        let calls = Arc::new(AtomicU32::new(0));
+        let uid_for_hook = user_id.clone();
+        let calls_hook = Arc::clone(&calls);
+        store.set_compare_and_update_test_hook(Arc::new(move |doc_id: &str| {
+            let writer = writer.clone();
+            let uid = uid_for_hook.clone();
+            let calls = Arc::clone(&calls_hook);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                // Only act on the user-doc CAS — `get` filters by `doc_type`,
+                // so defensively ignore any other compare_and_update.
+                if doc_id != uid {
+                    return;
+                }
+                // Count every CAS attempt so the test can tell a single
+                // successful pass from a retry. Do the concurrent write only
+                // on the first attempt, so the retry's CAS succeeds.
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n != 0 {
+                    return;
+                }
+                // Simulate a concurrent `record_ssh_certificate_issuance`
+                // committing after the revoker's snapshot read: insert the
+                // racing serial and bump the owner row. `store.insert` and
+                // `store.update` do not fire the compare_and_update hook, so
+                // there is no recursion.
+                let expires_at = Timestamp::now()
+                    .checked_add(jiff::Span::new().hours(8))
+                    .expect("future");
+                let cert = SshIssuedCertDoc {
+                    serial: "200".to_string(),
+                    user_id: uid.clone(),
+                    user_email: "occ-race@example.com".to_string(),
+                    principals: vec!["user".to_string()],
+                    expires_at,
+                };
+                writer
+                    .insert::<SshIssuedCertDoc>(&cert)
+                    .await
+                    .expect("hook insert racing cert");
+                let Some(user) = writer.get::<UserDoc>(&uid).await.expect("hook read user") else {
+                    return;
+                };
+                writer
+                    .update::<UserDoc>(&uid, &user.data)
+                    .await
+                    .expect("hook bump user doc");
+            })
+        }));
+
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
+            .await
+            .expect("revoke all");
+
+        // Both the pre-existing cert (100) and the racing cert (200) must be
+        // revoked: the revoker re-read the snapshot after losing the OCC race.
+        assert_eq!(
+            count, 2,
+            "both the pre-existing and racing serials must be revoked"
+        );
+        assert!(
+            is_ssh_certificate_revoked(&store, "100")
+                .await
+                .expect("check 100"),
+            "pre-existing serial must be revoked"
+        );
+        assert!(
+            is_ssh_certificate_revoked(&store, "200")
+                .await
+                .expect("check 200"),
+            "racing serial inserted after the snapshot must be revoked after the OCC retry re-reads the snapshot"
+        );
+        let revoked = get_revoked_ssh_certificates(&store)
+            .await
+            .expect("get revoked");
+        assert!(
+            revoked.iter().any(|r| r.serial == "100"),
+            "KRL path must include the pre-existing serial"
+        );
+        assert!(
+            revoked.iter().any(|r| r.serial == "200"),
+            "KRL path must include the racing serial"
+        );
+        // The revoker's CAS lost once (the hook bumped the owner row) and
+        // `with_dsql_retry!` re-ran it: two CAS attempts, the second against a
+        // fresh snapshot that includes the racing serial.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the revoker must retry the CAS after losing the owner-row race"
+        );
+    }
+
+    /// Regression for the issuer side of the same TOCTOU fix.
+    ///
+    /// `record_ssh_certificate_issuance` now bumps the owning `UserDoc` in
+    /// the same transaction as the issued-cert insert, so a concurrent
+    /// `revoke_all_ssh_certificates_for_user` that wins the owner-row CAS
+    /// forces the issuer to retry. On retry the issuer re-reads the user doc
+    /// and must reject when `active` has since been set to `false` (the
+    /// deactivation's persist step), so a certificate issued concurrently with
+    /// a deactivation is never left unrevoked.
+    #[tokio::test]
+    async fn test_record_issuance_rejects_when_user_deactivated_on_occ_retry() {
+        let (mut store, _dir) = test_store_wal().await;
+        let user_id = create_user(&store, "deactivate@example.com").await;
+
+        let writer = store.clone();
+        let calls = Arc::new(AtomicU32::new(0));
+        let uid_for_hook = user_id.clone();
+        let calls_hook = Arc::clone(&calls);
+        store.set_compare_and_update_test_hook(Arc::new(move |doc_id: &str| {
+            let writer = writer.clone();
+            let uid = uid_for_hook.clone();
+            let calls = Arc::clone(&calls_hook);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if doc_id != uid {
+                    return;
+                }
+                // Count CAS attempts; only the first deactivates the user.
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n != 0 {
+                    return;
+                }
+                // Simulate the revoker+persist winning the race: bump the
+                // owner row AND deactivate the user, so the issuer's retried
+                // read sees active=false and rejects.
+                let Some(mut user) = writer.get::<UserDoc>(&uid).await.expect("hook read user")
+                else {
+                    return;
+                };
+                user.data.active = false;
+                writer
+                    .update::<UserDoc>(&uid, &user.data)
+                    .await
+                    .expect("hook deactivate user");
+            })
+        }));
+
+        let expires_at = Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future");
+        let result = record_ssh_certificate_issuance(
+            &store,
+            555,
+            &user_id,
+            "deactivate@example.com",
+            &["user".to_string()],
+            expires_at,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "issuance must reject when the user is concurrently deactivated"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the issuer's owner-row CAS must be attempted (and lose) before the retry rejects"
+        );
+        let certs = get_issued_ssh_certificates_for_user(&store, &user_id)
+            .await
+            .expect("get issued");
+        assert!(
+            certs.is_empty(),
+            "no cert should be recorded for a user deactivated during issuance"
+        );
+    }
+
+    /// Control for the OCC race test: when both certs are issued before the
+    /// revoker takes its snapshot, both are revoked in a single pass with no
+    /// OCC retry. Confirms the race test's assertion is about the snapshot
+    /// boundary (the racing serial landing after the snapshot), not some
+    /// other mechanism.
+    #[tokio::test]
+    async fn test_revoke_all_catches_certs_issued_before_snapshot() {
+        let mut store = test_store().await;
+        let user_id = create_user(&store, "before-snapshot@example.com").await;
+        insert_issued(&store, &user_id, 100).await;
+        insert_issued(&store, &user_id, 200).await;
+
+        // Count owner-row CAS attempts: a single successful pass is exactly
+        // one attempt; a retry (as in the race test) would be two.
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_hook = Arc::clone(&calls);
+        store.set_compare_and_update_test_hook(Arc::new(move |_doc_id: &str| {
+            let calls = Arc::clone(&calls_hook);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        }));
+
+        let count = revoke_all_ssh_certificates_for_user(&store, &user_id, None, None)
+            .await
+            .expect("revoke all");
+
+        assert_eq!(count, 2);
+        assert!(
+            is_ssh_certificate_revoked(&store, "100")
+                .await
+                .expect("check 100"),
+        );
+        assert!(
+            is_ssh_certificate_revoked(&store, "200")
+                .await
+                .expect("check 200"),
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no OCC retry should occur when all certs predate the snapshot"
+        );
     }
 }
