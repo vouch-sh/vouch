@@ -694,24 +694,29 @@ pub(crate) async fn toggle_custom_policy(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to toggle policy: {e}")))?;
 
-    if result.is_none() {
+    // Audit from the refreshed post-commit document returned by
+    // `update_custom_policy`, not the pre-toggle `policy` snapshot: the
+    // OCC retry loop can absorb a concurrent rename/re-text, in which case
+    // the stale snapshot would name/hash a version the row no longer holds.
+    // Cf. the sibling `update_custom_policy` handler (#1135).
+    let Some(updated) = result else {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Policy not found",
         ));
-    }
+    };
 
     let action = if new_active {
         "activated"
     } else {
         "deactivated"
     };
-    let policy_hash = policy_text_hash(&policy.policy_text);
+    let policy_hash = policy_text_hash(&updated.policy_text);
     let data = CustomPolicyAdminData {
         action: format!("custom_policy_{action}"),
         policy_id: &id,
-        policy_name: Some(&policy.name),
+        policy_name: Some(&updated.name),
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
@@ -729,7 +734,7 @@ pub(crate) async fn toggle_custom_policy(
         "Admin {} {} custom policy '{}'",
         admin.email,
         action,
-        policy.name
+        updated.name
     );
 
     Ok(Redirect::to("/admin/policies").into_response())
@@ -1660,6 +1665,139 @@ mod tests {
             "policy must have been deleted by the OCC hook"
         );
     }
+
+    /// Regression: a concurrent full update that renames/re-texts the policy
+    /// between `toggle_custom_policy`'s initial `get_custom_policy` and its
+    /// `update_custom_policy` commit is absorbed by the OCC retry loop — the
+    /// toggle's `modify` closure only touches `active`, so it re-reads the
+    /// concurrent update's name/text and commits on top. The toggle succeeds
+    /// (303), the DB row holds the concurrent update's name/text plus the
+    /// toggled `active`, and `db::update_custom_policy` returns the refreshed
+    /// post-commit document. The `AdminPolicyToggle` audit event must reflect
+    /// that persisted state (name + `policy_text_hash`), not the stale
+    /// pre-toggle snapshot — otherwise it names/hashes a version the row no
+    /// longer holds at commit time, defeating `policy_text_hash`'s purpose of
+    /// tracing "which version was in effect at the time of an admin action."
+    ///
+    /// This deterministically drives the race with `set_modify_test_hook` (the
+    /// same seam as the concurrent-delete test above): on the toggle's first
+    /// OCC attempt the hook issues a blind `store.update` that renames +
+    /// re-texts the policy, bumping its version. The toggle's first
+    /// `compare_and_update` then matches zero rows, the loop retries, re-reads
+    /// the new name/text, applies `active`, and commits.
+    #[tokio::test]
+    async fn test_toggle_custom_policy_concurrent_update_audits_persisted_name_and_hash() {
+        use crate::db::documents::posture_policy::CustomPosturePolicyDoc;
+
+        let new_text = VALID_POLICY_TEXT;
+        let (app, state) = test_app_with_modify_hook(|store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let new_text = new_text.to_string();
+                Box::pin(async move {
+                    if attempt != 0 {
+                        return;
+                    }
+                    let Some(doc) = writer
+                        .get::<CustomPosturePolicyDoc>(&doc_id)
+                        .await
+                        .expect("read policy")
+                    else {
+                        return;
+                    };
+                    let mut data = doc.data;
+                    data.name = "ConcurrentRename".to_string();
+                    data.policy_text = new_text;
+                    writer
+                        .update(&doc_id, &data)
+                        .await
+                        .expect("concurrent full update");
+                })
+            }));
+        })
+        .await;
+
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+        let policy_id = create_inactive_custom_policy(&state, &org_id).await;
+        let pre_toggle_text = "posture.os == \"linux\"";
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{policy_id}/toggle"),
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "toggle must succeed after the OCC retry: {body}"
+        );
+
+        let stored = db::get_custom_policy(&state.store, &policy_id)
+            .await
+            .expect("get")
+            .expect("policy exists");
+        assert!(stored.active, "toggle must flip active to true");
+        assert_eq!(
+            stored.name, "ConcurrentRename",
+            "concurrent rename persisted"
+        );
+        assert_eq!(
+            stored.policy_text, VALID_POLICY_TEXT,
+            "concurrent re-text persisted"
+        );
+
+        // The audit event must agree with the persisted post-commit row, not
+        // the pre-toggle snapshot. Before the fix this asserted the stale
+        // `policy_name == "Toggle Me"` and `policy_text_hash ==
+        // hash(pre_toggle_text)`.
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyToggle.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "exactly one toggle audit event");
+        let v: serde_json::Value = serde_json::from_str(&events[0].data).expect("json");
+        assert_eq!(
+            v["policy_name"].as_str().unwrap(),
+            stored.name,
+            "audit policy_name must match the persisted (post-commit) name, not the pre-toggle snapshot"
+        );
+        assert_eq!(
+            v["policy_name"].as_str().unwrap(),
+            "ConcurrentRename",
+            "audit must not record the stale pre-toggle name 'Toggle Me'"
+        );
+        assert_eq!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(&stored.policy_text),
+            "audit hash must match the persisted (post-commit) text"
+        );
+        assert_eq!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(VALID_POLICY_TEXT),
+            "audit must not record the stale pre-toggle text hash"
+        );
+        assert_ne!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(pre_toggle_text),
+            "audit must not record the hash of the superseded text"
+        );
+    }
+
     /// A stored policy that fails validation is flagged on the page, so an
     /// admin sees it before users are locked out.
     #[tokio::test]
