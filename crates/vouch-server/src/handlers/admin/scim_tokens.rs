@@ -52,11 +52,31 @@ pub(crate) struct ScimTokenRow {
 pub(crate) struct AdminScimTokensTemplate {
     pub auth: AuthContext,
     pub tokens: Vec<ScimTokenRow>,
+    /// Tokens that still count against the per-org cap, mirroring the
+    /// active-only filter in [`db::create_scim_token`] (`expires_at > now`).
+    /// The create-form gate reads this, not `tokens.len()`, so an
+    /// expired-but-not-yet-cleaned-up row no longer hides the form when the
+    /// DB cap would accept creation.
+    pub active_count: usize,
     pub flash_message: Option<String>,
     pub new_token: Option<String>,
 }
 
 impl_template_response!(AdminScimTokensTemplate);
+
+/// Count tokens that still count against the per-org cap.
+///
+/// Mirrors the active-only filter in [`db::create_scim_token`]: a token with
+/// no expiration is always active, and one with an `expires_at` at or before
+/// `now` is not. Using the request's arrival instant for `now` keeps the
+/// display decision on the same clock the rest of the request uses; the DB
+/// cap remains authoritative for actual creation.
+fn count_active(tokens: &[ScimTokenRow], now: Timestamp) -> usize {
+    tokens
+        .iter()
+        .filter(|t| t.expires_at.is_none_or(|exp| exp > now))
+        .count()
+}
 
 /// Form data for creating a SCIM token.
 #[derive(Debug, Deserialize)]
@@ -77,6 +97,7 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 
 /// GET /admin/scim-tokens — SCIM token management page.
 pub(crate) async fn admin_scim_tokens_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     admin: AdminPage,
@@ -107,6 +128,12 @@ pub(crate) async fn admin_scim_tokens_page(
         })
         .collect();
 
+    // Gate the create form on the active-token count, not the total row
+    // count, so an expired-but-not-yet-cleaned-up row no longer hides the
+    // form when the DB cap would accept creation. The DB cap stays
+    // authoritative; this only controls what the UI affords.
+    let active_count = count_active(&tokens, arrival.timestamp());
+
     // Consume any flash messages set by a prior POST → redirect, then expire
     // the cookies in the response so a refresh doesn't re-show them.
     let messages = flash::read(&jar);
@@ -115,6 +142,7 @@ pub(crate) async fn admin_scim_tokens_page(
     let body = AdminScimTokensTemplate {
         auth,
         tokens,
+        active_count,
         flash_message: messages.err,
         new_token: None,
     };
@@ -229,11 +257,14 @@ pub(crate) async fn admin_create_scim_token(
         })
         .collect();
 
+    let active_count = count_active(&tokens, arrival.timestamp());
+
     let auth = get_resource_auth_context(&state, &jar, arrival).await;
 
     Ok(AdminScimTokensTemplate {
         auth,
         tokens,
+        active_count,
         flash_message: None,
         // Deliberate render-boundary exposure: this page shows the token
         // once, at creation, which is its purpose (Askama needs Display).
@@ -386,6 +417,147 @@ mod tests {
         assert!(
             resp.body.contains("provisioning token"),
             "page must list the org's tokens"
+        );
+    }
+
+    // ── GET /admin/scim-tokens: create-form visibility mirrors the active-only cap ──
+    //
+    // `db::create_scim_token` rejects a third creation only when *active* tokens
+    // (`expires_at > now`) reach MAX_SCIM_TOKENS. The create form must gate on the
+    // same predicate so an expired-but-not-yet-cleaned-up row no longer hides the
+    // form when the cap would accept creation (#715).
+
+    /// Seed a token row directly with an explicit expiry, bypassing the
+    /// `create_test_scim_token` factory (which always sets `expires_at: None`).
+    /// Mirrors the seeding in `db/tests/scim_tokens.rs`.
+    async fn seed_token(
+        state: &crate::AppState,
+        org_id: &str,
+        description: &str,
+        expires_at: Option<jiff::Timestamp>,
+    ) {
+        use crate::db::{CreateScimTokenParams, ScimScopeSet};
+        let token_hash = format!("{}-{}", description, uuid::Uuid::now_v7());
+        crate::db::create_scim_token(
+            &state.store,
+            &CreateScimTokenParams {
+                org_id,
+                token_hash: &token_hash,
+                description: Some(description),
+                expires_at,
+                scope: ScimScopeSet::default(),
+            },
+        )
+        .await
+        .expect("seed SCIM token");
+    }
+
+    #[tokio::test]
+    async fn expired_row_does_not_hide_create_form_when_active_below_cap() {
+        // The cap counts only active tokens, so one active + one expired row
+        // must keep the create form visible — the UI must not say "max
+        // reached" when the DB cap would accept creation.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+        let future = jiff::Timestamp::now() + jiff::Span::new().hours(24);
+        seed_token(&state, &org_id, "active-row", Some(future)).await;
+        seed_token(&state, &org_id, "expired-row", Some(past)).await;
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("active-row") && resp.body.contains("expired-row"),
+            "page must list both the active and expired rows"
+        );
+        assert!(
+            resp.body.contains(r#"name="expires_in_days""#),
+            "create form must be shown when active tokens are below the cap"
+        );
+        assert!(
+            !resp.body.contains("Maximum of 2 API tokens reached"),
+            "max-reached banner must not appear when the cap would accept creation"
+        );
+
+        // The DB cap agrees: a third (active) token can still be minted.
+        let third = crate::db::create_scim_token(
+            &state.store,
+            &crate::db::CreateScimTokenParams {
+                org_id: org_id.as_str(),
+                token_hash: "third-active",
+                description: None,
+                expires_at: Some(future),
+                scope: crate::db::ScimScopeSet::default(),
+            },
+        )
+        .await;
+        assert!(third.is_ok(), "DB cap must permit a third creation");
+    }
+
+    #[tokio::test]
+    async fn two_active_tokens_hide_create_form() {
+        // Regression guard: with two active tokens the form must stay hidden
+        // and the max-reached banner must render, exactly as before the fix.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        create_test_scim_token(&state.store, "active-1", &org_id).await;
+        create_test_scim_token(&state.store, "active-2", &org_id).await;
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("active-1") && resp.body.contains("active-2"),
+            "page must list both active tokens"
+        );
+        assert!(
+            !resp.body.contains(r#"name="expires_in_days""#),
+            "create form must be hidden when two active tokens reach the cap"
+        );
+        assert!(
+            resp.body.contains("Maximum of 2 API tokens reached"),
+            "max-reached banner must appear at the active cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_create_keeps_form_visible_with_one_expired_row() {
+        // After creating the first active token in an org that already holds
+        // an expired row, the post-create render must keep the form visible
+        // (now 1 active + 1 expired) rather than hiding it on the total row
+        // count. Mirrors the behavioral change called out in the fix note.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+        seed_token(&state, &org_id, "expired-row", Some(past)).await;
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            "description=rotated&expires_in_days=30",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("vouch_scim_"),
+            "the created token is shown once, on this response"
+        );
+        assert!(
+            resp.body.contains(r#"name="expires_in_days""#),
+            "form must remain visible after creating the first active token \
+             alongside an expired row"
         );
     }
 
