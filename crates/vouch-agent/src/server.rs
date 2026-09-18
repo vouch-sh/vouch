@@ -421,9 +421,14 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
     let credential = CachedCredential::new(params.data, expires_at);
     let credential_type = params.credential_type;
 
-    state
+    let stored = state
         .cache_credential(credential_type.clone(), credential)
         .await;
+    if !stored {
+        // Oversized `credential_type` is a caller-supplied value rejected by an
+        // input-length limit — invalid_params (-32602), not INTERNAL_ERROR.
+        return Response::invalid_params(request.id, "credential_type exceeds maximum length");
+    }
 
     info!("Cached credential: {credential_type}");
     audit::log_event(AuditEvent::CredentialCached { credential_type });
@@ -673,6 +678,156 @@ mod tests {
         assert!(
             elapsed >= SHUTDOWN_DRAIN_TIMEOUT,
             "drain should have waited for the timeout"
+        );
+    }
+
+    /// An oversized `credential_type` is rejected by the state layer, so the
+    /// IPC handler must surface it as an `invalid_params` (-32602) error and
+    /// must not report success or cache anything. This is the IPC half of the
+    /// fix: before it, the handler returned `{"result": true}` on rejection.
+    #[tokio::test]
+    async fn cache_credential_rejects_oversized_key_as_invalid_params() {
+        let state = AgentState::new();
+
+        let oversized_type = "x".repeat(257);
+        let params = CacheCredentialParams {
+            credential_type: oversized_type.clone(),
+            data: serde_json::json!({"secret": "data"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 42,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        };
+
+        let response = handle_request(&request, &state).await;
+
+        let error = response
+            .error
+            .as_ref()
+            .expect("oversized key should produce an error response");
+        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert!(
+            response.result.is_none(),
+            "rejected credential must not return a result"
+        );
+        assert!(
+            state.get_cached_credential(&oversized_type).await.is_none(),
+            "rejected credential must not be cached"
+        );
+    }
+
+    /// The audit stream must agree with the actual cache state: a stored
+    /// credential emits `CredentialCached`, while a rejected oversized key
+    /// emits nothing. Before the fix the handler wrote `event:
+    /// "credential_cached"` even when the state layer refused the entry.
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation to redirect the audit log to a tempdir in an isolated test; the var is restored before assertions"
+    )]
+    async fn cache_credential_audit_reflects_caching_outcome() {
+        // Env-var access is process-global; serialise against other env users.
+        // `tokio::sync::Mutex` (not `std::sync::Mutex`) is held across the
+        // `.await` on `handle_request` so `await_holding_lock` does not fire.
+        static AUDIT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = AUDIT_ENV_LOCK.lock().await;
+
+        let dir = tempdir().expect("tempdir");
+        let prior = std::env::var_os("XDG_STATE_HOME");
+        // SAFETY: `AUDIT_ENV_LOCK` serialises this test against any other env
+        // mutation in the test binary; the var is restored below, before any
+        // assertion can panic, so a failing test cannot leak the redirect.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", dir.path());
+        }
+
+        let state = AgentState::new();
+
+        // Accepted key: handler returns success, caches, and audits.
+        let valid_type = "aws:arn:aws:iam::123456789012:role/Example".to_string();
+        let valid_params = CacheCredentialParams {
+            credential_type: valid_type.clone(),
+            data: serde_json::json!({"AccessKeyId": "AKIAEXAMPLE"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let valid_request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 1,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&valid_params).unwrap()),
+        };
+        let valid_response = handle_request(&valid_request, &state).await;
+        let valid_cached = state.get_cached_credential(&valid_type).await;
+
+        // Rejected key: handler returns invalid_params, caches nothing, and
+        // emits no audit event.
+        let oversized_type = "x".repeat(257);
+        let reject_params = CacheCredentialParams {
+            credential_type: oversized_type.clone(),
+            data: serde_json::json!({"secret": "data"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let reject_request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 2,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&reject_params).unwrap()),
+        };
+        let reject_response = handle_request(&reject_request, &state).await;
+        let reject_cached = state.get_cached_credential(&oversized_type).await;
+
+        // Restore the env before asserting so a failing assertion cannot leak
+        // the redirect into other tests.
+        // SAFETY: the lock is still held; the prior value (if any) is restored.
+        unsafe {
+            match &prior {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+
+        // Accepted path: success, cached, audited.
+        assert!(valid_response.error.is_none(), "valid key should succeed");
+        assert_eq!(valid_response.result, Some(serde_json::json!(true)));
+        assert!(valid_cached.is_some(), "valid key should be cached");
+
+        // Rejected path: invalid_params, not cached, not audited.
+        let error = reject_response
+            .error
+            .as_ref()
+            .expect("oversized key should produce an error response");
+        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert!(reject_response.result.is_none());
+        assert!(reject_cached.is_none(), "oversized key must not be cached");
+
+        // Audit discriminator must match reality: the accepted key is recorded
+        // as cached; the rejected key is absent from the audit stream entirely.
+        let audit_path = dir.path().join("vouch").join("audit.log");
+        let audit_text =
+            std::fs::read_to_string(&audit_path).expect("audit log should exist after a cache");
+        assert!(
+            audit_text.contains("\"event\":\"credential_cached\""),
+            "accepted key should emit a credential_cached event: {audit_text}"
+        );
+        assert!(
+            audit_text.contains(valid_type.as_str()),
+            "audit log should record the accepted credential_type: {audit_text}"
+        );
+        assert!(
+            !audit_text.contains(oversized_type.as_str()),
+            "rejected key must not appear in the audit log as cached: {audit_text}"
         );
     }
 }
