@@ -1038,6 +1038,94 @@ async fn test_update_user_github_identity_preserves_concurrent_admin_change() {
     );
 }
 
+/// Regression for the re-link-revert race: a refresh-token rotation (the
+/// fixed `get_user_access_token` path, which now writes only the rotated
+/// token via `update_user_github_refresh_token`) must NOT revert a
+/// concurrent re-link to a different GitHub account that commits inside
+/// the OCC window.
+///
+/// Before the fix the refresh path re-read the user, captured
+/// `github_id`/`github_login`, and called `update_user_github_identity`
+/// with those captured values; on OCC retry `store.modify` re-read the
+/// post-relink doc but the closure re-applied the stale captured identity,
+/// silently reverting the re-link. The sibling
+/// `test_update_user_github_identity_preserves_concurrent_admin_change`
+/// above could not detect this because both writers shared the same
+/// `github_id` (only the untouched `is_org_admin` field diverged); this
+/// test uses a divergent `github_id` for the concurrent re-link, the case
+/// the lost-update surface actually endangers.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "relink-race@example.com",
+        Some("Relink Race User"),
+        Some("org-relink-race"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // Initial link to GitHub account 111.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // The refresh path now writes only the rotated token. Inject a
+    // concurrent re-link to a second GitHub account (id 222) inside
+    // attempt 0's OCC window to deterministically force a version-conflict
+    // retry (the same seam
+    // `test_update_user_github_identity_preserves_concurrent_admin_change`
+    // uses).
+    let writer = store.clone();
+    let relink_user_id = user_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let relink_user_id = relink_user_id.clone();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            // Concurrent re-link to account 222 commits inside the CAS window.
+            update_user_github_identity(&writer, &relink_user_id, 222, "g2-user", Some("r2"))
+                .await
+                .expect("concurrent relink to account 222");
+        })
+    }));
+
+    // Refresh-path write: rotated token only, no identity fields.
+    update_user_github_refresh_token(&hooked, &user_id, "r1-rotated")
+        .await
+        .expect("refresh-path write");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+
+    assert_eq!(
+        user.github_id,
+        Some(222),
+        "concurrent re-link to account 222 must survive the refresh path's OCC retry"
+    );
+    assert_eq!(
+        user.github_login.as_deref(),
+        Some("g2-user"),
+        "concurrent re-link's login must survive"
+    );
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1-rotated"),
+        "the rotated refresh token must still be persisted"
+    );
+}
+
 /// #543 — Deleting an authenticator must cascade to clear
 /// `authenticator_id` on `DeviceAuthRequestDoc`, which requires the
 /// `authenticator_id` index to be emitted by `DeviceAuthRequestDoc::index_entries`.

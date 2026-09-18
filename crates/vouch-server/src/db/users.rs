@@ -741,6 +741,35 @@ pub async fn update_user_github_identity(
     }
 }
 
+/// Update only a user's GitHub refresh token.
+///
+/// Used by the access-token refresh path, which has no reason to rewrite
+/// `github_id`/`github_login`: those fields are already in the doc, and
+/// re-writing them from a value captured before the OCC window would
+/// silently revert a concurrent re-link to a different GitHub account that
+/// commits inside the retry window. Touching only the refresh token lets a
+/// concurrent `update_user_github_identity` (the linking path) survive
+/// naturally across `store.modify`'s OCC retry.
+///
+/// A missing user is reported as an error (the refresh path had a stored
+/// token to rotate, so the user must exist).
+pub async fn update_user_github_refresh_token(
+    store: &DocumentStore,
+    user_id: &str,
+    new_refresh_token: &str,
+) -> Result<()> {
+    let found = store
+        .modify::<UserDoc, _>(user_id, |data| {
+            data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
+        })
+        .await?;
+    if found {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("user not found: {user_id}"))
+    }
+}
+
 /// Get a user's GitHub refresh token.
 pub async fn get_user_github_refresh_token(
     store: &DocumentStore,
