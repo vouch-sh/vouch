@@ -2509,20 +2509,17 @@ impl StoreTransaction<'_> {
     }
 }
 
-/// Truncate an RFC 3339 bound to whole seconds for lexicographic comparison
-/// against a `TEXT` timestamp column (`expires_at`, `created_at`).
+/// Truncate an RFC 3339 bound to whole seconds for a lexicographic `TEXT`
+/// comparison against `expires_at` or `created_at`.
 ///
 /// Columns hold [`jiff::Timestamp::to_string`] output, which trims trailing
-/// zero fractional digits to a variable width: `…16Z`, `…16.5Z`,
-/// `…16.537239482Z` are all valid. Comparing two such strings with SQL `<` /
-/// `>` is only chronological when one is a zero-padding-equivalent prefix of
-/// the other. Bound `…16.537239482Z` against row `…16.5Z` sorts the row as
-/// *greater* (`'Z'` > `'3'` at the first differing byte) although it is
-/// earlier. A bound with no fractional part is a strict prefix of every value
-/// in its own second, so it sorts correctly on both sides; the cost is that
-/// rows within the bound's own second are compared at whole-second
-/// granularity, which for an expiry check admits a row for at most one extra
-/// second and for a sweep leaves it for the next pass.
+/// zero fractional digits: `…16Z`, `…16.5Z`, and `…16.537239482Z` are all
+/// valid. Byte order matches time order only when one string is a prefix of
+/// the other. Bound `…16.537239482Z` sorts row `…16.5Z` as later because
+/// `'Z'` > `'3'`. A bound with no fraction is a prefix of every value in its
+/// second, so it sorts correctly on both sides. Rows in that second compare at
+/// whole-second granularity: an expiry check accepts them for up to 1 s more,
+/// and a sweep leaves them for the next pass.
 pub(crate) fn whole_second_bound_str(bound: &str) -> &str {
     let bound = bound.strip_suffix('Z').unwrap_or(bound);
     match bound.split_once('.') {
