@@ -125,21 +125,16 @@ impl GitHubService<'_> {
         // failures so they surface instead of silently discarding the only
         // copy of the new token.
         if let Some(new_refresh_token) = &token_response.refresh_token {
-            let user = db::get_user_by_id(self.store, user_id)
-                .await
-                .map_err(GitHubError::Database)?
-                .ok_or(GitHubError::UserNotFound)?;
-
-            let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login) else {
-                return Err(GitHubError::GitHubAccountNotLinked);
-            };
-
-            db::update_user_github_identity(
+            // Write only the refresh token. Re-deriving `github_id`/
+            // `github_login` from a read captured before the OCC window and
+            // re-applying them on retry would silently revert a concurrent
+            // re-link to a different GitHub account; the identity fields are
+            // already in the doc, so a token-only write is all this path
+            // needs — see `update_user_github_refresh_token`.
+            db::update_user_github_refresh_token(
                 self.store,
                 user_id,
-                github_id,
-                github_login,
-                Some(new_refresh_token.expose_secret()),
+                new_refresh_token.expose_secret(),
             )
             .await
             .map_err(GitHubError::Database)?;
