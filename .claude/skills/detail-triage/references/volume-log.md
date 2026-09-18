@@ -27,14 +27,16 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-15 | 6 | 6 | 7 | 1 | 6 | 6 of 6 fix, 2 of 7 dead-code | dead-code: 5 merged, 2 superseded (#1393, #1394); fix: 3 amended, 1 superseded (#1396), 2 closed | 1 of 6 | `wire-format-compat-on-persisted-structs`, synced #1395 |
 | 2026-09-16 | 4 | 3 | 0 | 2 | 4 | 3 of 3 | 3 amended, merged; #1406 fixed by #1409; siblings in `fix/secret-ui-and-scim-refusal` | 2 of 4 | client-type rule requested (`rcr_3b87ceaa…`), not synced |
 | 2026-09-17 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | 1 amended (#1427), 3 reworked into class fixes (#1424, #1426, #1428), 1 folded (#1425 → #1428) | 1 of 5 (contradicted 09-16 record) | `secret-gate-must-key-on-auth-method` created 09-16, not synced; #1421 was in its scope |
+| 2026-09-18 | 19 | 19 | 0 | 1 | 0 | 11 of 19 | 8 merged as-is; 8 amended (#1453, #1455, #1459, #1460, #1461, #1465, #1466, #1467); #1454 reworked (staged rollout); #1451 superseded by #1470; #1452 closed | 1 of 19 (#1433, 09-16 revoke-first decision) | lexical-bound rule requested (`rcr_e013fe46…`); secret-gate refinement synced |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
 (created 2026-09-12) and has never been synced into this repository.
 
-**Reading:** from 2026-09-12 on, PR≤3d equals the issue count in every batch —
-every finding was in something merged in the previous three days — while the
-Detail-only column never did. And review changed or rejected most of what
+**Reading:** from 2026-09-12 through 2026-09-17, PR≤3d equals the issue count
+in every batch — every finding was in something merged in the previous three
+days — while the Detail-only column never did. 2026-09-18 broke the streak:
+19 findings, PR≤3d 0, blame from January to August. That batch is backlog. And review changed or rejected most of what
 arrived in every recorded batch except 2026-09-11, so the batch's outcome is
 decided in review, not by Detail's PRs.
 
@@ -480,3 +482,53 @@ the fourth batch in a row made entirely of our own class fixes.
   templates but was never synced.
 - **#1422** was isolated. Its one sibling (key rename ignored a `false` write
   result) was fixed in the same PR.
+
+## 2026-09-18 — backlog batch, nineteen findings, none in recent merges
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 117 | 18 | 194 | 58 | 42 |
+
+**Self-caused: 0 of 19.** Blame reaches #96 (February) and a January commit.
+First batch since 2026-09-11 with no finding in a merge from the previous
+three days, after six straight batches (31 of 31) that were.
+
+### Classes
+
+- **Lexical compare of RFC 3339 TEXT against a full-precision bound** (#1432).
+  Two members: `documents.expires_at` (both predicates, reported) and
+  `audit_events.created_at` (three predicates, already fixed by
+  `normalize_timestamp_bound`). Detail's #1451 added an epoch column with a
+  one-statement backfill that exceeds DSQL's 3,000-row transaction quota and an
+  `IS NOT NULL` predicate that rejects nonces from old instances mid-deploy.
+  Replaced by #1470: the audit helper moved to `db/store.rs` as
+  `whole_second_bound_str` and both document predicates use it. Rule requested.
+- **Element side of the exc-c14n prefix collision** (#1446). #1465 fixed the
+  attribute half; the element half at three sites was confirmed by test
+  (`<signed xmlns="urn:X">` vs libxml2's `<a:signed xmlns:a="urn:X">`) and fixed
+  in the same PR by reading the source prefix (`roxmltree` `positions`).
+- **Logout audit through an expiry-filtering lookup** (#1440): two handlers,
+  both in Detail's PR.
+
+### Review outcomes
+
+- #1454 (FIDO2 challenge binding) would have broken every released CLI with
+  HTTP 415 and every rolling deploy with a required state field, and reversed
+  the recorded challenge-endpoint decision. Reworked as a staged rollout;
+  enforcement becomes mandatory in a later release.
+- #1452 (SSH cert TOCTOU) did not close the race: its issuer re-check reads
+  `active`, which `revoke_then_persist` writes after revocation. Closed as a
+  recurrence of the 09-16 decision.
+- Spec citations corrected in five PRs: RFC 8628 §5.2 is brute forcing, not
+  binding (#1454); exc-c14n §3.1 is non-normative and XMLDSig §4.4.1 says
+  nothing about fixed points (#1465); RFC 8705 §2.2 is permissive (#1466);
+  RFC 9449 §10 fixes SHA-256 (#1455); RFC 9449 §11.1 permits nonce reuse
+  (#1451).
+- Internal labels in two PRs (`BUG Class A/B` in #1453 evades the digit-based
+  sweep; `G17`/`G9` in #1461).
+
+### Process
+
+One worktree at a time. No sleep-polling. Root `Cargo.toml` never carries
+`features`; a crate enables them in its own manifest. Comments in Amazonian
+style.
