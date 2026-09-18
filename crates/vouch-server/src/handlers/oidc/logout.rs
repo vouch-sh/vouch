@@ -454,12 +454,21 @@ async fn resolve_post_logout_redirect_uri(
 ///
 /// The `rp_client_id` is the `aud` from the verified `id_token_hint`, included
 /// in the audit event to distinguish RP-initiated logouts from user-initiated ones.
+///
+/// The audit context lookup uses the expiry-agnostic
+/// [`db::find_session_by_token_hash`] rather than the expiry-filtering
+/// [`db::get_session_by_token_hash`]: a `POST /oauth/logout` deletes the row
+/// by `token_hash` regardless of expiry (see [`db::delete_session_by_token_hash`]),
+/// so the `Logout` audit event must fire whenever the row actually existed.
+/// The expiry-filtering lookup returns `None` for an expired-but-present row,
+/// silently dropping the audit event in the window between DB expiry and the
+/// next reaper tick.
 async fn clear_user_session(
     state: &AppState,
     jar: &CookieJar,
     headers: &HeaderMap,
     rp_client_id: Option<&str>,
-    arrival: ArrivalTime,
+    _arrival: ArrivalTime,
 ) {
     let Some(token) = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
@@ -470,15 +479,15 @@ async fn clear_user_session(
 
     let token_hash = hash_token(&token);
 
-    let session_info = match state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash, arrival)
-        .await
-    {
+    // Look up the row WITHOUT the expiry filter so an expired-but-present
+    // session still yields `user_id`/`user_email` for the audit. The cache
+    // is bypassed for the same reason: its miss path delegates to the
+    // expiry-filtering lookup and would answer `None` for an expired row.
+    // Best-effort: on a DB error the session is still deleted below; only
+    // the audit event's user context is lost.
+    let session_info = match db::find_session_by_token_hash(&state.store, &token_hash).await {
         Ok(info) => info,
         Err(e) => {
-            // Don't silently drop the error: log it and proceed. The session is
-            // still deleted below; only the audit event's user context is lost.
             tracing::warn!(error = %e, "RP-Initiated Logout: session lookup for audit failed");
             None
         }
@@ -918,6 +927,173 @@ mod tests {
         assert!(
             status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
             "unexpected status: {status}"
+        );
+    }
+
+    // ====================================================================
+    // Audit-event regression: expired-but-present session row
+    // ====================================================================
+    //
+    // `clear_user_session` previously fetched the audit context via the
+    // expiry-filtering `get_session_by_token_hash`, which returns `None` for
+    // an expired-but-present row, then gated the `Logout` audit event on
+    // `if let Some(session) = session_info`. So an RP-initiated logout whose
+    // cookie session row had already expired (but had not yet been reaped)
+    // deleted the row without recording any audit event. These tests pin
+    // the fix: the audit fires for both expired and live rows, and only when
+    // a row was actually deleted.
+
+    /// Seed an already-expired session row for `user_id`/`email` keyed to an
+    /// arbitrary cookie value (the logout path hashes the cookie and matches
+    /// by `token_hash`; it never decodes a JWT, so the cookie need not be a
+    /// real token). Returns `(token, token_hash)`.
+    async fn seed_expired_session_row(
+        state: &crate::AppState,
+        user_id: &str,
+        email: &str,
+    ) -> (String, String) {
+        use crate::db::{CreateSessionParams, SessionPurpose, create_session};
+
+        let token = format!("expired-rp-{}", uuid::Uuid::now_v7());
+        let token_hash = crate::crypto::hash_token(&token);
+        let expires_at = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(1))
+            .unwrap();
+        create_session(
+            &state.store,
+            &CreateSessionParams {
+                user_id,
+                user_email: email,
+                token_hash: &token_hash,
+                authenticator_id: None,
+                expires_at,
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: None,
+                source_code_hash: None,
+            },
+        )
+        .await
+        .unwrap();
+        (token, token_hash)
+    }
+
+    async fn logout_audit_events(
+        state: &crate::AppState,
+        user_id: &str,
+    ) -> Vec<crate::db::AuditEvent> {
+        state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec![crate::db::AuditEventKind::Logout.as_str().to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_records_audit_event_for_expired_session_row() {
+        // The bug: an expired-but-present cookie session row was deleted
+        // during RP-initiated logout but no `Logout` audit event was written.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-expired@example.com").await;
+
+        let (token, token_hash) = seed_expired_session_row(&state, &user.id, &user.email).await;
+
+        // Sanity: the expiry-filtering lookup returns `None` — the
+        // precondition the bug report describes.
+        let filtered =
+            crate::db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
+                .await
+                .unwrap();
+        assert!(filtered.is_none(), "expired row must be filtered out");
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) =
+            http_post_form(&app, "/oauth/logout", "", &[("Cookie", cookie.as_str())]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        // The row must be gone.
+        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .unwrap();
+        assert!(after.is_none(), "expired session row must be deleted");
+
+        // The `Logout` audit event must exist — the bug dropped it.
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "RP-initiated logout must record a Logout audit event for an expired-but-present row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_records_audit_event_for_live_session() {
+        // Happy path: a live cookie session row must also record the
+        // `Logout` audit event — guards against a fix that broke the
+        // happy path while repairing the expired-row case.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-live@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crate::crypto::hash_token(&token);
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) =
+            http_post_form(&app, "/oauth/logout", "", &[("Cookie", cookie.as_str())]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .unwrap();
+        assert!(after.is_none(), "live session row must be deleted");
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "RP-initiated logout must record a Logout audit event for a live row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_no_audit_event_when_no_session_row() {
+        // No cookie / no row: `clear_user_session` deletes nothing, so no
+        // audit event must be recorded. Guards against a fix that records
+        // the event unconditionally.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-none@example.com").await;
+
+        let (status, _body) = http_post_form(&app, "/oauth/logout", "", &[]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout without a cookie must still succeed; got {status}"
+        );
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert!(
+            events.is_empty(),
+            "no Logout audit event when there is no session to delete"
         );
     }
 }

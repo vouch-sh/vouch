@@ -133,6 +133,32 @@ pub async fn get_session_by_token_hash(
     }
 }
 
+/// Look up a session row by token hash WITHOUT the expiry filter.
+///
+/// Unlike [`get_session_by_token_hash`], this returns the row even when its
+/// `expires_at` is already in the past, as long as the row has not yet been
+/// reaped by the expired-session cleanup task. It is the lookup the logout
+/// handlers need to capture `user_id`/`user_email` for audit logging: a
+/// `POST /logout` deletes the row by `token_hash` regardless of expiry (see
+/// [`delete_session_by_token_hash`]), so the audit event must be recorded
+/// whenever the row actually existed — but the expiry-filtering lookup returns
+/// `None` for an expired-but-present row, silently dropping the `Logout`
+/// audit event in the window between DB expiry and the next reaper tick.
+///
+/// This bypasses the [`SessionCache`] on purpose: the cache's miss path
+/// delegates to the expiry-filtering [`get_session_by_token_hash`] and would
+/// also answer `None` for an expired-but-present row, so a cache probe does
+/// not recover the audit context the handler needs.
+pub async fn find_session_by_token_hash(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<Session>> {
+    let doc = store
+        .find_one::<SessionDoc>("token_hash", token_hash)
+        .await?;
+    Ok(doc.map(Session::from))
+}
+
 /// Delete a session by token hash.
 pub async fn delete_session_by_token_hash(store: &DocumentStore, token_hash: &str) -> Result<bool> {
     let count = store
