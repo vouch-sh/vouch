@@ -361,8 +361,8 @@ mod tests {
 
     /// The domain separator (`b"github_installation\0"`) must keep the
     /// installation ID distinct from a raw digest of the same input bytes
-    /// (i.e. the prefix is actually mixed in). This is the structural
-    /// guarantee behind G17: the `deterministic_challenge_state_id` and
+    /// (i.e. the prefix is actually mixed in). This is what keeps the ID
+    /// domains apart: the `deterministic_challenge_state_id` and
     /// `deterministic_org_id` helpers use different prefixes
     /// (`b"challenge_state\0"`, `b"organization_domain\0"`), so they can never
     /// produce a `documents`-primary-key collision with an installation ID

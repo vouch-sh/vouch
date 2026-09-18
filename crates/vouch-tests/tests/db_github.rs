@@ -484,7 +484,7 @@ async fn create_github_installation_same_installation_id_different_org_succeed()
 
 #[tokio::test]
 async fn create_github_installation_concurrent_same_installation_produces_one_row() {
-    // Race-safety (G9): N concurrent `create_github_installation` calls for the
+    // Race-safety: N concurrent `create_github_installation` calls for the
     // same `(org_id, installation_id)` must produce exactly one `Ok(id)` and
     // N-1 `Err(Duplicate)`, leaving exactly one row — the deterministic primary
     // key collides atomically. Mirrors the challenge-state and SCIM concurrent

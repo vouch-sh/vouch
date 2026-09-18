@@ -143,16 +143,31 @@ impl GitHubService<'_> {
     ) -> GitHubResult<InstallationConnectResult> {
         let app = self.require_app()?;
 
+        // Already-linked guard. Rows written before installation IDs became
+        // deterministic carry random document IDs, so a replayed callback for
+        // one of them would not collide on insert; the index lookup catches
+        // those, and skips the GitHub API round trip for every replay.
+        if db::get_github_installation_by_installation_id(
+            self.store,
+            params.installation_id.cast_signed(),
+        )
+        .await
+        .map_err(GitHubError::Database)?
+        .is_some()
+        {
+            return Err(GitHubError::InstallationAlreadyConnected);
+        }
+
         // Fetch installation details from GitHub
         let details = app
             .get_installation_details(GitHubInstallationId(params.installation_id))
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Store installation in database. A replayed install callback (or two
-        // concurrent connects) for the same `(org_id, installation_id)` collide
-        // on the deterministic document ID and surface as `Duplicate`, which we
-        // map to `InstallationAlreadyConnected` — race-safe, no duplicate row.
+        // Store installation in database. The guard above is a fast path; a
+        // replayed callback or two concurrent connects that pass it collide on
+        // the deterministic document ID and surface as `Duplicate`, which maps
+        // to `InstallationAlreadyConnected` — race-safe, no duplicate row.
         db::create_github_installation(
             self.store,
             &db::CreateGitHubInstallationParams {
