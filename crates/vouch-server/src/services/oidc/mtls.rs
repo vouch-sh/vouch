@@ -429,12 +429,21 @@ pub(crate) fn verify_tls_client_auth(
     Err(MtlsError::CertificateNotRegistered)
 }
 
-/// Verify `self_signed_tls_client_auth` — match certificate against
-/// client's JWKS x5c entries (RFC 8705 Section 2.2).
+/// Verify `self_signed_tls_client_auth` — match the presented certificate
+/// against the leaf certificate of each JWK's `x5c` in the client's JWKS.
 ///
-/// The TLS handshake proves possession of the private key. This
-/// function verifies the presented certificate matches one registered
-/// in the client's JWKS via the x5c parameter.
+/// The TLS handshake proves possession of the private key. RFC 8705
+/// Section 2.2 only says the client "is successfully authenticated if the
+/// certificate that it presented during the handshake matches one of the
+/// certificates configured or registered for that particular client"; it
+/// does not say which `x5c` entries count as registered. RFC 7517
+/// Section 4.7 fixes the shape of the array: "The PKIX certificate
+/// containing the key value MUST be the first certificate. This MAY be
+/// followed by additional certificates, with each subsequent certificate
+/// being the one used to certify the previous one." Vouch therefore treats
+/// only `x5c[0]` as the registered credential. The later entries are the
+/// issuers of the client's own key, and accepting them would let an issuer
+/// authenticate as the client.
 pub(crate) fn verify_self_signed_tls_client_auth(
     cert: &ClientCertificate,
     jwks: &serde_json::Value,
@@ -445,22 +454,21 @@ pub(crate) fn verify_self_signed_tls_client_auth(
         .and_then(|k| k.as_array())
         .ok_or(MtlsError::CertificateNotRegistered)?;
 
-    // Check each key's x5c entries
     for key in keys {
         if let Some(x5c_array) = key.get("x5c").and_then(|v| v.as_array()) {
-            for x5c_entry in x5c_array {
-                if let Some(x5c_b64) = x5c_entry.as_str() {
-                    // x5c uses standard base64 (NOT base64url) per RFC 7517 Section 4.7
-                    if let Ok(x5c_der) = STANDARD.decode(x5c_b64) {
-                        let x5c_thumbprint = compute_cert_thumbprint(&x5c_der);
-                        let is_match: bool = x5c_thumbprint
-                            .as_str()
-                            .as_bytes()
-                            .ct_eq(cert.thumbprint.as_str().as_bytes())
-                            .into();
-                        if is_match {
-                            return Ok(());
-                        }
+            // Only x5c[0] carries the JWK's key (RFC 7517 §4.7); the later
+            // entries are its issuers and are not the client's credential.
+            if let Some(x5c_b64) = x5c_array.first().and_then(|e| e.as_str()) {
+                // x5c uses standard base64 (NOT base64url) per RFC 7517 Section 4.7
+                if let Ok(x5c_der) = STANDARD.decode(x5c_b64) {
+                    let x5c_thumbprint = compute_cert_thumbprint(&x5c_der);
+                    let is_match: bool = x5c_thumbprint
+                        .as_str()
+                        .as_bytes()
+                        .ct_eq(cert.thumbprint.as_str().as_bytes())
+                        .into();
+                    if is_match {
+                        return Ok(());
                     }
                 }
             }
@@ -1223,6 +1231,59 @@ mod tests {
         assert!(
             matches!(result, Err(MtlsError::CertificateNotRegistered)),
             "empty keys array must return CertificateNotRegistered"
+        );
+    }
+
+    // RFC 7517 §4.7 makes `x5c[0]` the certificate carrying the JWK's key and
+    // the later entries its issuers. Vouch registers only the leaf as the
+    // client's credential, so a presenter whose cert equals a non-leaf entry
+    // is not authenticated.
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_non_leaf_x5c_entry_must_not_match() {
+        let leaf_der = make_test_cert("self-signed-leaf");
+        let other_der = make_test_cert("self-signed-other");
+        let other = parse_client_certificate(&other_der).expect("parse other");
+
+        // JWKS registers a multi-entry x5c: [leaf, other].
+        let leaf_b64 = base64::engine::general_purpose::STANDARD.encode(&leaf_der);
+        let other_b64 = base64::engine::general_purpose::STANDARD.encode(&other_der);
+        let jwks = serde_json::json!({
+            "keys": [
+                { "kty": "EC", "crv": "P-256", "x5c": [leaf_b64, other_b64] }
+            ]
+        });
+
+        // Present `other` (x5c[1]) — a holder of its private key is not the
+        // client.
+        let result = verify_self_signed_tls_client_auth(&other, &jwks);
+        assert!(
+            matches!(result, Err(MtlsError::CertificateNotRegistered)),
+            "presenting a cert equal to x5c[1] (non-leaf) is not the registered \
+             credential (RFC 7517 §4.7: the key-bearing cert is x5c[0]). Got: {result:?}"
+        );
+    }
+
+    // Companion positive case: with a multi-entry `x5c`, presenting the leaf
+    // (x5c[0]) still authenticates.
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_multi_entry_leaf_matches() {
+        let leaf_der = make_test_cert("self-signed-leaf-pos");
+        let other_der = make_test_cert("self-signed-other-pos");
+        let leaf = parse_client_certificate(&leaf_der).expect("parse leaf");
+
+        let leaf_b64 = base64::engine::general_purpose::STANDARD.encode(&leaf_der);
+        let other_b64 = base64::engine::general_purpose::STANDARD.encode(&other_der);
+        let jwks = serde_json::json!({
+            "keys": [
+                { "kty": "EC", "crv": "P-256", "x5c": [leaf_b64, other_b64] }
+            ]
+        });
+
+        let result = verify_self_signed_tls_client_auth(&leaf, &jwks);
+        assert!(
+            result.is_ok(),
+            "presenting the leaf (x5c[0]) of a multi-entry x5c must authenticate: \
+             {result:?}"
         );
     }
 
