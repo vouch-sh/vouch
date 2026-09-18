@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.9.4"
+version = "2026.9.5"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.98.0"
@@ -139,23 +139,23 @@ arc-swap = { version = "=1.9.2", default-features = false }
 askama = { version = "=0.16.1", default-features = false }
 aws-config = { version = "=1.12.0", default-features = false }
 aws-lc-rs = { version = "=1.18.1", default-features = false }
-aws-sdk-dsql = { version = "=1.69.0", default-features = false }
-aws-sdk-kms = { version = "=1.118.0", default-features = false }
-aws-sdk-s3 = { version = "=1.146.0", default-features = false }
-aws-sdk-ssm = { version = "=1.122.0", default-features = false }
-aws-smithy-types = { version = "=1.6.3", default-features = false }
+aws-sdk-dsql = { version = "=1.71.0", default-features = false }
+aws-sdk-kms = { version = "=1.120.0", default-features = false }
+aws-sdk-s3 = { version = "=1.148.0", default-features = false }
+aws-sdk-ssm = { version = "=1.124.0", default-features = false }
+aws-smithy-types = { version = "=1.6.4", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.6.6", default-features = false }
-clap_complete = { version = "=4.6.9", default-features = false }
+clap = { version = "=4.6.7", default-features = false }
+clap_complete = { version = "=4.6.11", default-features = false }
 const-oid = { version = "=0.9.6", default-features = false }
 ctap-hid-fido2 = { version = "=3.6.0", default-features = false }
 der = { version = "=0.7.10", default-features = false }
 dirs = { version = "=7.0.0", default-features = false }
-dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "fa7a32370a642b32b54c73c16fd75bc88c847050", package = "dogwood-language", default-features = false }
+dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "996d756de1013b7ae209a14f566a80375a59f2f0", package = "dogwood-language", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
 ed25519-dalek = { version = "=3.0.0", default-features = false }
 flate2 = { version = "=1.1.10", default-features = false }
@@ -171,7 +171,7 @@ i18n-embed-fl = { version = "=0.10.1", default-features = false }
 idna = { version = "=1.1.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
 jiff = { version = "=0.2.37", default-features = false }
-jsonwebtoken = { version = "=11.0.0", default-features = false }
+jsonwebtoken = { version = "=11.1.0", default-features = false }
 keyring-core = { version = "=1.0.0", default-features = false }
 libc = { version = "=0.2.189", default-features = false }
 linux-keyutils-keyring-store = { version = "=1.0.0", default-features = false }
@@ -199,7 +199,7 @@ secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.229", default-features = false }
 serde_json = { version = "=1.0.151", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
-serde-saphyr = { version = "=1.2.0", default-features = false }
+serde-saphyr = { version = "=1.3.0", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
 signature = { version = "=2.2.0", default-features = false }
 spki = { version = "=0.7.3", default-features = false }

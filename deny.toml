@@ -48,13 +48,6 @@ allow = [
 ]
 exceptions = []
 
-# The dogwood-language crate manifest omits the `license` field; the
-# repository is Apache-2.0 (LICENSE at repo root).
-[[licenses.clarify]]
-crate = "dogwood-language"
-expression = "Apache-2.0"
-license-files = []
-
 [bans]
 # Duplicate versions are reported but not gate-breaking: dependency bumps that
 # transiently split a crate would otherwise fail required checks on unrelated
@@ -157,7 +150,7 @@ unknown-registry = "deny"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # Dogwood spike (feat/dogwood-spike, never merged): reference interpreter,
-    # not published on crates.io — pinned to an exact rev in Cargo.toml.
+    # Dogwood policy engine: not published on crates.io — pinned to an exact
+    # rev in Cargo.toml.
     "https://github.com/dogwood-policy/dogwood",
 ]
