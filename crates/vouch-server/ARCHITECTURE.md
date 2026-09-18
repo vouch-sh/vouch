@@ -221,14 +221,17 @@ sequenceDiagram
   participant YK as YubiKey CTAP2
   participant SRV as vouch-server
   participant DB as DocumentStore
-  CLI->>SRV: POST /oauth/fido2/challenge
-  SRV->>DB: store challenge state JWT
+  CLI->>SRV: POST /oauth/fido2/challenge (private_key_jwt)
+  SRV->>SRV: authenticate client; stamp client_id into state JWT
+  SRV->>DB: store challenge state JWT (bound to client_id)
   SRV-->>CLI: challenge, rp_id, allowCredentials
   CLI->>YK: authenticatorGetAssertion
   YK-->>CLI: authData, clientDataJSON, signature
   CLI->>SRV: POST /oauth/token, FIDO2 grant + DPoP header
   SRV->>SRV: validate_dpop_proof: sig, jti, nonce, htm, htu, iat
-  SRV->>SRV: AssertionGrant::validate
+  SRV->>SRV: authenticate presenting client (private_key_jwt)
+  SRV->>SRV: AssertionGrant::validate (decodes the state JWT)
+  SRV->>SRV: reject if state.client_id != presenting client_id (cross-client binding)
   par consume the challenge
     SRV->>DB: try_consume_challenge_state
     DB-->>SRV: ChallengeStateClaim

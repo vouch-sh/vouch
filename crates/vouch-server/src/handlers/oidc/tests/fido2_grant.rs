@@ -15,10 +15,12 @@ use super::helpers::*;
 #[tokio::test]
 async fn test_fido2_challenge_endpoint_exists() {
     // The challenge endpoint must return 200 with a JSON body containing
-    // "challenge", "rp_id", and "state" fields. No authentication required.
-    let (app, _state) = test_app().await;
+    // "challenge", "rp_id", and "state" fields when authenticated.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-exists@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let (status, body) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
 
     assert_eq!(
         status,
@@ -44,9 +46,21 @@ async fn test_fido2_challenge_endpoint_exists() {
 #[tokio::test]
 async fn test_fido2_challenge_response_has_no_cache_headers() {
     // Challenge responses must not be cached — they contain one-time-use material.
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-cache@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        &pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
 
-    let resp = http_post_form_full(&app, "/oauth/fido2/challenge", "", &[]).await;
+    let resp = http_post_form_full(&app, "/oauth/fido2/challenge", &body, &[]).await;
 
     assert_eq!(resp.status, StatusCode::OK);
     let cache_control = resp
@@ -63,9 +77,11 @@ async fn test_fido2_challenge_response_has_no_cache_headers() {
 #[tokio::test]
 async fn test_fido2_challenge_state_is_valid_jwt() {
     // The state field must be a three-part dot-separated JWT string.
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-jwt@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let (status, body) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
     assert_eq!(status, StatusCode::OK);
 
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -293,9 +309,28 @@ async fn test_fido2_token_invalid_state_jwt_rejected() {
 // Negative: Individual field encoding validation
 // ========================================================================
 
-/// Helper: get a real state JWT from the challenge endpoint.
-async fn get_real_state_jwt(app: &axum::Router) -> String {
-    let (status, body) = http_post_form(app, "/oauth/fido2/challenge", "", &[]).await;
+/// Helper: build a `private_key_jwt`-authenticated form body for
+/// `POST /oauth/fido2/challenge`. The challenge endpoint now requires
+/// client authentication, so a valid `client_assertion` is needed to obtain
+/// a state JWT at all.
+async fn post_challenge(app: &axum::Router, client_id: &str, pkcs8: &[u8]) -> (StatusCode, String) {
+    let client_assertion = build_client_assertion(
+        client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
+    http_post_form(app, "/oauth/fido2/challenge", &body, &[]).await
+}
+
+/// Helper: get a real state JWT from the challenge endpoint, authenticated
+/// as `client_id` so the state is bound to the same client that redeems it.
+async fn get_real_state_jwt(app: &axum::Router, client_id: &str, pkcs8: &[u8]) -> String {
+    let (status, body) = post_challenge(app, client_id, pkcs8).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -326,7 +361,7 @@ async fn post_assertion_with_credential_id(
         None,
     );
 
-    let state_jwt = get_real_state_jwt(app).await;
+    let state_jwt = get_real_state_jwt(app, &client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -434,7 +469,7 @@ async fn test_fido2_token_invalid_credential_id_encoding_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -485,7 +520,7 @@ async fn test_fido2_token_invalid_authenticator_data_encoding_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -536,7 +571,7 @@ async fn test_fido2_token_invalid_signature_encoding_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -587,7 +622,7 @@ async fn test_fido2_token_invalid_client_data_json_encoding_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -638,7 +673,7 @@ async fn test_fido2_token_invalid_user_handle_encoding_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
@@ -691,7 +726,7 @@ async fn test_fido2_token_invalid_user_handle_uuid_rejected() {
         None,
     );
 
-    let state_jwt = get_real_state_jwt(&app).await;
+    let state_jwt = get_real_state_jwt(&app, &_client.client_id, &pkcs8).await;
     let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
     // 8 bytes decodes fine from base64url but cannot be a UUID (needs 16 bytes)
     let short_user_handle = URL_SAFE_NO_PAD.encode(b"8bytesok");
@@ -738,10 +773,12 @@ async fn test_fido2_token_invalid_user_handle_uuid_rejected() {
 
 #[tokio::test]
 async fn test_fido2_challenge_returns_unique_challenges() {
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-uniq@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let (status1, body1) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
-    let (status2, body2) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
+    let (status1, body1) = post_challenge(&app, &client.client_id, &pkcs8).await;
+    let (status2, body2) = post_challenge(&app, &client.client_id, &pkcs8).await;
 
     assert_eq!(
         status1,
@@ -772,9 +809,11 @@ async fn test_fido2_challenge_returns_unique_challenges() {
 
 #[tokio::test]
 async fn test_fido2_challenge_rp_id_matches_config() {
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-rpid@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let (status, body) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
     assert_eq!(status, StatusCode::OK, "Challenge must return 200: {body}");
 
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -784,6 +823,196 @@ async fn test_fido2_challenge_rp_id_matches_config() {
         rp_id, "test.example.com",
         "rp_id in challenge response must match server configuration"
     );
+}
+
+// ========================================================================
+// Challenge endpoint client authentication (cross-client binding)
+// ========================================================================
+
+/// The challenge endpoint must reject a request with no client credentials
+/// as `invalid_client` (RFC 6749 §5.2). It is no longer unauthenticated.
+#[tokio::test]
+async fn test_fido2_challenge_requires_client_authentication() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Unauthenticated challenge must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "Missing client auth must return invalid_client, got: {}",
+        error["error"]
+    );
+}
+
+/// The challenge endpoint must require `private_key_jwt`. A client
+/// authenticating with a shared secret (even a valid one) must be rejected,
+/// matching the token endpoint's auth-method requirement for this grant.
+#[tokio::test]
+async fn test_fido2_challenge_requires_private_key_jwt() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-secret@example.com").await;
+    // A client registered for `client_secret_basic` rather than
+    // `private_key_jwt`.
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretBasic),
+            with_secret: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let auth = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/fido2/challenge",
+        "",
+        &[("Authorization", auth.as_str())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Secret-based challenge auth must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "Secret auth must return invalid_client, got: {}",
+        error["error"]
+    );
+}
+
+/// A client not registered for the `fido2-assertion` grant must not be able
+/// to start the ceremony. RFC 6749 §5.2 `unauthorized_client` — mirroring
+/// `ValidatedOAuthClient::for_grant` at the token endpoint.
+#[tokio::test]
+async fn test_fido2_challenge_rejects_client_unauthorized_for_grant() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-unauth@example.com").await;
+    // `private_key_jwt` but authorized for `authorization_code` only.
+    let (client, pkcs8) =
+        create_jwt_client_with_grants(&state.store, &user.id, &["authorization_code"]).await;
+
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Unauthorized client must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "unauthorized_client",
+        "Client without fido2-assertion grant must return unauthorized_client, got: {}",
+        error["error"]
+    );
+}
+
+/// The challenge state JWT must carry the authenticated `client_id`, so a
+/// cross-client replay at the token endpoint is rejected. Decoding the
+/// state JWT (HS256, signed by the server's state signer) and reading the
+/// `client_id` claim verifies the binding at issuance.
+#[tokio::test]
+async fn test_fido2_challenge_state_carries_client_id() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-challenge-cid@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
+    assert_eq!(status, StatusCode::OK, "Challenge must succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let state_jwt = response["state"].as_str().expect("state must be a string");
+
+    // The state JWT payload is the middle segment, base64url-encoded JSON.
+    let parts: Vec<&str> = state_jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "state must be a JWT: {state_jwt}");
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("JWT payload must be valid base64url");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&payload).expect("JWT payload must be valid JSON");
+
+    assert_eq!(
+        claims["client_id"].as_str(),
+        Some(client.client_id.as_str()),
+        "state JWT must be bound to the authenticated client_id: {}",
+        claims
+    );
+}
+
+/// A state JWT issued to one client must not be redeemable by a different
+/// client. The cross-client check in `exchange_fido2_assertion` rejects the
+/// token request with `invalid_grant` before consuming the challenge state,
+/// so the legitimate client can still redeem it (no denial of service).
+#[tokio::test]
+async fn test_fido2_grant_rejects_cross_client_replay_before_consume() {
+    let (app, state) = test_app().await;
+
+    // Client A initiates the ceremony and obtains a state JWT bound to A.
+    let user_a = create_test_user(&state.store, "fido2-xclient-a@example.com").await;
+    let (client_a, pkcs8_a) = create_test_jwt_client(&state.store, &user_a.id).await;
+    let state_jwt = get_real_state_jwt(&app, &client_a.client_id, &pkcs8_a).await;
+
+    // Client B (separately registered, also authorized for fido2-assertion)
+    // tries to redeem A's state+assertion under its own credentials.
+    let user_b = create_test_user(&state.store, "fido2-xclient-b@example.com").await;
+    let (client_b, pkcs8_b) = create_test_jwt_client(&state.store, &user_b.id).await;
+    let client_assertion_b = build_client_assertion(
+        &client_b.client_id,
+        "https://test.example.com/oauth/token",
+        &pkcs8_b,
+        None,
+    );
+
+    let placeholder = URL_SAFE_NO_PAD.encode(b"valid-placeholder");
+    let assertion_payload = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": placeholder,
+        "authenticator_data": placeholder,
+        "signature": placeholder,
+        "client_data_json": placeholder,
+        "user_handle": URL_SAFE_NO_PAD.encode(uuid::Uuid::now_v7().as_bytes()),
+    });
+    let assertion =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+             &assertion={assertion}\
+             &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+             &client_assertion={client_assertion_b}"
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Cross-client replay must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "Cross-client replay must return invalid_grant, got: {}",
+        error["error"]
+    );
+
+    // The rejected attempt did not consume the state, so client A can redeem.
+    assert_challenge_unspent(&state, &state_jwt).await;
 }
 
 // ========================================================================
@@ -874,3 +1103,31 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
 // ========================================================================
 // Helpers local to this module
 // ========================================================================
+
+/// Create a `private_key_jwt` client authorized for exactly `grants` (as
+/// the wire strings stored in `grant_types`), returning the client and the
+/// ES256 signing key. Used to exercise the challenge endpoint's
+/// `unauthorized_client` check for a client lacking the `fido2-assertion`
+/// grant.
+async fn create_jwt_client_with_grants(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+    grants: &[&str],
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            grant_types: Some(grants.iter().map(|g| (*g).to_string()).collect()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    (client, pkcs8_bytes)
+}

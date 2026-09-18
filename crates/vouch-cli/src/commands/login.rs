@@ -21,7 +21,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret;
 use serde::Serialize;
-use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction};
+use vouch_cli::fapi::{
+    ClientAssertion, ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction,
+};
 use vouch_common::{Fido2ChallengeResponse, protocol};
 
 use super::enroll::expiry_offset_seconds;
@@ -71,6 +73,17 @@ struct Fido2AssertionTokenRequest {
     /// RFC 9396: Device posture as authorization_details JSON array.
     #[serde(skip_serializing_if = "Option::is_none")]
     authorization_details: Option<String>,
+}
+
+/// Form fields for `POST /oauth/fido2/challenge`.
+///
+/// The challenge endpoint requires `private_key_jwt` client authentication,
+/// so the request carries only the client assertion and its type.
+#[derive(Serialize)]
+struct Fido2ChallengeForm {
+    client_assertion_type: &'static str,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    client_assertion: secrecy::SecretString,
 }
 
 // RFC 7521/7523: both the client assertion and the FIDO2 assertion are
@@ -132,20 +145,36 @@ async fn run_fapi_login(
     let token_endpoint_url = format!("{server}/oauth/token");
     let challenge_url = format!("{server}/oauth/fido2/challenge");
 
-    let dpop_proof = DpopProofBuilder::new("POST", &challenge_url)
+    // The challenge endpoint requires `private_key_jwt` client
+    // authentication so the server can bind the issued state JWT to this
+    // client (and reject a state+assertion replayed under a different
+    // client at the token endpoint). FAPI 2.0 §5.3.2.1-8: the assertion
+    // audience is the issuer URL, the same value the token request uses.
+    let challenge_client_assertion = ClientAssertionBuilder::new(&client_id, server)
+        .build(fapi_key)
+        .context(tr!("err-failed-build-client-assertion-challenge-request"))?;
+
+    let challenge_dpop_proof = DpopProofBuilder::new("POST", &challenge_url)
         .build(fapi_key)
         .context(tr!("err-failed-build-dpop-proof-challenge-request"))?;
 
     let interaction = FapiInteraction::new();
     let fapi_headers = interaction.headers();
 
+    let challenge_form = serde_urlencoded::to_string(&Fido2ChallengeForm {
+        client_assertion_type: ClientAssertion::TYPE,
+        client_assertion: challenge_client_assertion.assertion,
+    })
+    .context(tr!("err-failed-encode-challenge-request"))?;
+
     let response = client
         .raw_client()
         .post(&challenge_url)
-        .header(protocol::HEADER_DPOP, dpop_proof)
+        .header("Content-Type", protocol::CONTENT_TYPE_FORM_URLENCODED)
+        .header(protocol::HEADER_DPOP, challenge_dpop_proof)
         .header(fapi_headers[0].0, fapi_headers[0].1)
         .header(fapi_headers[1].0, fapi_headers[1].1)
-        .json(&serde_json::json!({}))
+        .body(challenge_form)
         .send()
         .await
         .context(tr!("err-failed-request-fido2-challenge"))?;

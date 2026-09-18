@@ -235,6 +235,7 @@ pub async fn authenticate_client_jwt(
     let par_endpoint_url = format!("{base_url}/oauth/par");
     let introspect_endpoint_url = format!("{base_url}/oauth/introspect");
     let device_endpoint_url = format!("{base_url}/oauth/device");
+    let fido2_challenge_endpoint_url = format!("{base_url}/oauth/fido2/challenge");
 
     let allowed_audiences: Vec<&str> = if client.is_fapi() {
         vec![base_url]
@@ -245,6 +246,7 @@ pub async fn authenticate_client_jwt(
             &par_endpoint_url,
             &introspect_endpoint_url,
             &device_endpoint_url,
+            &fido2_challenge_endpoint_url,
             base_url,
         ]
     };
