@@ -629,11 +629,14 @@ const MAX_NONCE_LEN: usize = 256;
 const MAX_CODE_CHALLENGE_LEN: usize = 128;
 const MAX_ACR_VALUES_LEN: usize = 512;
 /// Maximum allowed length for the `dpop_jkt` parameter.
-/// RFC 9449 Section 10 binds the authorization code to a DPoP key via its RFC 7638
-/// JWK thumbprint, which is `base64url(SHA-256(jwk))` — 43 characters, no padding
-/// (see `services::oidc::dpop` and `crypto::jwk`). 256 characters is a comfortable
-/// upper bound that accommodates future hash-algorithm agility while still
-/// preventing oversized inputs from being persisted in PAR and pending-OAuth records.
+///
+/// RFC 9449 Section 10: "The value of the dpop_jkt authorization request
+/// parameter is the JWK Thumbprint [RFC7638] of the proof-of-possession public
+/// key using the SHA-256 hash function", so a conformant value is always the
+/// 43-character unpadded base64url digest. The bound matches the other opaque
+/// string caps in this block rather than the exact width; a non-thumbprint
+/// value that fits is still rejected at the token endpoint, where Section 10
+/// requires the thumbprint of the presented DPoP key to match.
 const MAX_DPOP_JKT_LEN: usize = 256;
 /// Maximum allowed value for the `max_age` parameter (1 year in seconds).
 /// Prevents unreasonable values and ensures safe u64→i64 conversion for storage.
