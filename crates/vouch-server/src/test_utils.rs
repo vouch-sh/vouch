@@ -1474,6 +1474,19 @@ pub async fn create_test_org_token_with_scope(
     org_id: &str,
     scope: crate::db::ScimScopeSet,
 ) -> String {
+    create_test_org_token_with_scope_expiring(store, description, org_id, scope, None).await
+}
+
+/// [`create_test_org_token_with_scope`] with an explicit expiry, for tests
+/// about the active-token cap: `Some(past)` seeds an expired-but-present row,
+/// `Some(future)` a live one.
+pub async fn create_test_org_token_with_scope_expiring(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+    scope: crate::db::ScimScopeSet,
+    expires_at: Option<jiff::Timestamp>,
+) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
@@ -1524,7 +1537,7 @@ pub async fn create_test_org_token_with_scope(
             org_id,
             token_hash: &token_hash,
             description: Some(description),
-            expires_at: None,
+            expires_at,
             scope,
         },
     )
@@ -1546,6 +1559,23 @@ pub async fn create_test_scim_token(
         description,
         org_id,
         crate::db::ScimScopeSet::default(),
+    )
+    .await
+}
+
+/// [`create_test_scim_token`] with an explicit expiry.
+pub async fn create_test_scim_token_expiring(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+    expires_at: Option<jiff::Timestamp>,
+) -> String {
+    create_test_org_token_with_scope_expiring(
+        store,
+        description,
+        org_id,
+        crate::db::ScimScopeSet::default(),
+        expires_at,
     )
     .await
 }
