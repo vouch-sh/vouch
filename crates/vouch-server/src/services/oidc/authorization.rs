@@ -628,6 +628,16 @@ const MAX_SCOPE_LEN: usize = 512;
 const MAX_NONCE_LEN: usize = 256;
 const MAX_CODE_CHALLENGE_LEN: usize = 128;
 const MAX_ACR_VALUES_LEN: usize = 512;
+/// Maximum allowed length for the `dpop_jkt` parameter.
+///
+/// RFC 9449 Section 10: "The value of the dpop_jkt authorization request
+/// parameter is the JWK Thumbprint [RFC7638] of the proof-of-possession public
+/// key using the SHA-256 hash function", so a conformant value is always the
+/// 43-character unpadded base64url digest. The bound matches the other opaque
+/// string caps in this block rather than the exact width; a non-thumbprint
+/// value that fits is still rejected at the token endpoint, where Section 10
+/// requires the thumbprint of the presented DPoP key to match.
+const MAX_DPOP_JKT_LEN: usize = 256;
 /// Maximum allowed value for the `max_age` parameter (1 year in seconds).
 /// Prevents unreasonable values and ensures safe u64→i64 conversion for storage.
 const MAX_MAX_AGE: u64 = 31_536_000;
@@ -700,6 +710,12 @@ pub fn validate_authorize_request(
                 "acr_values contains invalid characters",
             ));
         }
+    }
+    // RFC 9449 Section 10: `dpop_jkt` is client-controlled (form param or JAR
+    // Request Object claim) and is persisted verbatim into PAR and pending-OAuth
+    // records, so cap it like every other free-form string parameter.
+    if let Some(ref dpop_jkt) = params.dpop_jkt {
+        validate_param_length("dpop_jkt", dpop_jkt, MAX_DPOP_JKT_LEN)?;
     }
     if let Some(max_age) = params.max_age
         && max_age > MAX_MAX_AGE
@@ -1812,6 +1828,100 @@ mod tests {
 
         let result = validate_authorize_request(params);
         assert!(result.is_err());
+    }
+
+    // RFC 9449 Section 10: `dpop_jkt` carries the RFC 7638 JWK thumbprint
+    // (base64url(SHA-256(jwk)), 43 chars, no padding) used to bind the
+    // authorization code to a DPoP key. A canonical thumbprint is accepted
+    // unchanged and surfaced on the validated request.
+    #[test]
+    fn test_validate_authorize_request_with_dpop_jkt() {
+        // RFC 7638 Section 3.2 example thumbprint (43 chars, base64url no-pad).
+        let jkt = "NzbLsXh8uDCcd-6MNwXF4p_7U6d6sWMR0S5Zm-zUhck";
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some(jkt.to_string()),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.dpop_jkt(), Some(jkt));
+    }
+
+    // RFC 9449 Section 10: `dpop_jkt` is client-controlled and persisted into
+    // PAR and pending-OAuth records, so it must be bounded like every other
+    // free-form string parameter. An oversized value is rejected before any
+    // caller can mint or store an authorization code.
+    #[test]
+    fn test_validate_authorize_request_rejects_long_dpop_jkt() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("a".repeat(MAX_DPOP_JKT_LEN + 1)),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, description }
+                if *code == OAuthErrorCode::InvalidRequest
+                    && description.contains("exceeds maximum length")),
+            "Expected OAuth InvalidRequest reporting an exceeded length, got: {err:?}",
+        );
+    }
+
+    // RFC 9449 Section 10: the length cap is an upper bound, not a tight one.
+    // A `dpop_jkt` at exactly the bound is accepted (border case mirrors the
+    // `max_age` boundary test).
+    #[test]
+    fn test_validate_authorize_request_accepts_max_dpop_jkt() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("a".repeat(MAX_DPOP_JKT_LEN)),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
     }
 
     /// Extract the OAuth error code from a failed [`PromptSet::parse`].
