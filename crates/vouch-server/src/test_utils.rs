@@ -1441,6 +1441,49 @@ pub async fn forge_short_lived_access_token(
     token
 }
 
+/// Seed an already-expired session row for `user_id`/`email` keyed to an
+/// opaque cookie value, and return `(cookie, token_hash)`.
+///
+/// The logout handlers hash the cookie and match rows by `token_hash`; they
+/// never decode a JWT, so an opaque cookie is the faithful fixture. The row's
+/// `expires_at` is one second in the past, which is the expired-but-not-yet-
+/// reaped window: the expiry-filtering `get_session_by_token_hash` answers
+/// `None` while the row still exists.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+pub async fn create_test_expired_session_row(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+) -> (String, String) {
+    let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
+    let token_hash = crate::crypto::hash_token(&token);
+    let expires_at = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().seconds(1))
+        .expect("backdate session row by 1s");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash: &token_hash,
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
+            hardware_aaguid: Option::None,
+            org_domain: Option::None,
+            client_id: Option::None,
+            source_code_hash: Option::None,
+        },
+    )
+    .await
+    .expect("create expired session row");
+    (token, token_hash)
+}
+
 /// Create an org with an admin user, a FIDO2-verified session, and return
 /// the admin plus the session's raw access token.
 pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {

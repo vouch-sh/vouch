@@ -813,3 +813,135 @@ async fn test_downgrade_reports_missing_member() {
             .expect("a missing member is not an error")
     );
 }
+
+// ===========================================================================
+// Expiry-agnostic lookup (`find_session_by_token_hash`) — the root-cause
+// regression for the "Logout audit event silently dropped when the session
+// is expired but still present in the DB" bug.
+//
+// `delete_session_by_token_hash` deletes purely on the `token_hash` index
+// with no expiry check, so it can delete an expired-but-present row. The
+// logout handlers must therefore be able to read that same row's
+// `user_id`/`user_email` for audit logging even after expiry — but
+// `get_session_by_token_hash` filters on `expires_at > now` and returns
+// `None` for it, which is what dropped the `Logout` audit event.
+// `find_session_by_token_hash` is the expiry-agnostic companion the handlers
+// now use for audit context.
+// ===========================================================================
+
+/// `find_session_by_token_hash` returns a row that `get_session_by_token_hash`
+/// filters out as expired — the exact divergence that dropped the audit event.
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_expired_row() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "find-expired@example.com", None)
+        .await
+        .expect("create user");
+
+    // A row that has already expired by one second.
+    let expires_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let just_after = expires_at
+        .checked_add(jiff::Span::new().seconds(1))
+        .unwrap();
+    let token_hash = "find_expired_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "find-expired@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    // The filtering lookup returns `None` for this row.
+    let filtered = get_session_by_token_hash(&store, token_hash, just_after)
+        .await
+        .expect("filtered query");
+    assert!(filtered.is_none(), "expired row must be filtered out");
+
+    // The expiry-agnostic lookup returns the row — the audit context
+    // (`user_id`/`user_email`) the logout handlers need.
+    let found = find_session_by_token_hash(&store, token_hash)
+        .await
+        .expect("expiry-agnostic query");
+    let session = found.expect("expired-but-present row must be returned");
+    assert_eq!(session.user_id, user_id);
+    assert_eq!(session.user_email, "find-expired@example.com");
+    assert_eq!(session.token_hash, token_hash);
+}
+
+/// `find_session_by_token_hash` returns `None` for a token hash that has no
+/// row at all, mirroring `delete_session_by_token_hash`'s `Ok(false)` so the
+/// audit is gated on `deleted` (no row → no audit).
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_none_when_absent() {
+    let (store, _audit) = test_db().await;
+    let found = find_session_by_token_hash(&store, "no-such-token-hash")
+        .await
+        .expect("absent query");
+    assert!(found.is_none(), "an absent row must return None");
+
+    // Mirrors `delete_session_by_token_hash` for the same absent row: nothing
+    // is deleted, so the handler's `if deleted` gate stays closed and no audit
+    // event is recorded — the symmetric, correct behavior on the other side.
+    let deleted = delete_session_by_token_hash(&store, "no-such-token-hash")
+        .await
+        .expect("absent delete");
+    assert!(!deleted, "deleting an absent row reports false");
+}
+
+/// `find_session_by_token_hash` also returns live rows, so the logout handlers
+/// keep recording the `Logout` audit event in the happy path.
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_live_row() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "find-live@example.com", None)
+        .await
+        .expect("create user");
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let token_hash = "find_live_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "find-live@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    let found = find_session_by_token_hash(&store, token_hash)
+        .await
+        .expect("live query");
+    let session = found.expect("live row must be returned");
+    assert_eq!(session.user_id, user_id);
+
+    // And the filtering lookup agrees for the live row.
+    let filtered = get_session_by_token_hash(&store, token_hash, jiff::Timestamp::now())
+        .await
+        .expect("filtered live query");
+    assert!(
+        filtered.is_some(),
+        "live row must also be returned by the filtering lookup"
+    );
+}
