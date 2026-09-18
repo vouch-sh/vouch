@@ -171,6 +171,16 @@ pub(crate) async fn complete_login(
         )
             .into_response();
     }
+    // Companion cache eviction: a DB delete alone does not evict the
+    // in-process `SessionCache`. Without this, a DB-deleted session cookie
+    // keeps validating as a `Hit` until the cache TTL elapses, so the next
+    // conformance module could still be authenticated by a prior module's
+    // stale cookie — exactly the per-module "clean session" the delete above
+    // is meant to guarantee. Mirrors the contract every other production
+    // `delete_sessions_for_user` caller follows (`revoke_user_access`,
+    // `revoke_token`, `revoke_tokens_api`, `delete_oauth_client_and_revoke_sessions`,
+    // `revoke_sessions_for_domain_users`).
+    state.session_cache.invalidate_for_user(&user.id);
 
     let session_client_id = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
@@ -597,6 +607,223 @@ mod tests {
         assert!(
             resp.headers.get("set-cookie").is_some(),
             "Response must set a session cookie"
+        );
+    }
+
+    // ── complete_login session-cache invalidation tests ───────────────
+
+    /// Create a pending OAuth authorization bound to `client` and return its id.
+    async fn create_cert_pending(
+        state: &Arc<AppState>,
+        client: &crate::test_utils::TestOAuthClient,
+    ) -> String {
+        crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: Some("state-cert-cache"),
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: None,
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: Default::default(),
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("create pending auth")
+    }
+
+    /// Pump `GET /certification/complete-login` for `pending_id` and return the
+    /// issued session cookie value plus the redirect Location. Asserts the
+    /// handler minted a session and redirected to `/oauth/authorize`.
+    async fn run_complete_login(
+        app: &axum::Router,
+        state: &Arc<AppState>,
+        pending_id: &str,
+    ) -> (String, String) {
+        let secret = state
+            .config()
+            .certification_test_token
+            .as_ref()
+            .expect("cert token set")
+            .expose_secret()
+            .to_string();
+        let token = hmac_sha256_base64url(&secret, pending_id);
+        let resp = crate::test_utils::http_get_full(
+            app,
+            &format!("/certification/complete-login?pending_auth={pending_id}&token={token}"),
+            &[],
+        )
+        .await;
+        assert!(
+            resp.status == axum::http::StatusCode::FOUND
+                || resp.status == axum::http::StatusCode::SEE_OTHER,
+            "complete_login must redirect, got {} body {}",
+            resp.status,
+            resp.body
+        );
+        let set_cookie = resp
+            .headers
+            .get(header::SET_COOKIE)
+            .expect("complete_login must Set-Cookie")
+            .to_str()
+            .expect("ascii Set-Cookie")
+            .to_string();
+        let cookie_value = set_cookie
+            .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
+            .and_then(|(_, rest)| rest.split(';').next())
+            .expect("extract session cookie value")
+            .to_string();
+        let location = resp
+            .headers
+            .get("location")
+            .expect("complete_login must redirect")
+            .to_str()
+            .expect("ascii Location")
+            .to_string();
+        assert!(
+            location.starts_with("/oauth/authorize?pending_auth="),
+            "redirect must target authorize: {location}"
+        );
+        (cookie_value, location)
+    }
+
+    /// Build a `Cookie` header carrying `value` as the session cookie.
+    fn session_cookie_header(value: &str) -> String {
+        format!("{}={}", vouch_common::SESSION_COOKIE_NAME, value)
+    }
+
+    /// End-to-end regression for the missing `SessionCache` eviction in
+    /// `complete_login`.
+    ///
+    /// The handler deletes every prior cert-user session row in the DB but —
+    /// before the fix — never called `session_cache.invalidate_for_user`, so a
+    /// DB-deleted session cookie kept authenticating via a stale cache `Hit`
+    /// until the cache TTL elapsed. The handler's own comment promises "Each
+    /// module should start with a clean session"; a stale cached session
+    /// resurrected by a replayed cookie breaks that invariant: it issues an
+    /// authorization code under the deleted session's `auth_time` for a
+    /// `pending_auth` the session was never minted for.
+    ///
+    /// Mirrors the contract every other production `delete_sessions_for_user`
+    /// caller follows (`revoke_user_access`, `revoke_token`, `revoke_tokens_api`,
+    /// `delete_oauth_client_and_revoke_sessions`, `revoke_sessions_for_domain_users`).
+    ///
+    /// Steps:
+    /// 1. Module A: `complete_login` for `P1` mints cookie `C1`. Following its
+    ///    redirect with `C1` consumes `P1`, issues a code, and — critically —
+    ///    seeds `SessionCache` with `hash(C1)` (the hot path's DB-miss-then-
+    ///    insert behavior).
+    /// 2. Module B: a fresh `complete_login` for `P2` deletes all cert-user
+    ///    session rows (including `C1`'s) and mints a new cookie `C2`. With
+    ///    the fix it also evicts the cert user's cache entries.
+    /// 3. Inject the OLD cookie `C1` into a probe against a fresh `P3`. It
+    ///    must NOT issue a code: the cache must no longer serve `C1` as a
+    ///    `Hit`, and the DB row is gone, so `/oauth/authorize` redirects to
+    ///    `/login?pending_auth=P3` instead.
+    /// 4. Control: the fresh cookie `C2` (minted by module B) must still
+    ///    issue a code against a fresh `P4`, proving the fix evicts only the
+    ///    stale entry and does not over-revoke the cert user's current session.
+    #[tokio::test]
+    async fn test_complete_login_invalidates_stale_session_cache_for_prior_cert_sessions() {
+        let (app, state) = crate::test_utils::test_app_with_certification().await;
+
+        // The OAuth client the cert session authorizes against. Owned by an
+        // unrelated user; the cert handler mints the shared cert-test@vouch.sh
+        // user separately.
+        let owner =
+            crate::test_utils::create_test_user(&state.store, "cert-cache-owner@example.com").await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &owner.id).await;
+
+        // ── Module A: mint C1 and seed the cache ──────────────────────────
+        let p1 = create_cert_pending(&state, &client).await;
+        let (c1, _p1_redirect) = run_complete_login(&app, &state, &p1).await;
+
+        // Drain the redirect to `/oauth/authorize?pending_auth=P1` with C1.
+        // This consumes P1, issues a code, and seeds SessionCache with
+        // hash(C1) -> Session (the cache-miss-then-DB-hit-then-insert path).
+        let auth_a = crate::test_utils::http_get_full(
+            &app,
+            &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p1)),
+            &[("Cookie", &session_cookie_header(&c1))],
+        )
+        .await;
+        let location_a = auth_a
+            .headers
+            .get("location")
+            .expect("module A authorize must redirect")
+            .to_str()
+            .expect("ascii");
+        assert!(
+            location_a.contains("code="),
+            "module A: fresh cert session must issue a code (cache-seed step), \
+             got {location_a}"
+        );
+
+        // ── Module B: second complete_login wipes prior cert sessions ──────
+        let p2 = create_cert_pending(&state, &client).await;
+        let (c2, _p2_redirect) = run_complete_login(&app, &state, &p2).await;
+        // p2 is intentionally left unconsumed; complete_login only reads it.
+
+        // ── Probe: the OLD cookie C1 against a fresh P3 ────────────────────
+        let p3 = create_cert_pending(&state, &client).await;
+        let stale = crate::test_utils::http_get_full(
+            &app,
+            &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p3)),
+            &[("Cookie", &session_cookie_header(&c1))],
+        )
+        .await;
+        assert!(
+            stale.status == axum::http::StatusCode::FOUND
+                || stale.status == axum::http::StatusCode::SEE_OTHER,
+            "stale-cookie probe must redirect, got {} body {}",
+            stale.status,
+            stale.body
+        );
+        let stale_location = stale
+            .headers
+            .get("location")
+            .expect("stale-cookie probe must redirect")
+            .to_str()
+            .expect("ascii")
+            .to_string();
+        assert!(
+            !stale_location.contains("code="),
+            "stale session cookie must NOT issue a code via the SessionCache hit; \
+             got redirect: {stale_location}"
+        );
+        assert!(
+            stale_location.starts_with("/login?pending_auth="),
+            "stale session cookie must redirect to /login for re-auth, got: {stale_location}"
+        );
+
+        // ── Control: the fresh cookie C2 against a fresh P4 ────────────────
+        let p4 = create_cert_pending(&state, &client).await;
+        let fresh = crate::test_utils::http_get_full(
+            &app,
+            &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p4)),
+            &[("Cookie", &session_cookie_header(&c2))],
+        )
+        .await;
+        let fresh_location = fresh
+            .headers
+            .get("location")
+            .expect("fresh-cookie probe must redirect")
+            .to_str()
+            .expect("ascii");
+        assert!(
+            fresh_location.contains("code="),
+            "the fresh cert session minted by module B must still issue a code \
+             (no over-revocation), got {fresh_location}"
         );
     }
 
