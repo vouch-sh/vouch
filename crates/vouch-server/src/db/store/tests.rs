@@ -66,6 +66,7 @@ async fn test_store() -> DocumentStore {
             encapped_key TEXT,
             data TEXT NOT NULL,
             expires_at TEXT,
+            expires_at_epoch_ns BIGINT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             version INTEGER NOT NULL DEFAULT 1,
@@ -260,6 +261,339 @@ async fn delete_expired() {
         .await
         .unwrap();
     assert!(found.is_some());
+}
+
+// ------------------------------------------------------------------------
+// Sub-second expiry comparison.
+//
+// jiff's `Timestamp::to_string()` renders fractional seconds minimally
+// (trailing zeros stripped), so two instants sharing an integer-second field
+// can render at different widths — e.g. `...00.5Z` (1 fractional digit) vs
+// `...00.5001Z` (4 digits). When such a pair is compared with SQL `<`/`>` as
+// the raw `expires_at TEXT` column was, byte ordering diverges from
+// chronological ordering at the byte after the shared fractional prefix
+// (`.` (0x2E) < `0` (0x30) < `Z` (0x5A)), so the shorter string sorts *after*
+// the longer one even when it is *earlier* in time. These tests pin the
+// expiry predicates to a chronological integer-nanosecond comparison that is
+// lossless at `Timestamp` precision, covering exactly the regime the
+// whole-second fixtures above deliberately avoided.
+// ------------------------------------------------------------------------
+
+/// Two instants in the same integer-second whose minimal-fraction strings
+/// differ in width and share a fractional prefix — the exact pair that
+/// mis-sorts lexically.
+fn sub_second_pair() -> (Timestamp, Timestamp) {
+    // 500.0 ms and 500.1 ms after 16:45:00 UTC — `.5Z` and `.5001Z`.
+    let earlier: Timestamp = "2025-03-26T16:45:00.5Z".parse().unwrap();
+    let later: Timestamp = "2025-03-26T16:45:00.5001Z".parse().unwrap();
+    assert!(
+        later > earlier,
+        "fixture invariant: later is chronologically after"
+    );
+    (earlier, later)
+}
+
+/// Read the raw `expires_at_epoch_ns` column for `id`, to assert the writer
+/// stored a lossless nanosecond value (not a truncated ms/µs one).
+async fn stored_epoch_ns(store: &DocumentStore, id: &str) -> Option<i64> {
+    let Pool::Sqlite(p) = &store.pool else {
+        unreachable!()
+    };
+    sqlx::query_scalar::<_, Option<i64>>("SELECT expires_at_epoch_ns FROM documents WHERE id = ?")
+        .bind(id)
+        .fetch_optional(p)
+        .await
+        .unwrap()
+        .flatten()
+}
+
+/// RFC 9449 §11.1 single-use: an expired nonce must NOT be consumed — the
+/// `expires_at > now` predicate must return false for `now` chronologically
+/// after the stored expiry. With the buggy lexical TEXT comparison this
+/// deletes the row, because `...00.5Z` sorts *after* `...00.5001Z` lexically
+/// even though `.5Z` is *earlier* than `.5001Z`.
+#[tokio::test]
+async fn delete_if_not_expired_rejects_expired_subsecond_nonce() {
+    let store = test_store().await;
+    let (earlier, later) = sub_second_pair();
+
+    let doc = ExpiringDoc {
+        token: "exp-500ms".to_string(),
+        expires: earlier, // `.5Z`
+    };
+    store.insert_with_id("subsec-expired", &doc).await.unwrap();
+
+    // The writer stored a lossless nanosecond epoch, not a truncated one.
+    assert_eq!(
+        stored_epoch_ns(&store, "subsec-expired").await,
+        Some(i64::try_from(earlier.as_nanosecond()).unwrap()),
+        "expires_at_epoch_ns must be the lossless nanosecond value",
+    );
+
+    // `now` is chronologically AFTER the expiry → the nonce is expired → the
+    // consume must NOT delete it (won == false).
+    let mut tx = store.begin().await.unwrap();
+    let won = tx
+        .delete_if_not_expired("subsec-expired", &later)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        !won,
+        "expired nonce (.5Z) judged against now=.5001Z (chronologically after, \
+         lexically before) must NOT be consumed",
+    );
+    assert!(
+        store
+            .get::<ExpiringDoc>("subsec-expired")
+            .await
+            .unwrap()
+            .is_some(),
+        "the expired row must survive unconsumed",
+    );
+}
+
+/// RFC 9449 §11.1 single-use: a still-live nonce MUST be consumed. The
+/// `expires_at > now` predicate must return true for `now` chronologically
+/// before the stored expiry. With the buggy lexical TEXT comparison this
+/// refuses the live nonce, because `...00.5Z` sorts *after* `...00.5001Z`
+/// lexically so the stored `.5001Z` is judged not-greater-than `now=.5Z`.
+#[tokio::test]
+async fn delete_if_not_expired_consumes_live_subsecond_nonce() {
+    let store = test_store().await;
+    let (earlier, later) = sub_second_pair();
+
+    let doc = ExpiringDoc {
+        token: "live-500_1ms".to_string(),
+        expires: later, // `.5001Z`
+    };
+    store.insert_with_id("subsec-live", &doc).await.unwrap();
+
+    // `now` is chronologically BEFORE the expiry → the nonce is still live →
+    // the consume MUST delete it (won == true).
+    let mut tx = store.begin().await.unwrap();
+    let won = tx
+        .delete_if_not_expired("subsec-live", &earlier)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        won,
+        "live nonce (.5001Z) judged against now=.5Z (chronologically before, \
+         lexically after) MUST be consumed",
+    );
+    assert!(
+        store
+            .get::<ExpiringDoc>("subsec-live")
+            .await
+            .unwrap()
+            .is_none(),
+        "the consumed row must be gone",
+    );
+}
+
+/// The consume is `expires_at > now` (strictly greater), so a nonce whose
+/// expiry equals `now` is not consumable, and one far in the future still is.
+#[tokio::test]
+async fn delete_if_not_expired_strict_greater_boundary() {
+    let store = test_store().await;
+
+    // Expiry exactly equal to `now`: not strictly greater → not consumed.
+    let exactly_now: Timestamp = "2025-03-26T16:45:00.5Z".parse().unwrap();
+    store
+        .insert_with_id(
+            "subsec-eq-now",
+            &ExpiringDoc {
+                token: "eq-now".to_string(),
+                expires: exactly_now,
+            },
+        )
+        .await
+        .unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let won = tx
+        .delete_if_not_expired("subsec-eq-now", &exactly_now)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        !won,
+        "expiry == now is not strictly greater → must not be consumed",
+    );
+
+    // Far future: still live → consumed.
+    let future: Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+    store
+        .insert_with_id(
+            "far-future",
+            &ExpiringDoc {
+                token: "far-future".to_string(),
+                expires: future,
+            },
+        )
+        .await
+        .unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let won = tx
+        .delete_if_not_expired("far-future", &exactly_now)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        won,
+        "a far-future nonce must be consumable against a past now"
+    );
+}
+
+/// Sweeper: `expires_at < now` must delete only rows chronologically before
+/// `now`. With the buggy lexical comparison, `.5Z` is *not* swept even though
+/// it is chronologically before `now=.5001Z` (because `.5Z` sorts after
+/// `.5001Z` lexically).
+#[tokio::test]
+async fn delete_expired_sweeps_chronologically_earlier_subsecond() {
+    let store = test_store().await;
+    let (earlier, later) = sub_second_pair();
+
+    store
+        .insert_with_id(
+            "sweep-earlier",
+            &ExpiringDoc {
+                token: "sweep-earlier".to_string(),
+                expires: earlier,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .insert_with_id(
+            "sweep-later",
+            &ExpiringDoc {
+                token: "sweep-later".to_string(),
+                expires: later,
+            },
+        )
+        .await
+        .unwrap();
+
+    // `now` is the later instant: `earlier` is expired, `later` is not.
+    let deleted = store.delete_expired_at("expiring", &later).await.unwrap();
+    assert_eq!(deleted, 1, "only the chronologically-earlier row is swept");
+    assert!(
+        store
+            .get::<ExpiringDoc>("sweep-earlier")
+            .await
+            .unwrap()
+            .is_none(),
+        "the expired row must be swept",
+    );
+    assert!(
+        store
+            .get::<ExpiringDoc>("sweep-later")
+            .await
+            .unwrap()
+            .is_some(),
+        "the row whose expiry equals now is not strictly before now → survives",
+    );
+}
+
+/// Sweeper: a row chronologically *after* `now` must NOT be swept. With the
+/// buggy lexical comparison, `.5001Z` sorts *before* `.5Z` lexically, so a
+/// still-valid `.5001Z` row would be wrongly deleted by a `now=.5Z` sweep.
+#[tokio::test]
+async fn delete_expired_keeps_chronologically_later_subsecond() {
+    let store = test_store().await;
+    let (earlier, later) = sub_second_pair();
+
+    store
+        .insert_with_id(
+            "sweep-eq",
+            &ExpiringDoc {
+                token: "sweep-eq".to_string(),
+                expires: earlier,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .insert_with_id(
+            "sweep-after",
+            &ExpiringDoc {
+                token: "sweep-after".to_string(),
+                expires: later,
+            },
+        )
+        .await
+        .unwrap();
+
+    // `now` is the earlier instant: neither row is strictly before `now`
+    // (one equals it, one is after it) — sweep must delete zero rows.
+    let deleted = store.delete_expired_at("expiring", &earlier).await.unwrap();
+    assert_eq!(deleted, 0, "neither row is chronologically before now");
+    assert!(
+        store
+            .get::<ExpiringDoc>("sweep-eq")
+            .await
+            .unwrap()
+            .is_some(),
+        "the row whose expiry equals now survives",
+    );
+    assert!(
+        store
+            .get::<ExpiringDoc>("sweep-after")
+            .await
+            .unwrap()
+            .is_some(),
+        "the chronologically-later row (still valid) must survive the sweep",
+    );
+}
+
+/// The writer must store the `expires_at_epoch_ns` column at full
+/// nanosecond precision for variable-width-fraction expiries, so the
+/// comparison is lossless (a truncated ms/µs column would reintroduce a
+/// boundary miscompare of its own).
+#[tokio::test]
+async fn expires_at_epoch_ns_stored_at_nanosecond_precision() {
+    let store = test_store().await;
+
+    for (label, ts) in [
+        (
+            "whole",
+            "2025-03-26T16:45:00Z".parse::<Timestamp>().unwrap(),
+        ),
+        (
+            "frac5",
+            "2025-03-26T16:45:00.5Z".parse::<Timestamp>().unwrap(),
+        ),
+        (
+            "frac5001",
+            "2025-03-26T16:45:00.5001Z".parse::<Timestamp>().unwrap(),
+        ),
+        (
+            "frac00005",
+            "2025-03-26T16:45:00.00005Z".parse::<Timestamp>().unwrap(),
+        ),
+    ] {
+        let id = format!("prec-{label}");
+        store
+            .insert_with_id(
+                &id,
+                &ExpiringDoc {
+                    token: label.to_string(),
+                    expires: ts,
+                },
+            )
+            .await
+            .unwrap();
+
+        let expected = i64::try_from(ts.as_nanosecond()).unwrap();
+        assert_eq!(
+            stored_epoch_ns(&store, &id).await,
+            Some(expected),
+            "expires_at_epoch_ns for {label} must equal the lossless nanosecond value",
+        );
+    }
 }
 
 #[tokio::test]

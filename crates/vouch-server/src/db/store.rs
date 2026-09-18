@@ -36,6 +36,16 @@ enum Documents {
     EncappedKey,
     Data,
     ExpiresAt,
+    /// Chronological-expiry column: nanoseconds since the Unix epoch.
+    ///
+    /// Mirrors [`Documents::ExpiresAt`] at full `Timestamp` (nanosecond)
+    /// precision. Expiry predicates compare this `BIGINT` column against
+    /// `Timestamp::as_nanosecond()` instead of the `expires_at TEXT` column,
+    /// because a SQL `<`/`>` over jiff's minimal-fraction RFC 3339 strings
+    /// mis-sorts at the variable-width fractional boundary (e.g. `.5Z` sorts
+    /// after `.5001Z` lexically, opposite to chronology). Integer comparison
+    /// is exact and lossless.
+    ExpiresAtEpochNs,
     CreatedAt,
     UpdatedAt,
     Version,
@@ -44,13 +54,14 @@ enum Documents {
 
 /// All document columns (unqualified) for `SELECT` statements on a
 /// single table.
-const DOC_COLUMNS: [Documents; 10] = [
+const DOC_COLUMNS: [Documents; 11] = [
     Documents::Id,
     Documents::DocType,
     Documents::SchemaVersion,
     Documents::EncappedKey,
     Documents::Data,
     Documents::ExpiresAt,
+    Documents::ExpiresAtEpochNs,
     Documents::CreatedAt,
     Documents::UpdatedAt,
     Documents::Version,
@@ -59,13 +70,14 @@ const DOC_COLUMNS: [Documents; 10] = [
 
 /// All document columns qualified with the table name, for `SELECT`
 /// statements involving joins.
-const DOC_TABLE_COLUMNS: [(Documents, Documents); 10] = [
+const DOC_TABLE_COLUMNS: [(Documents, Documents); 11] = [
     (Documents::Table, Documents::Id),
     (Documents::Table, Documents::DocType),
     (Documents::Table, Documents::SchemaVersion),
     (Documents::Table, Documents::EncappedKey),
     (Documents::Table, Documents::Data),
     (Documents::Table, Documents::ExpiresAt),
+    (Documents::Table, Documents::ExpiresAtEpochNs),
     (Documents::Table, Documents::CreatedAt),
     (Documents::Table, Documents::UpdatedAt),
     (Documents::Table, Documents::Version),
@@ -215,7 +227,13 @@ struct SerializedDoc {
     /// Encrypted payload.
     encrypted: EncryptedDocument,
     /// ISO 8601 expiration timestamp string, if the document expires.
+    ///
+    /// Kept for human-readable `expires_at TEXT` column and any tooling that
+    /// inspects it; the expiry comparison uses [`Self::expires_epoch_ns`].
     expires_str: Option<String>,
+    /// Nanoseconds-since-Unix-epoch of the expiry, if the document expires;
+    /// the value the expiry comparison predicates filter on.
+    expires_epoch_ns: Option<i64>,
     /// Index entries to write to `document_indexes`.
     indexes: Vec<super::document_type::IndexEntry>,
 }
@@ -232,14 +250,47 @@ fn serialize_and_encrypt<T: DocumentType>(
 ) -> Result<SerializedDoc> {
     let json = serde_json::to_vec(doc).context("failed to serialize document")?;
     let encrypted = crypto.seal(T::DOC_TYPE.as_bytes(), id.as_bytes(), &json)?;
-    let expires_str = doc.expires_at().map(|ts| ts.to_string());
+    let expires = doc.expires_at();
+    let expires_str = expires.map(|ts| ts.to_string());
+    let expires_epoch_ns = expires.map(epoch_ns).transpose()?;
     let indexes = doc.index_entries();
     Ok(SerializedDoc {
         json,
         encrypted,
         expires_str,
+        expires_epoch_ns,
         indexes,
     })
+}
+
+/// Nanoseconds since the Unix epoch for the `expires_at_epoch_ns` column.
+///
+/// The expiry comparison must be a *chronological* comparison. Comparing the
+/// `expires_at TEXT` column against `Timestamp::now().to_string()` with SQL
+/// `<`/`>` compares variable-width minimal-fraction RFC 3339 strings
+/// byte-for-byte, which mis-sorts two instants that share an integer-second
+/// field when one minimal fraction is a strict prefix of the other (e.g.
+/// `...00.5Z` sorts *after* `...00.5001Z` lexically, opposite to chronology).
+/// Storing the expiry as a fixed-precision `BIGINT` epoch and comparing
+/// integers restores exact chronological ordering.
+///
+/// This uses nanoseconds — the full precision of jiff's `Timestamp` — so the
+/// comparison is lossless, matching the typed `Timestamp` comparison the
+/// consume path used before it was pushed into SQL. `as_millisecond`/`
+/// as_microsecond` truncate and would reintroduce a (smaller) boundary
+/// miscompare of their own.
+///
+/// `Timestamp::as_nanosecond` returns `i128` because jiff's representable
+/// range exceeds `i64`'s ±292-year span. Every expiry this store writes is
+/// near the present day and well within `i64` range, so the narrowing is total
+/// for reachable inputs; the unreachable overflow case surfaces a hard error
+/// instead of silent truncation.
+///
+/// # Errors
+///
+/// Returns an error if `ts` is outside the `i64` nanosecond range.
+fn epoch_ns(ts: Timestamp) -> Result<i64> {
+    i64::try_from(ts.as_nanosecond()).context("expires_at nanoseconds exceed i64 range")
 }
 
 /// Decrypt and deserialize a raw row into a typed document.
@@ -936,6 +987,7 @@ impl DocumentStore {
             let SerializedDoc {
                 encrypted,
                 expires_str,
+                expires_epoch_ns,
                 indexes,
                 ..
             } = serialize_and_encrypt(&self.crypto, id, doc)?;
@@ -962,6 +1014,7 @@ impl DocumentStore {
                     encapped.into(),
                     encrypted.data.as_str().into(),
                     expires_ref.into(),
+                    expires_epoch_ns.into(),
                     now_str.as_str().into(),
                     now_str.as_str().into(),
                     1_i32.into(),
@@ -974,6 +1027,7 @@ impl DocumentStore {
                             Documents::EncappedKey,
                             Documents::Data,
                             Documents::ExpiresAt,
+                            Documents::ExpiresAtEpochNs,
                             Documents::UpdatedAt,
                         ])
                         .to_owned(),
@@ -1406,6 +1460,7 @@ impl DocumentStore {
 
             let now_str = Timestamp::now().to_string();
             let expires = doc.expires_at();
+            let expires_epoch_ns = expires.map(epoch_ns).transpose()?;
             let indexes = doc.index_entries();
 
             let encapped: Option<&str> = encrypted.encapped_key.as_deref();
@@ -1430,6 +1485,7 @@ impl DocumentStore {
                     .value(Documents::Data, Expr::val(encrypted.data.as_str()))
                     .value(Documents::EncappedKey, Expr::val(encapped))
                     .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                    .value(Documents::ExpiresAtEpochNs, Expr::val(expires_epoch_ns))
                     .value(
                         Documents::SchemaVersion,
                         Expr::val(T::CURRENT_VERSION.cast_signed()),
@@ -1565,6 +1621,10 @@ impl DocumentStore {
     /// each (2 statements per batch) to stay within DSQL's
     /// 3,000-statement transaction limit.
     ///
+    /// The cutoff compares the integer `expires_at_epoch_ns` column against
+    /// the sweep instant's nanoseconds, never the `expires_at TEXT` column,
+    /// so the comparison is chronological at full `Timestamp` precision.
+    ///
     /// Returns the number of documents deleted.
     ///
     /// # Errors
@@ -1576,43 +1636,72 @@ impl DocumentStore {
     )]
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
         crate::with_dsql_retry!(async {
-            let now = jiff::Timestamp::now().to_string();
-
-            // Find expired document IDs
-            let select_stmt = Query::select()
-                .column(Documents::Id)
-                .from(Documents::Table)
-                .and_where(Expr::col(Documents::DocType).eq(doc_type))
-                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-                .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-                .to_owned();
-
-            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
-
-            let total = rows.len() as u64;
-            // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
-            for batch in rows.chunks(1000) {
-                let ids: Vec<sea_query::Value> =
-                    batch.iter().map(|r| r.id.as_str().into()).collect();
-
-                let mut tx = self.pool.begin().await?;
-
-                let del_idx = Query::delete()
-                    .from_table(DocumentIndexes::Table)
-                    .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                    .to_owned();
-                crate::tx_execute!(tx, del_idx)?;
-
-                let del_doc = Query::delete()
-                    .from_table(Documents::Table)
-                    .and_where(Expr::col(Documents::Id).is_in(ids))
-                    .to_owned();
-                crate::tx_execute!(tx, del_doc)?;
-
-                tx.commit().await?;
-            }
-            Ok(total)
+            let now_ns = epoch_ns(jiff::Timestamp::now())?;
+            self.delete_expired_with_cutoff(doc_type, now_ns).await
         })
+    }
+
+    /// Delete every expired row of `doc_type` whose `expires_at_epoch_ns` is
+    /// strictly before `now_ns`.
+    ///
+    /// Shared core of [`Self::delete_expired`] (ambient clock) and the
+    /// test-only [`Self::delete_expired_at`] (injected clock) so the
+    /// chronological-cutoff predicate is exercised under test without
+    /// exposing a request-serving ambient-clock overload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    async fn delete_expired_with_cutoff(&self, doc_type: &str, now_ns: i64) -> Result<u64> {
+        // Find expired document IDs by chronological (integer-nanosecond)
+        // ordering. The `expires_at TEXT` column is intentionally not used:
+        // a SQL `<` over jiff's minimal-fraction RFC 3339 strings mis-sorts
+        // at the variable-width fractional boundary.
+        let select_stmt = Query::select()
+            .column(Documents::Id)
+            .from(Documents::Table)
+            .and_where(Expr::col(Documents::DocType).eq(doc_type))
+            .and_where(Expr::col(Documents::ExpiresAtEpochNs).is_not_null())
+            .and_where(Expr::col(Documents::ExpiresAtEpochNs).lt(now_ns))
+            .to_owned();
+
+        let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
+
+        let total = rows.len() as u64;
+        // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
+        for batch in rows.chunks(1000) {
+            let ids: Vec<sea_query::Value> = batch.iter().map(|r| r.id.as_str().into()).collect();
+
+            let mut tx = self.pool.begin().await?;
+
+            let del_idx = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
+                .to_owned();
+            crate::tx_execute!(tx, del_idx)?;
+
+            let del_doc = Query::delete()
+                .from_table(Documents::Table)
+                .and_where(Expr::col(Documents::Id).is_in(ids))
+                .to_owned();
+            crate::tx_execute!(tx, del_doc)?;
+
+            tx.commit().await?;
+        }
+        Ok(total)
+    }
+
+    /// Test-only [`Self::delete_expired`] with an injected cutoff, so the
+    /// sub-second chronological predicate is exercised deterministically
+    /// without waiting on the wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    #[cfg(test)]
+    pub(crate) async fn delete_expired_at(&self, doc_type: &str, now: &Timestamp) -> Result<u64> {
+        let now_ns = epoch_ns(*now)?;
+        self.delete_expired_with_cutoff(doc_type, now_ns).await
     }
 
     // ========================================================================
@@ -1868,6 +1957,7 @@ impl StoreTransaction<'_> {
             json,
             encrypted,
             expires_str,
+            expires_epoch_ns,
             indexes,
         } = serialize_and_encrypt(self.crypto, id, doc)?;
 
@@ -1888,6 +1978,7 @@ impl StoreTransaction<'_> {
                 encapped.into(),
                 encrypted.data.as_str().into(),
                 expires_ref.into(),
+                expires_epoch_ns.into(),
                 now_str.as_str().into(),
                 now_str.as_str().into(),
                 1_i32.into(),
@@ -2031,6 +2122,7 @@ impl StoreTransaction<'_> {
         let SerializedDoc {
             encrypted,
             expires_str,
+            expires_epoch_ns,
             indexes,
             ..
         } = serialize_and_encrypt(self.crypto, id, doc)?;
@@ -2047,6 +2139,7 @@ impl StoreTransaction<'_> {
                 .value(Documents::Data, Expr::val(encrypted.data.as_str()))
                 .value(Documents::EncappedKey, Expr::val(encapped))
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                .value(Documents::ExpiresAtEpochNs, Expr::val(expires_epoch_ns))
                 .value(
                     Documents::SchemaVersion,
                     Expr::val(T::CURRENT_VERSION.cast_signed()),
@@ -2126,11 +2219,19 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_if_not_expired(&mut self, id: &str, now: &Timestamp) -> Result<bool> {
+        // The expiry check is a chronological `expires_at > now` comparison.
+        // It runs against the integer `expires_at_epoch_ns` column, never the
+        // `expires_at TEXT` column: a SQL `>` over jiff's minimal-fraction
+        // RFC 3339 strings mis-sorts two instants that share an integer-second
+        // field when one minimal fraction is a strict prefix of the other
+        // (e.g. `...00.5Z` sorts after `...00.5001Z` lexically, opposite to
+        // chronology). Integer-nanosecond comparison is exact and lossless.
+        let now_ns = epoch_ns(*now)?;
         let delete_doc_stmt = Query::delete()
             .from_table(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
-            .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).gt(now.to_string()))
+            .and_where(Expr::col(Documents::ExpiresAtEpochNs).is_not_null())
+            .and_where(Expr::col(Documents::ExpiresAtEpochNs).gt(now_ns))
             .to_owned();
         let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
         let won = result.rows_affected() == 1;
@@ -2328,6 +2429,7 @@ impl StoreTransaction<'_> {
             for (id, version, serialized) in &prepared {
                 let encapped: Option<&str> = serialized.encrypted.encapped_key.as_deref();
                 let expires_ref: Option<&str> = serialized.expires_str.as_deref();
+                let expires_epoch_ns = serialized.expires_epoch_ns;
                 let update_stmt = {
                     let mut q = Query::update();
                     q.table(Documents::Table)
@@ -2337,6 +2439,7 @@ impl StoreTransaction<'_> {
                         )
                         .value(Documents::EncappedKey, Expr::val(encapped))
                         .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                        .value(Documents::ExpiresAtEpochNs, Expr::val(expires_epoch_ns))
                         .value(
                             Documents::SchemaVersion,
                             Expr::val(T::CURRENT_VERSION.cast_signed()),
@@ -2455,6 +2558,7 @@ impl StoreTransaction<'_> {
 
         let now_str = Timestamp::now().to_string();
         let expires = doc.expires_at();
+        let expires_epoch_ns = expires.map(epoch_ns).transpose()?;
         let indexes = doc.index_entries();
 
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
@@ -2467,6 +2571,7 @@ impl StoreTransaction<'_> {
                 .value(Documents::Data, Expr::val(encrypted.data.as_str()))
                 .value(Documents::EncappedKey, Expr::val(encapped))
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                .value(Documents::ExpiresAtEpochNs, Expr::val(expires_epoch_ns))
                 .value(
                     Documents::SchemaVersion,
                     Expr::val(T::CURRENT_VERSION.cast_signed()),
