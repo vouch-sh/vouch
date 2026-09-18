@@ -58,6 +58,9 @@ pub(crate) struct AdminScimTokensTemplate {
     /// expired-but-not-yet-cleaned-up row no longer hides the form when the
     /// DB cap would accept creation.
     pub active_count: usize,
+    /// The cap the create form and the "max reached" banner are keyed on;
+    /// the same constant the store enforces inside the create transaction.
+    pub max_tokens: usize,
     pub flash_message: Option<String>,
     pub new_token: Option<String>,
 }
@@ -143,6 +146,7 @@ pub(crate) async fn admin_scim_tokens_page(
         auth,
         tokens,
         active_count,
+        max_tokens: db::MAX_SCIM_TOKENS,
         flash_message: messages.err,
         new_token: None,
     };
@@ -265,6 +269,7 @@ pub(crate) async fn admin_create_scim_token(
         auth,
         tokens,
         active_count,
+        max_tokens: db::MAX_SCIM_TOKENS,
         flash_message: None,
         // Deliberate render-boundary exposure: this page shows the token
         // once, at creation, which is its purpose (Askama needs Display).
@@ -427,29 +432,13 @@ mod tests {
     // same predicate so an expired-but-not-yet-cleaned-up row no longer hides the
     // form when the cap would accept creation (#715).
 
-    /// Seed a token row directly with an explicit expiry, bypassing the
-    /// `create_test_scim_token` factory (which always sets `expires_at: None`).
-    /// Mirrors the seeding in `db/tests/scim_tokens.rs`.
     async fn seed_token(
         state: &crate::AppState,
         org_id: &str,
         description: &str,
         expires_at: Option<jiff::Timestamp>,
     ) {
-        use crate::db::{CreateScimTokenParams, ScimScopeSet};
-        let token_hash = format!("{}-{}", description, uuid::Uuid::now_v7());
-        crate::db::create_scim_token(
-            &state.store,
-            &CreateScimTokenParams {
-                org_id,
-                token_hash: &token_hash,
-                description: Some(description),
-                expires_at,
-                scope: ScimScopeSet::default(),
-            },
-        )
-        .await
-        .expect("seed SCIM token");
+        create_test_scim_token_expiring(&state.store, description, org_id, expires_at).await;
     }
 
     #[tokio::test]
@@ -484,18 +473,7 @@ mod tests {
         );
 
         // The DB cap agrees: a third (active) token can still be minted.
-        let third = crate::db::create_scim_token(
-            &state.store,
-            &crate::db::CreateScimTokenParams {
-                org_id: org_id.as_str(),
-                token_hash: "third-active",
-                description: None,
-                expires_at: Some(future),
-                scope: crate::db::ScimScopeSet::default(),
-            },
-        )
-        .await;
-        assert!(third.is_ok(), "DB cap must permit a third creation");
+        create_test_scim_token_expiring(&state.store, "third-active", &org_id, Some(future)).await;
     }
 
     #[tokio::test]

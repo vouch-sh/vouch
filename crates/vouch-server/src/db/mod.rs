@@ -127,6 +127,7 @@ pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, R
 pub use config::{AuthEventParams, AuthEventType, ClientInfo, record_auth_event};
 
 // Re-export SCIM types and functions
+pub(crate) use scim::MAX_SCIM_TOKENS;
 pub use scim::{
     CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimGroupState,
     ScimGroupUpdateError, ScimScope, ScimScopeSet, ScimToken, ScimUpdateError, ScimUserRecord,
