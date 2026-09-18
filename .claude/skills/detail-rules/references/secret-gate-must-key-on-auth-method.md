@@ -1,143 +1,164 @@
-# Secret-Gate Must Key On Token Endpoint Auth Method
+# Secret Gate Must Key on Auth Method
 
-Secret-holding, secret-minting, secret-deletion, and secret-authentication decisions must be keyed on `TokenEndpointAuthMethod::uses_client_secret()`, never on `OAuthClient::client_type()`, `OAuthClientType::requires_secret()`, or `is_fapi()` alone.
+Every decision about whether a client holds, may mint, may revoke, or may display controls for a `client_secret` must call `TokenEndpointAuthMethod::secret_is_credential(fapi_profile)` — never a hand-rolled equivalent.
 
 ## What to look for
 
-Any code that decides whether a client **holds**, **may mint**, **may revoke**, or **may authenticate with** a `client_secret` must use `token_endpoint_auth_method.uses_client_secret()` as its primary predicate. The following predicates are incorrect substitutes:
+`TokenEndpointAuthMethod::secret_is_credential(fapi_profile)` is the single canonical predicate (defined in `crates/vouch-server/src/db/documents/oauth.rs`). It returns `true` only when the registered method is `client_secret_basic` or `client_secret_post` **and** `fapi_profile` is `FapiProfile::None`.
 
-**Wrong predicates:**
-- `client.client_type() == ClientType::Confidential` / `client.client_type() != ClientType::Confidential` — `client_type()` returns `Confidential` for `private_key_jwt`, `tls_client_auth`, and `self_signed_tls_client_auth`, none of which authenticate with a secret.
-- `client.application_type.requires_secret()` — returns `true` only for `Web`/`Service`, excluding dynamically-registered `Native`/`SPA` clients that have a `client_secret_*` method, and does not exclude `private_key_jwt` or mTLS clients.
-- `!client.is_fapi()` alone as the sole guard — blocks FAPI clients but not non-FAPI `private_key_jwt` or non-FAPI mTLS clients.
+A violation exists whenever any of the following sites makes a secret-eligibility decision without calling this predicate:
 
-**Correct predicate:**
-- `client.token_endpoint_auth_method.uses_client_secret()` — returns `true` only for `ClientSecretBasic` and `ClientSecretPost`; returns `false` for `PrivateKeyJwt`, `TlsClientAuth`, `SelfSignedTlsClientAuth`, and `None`.
+1. **`add_secret_form` / `add_secret_api`** — the guard that rejects minting a new secret must call `secret_is_credential(fapi_profile)`, not `uses_client_secret()` alone or `is_fapi()` alone.
 
-**The five enforcement points** where the correct predicate must be used:
+2. **`delete_secret_form` / `delete_secret_api`** — the last-secret floor (`other_active == 0 && …`) must call `secret_is_credential(fapi_profile)`. Using `uses_client_secret() && !is_fapi()` is an inline re-derivation of the same logic; it is a violation because it will silently diverge if the predicate's definition ever changes.
 
-1. **Secret-mint handler (web):** `add_secret_form` in `handlers/applications/web.rs`
-2. **Secret-mint handler (API):** `add_secret_api` in `handlers/api/applications.rs`
-3. **Last-secret deletion floor (handler):** pre-flight check before `revoke_oauth_client_secret` in both `web.rs` and `api/applications.rs`
-4. **Last-secret deletion floor (in-transaction):** `revoke_oauth_client_secret` in `db/oauth.rs`
-5. **Token endpoint secret verification:** `authenticate_client` in `services/oidc/token.rs`
+3. **`revoke_oauth_client_secret` (in-transaction floor in `db/oauth.rs`)** — the floor guard must call `secret_is_credential(fapi_profile)` on the loaded `OAuthClientDoc`.
 
-**Also check:**
-- UI template guard: `ApplicationInfo::can_add_secret` in `handlers/applications/types.rs` must use `uses_client_secret() && !is_fapi()`.
-- Creation-time secret generation: dynamic registration in `services/oidc/registration.rs` must gate `create_oauth_client_secret` on `uses_client_secret()`.
+4. **`ApplicationInfo::secret_is_credential` field (in `handlers/applications/types.rs`)** — the `From<OAuthClient>` impl must set `secret_is_credential` by calling `client.token_endpoint_auth_method.secret_is_credential(client.fapi_profile)`. The field must be named `secret_is_credential`; the old name `can_add_secret` no longer exists.
+
+5. **Templates (`templates/applications/detail.html`)** — the Add Secret button gate and the Revoke button gate must both key on the `app.secret_is_credential` template field. A template that re-derives the condition (e.g. checks `token_endpoint_auth_method` or `fapi_profile` directly) is a violation. A template that gates Revoke on `secrets_count > 1` unconditionally — without also exempting `!app.secret_is_credential` clients — hides a Revoke button that the handler would allow, recreating the bug fixed in commit `776cf615`.
+
+Specific incorrect patterns to detect:
+
+- `uses_client_secret()` used as a sole secret-eligibility guard (missing the `fapi_profile` axis).
+- `is_fapi()` checked separately rather than folded into `secret_is_credential`.
+- `uses_client_secret() && !client.is_fapi()` (hand-rolled equivalent of `secret_is_credential`).
+- `can_add_secret` as a field or variable name (renamed to `secret_is_credential` in commit `776cf615`).
+- A template Revoke gate of the form `secret.active && secrets_count > 1` without an `!app.secret_is_credential` bypass.
 
 ## Violation examples
 
-**Pattern A — mint gated on client_type() (introduced by c9c89a0f, caused auth downgrade for private_key_jwt and dead secrets for mTLS):**
+**Hand-rolled add-secret guard (missing fapi axis):**
 ```rust
-// In add_secret_api / add_secret_form
-if client.client_type() != crate::db::ClientType::Confidential {
-    return Err(ServiceError::api(StatusCode::BAD_REQUEST, "no_secret", ...));
-}
-// Only checks is_fapi() after; non-FAPI private_key_jwt and non-FAPI mTLS
-// clients slip through and can mint a client_secret.
-if client.is_fapi() { ... }
-```
-`client_type()` returns `Confidential` for `private_key_jwt`, `tls_client_auth`, and `self_signed_tls_client_auth`, so these non-secret auth methods pass the gate.
-
-**Pattern B — mint gated on application_type (pre-c9c89a0f):**
-```rust
-// In add_secret_api / add_secret_form
-if !client.application_type.requires_secret() {
-    return Err(ServiceError::api(StatusCode::BAD_REQUEST, "no_secret", ...));
-}
-```
-`requires_secret()` is `true` only for `Web`/`Service`. This rejects a Native client with a dynamically-registered `client_secret_post`, and allows a Web client with `private_key_jwt` to mint an unusable secret.
-
-**Pattern C — last-secret deletion floor exempts only is_fapi():**
-```rust
-// In revoke handler or db/oauth.rs transaction
-if other_active == 0 && !client.is_fapi() {
-    return error_page(...); // or 409 last_secret
-}
-```
-A non-FAPI mTLS or `private_key_jwt` client with a dead secret row is pinned — it can never revoke the stray secret without deleting the entire application.
-
-**Pattern D — token endpoint verifies secret without checking registered method:**
-```rust
-// In authenticate_client (token.rs)
-let is_confidential = client.client_type() == crate::db::ClientType::Confidential;
-// mTLS branch exits early; FAPI returns error; then:
-if is_confidential {
-    let secret = credentials.client_secret.as_ref().ok_or(SecretRequired)?;
-    let validated = db::validate_oauth_client_credentials(...).await?;
-    Ok((client, Some(ClientSecretVerification { ... })))
-    // BUG: never checks that token_endpoint_auth_method is client_secret_*
-    // A private_key_jwt client with a minted secret authenticates here.
-}
-```
-
-## Correct patterns
-
-**Mint gate (both handlers must match):**
-```rust
-// Check FAPI first for the FAPI-specific error message.
-if client.is_fapi() {
-    return Err(...); // FAPI-specific message
-}
-// Then gate on the registered method, not on client_type().
+// Missing fapi_profile check — FAPI client_secret_basic clients slip through
 if !client.token_endpoint_auth_method.uses_client_secret() {
-    return Err(ServiceError::api(StatusCode::BAD_REQUEST, "no_secret",
-        "This client does not use client secrets"));
+    return error_page(...);
 }
 ```
 
-**Last-secret deletion floor (handler and in-transaction):**
+**Separate is_fapi check instead of unified predicate:**
 ```rust
-// Exempt clients whose secrets authenticate_client never accepts.
-let secret_usable = client.token_endpoint_auth_method.uses_client_secret()
-    && !client.is_fapi();
-if other_active == 0 && secret_usable {
-    return Err(/* 409 last_secret */);
+if client.is_fapi() {
+    return error_page(Tr::new("apps-error-fapi-no-secrets"), ...);
+}
+if !client.token_endpoint_auth_method.uses_client_secret() {
+    return error_page(Tr::new("apps-error-no-client-secrets"), ...);
 }
 ```
 
-**Token endpoint:**
+**Hand-rolled last-secret floor:**
 ```rust
-let is_confidential = client.client_type() == crate::db::ClientType::Confidential;
-let is_mtls_auth = matches!(client.token_endpoint_auth_method,
-    TlsClientAuth | SelfSignedTlsClientAuth);
-if is_confidential && is_mtls_auth { return Ok((client, None)); } // cert auth
-if is_confidential {
-    if client.is_fapi() { return Err(ClientAuthError::FapiSecretRejected); }
-    // OIDC Core 1.0 §3.1.3.1: client must use its registered method.
-    if !client.token_endpoint_auth_method.uses_client_secret() {
-        return Err(ClientAuthError::SecretNotRegistered);
-    }
-    // ... validate secret hash ...
+if other_active == 0
+    && client.token_endpoint_auth_method.uses_client_secret()
+    && !client.is_fapi()
+{
+    return error_page(Tr::new("apps-error-secret-last-active"), ...);
 }
 ```
 
-**UI template guard (`ApplicationInfo::can_add_secret`):**
+**In-transaction floor using inline boolean rather than predicate:**
 ```rust
+let secret_usable = client_doc.data.token_endpoint_auth_method.uses_client_secret()
+    && client_doc.data.fapi_profile == FapiProfile::None;
+if other_active_count == 0 && secret_usable {
+    return Err(ServiceError::api(409, "last_secret", ...));
+}
+```
+
+**`ApplicationInfo` using old field name:**
+```rust
+pub can_add_secret: bool,  // renamed to secret_is_credential
+// ...
 let can_add_secret =
     client.token_endpoint_auth_method.uses_client_secret() && !client.is_fapi();
 ```
 
-**Dynamic registration — creation-time secret:**
+**Template Revoke gate missing the non-credential bypass (the bug from commit `14a80c87`):**
+```jinja
+{% if secret.active && secrets_count > 1 %}
+<form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" ...>
+    <button>Revoke</button>
+</form>
+{% endif %}
+```
+This hides Revoke for a lone stray secret on a `private_key_jwt` or FAPI client even though the handler allows the revocation.
+
+**Template Add Secret gate using old field name:**
+```jinja
+{% if app.can_add_secret && secrets_count < 2 %}
+```
+
+## Correct patterns
+
+**Unified add-secret guard:**
 ```rust
-let client_secret = if jwks_auth.auth_method.uses_client_secret() {
-    // generate and store secret
-} else {
-    None
-};
+if !client
+    .token_endpoint_auth_method
+    .secret_is_credential(client.fapi_profile)
+{
+    let message = if client.is_fapi() {
+        Tr::new("apps-error-fapi-no-secrets")
+    } else {
+        Tr::new("apps-error-no-client-secrets")
+    };
+    return error_page(Tr::new("apps-error-title-error"), message, ...);
+}
+```
+
+**Correct last-secret floor:**
+```rust
+if other_active == 0
+    && client
+        .token_endpoint_auth_method
+        .secret_is_credential(client.fapi_profile)
+{
+    return error_page(Tr::new("apps-error-title-error"),
+        Tr::new("apps-error-secret-last-active"), ...);
+}
+```
+
+**Correct in-transaction floor:**
+```rust
+let secret_is_credential = client_doc
+    .data
+    .token_endpoint_auth_method
+    .secret_is_credential(client_doc.data.fapi_profile);
+if other_active_count == 0 && secret_is_credential {
+    return Err(ServiceError::api(StatusCode::CONFLICT, "last_secret", ...));
+}
+```
+
+**Correct `ApplicationInfo` field:**
+```rust
+pub secret_is_credential: bool,
+// ...
+let secret_is_credential = client
+    .token_endpoint_auth_method
+    .secret_is_credential(client.fapi_profile);
+```
+
+**Correct template section gate and Revoke gate:**
+```jinja
+{% if app.secret_is_credential || secrets_count > 0 %}
+    {% if app.secret_is_credential && secrets_count < 2 %}
+    <form action="/applications/{{ app.id }}/secrets" method="POST">
+        <button>Add Secret</button>
+    </form>
+    {% endif %}
+    {% if secret.active && (!app.secret_is_credential || secrets_count > 1) %}
+    <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
+        <button>Revoke</button>
+    </form>
+    {% endif %}
+{% endif %}
 ```
 
 ## Scope
 
-All files under `crates/vouch-server/src/` that touch client-secret decisions:
-
-- `handlers/applications/web.rs` — `add_secret_form`, `delete_secret_form`
-- `handlers/api/applications.rs` — `add_secret_api`, `delete_secret_api`
-- `handlers/applications/types.rs` — `ApplicationInfo::can_add_secret`
-- `db/oauth.rs` — `revoke_oauth_client_secret` (in-transaction floor), `OAuthClient::client_type`
-- `services/oidc/token.rs` — `authenticate_client`
-- `services/oidc/registration.rs` — creation-time `client_secret` generation
-- `handlers/applications/validate.rs` — `build_create_params` creation-time method assignment
-- `db/documents/oauth.rs` — `TokenEndpointAuthMethod::uses_client_secret` definition
-- Templates: `templates/applications/detail.html`, `templates/applications/created.html`
+- `crates/vouch-server/src/db/documents/oauth.rs` — definition of `secret_is_credential`; any change to `uses_client_secret` or the FAPI axis must keep them in sync.
+- `crates/vouch-server/src/db/oauth.rs` — in-transaction floor in `revoke_oauth_client_secret`.
+- `crates/vouch-server/src/handlers/applications/types.rs` — `ApplicationInfo::secret_is_credential` field and its `From<OAuthClient>` derivation.
+- `crates/vouch-server/src/handlers/applications/web.rs` — `add_secret_form`, `delete_secret_form`.
+- `crates/vouch-server/src/handlers/api/applications.rs` — `add_secret_api`, `delete_secret_api`.
+- `crates/vouch-server/templates/applications/detail.html` — Add Secret and Revoke button gates.
+- `crates/vouch-server/src/services/oidc/token.rs` — `authenticate_client` (must reject secrets for FAPI clients and for non-`client_secret_*` methods; currently uses `is_fapi()` + `uses_client_secret()` directly because it predates the unified predicate — any refactor must not weaken these two independent checks).
