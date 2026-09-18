@@ -7,15 +7,18 @@
 //!
 //! ## Flow
 //!
-//! 1. CLI authenticates with `private_key_jwt` and calls
-//!    `POST /oauth/fido2/challenge` → receives challenge + state JWT. The
-//!    state JWT is bound to the authenticated `client_id`.
+//! 1. CLI calls `POST /oauth/fido2/challenge` → receives challenge + state
+//!    JWT. During this staged rollout the CLI authenticates with
+//!    `private_key_jwt`, binding the state JWT to its `client_id`; an
+//!    unauthenticated request is still accepted and mints a state JWT with
+//!    no `client_id` (see `handlers::oidc::fido2_challenge`'s module doc).
 //! 2. CLI performs local CTAP2 assertion (user touches YubiKey)
 //! 3. CLI calls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion`
 //! 4. Server verifies state JWT, authenticates client via `private_key_jwt`,
-//!    confirms the presenting client matches the client that initiated the
-//!    challenge (rejecting cross-client replay with `invalid_grant`),
-//!    verifies WebAuthn assertion, and issues an OAuth access token.
+//!    and — only when the state JWT carries a `client_id` — confirms the
+//!    presenting client matches the client that initiated the challenge
+//!    (rejecting cross-client replay with `invalid_grant`). It then verifies
+//!    the WebAuthn assertion and issues an OAuth access token.
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
@@ -54,15 +57,25 @@ pub(crate) struct Fido2ChallengeState {
     pub(crate) challenge: Challenge<Raw>,
     pub(crate) rp_id: String,
     /// OAuth `client_id` of the client that authenticated at
-    /// `POST /oauth/fido2/challenge` and initiated this ceremony. Stamped
-    /// from the authenticated client — the challenge endpoint requires
-    /// `private_key_jwt` — so [`exchange_fido2_assertion`] can reject a
-    /// state+assertion presented by a different client, mirroring the
-    /// `authorization_code` grant's `verify_client_matches_code`
-    /// (RFC 6749 §4.1.3) and the `device_code` grant's cross-client check
-    /// (RFC 8628 §5.2). A captured state+assertion replayed under an
-    /// attacker's client fails this comparison and returns `invalid_grant`.
-    pub(crate) client_id: String,
+    /// `POST /oauth/fido2/challenge` and initiated this ceremony, if the
+    /// challenge request was authenticated. Stamped from the authenticated
+    /// client — the challenge endpoint accepts `private_key_jwt` — so
+    /// [`exchange_fido2_assertion`] can reject a state+assertion presented by
+    /// a different client, mirroring the `authorization_code` grant's
+    /// `verify_client_matches_code` (RFC 6749 §4.1.3). No RFC governs this
+    /// custom grant's client binding; it is Vouch's own decision, made by
+    /// analogy to that sibling grant.
+    ///
+    /// `None` when the challenge request carried no client credentials — the
+    /// challenge endpoint's staged rollout still accepts that, for CLI
+    /// compatibility and rolling-deploy state-token decoding — in which case
+    /// [`exchange_fido2_assertion`] enforces no binding at all, matching this
+    /// grant's behavior before the fix. `#[serde(default)]` lets a state
+    /// token minted by a server version that predates this field, or that
+    /// omitted `client_id` because the request was unauthenticated, decode
+    /// as `None` rather than fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_id: Option<String>,
     /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
     /// is minted and consumed by this server on one clock, so `exp` alone
     /// bounds its lifetime.
@@ -247,14 +260,16 @@ pub(crate) async fn exchange_fido2_assertion(
     let grant = AssertionGrant::validate(params.assertion, state, arrival).await?;
     let user_id = grant.user_id;
 
-    // Bind the ceremony to the client that initiated it. The challenge
-    // endpoint authenticates the client and stamps its `client_id` into the
-    // state JWT; reject a state+assertion presented by any other client.
-    // This is the FIDO2-assertion-grant analogue of
-    // `verify_client_matches_code` (RFC 6749 §4.1.3) and the device-code
-    // grant's cross-client check (RFC 8628 §5.2): no RFC governs this custom
-    // grant's client binding, so the property is enforced here by mirroring
-    // the sibling grants.
+    // Bind the ceremony to the client that initiated it, when the challenge
+    // was authenticated at all. The challenge endpoint stamps the
+    // authenticated client's `client_id` into the state JWT; reject a
+    // state+assertion presented by any other client. This is the
+    // FIDO2-assertion-grant analogue of `verify_client_matches_code`
+    // (RFC 6749 §4.1.3): no RFC governs this custom grant's client binding,
+    // so the property is enforced here by mirroring that sibling grant. A
+    // state JWT with no `client_id` — an unauthenticated challenge request,
+    // still accepted during this staged rollout — enforces no binding,
+    // matching this grant's behavior before the fix.
     //
     // Checked before `try_consume_challenge_state` so a cross-client
     // attempt — e.g. a captured state+assertion replayed under an
@@ -264,12 +279,14 @@ pub(crate) async fn exchange_fido2_assertion(
     // client is cryptographically authenticated at the token endpoint via
     // `private_key_jwt` before this function is entered, so comparing
     // `client_id`s is a binding check, not a self-asserted one.
-    if grant.challenge_state.client_id != params.client.client_id {
+    if let Some(expected_client_id) = &grant.challenge_state.client_id
+        && expected_client_id != &params.client.client_id
+    {
         tracing::warn!(
             target: "security",
             "FIDO2 assertion grant: client_id mismatch — challenge was issued to {} \
              but token request authenticated as {}",
-            grant.challenge_state.client_id,
+            expected_client_id,
             params.client.client_id,
         );
         return Err(ServiceError::oauth(

@@ -22,6 +22,13 @@
 //! - The legitimate client's token is still minted with the correct,
 //!   binding-bound claims (`sub = victim`, `aud`/`client_id = issuing client`,
 //!   `hardware_verified = true`).
+//!
+//! The fix ships as a staged rollout: the challenge endpoint still accepts
+//! an unauthenticated request — including the JSON `{}` body sent by CLI
+//! versions built before this change — and mints a state JWT with no
+//! `client_id`, which is redeemable by any registered client, exactly as
+//! before the fix. `test_fido2_unauthenticated_legacy_challenge_still_works`
+//! below covers that compatibility path.
 
 #![expect(
     clippy::expect_used,
@@ -168,6 +175,29 @@ async fn get_challenge(harness: &TestHarness, client_id: &str, pkcs8: &[u8]) -> 
         resp.status,
         200,
         "challenge must succeed: {}",
+        resp.text().unwrap_or_default()
+    );
+    let json: serde_json::Value = resp.json().expect("Valid JSON");
+    let challenge = URL_SAFE_NO_PAD
+        .decode(json["challenge"].as_str().expect("challenge"))
+        .expect("base64url");
+    let state = json["state"].as_str().expect("state").to_string();
+    (challenge, state)
+}
+
+/// Obtain a challenge + state JWT from `/oauth/fido2/challenge` with no
+/// client authentication at all — the JSON `{}` body the CLI sent before
+/// this endpoint accepted `client_assertion` (see `vouch-cli`'s `login.rs`
+/// before this fix).
+async fn get_challenge_unauthenticated(harness: &TestHarness) -> (Vec<u8>, String) {
+    let resp = harness
+        .post_json("/oauth/fido2/challenge", &serde_json::json!({}))
+        .await
+        .expect("challenge request");
+    assert_eq!(
+        resp.status,
+        200,
+        "unauthenticated challenge must still succeed during the rollout: {}",
         resp.text().unwrap_or_default()
     );
     let json: serde_json::Value = resp.json().expect("Valid JSON");
@@ -456,5 +486,41 @@ async fn test_fido2_cross_client_attacker_cannot_spoof_victim_client_id() {
         json["error"], "invalid_client",
         "spoofed client_id must return invalid_client, got: {}",
         json["error"]
+    );
+}
+
+/// A challenge obtained with no client authentication at all (the JSON `{}`
+/// body the CLI sent before this fix) mints a state JWT with no `client_id`,
+/// so it is redeemable by any registered `fido2-assertion` client — the
+/// exact pre-fix behavior, kept during this staged rollout for CLI
+/// compatibility. The redeeming client here is registered separately from
+/// whichever client (if any) the CLI would otherwise have used, which is the
+/// point: with no `client_id` recorded on the challenge, there is nothing to
+/// bind against.
+#[tokio::test]
+async fn test_fido2_unauthenticated_legacy_challenge_still_works() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("legacy-challenge@example.com")
+        .await
+        .expect("create user");
+    let device = IntegrationMockDevice::new();
+    register_mock_device_in_db(&harness, &user.id, &device, "Legacy Key").await;
+    let (client, pkcs8) = create_legitimate_client(&harness, &user.id).await;
+
+    let (challenge, state) = get_challenge_unauthenticated(&harness).await;
+    let assertion = build_assertion_param(&device, &challenge, &state, &user.id);
+
+    let (status, json) = redeem_assertion(&harness, &client.client_id, &pkcs8, &assertion).await;
+    assert_eq!(
+        status, 200,
+        "redemption of an unauthenticated-challenge state must still succeed: {json}"
+    );
+    let access_token = json["access_token"].as_str().expect("access_token");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(claims["sub"], user.id, "sub must be the user: {claims}");
+    assert_eq!(
+        claims["hardware_verified"], true,
+        "hardware_verified must be true: {claims}"
     );
 }

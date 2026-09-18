@@ -829,24 +829,98 @@ async fn test_fido2_challenge_rp_id_matches_config() {
 // Challenge endpoint client authentication (cross-client binding)
 // ========================================================================
 
-/// The challenge endpoint must reject a request with no client credentials
-/// as `invalid_client` (RFC 6749 §5.2). It is no longer unauthenticated.
+/// A request with no client credentials at all is still accepted during the
+/// staged rollout — the released CLI's `/oauth/fido2/challenge` request
+/// carries none — and mints a state JWT with no `client_id` claim, matching
+/// this endpoint's behavior before the binding fix.
 #[tokio::test]
-async fn test_fido2_challenge_requires_client_authentication() {
+async fn test_fido2_challenge_unauthenticated_request_still_succeeds() {
     let (app, _state) = test_app().await;
 
     let (status, body) = http_post_form(&app, "/oauth/fido2/challenge", "", &[]).await;
 
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
-        "Unauthenticated challenge must be rejected: {body}"
+        StatusCode::OK,
+        "Unauthenticated challenge must still succeed during the rollout: {body}"
     );
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let state_jwt = response["state"].as_str().expect("state must be a string");
+    let claims = decode_state_jwt_claims(state_jwt);
+    assert!(
+        claims.get("client_id").is_none(),
+        "unauthenticated challenge must mint a state JWT with no client_id: {claims}"
+    );
+}
+
+/// The released CLI's `/oauth/fido2/challenge` request is a JSON `{}` body
+/// with no client authentication (see `vouch-cli` before this fix). The
+/// challenge endpoint must still accept it during the rollout so already-
+/// installed CLIs keep working.
+#[tokio::test]
+async fn test_fido2_challenge_legacy_json_body_still_succeeds() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_json(&app, "/oauth/fido2/challenge", "{}", &[]).await;
+
     assert_eq!(
-        error["error"], "invalid_client",
-        "Missing client auth must return invalid_client, got: {}",
-        error["error"]
+        status,
+        StatusCode::OK,
+        "Legacy JSON challenge body must still succeed during the rollout: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response["challenge"].is_string(),
+        "Response must contain 'challenge' string field"
+    );
+}
+
+/// A state JWT minted by a server version that predates the `client_id`
+/// field entirely must still decode — the rolling-deploy case where an
+/// instance running the old binary issued the token and a new instance
+/// redeems it. `#[serde(default)]` on `Fido2ChallengeState::client_id` is
+/// what makes this work: the field is simply absent from the JSON payload,
+/// not present-and-null.
+#[tokio::test]
+async fn test_fido2_challenge_state_decodes_without_client_id_field() {
+    use crate::crypto::jwt::JwtType;
+    use crate::handlers::generate_challenge;
+    use crate::services::oidc::fido2_grant::Fido2ChallengeState;
+
+    /// Mirrors the pre-fix `Fido2ChallengeState` shape: no `client_id` field
+    /// at all, as a server running before this change would have minted.
+    #[derive(serde::Serialize)]
+    struct LegacyFido2ChallengeState {
+        challenge: vouch_common::fido2_types::Challenge<vouch_common::encoding::Raw>,
+        rp_id: String,
+        iat: i64,
+        exp: i64,
+    }
+
+    let (_app, state) = test_app().await;
+    let now = jiff::Timestamp::now().as_second();
+    let legacy = LegacyFido2ChallengeState {
+        challenge: generate_challenge().expect("generate challenge").into(),
+        rp_id: "test.example.com".to_string(),
+        iat: now,
+        exp: now.saturating_add(300),
+    };
+
+    let token = state
+        .state_signer
+        .encode_state_token(&legacy, JwtType::Fido2ChallengeState)
+        .await
+        .expect("encode legacy state token");
+
+    let decoded: Fido2ChallengeState = state
+        .state_signer
+        .decode_state_token(&token, JwtType::Fido2ChallengeState, now)
+        .await
+        .expect("decode legacy state token");
+
+    assert_eq!(
+        decoded.client_id, None,
+        "a state token minted with no client_id field must decode to None"
     );
 }
 
@@ -932,15 +1006,7 @@ async fn test_fido2_challenge_state_carries_client_id() {
     assert_eq!(status, StatusCode::OK, "Challenge must succeed: {body}");
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let state_jwt = response["state"].as_str().expect("state must be a string");
-
-    // The state JWT payload is the middle segment, base64url-encoded JSON.
-    let parts: Vec<&str> = state_jwt.split('.').collect();
-    assert_eq!(parts.len(), 3, "state must be a JWT: {state_jwt}");
-    let payload = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .expect("JWT payload must be valid base64url");
-    let claims: serde_json::Value =
-        serde_json::from_slice(&payload).expect("JWT payload must be valid JSON");
+    let claims = decode_state_jwt_claims(state_jwt);
 
     assert_eq!(
         claims["client_id"].as_str(),
@@ -1103,6 +1169,17 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
 // ========================================================================
 // Helpers local to this module
 // ========================================================================
+
+/// Decode the claims of a state JWT (the middle, base64url-encoded segment)
+/// into a JSON value, for asserting on individual claims such as `client_id`.
+fn decode_state_jwt_claims(state_jwt: &str) -> serde_json::Value {
+    let parts: Vec<&str> = state_jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "state must be a JWT: {state_jwt}");
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("JWT payload must be valid base64url");
+    serde_json::from_slice(&payload).expect("JWT payload must be valid JSON")
+}
 
 /// Create a `private_key_jwt` client authorized for exactly `grants` (as
 /// the wire strings stored in `grant_types`), returning the client and the
