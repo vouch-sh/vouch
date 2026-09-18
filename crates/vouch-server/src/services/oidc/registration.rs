@@ -1640,11 +1640,21 @@ fn determine_client_type(
 // Client Configuration Read (RFC 7592 Section 2.1)
 // ============================================================================
 
-/// Read the configuration of a dynamically registered client (RFC 7592).
+/// Read the configuration of a dynamically registered client (RFC 7592 §2.1).
 ///
 /// Authenticates the caller using the registration access token, then returns
-/// the current client metadata. The response omits the
-/// `registration_access_token` (RFC 7592 Section 3).
+/// the current client metadata. RFC 7592 §3 marks `registration_access_token`
+/// as REQUIRED in every Client Information Response, and §2.1 states the GET
+/// response uses "a payload as described in Section 3", so the field is
+/// echoed back rather than omitted.
+///
+/// A read is idempotent and side-effect free, so the presented bearer token is
+/// echoed verbatim rather than rotated. RFC 7592 §5 permits (but does not
+/// require) rotating the token on a read; rotating would turn the GET into a
+/// write and silently invalidate the caller's stored credential, breaking
+/// management clients that do not capture the rotated value from a GET
+/// response (e.g. `vouch-cli`'s `is_client_registered`, which checks only the
+/// HTTP status and reuses the token it already holds).
 ///
 /// # Errors
 ///
@@ -1661,7 +1671,14 @@ pub async fn read_client_configuration(
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
     let base_url = &state.config().base_url;
-    Ok(build_client_response(client, base_url))
+    let mut response = build_client_response(client, base_url);
+    // RFC 7592 §3: registration_access_token is REQUIRED in every Client
+    // Information Response, including the GET response per §2.1. Echo the
+    // presented bearer token rather than rotating it — a read is idempotent,
+    // §5 makes rotation on a read MAY (not MUST), and rotation would
+    // invalidate the caller's stored credential (see the fn doc).
+    response.registration_access_token = Some(registration_access_token.to_owned().into());
+    Ok(response)
 }
 
 /// Delete a dynamically registered client (RFC 7592 Section 2.3).
@@ -2135,8 +2152,11 @@ async fn revoke_token_for_unknown_client(state: &Arc<AppState>, token: &str) {
 
 /// Build a `RegistrationResponse` from a stored `OAuthClient`.
 ///
-/// Per RFC 7592 Section 3, the response omits the `registration_access_token`
-/// but includes the `registration_client_uri`.
+/// Leaves `registration_access_token` unset (`None`); RFC 7592 Section 3 marks
+/// it REQUIRED in every Client Information Response, so each caller populates
+/// it — [`read_client_configuration`] echoes the presented bearer token and
+/// [`update_client_configuration`] sets a freshly rotated one. Includes the
+/// REQUIRED `registration_client_uri`.
 fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationResponse {
     let grant_types = client.grant_types.unwrap_or_default();
     let response_types = client.response_types.unwrap_or_default();

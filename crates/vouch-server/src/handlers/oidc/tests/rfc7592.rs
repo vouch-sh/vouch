@@ -993,6 +993,74 @@ async fn test_rfc7592_get_response_echoes_tls_certificate_bound_flag() {
     }
 }
 
+/// RFC 7592 §3 marks `registration_access_token` as REQUIRED in every Client
+/// Information Response, and §2.1 states the GET response uses "a payload as
+/// described in Section 3" (`specs/rfc/rfc7592.txt:315-318`). The GET response
+/// must therefore include a `registration_access_token` member; it may not be
+/// elided by `#[serde(skip_serializing_if = "Option::is_none")]`.
+///
+/// The GET is a read (RFC 7592 §2.1, "Client Configuration Read Request"), so
+/// the presented bearer token is echoed back unchanged rather than rotated:
+/// rotation on a read is MAY per §5, not MUST, and would invalidate the
+/// caller's stored credential. This test pins both the field's presence
+/// (§3 conformance) and the idempotent, non-rotating read semantics that
+/// `vouch-cli`'s `is_client_registered` relies on.
+#[tokio::test]
+async fn test_rfc7592_get_includes_registration_access_token_per_section_3() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+
+    // RFC 7592 §3: registration_access_token is REQUIRED. The field MUST
+    // appear in the GET response (it must not be elided by
+    // `skip_serializing_if = "Option::is_none"`).
+    assert!(
+        stored.get("registration_access_token").is_some(),
+        "RFC 7592 §3: registration_access_token is REQUIRED but absent from \
+         GET response: {stored}"
+    );
+
+    // RFC 7592 §3 also marks registration_client_uri REQUIRED; its presence
+    // confirms the response is shaped as a §3 Client Information Response.
+    assert!(
+        stored.get("registration_client_uri").is_some(),
+        "RFC 7592 §3: registration_client_uri is REQUIRED but absent from GET \
+         response: {stored}"
+    );
+
+    // A read is idempotent (RFC 7592 §2.1): the GET echoes the presented
+    // bearer token verbatim rather than rotating it. Rotation on a read is
+    // MAY per §5, not MUST, and rotating would silently invalidate the
+    // caller's stored credential (see `read_client_configuration`).
+    assert_eq!(
+        stored["registration_access_token"].as_str(),
+        Some(token.as_str()),
+        "GET must echo the presented registration_access_token, not a rotated \
+         one: {stored}"
+    );
+
+    // The echoed token must still be valid for a subsequent read — a GET
+    // must not rotate the credential out from under its caller. This guards
+    // against a regression to rotation-on-read, which would break management
+    // clients that reuse the token they already hold (e.g. `vouch-cli`'s
+    // `is_client_registered`).
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the original registration_access_token must still work after a GET \
+         (a read must not rotate it): {body}"
+    );
+}
+
 /// RFC 7592 §2.2 (PUT) uses the same response format as RFC 7591 §3.2.1, so an
 /// updated RFC 8705 §2.1.2 certificate-subject parameter must be echoed in the
 /// PUT response and persisted to a subsequent GET.
