@@ -1576,43 +1576,50 @@ impl DocumentStore {
     )]
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
         crate::with_dsql_retry!(async {
-            let now = jiff::Timestamp::now().to_string();
-
-            // Find expired document IDs
-            let select_stmt = Query::select()
-                .column(Documents::Id)
-                .from(Documents::Table)
-                .and_where(Expr::col(Documents::DocType).eq(doc_type))
-                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-                .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-                .to_owned();
-
-            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
-
-            let total = rows.len() as u64;
-            // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
-            for batch in rows.chunks(1000) {
-                let ids: Vec<sea_query::Value> =
-                    batch.iter().map(|r| r.id.as_str().into()).collect();
-
-                let mut tx = self.pool.begin().await?;
-
-                let del_idx = Query::delete()
-                    .from_table(DocumentIndexes::Table)
-                    .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                    .to_owned();
-                crate::tx_execute!(tx, del_idx)?;
-
-                let del_doc = Query::delete()
-                    .from_table(Documents::Table)
-                    .and_where(Expr::col(Documents::Id).is_in(ids))
-                    .to_owned();
-                crate::tx_execute!(tx, del_doc)?;
-
-                tx.commit().await?;
-            }
-            Ok(total)
+            let now = jiff::Timestamp::now();
+            self.delete_expired_before(doc_type, &now).await
         })
+    }
+
+    /// One attempt of [`delete_expired`](Self::delete_expired) against an
+    /// explicit cutoff, so a test can place the cutoff inside the same second
+    /// as a row's `expires_at`.
+    async fn delete_expired_before(&self, doc_type: &str, now: &Timestamp) -> Result<u64> {
+        let now = whole_second_bound(now);
+
+        // Find expired document IDs
+        let select_stmt = Query::select()
+            .column(Documents::Id)
+            .from(Documents::Table)
+            .and_where(Expr::col(Documents::DocType).eq(doc_type))
+            .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+            .and_where(Expr::col(Documents::ExpiresAt).lt(now))
+            .to_owned();
+
+        let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
+
+        let total = rows.len() as u64;
+        // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
+        for batch in rows.chunks(1000) {
+            let ids: Vec<sea_query::Value> = batch.iter().map(|r| r.id.as_str().into()).collect();
+
+            let mut tx = self.pool.begin().await?;
+
+            let del_idx = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
+                .to_owned();
+            crate::tx_execute!(tx, del_idx)?;
+
+            let del_doc = Query::delete()
+                .from_table(Documents::Table)
+                .and_where(Expr::col(Documents::Id).is_in(ids))
+                .to_owned();
+            crate::tx_execute!(tx, del_doc)?;
+
+            tx.commit().await?;
+        }
+        Ok(total)
     }
 
     // ========================================================================
@@ -2130,7 +2137,7 @@ impl StoreTransaction<'_> {
             .from_table(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).gt(now.to_string()))
+            .and_where(Expr::col(Documents::ExpiresAt).gt(whole_second_bound(now)))
             .to_owned();
         let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
         let won = result.rows_affected() == 1;
@@ -2500,6 +2507,33 @@ impl StoreTransaction<'_> {
 
         Ok(true)
     }
+}
+
+/// Truncate an RFC 3339 bound to whole seconds for lexicographic comparison
+/// against a `TEXT` timestamp column (`expires_at`, `created_at`).
+///
+/// Columns hold [`jiff::Timestamp::to_string`] output, which trims trailing
+/// zero fractional digits to a variable width: `…16Z`, `…16.5Z`,
+/// `…16.537239482Z` are all valid. Comparing two such strings with SQL `<` /
+/// `>` is only chronological when one is a zero-padding-equivalent prefix of
+/// the other. Bound `…16.537239482Z` against row `…16.5Z` sorts the row as
+/// *greater* (`'Z'` > `'3'` at the first differing byte) although it is
+/// earlier. A bound with no fractional part is a strict prefix of every value
+/// in its own second, so it sorts correctly on both sides; the cost is that
+/// rows within the bound's own second are compared at whole-second
+/// granularity, which for an expiry check admits a row for at most one extra
+/// second and for a sweep leaves it for the next pass.
+pub(crate) fn whole_second_bound_str(bound: &str) -> &str {
+    let bound = bound.strip_suffix('Z').unwrap_or(bound);
+    match bound.split_once('.') {
+        Some((whole_seconds, _fraction)) => whole_seconds,
+        None => bound,
+    }
+}
+
+/// [`whole_second_bound_str`] for a [`Timestamp`].
+fn whole_second_bound(now: &Timestamp) -> String {
+    whole_second_bound_str(&now.to_string()).to_owned()
 }
 
 impl std::fmt::Debug for StoreTransaction<'_> {

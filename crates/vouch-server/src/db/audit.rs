@@ -13,6 +13,7 @@ use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
 use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
+use super::store::whole_second_bound_str;
 use crate::crypto::document_crypto::DocumentCrypto;
 
 // ============================================================================
@@ -604,10 +605,10 @@ impl AuditStore {
                 );
             }
             if let Some(ref since) = filter.since {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(normalize_timestamp_bound(since)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(whole_second_bound_str(since)));
             }
             if let Some(ref until) = filter.until {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(until)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(whole_second_bound_str(until)));
             }
 
             // `after_id` (forward/ascending polling) takes precedence over
@@ -674,7 +675,7 @@ impl AuditStore {
         let stmt = Query::delete()
             .from_table(AuditEvents::Table)
             .and_where(Expr::col(AuditEvents::EventType).eq(kind.as_str()))
-            .and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(before)))
+            .and_where(Expr::col(AuditEvents::CreatedAt).lt(whole_second_bound_str(before)))
             .to_owned();
 
         let result = crate::db_execute!(&self.pool, stmt)?;
@@ -722,44 +723,6 @@ impl std::fmt::Debug for AuditStore {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Normalize a `since`/`until`/cleanup-cutoff timestamp bound for
-/// lexicographic comparison against the `created_at` column, by truncating
-/// it to whole-second precision (dropping any fractional-second component
-/// and the trailing `Z`).
-///
-/// `created_at` is stored as [`jiff::Timestamp::to_string`] output, which
-/// trims trailing zero fractional-second digits to a *variable* width — one
-/// row might store `...T00:00:00.5Z` (500ms) and another `...T00:00:00Z`
-/// (exactly on the second) or `...T00:00:00.537239482Z` (full nanosecond
-/// precision). Comparing two such strings lexicographically is only
-/// guaranteed correct when one is a zero-padding-equivalent prefix of the
-/// other; it silently breaks whenever the digits actually differ at a
-/// shared position. Concrete counterexample: bound `...16.537239482` (no Z)
-/// vs row `...16.5Z` — chronologically 0.5 < 0.537239482, so the row is
-/// *earlier*, but lexicographically `'Z'` (0x5A) > `'3'` (0x33) at the
-/// second differing character, so the row compares as *greater*. Because
-/// the id-based forward cursor never retries a skipped id, a row wrongly
-/// excluded from an `until`/lag-window comparison this way is lost
-/// permanently, not just delayed.
-///
-/// Truncating the *bound* to whole seconds sidesteps the ambiguity
-/// entirely: a bound with no fractional part at all is always a strict
-/// string prefix of every `created_at` value in that same second
-/// (fractional or not), which sorts correctly on both sides of the
-/// comparison. The cost is that rows within the bound's own second are
-/// compared at second granularity — for `until`, this makes the effective
-/// cutoff up to ~1s more conservative (never less), which only strengthens
-/// the "never return events newer than the lag window" guarantee and
-/// self-corrects on the next poll as `now` advances; for `since`, it makes
-/// the filter up to ~1s more inclusive at the boundary, never lossy.
-fn normalize_timestamp_bound(bound: &str) -> &str {
-    let bound = bound.strip_suffix('Z').unwrap_or(bound);
-    match bound.split_once('.') {
-        Some((whole_seconds, _fraction)) => whole_seconds,
-        None => bound,
-    }
-}
 
 /// Convert a raw row to an `AuditEvent`.
 fn raw_to_audit_event(row: RawAuditRow) -> Result<AuditEvent> {

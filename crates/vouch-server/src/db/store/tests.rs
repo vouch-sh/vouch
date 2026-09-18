@@ -262,6 +262,92 @@ async fn delete_expired() {
     assert!(found.is_some());
 }
 
+// RFC 3339 text sorts lexically only when both strings render fractional
+// seconds at the same width; jiff trims trailing zeros, so a live row can sort
+// as expired. RFC 9421 leaves nonce lifetime handling to the application
+// (`specs/rfc/rfc9421.txt:2213`, "Enforcing uniqueness of the nonce
+// parameter"); these tests pin our own bound handling.
+#[tokio::test]
+async fn delete_expired_keeps_row_expiring_later_in_the_same_second() {
+    let store = test_store().await;
+    let live = ExpiringDoc {
+        token: "live-same-second".to_string(),
+        expires: "2030-01-01T00:00:16.537239482Z".parse().unwrap(),
+    };
+    store.insert(&live).await.unwrap();
+    let expired = ExpiringDoc {
+        token: "expired-previous-second".to_string(),
+        expires: "2030-01-01T00:00:15.9Z".parse().unwrap(),
+    };
+    store.insert(&expired).await.unwrap();
+
+    let now: Timestamp = "2030-01-01T00:00:16.5Z".parse().unwrap();
+    let deleted = store.delete_expired_before("expiring", &now).await.unwrap();
+    assert_eq!(
+        deleted, 1,
+        "only the row from the previous second is expired"
+    );
+
+    assert!(
+        store
+            .find_one::<ExpiringDoc>("token", "live-same-second")
+            .await
+            .unwrap()
+            .is_some(),
+        "a row expiring later in the cutoff's own second must survive"
+    );
+    assert!(
+        store
+            .find_one::<ExpiringDoc>("token", "expired-previous-second")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delete_if_not_expired_consumes_row_expiring_later_in_the_same_second() {
+    let store = test_store().await;
+    let live = ExpiringDoc {
+        token: "nonce-live".to_string(),
+        expires: "2030-01-01T00:00:16.537239482Z".parse().unwrap(),
+    };
+    let live = store.insert(&live).await.unwrap();
+    let expired = ExpiringDoc {
+        token: "nonce-expired".to_string(),
+        expires: "2030-01-01T00:00:15.9Z".parse().unwrap(),
+    };
+    let expired = store.insert(&expired).await.unwrap();
+
+    let now: Timestamp = "2030-01-01T00:00:16.5Z".parse().unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.delete_if_not_expired(&live.id, &now).await.unwrap(),
+        "a row expiring 37ms after `now` is live and must be consumed"
+    );
+    assert!(
+        !tx.delete_if_not_expired(&expired.id, &now).await.unwrap(),
+        "a row expired in the previous second must not be consumed"
+    );
+    tx.commit().await.unwrap();
+}
+
+#[test]
+fn whole_second_bound_str_truncates_fraction_and_zulu() {
+    assert_eq!(
+        whole_second_bound_str("2030-01-01T00:00:16.537239482Z"),
+        "2030-01-01T00:00:16"
+    );
+    assert_eq!(
+        whole_second_bound_str("2030-01-01T00:00:16Z"),
+        "2030-01-01T00:00:16"
+    );
+    assert_eq!(
+        whole_second_bound_str("2030-01-01T00:00:16"),
+        "2030-01-01T00:00:16"
+    );
+}
+
 #[tokio::test]
 async fn count_by_index() {
     let store = test_store().await;
