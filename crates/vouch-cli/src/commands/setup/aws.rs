@@ -1139,6 +1139,79 @@ fn sweep_decision_for_role(
     }
 }
 
+/// The existing-profile sweep's action for one `--role` (optionally `--via`)
+/// profile: which (if any) diagnostic to emit, whether to count it, and
+/// whether to probe it. Produced by [`plan_role_sweep`] from the profile's
+/// `role_arn`/`via`, the live org config, the discover run's management
+/// role, and the probe-dedup set.
+///
+/// Distinct from [`SweepDecision`] (the pure classification) because this
+/// folds in the probe-dedup gate, which suppresses ONLY re-probing. The
+/// [`RoleSweepAction::Verified`] and [`RoleSweepAction::Unresolved`]
+/// diagnostics are emitted for *every* existing profile, including one whose
+/// `role_arn` the entitlement pass probed this run, so a manually-created
+/// `--role` profile (via = `None`) is reported on its own `via` rather than
+/// silently dropped when AAM listed the same role ARN.
+#[derive(Debug, PartialEq, Eq)]
+enum RoleSweepAction {
+    /// The discover run already holds a session for this role (it assumed the
+    /// role directly). Report `setup-aws-entitlements-existing-verified` and
+    /// count it checked — no probe needed.
+    Verified,
+    /// Vending chains through the run's management role and the role was not
+    /// already probed this run. Count it checked and probe it through the
+    /// run's session — the probe matches vending's hop.
+    Probe,
+    /// The role was already probed this run (by the entitlement pass, or an
+    /// earlier profile in this sweep). Do not re-probe, do not count, do not
+    /// print — the earlier probe's report already covered this `role_arn`.
+    /// The non-diagnostic counterpart of [`RoleSweepAction::Skip`], which is
+    /// silent where `Skip` emits a `tracing::debug`.
+    AlreadyProbed,
+    /// Vending resolves the target through a different hop than the sweep's
+    /// session. Skip silently to the user; `tracing::debug` only.
+    Skip,
+    /// Vending cannot resolve the target under the current config. Print
+    /// `setup-aws-existing-unresolved`, count it checked, and count an issue.
+    Unresolved,
+}
+
+/// Plan the existing-profile sweep's action for one role-carrying profile,
+/// applying the probe-dedup gate ONLY to the probe path.
+///
+/// `seen` is the probe-dedup set, seeded with the entitlement pass's `probed`
+/// role ARNs before the sweep loop; [`plan_role_sweep`] inserts each probed
+/// `role_arn` into it. The dedup suppresses ONLY [`RoleSweepAction::Probe`]
+/// — re-probing a role the entitlement pass just probed is redundant (it
+/// already produced a CloudTrail `AssumeRole` event and a verified/denial
+/// line). The non-probe arms ([`RoleSweepAction::Verified`] and
+/// [`RoleSweepAction::Unresolved`]) run for *every* existing profile, so a
+/// manual `--role` profile (via = `None`) is still classified and reported
+/// even when the entitlement pass probed the same `role_arn` (under a
+/// different `--via`) this run. Gating them too would suppress the
+/// `setup-aws-existing-unresolved` diagnostic for a genuinely broken manual
+/// profile whose `role_arn` AAM also listed.
+fn plan_role_sweep(
+    vouch_config: &Config,
+    role_arn: &str,
+    via: Option<&str>,
+    management_role: &str,
+    seen: &mut BTreeSet<String>,
+) -> RoleSweepAction {
+    match sweep_decision_for_role(vouch_config, role_arn, via, management_role) {
+        SweepDecision::TriviallyAssumable => RoleSweepAction::Verified,
+        SweepDecision::Probe => {
+            if seen.insert(role_arn.to_string()) {
+                RoleSweepAction::Probe
+            } else {
+                RoleSweepAction::AlreadyProbed
+            }
+        }
+        SweepDecision::Skip => RoleSweepAction::Skip,
+        SweepDecision::Unresolved => RoleSweepAction::Unresolved,
+    }
+}
+
 /// Health-check every Vouch-managed profile that discovery did not already
 /// touch this run: role-carrying profiles are probed through the management
 /// session *only when that session is the same principal vending chains
@@ -1170,25 +1243,21 @@ async fn validate_existing_profiles(
         };
         match line {
             CredentialProcessLine::Role { role_arn, via } => {
-                if !seen.insert(role_arn.clone()) {
-                    continue;
-                }
-                // Decide whether to probe this profile through the
-                // discover run's management session — and only when that
-                // session is the same principal vending chains through.
-                // Probing with the wrong session (a different org's
-                // management role, or a direct AssumeRoleWithWebIdentity
-                // the sweep cannot replicate with a SigV4 session) is a
-                // different hop than vending performs and yields false
-                // `existing-trust-missing` reports (and, for unresolvable
-                // chains, false `existing-verified` reports).
-                match sweep_decision_for_role(
+                // Classify first, then let `plan_role_sweep` apply the
+                // probe-dedup gate (`seen`, seeded with the entitlement pass's
+                // `probed` role ARNs) ONLY to the probe path. Non-probe
+                // diagnostics (Verified/Unresolved) run for every existing
+                // profile, so a manual `--role` profile whose `role_arn` AAM
+                // also probed is still reported on its own `via` — the gate
+                // never suppresses a `setup-aws-existing-unresolved` line.
+                match plan_role_sweep(
                     vouch_config,
                     &role_arn,
                     via.as_deref(),
                     ctx.management_role,
+                    &mut seen,
                 ) {
-                    SweepDecision::TriviallyAssumable => {
+                    RoleSweepAction::Verified => {
                         // The session in hand IS this role — the discover run
                         // assumed it via the same direct
                         // AssumeRoleWithWebIdentity hop vending uses for a
@@ -1199,12 +1268,12 @@ async fn validate_existing_profiles(
                             profile = profile.name.as_str(),
                             role_arn = role_arn.as_str()
                         );
-                        continue;
                     }
-                    SweepDecision::Probe => {
+                    RoleSweepAction::Probe => {
                         // Vending chains through ctx.management_role, which
                         // is the session the sweep holds — probe matches
-                        // vending's hop.
+                        // vending's hop. The dedup gate already confirmed this
+                        // role was not probed this run.
                         checked = checked.saturating_add(1);
                         targets.push(ProbeTarget {
                             role_arn,
@@ -1212,18 +1281,22 @@ async fn validate_existing_profiles(
                             disposition: Disposition::Existing,
                         });
                     }
-                    SweepDecision::Skip => {
-                        // Vending resolves the target through a different
-                        // hop than the sweep's session. The sweep has no
-                        // matching session; claim nothing and skip.
+                    RoleSweepAction::AlreadyProbed => {
+                        // The entitlement pass (or an earlier profile in this
+                        // sweep) already probed this `role_arn` and reported
+                        // its outcome; re-probing is redundant.
+                    }
+                    RoleSweepAction::Skip => {
+                        // Vending resolves the target through a different hop
+                        // than the sweep's session. The sweep has no matching
+                        // session; claim nothing and skip.
                         tracing::debug!(
                             "sweep skipped {}: vending resolves it through \
                              a different hop than this run's management role",
                             profile.name,
                         );
-                        continue;
                     }
-                    SweepDecision::Unresolved => {
+                    RoleSweepAction::Unresolved => {
                         // Vending cannot resolve this target under the current
                         // config either — the profile is genuinely broken.
                         // Surface a distinct diagnostic; do not probe (the
@@ -1237,7 +1310,6 @@ async fn validate_existing_profiles(
                             profile = profile.name.as_str(),
                             role_arn = role_arn.as_str(),
                         );
-                        continue;
                     }
                 }
             }
@@ -1709,6 +1781,110 @@ mod tests {
         assert_eq!(
             sweep_decision_for_role(&cfg, target, Some("arn:aws:iam::999:role/Unknown"), mgmt),
             SweepDecision::Unresolved,
+        );
+    }
+
+    // -- plan_role_sweep -------------------------------------------------------
+    //
+    // `validate_existing_profiles`'s per-profile gate. The probe-dedup set
+    // (`seen`, seeded with the entitlement pass's `probed` role ARNs) must
+    // suppress ONLY re-probing; the `Unresolved` (broken manual profile) and
+    // `Verified` diagnostics must still run for every existing profile, even
+    // one whose `role_arn` the entitlement pass probed this run. Regression
+    // coverage for the bug where `seen = probed.clone()` plus a `seen.insert`
+    // gate *before* classification silently dropped the
+    // `setup-aws-existing-unresolved` line for a manual `--role` profile when
+    // AAM listed the same `role_arn` as an entitlement.
+
+    /// The headline bug: a manual `--role` profile (via = None) in a multi-org
+    /// config whose account no org covers classifies `Unresolved`. The fix must
+    /// surface `Unresolved` even when the entitlement pass already probed the
+    /// same `role_arn` (inserted it into `seen`). Before the fix, the
+    /// `seen.insert` gate fired before classification and suppressed this.
+    #[test]
+    fn plan_role_sweep_unresolved_not_suppressed_when_role_probed() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::222:role/MgmtB";
+        // Account 888 is covered by neither org.
+        let orphan = "arn:aws:iam::888:role/OrphanRole";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        // `seen` seeded as if the entitlement pass probed `orphan` this run.
+        let mut seen: BTreeSet<String> = BTreeSet::from([orphan.to_string()]);
+        assert_eq!(
+            plan_role_sweep(&cfg, orphan, None, mgmt_a, &mut seen),
+            RoleSweepAction::Unresolved,
+        );
+    }
+
+    /// The fix keeps probe suppression: an entitlement profile pinned `--via`
+    /// the run's management role classifies `Probe`, but when the entitlement
+    /// pass already probed the same `role_arn`, re-probing is redundant —
+    /// `AlreadyProbed`, not `Probe`. Preserves `probed`'s stated purpose
+    /// ("the existing-profile sweep does not probe them again").
+    #[test]
+    fn plan_role_sweep_probe_suppressed_when_role_probed() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_sweep_config(&[mgmt]);
+        let mut seen: BTreeSet<String> = BTreeSet::from([target.to_string()]);
+        assert_eq!(
+            plan_role_sweep(&cfg, target, Some(mgmt), mgmt, &mut seen),
+            RoleSweepAction::AlreadyProbed,
+        );
+    }
+
+    /// A role NOT already probed this run (`seen` empty) classifies `Probe`
+    /// normally, and `plan_role_sweep` records it so a later profile with the
+    /// same `role_arn` is deduped within the sweep.
+    #[test]
+    fn plan_role_sweep_probe_when_not_yet_probed_dedups_within_sweep() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_sweep_config(&[mgmt]);
+        let mut seen = BTreeSet::new();
+        assert_eq!(
+            plan_role_sweep(&cfg, target, Some(mgmt), mgmt, &mut seen),
+            RoleSweepAction::Probe,
+        );
+        // Within-sweep dedup: a second profile for the same role_arn does
+        // not re-probe.
+        assert_eq!(
+            plan_role_sweep(&cfg, target, Some(mgmt), mgmt, &mut seen),
+            RoleSweepAction::AlreadyProbed,
+        );
+    }
+
+    /// `TriviallyAssumable` (the role IS the run's management role; the
+    /// discover run already assumed it) is not a probe, so the dedup must not
+    /// suppress it — the manual profile is still reported `Verified` even when
+    /// the entitlement pass probed the same `role_arn`.
+    #[test]
+    fn plan_role_sweep_verified_not_suppressed_when_role_probed() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let cfg = make_sweep_config(&[mgmt]);
+        let mut seen: BTreeSet<String> = BTreeSet::from([mgmt.to_string()]);
+        assert_eq!(
+            plan_role_sweep(&cfg, mgmt, None, mgmt, &mut seen),
+            RoleSweepAction::Verified,
+        );
+    }
+
+    /// A profile vending through a *different* hop (another org's chain)
+    /// classifies `Skip`, which emits a `tracing::debug` — distinct from
+    /// `AlreadyProbed` (silently dropped dedup). The dedup must not conflate
+    /// the two, even when `role_arn` was probed this run.
+    #[test]
+    fn plan_role_sweep_skip_not_conflated_with_already_probed() {
+        let mgmt_a = "arn:aws:iam::111:role/MgmtA";
+        let mgmt_b = "arn:aws:iam::999:role/MgmtB";
+        // Member role in account 999 -> disambiguation picks org B; MgmtB !=
+        // target -> chain through MgmtB, which is not the run's mgmt -> Skip.
+        let target = "arn:aws:iam::999:role/ProdRole";
+        let cfg = make_sweep_config(&[mgmt_a, mgmt_b]);
+        let mut seen: BTreeSet<String> = BTreeSet::from([target.to_string()]);
+        assert_eq!(
+            plan_role_sweep(&cfg, target, None, mgmt_a, &mut seen),
+            RoleSweepAction::Skip,
         );
     }
 
