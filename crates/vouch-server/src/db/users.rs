@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::document_type::Document;
 use super::documents::user::UserDoc;
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
 use anyhow::Result;
 
 /// User record.
@@ -741,15 +741,94 @@ pub async fn update_user_github_identity(
     }
 }
 
-/// Update only a user's GitHub refresh token.
+/// Outcome of [`update_user_github_refresh_token`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The rotated refresh token was persisted.
+    Written,
+    /// The write was skipped because the stored `github_id` no longer
+    /// matches the value the caller captured before the
+    /// access-token refresh round-trip — a concurrent re-link to a
+    /// different GitHub account committed during that window. The
+    /// rotated token belongs to the pre-relink account and would clobber
+    /// the re-link's refresh token, so the conditional write refuses to
+    /// commit; the doc keeps the new account's full identity intact
+    /// (`github_id`, `github_login`, and `github_refresh_token` all
+    /// belonging to the re-link).
+    SkippedIdentityChanged,
+}
+
+/// A user's stored GitHub link state, captured from a single doc snapshot.
+///
+/// `github_id` and `github_refresh_token` are read together — not via
+/// two separate queries — so they describe the same account at the same
+/// moment. The access-token refresh path uses `github_id` as the
+/// "expected identity" for [`update_user_github_refresh_token`]'s
+/// conditional write; if the two fields were read in separate queries, a
+/// concurrent re-link could land between them and the caller would
+/// capture the new `github_id` alongside the *old* refresh token,
+/// defeating the guard. Bundling them into a single `store.get` closes
+/// the last split-snapshot race in the refresh path.
+///
+/// `None` is returned when the user document does not exist. The inner
+/// `Option`s cover users with no GitHub link at all, and — for
+/// `github_id` — legacy docs that predate the identity field.
+#[derive(Clone)]
+pub struct GitHubLink {
+    pub github_id: Option<i64>,
+    pub github_refresh_token: Option<secrecy::SecretString>,
+}
+
+// Custom Debug that redacts `github_refresh_token` to prevent accidental
+// log exposure of a credential that mints new GitHub access tokens.
+impl std::fmt::Debug for GitHubLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubLink")
+            .field("github_id", &self.github_id)
+            .field("github_refresh_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Get a user's GitHub link state from a single doc snapshot.
+///
+/// See [`GitHubLink`] for why `github_id` and `github_refresh_token` are
+/// read together rather than via two separate queries.
+pub async fn get_user_github_link(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<Option<GitHubLink>> {
+    let doc = store.get::<UserDoc>(user_id).await?;
+    Ok(doc.map(|d| GitHubLink {
+        github_id: d.data.github_id,
+        github_refresh_token: d.data.github_refresh_token,
+    }))
+}
+
+/// Update only a user's GitHub refresh token, conditioned on the stored
+/// GitHub identity not having changed since the caller read it.
 ///
 /// Used by the access-token refresh path, which has no reason to rewrite
 /// `github_id`/`github_login`: those fields are already in the doc, and
 /// re-writing them from a value captured before the OCC window would
-/// silently revert a concurrent re-link to a different GitHub account that
-/// commits inside the retry window. Touching only the refresh token lets a
-/// concurrent `update_user_github_identity` (the linking path) survive
-/// naturally across `store.modify`'s OCC retry.
+/// silently revert a concurrent re-link to a different GitHub account
+/// (the failure mode this function's predecessor introduced). Touching
+/// only the refresh token lets a concurrent `update_user_github_identity`
+/// (the linking path) survive naturally across the OCC retry.
+///
+/// `expected_github_id` is the `github_id` the caller read alongside
+/// the refresh token — i.e. via [`get_user_github_link`] — *before* the
+/// `refresh_oauth_token` API round-trip. The closure rotates the stored
+/// token only when the doc's current `github_id` still matches it. When
+/// a concurrent re-link commits during that round-trip, the doc's
+/// `github_id` has changed by the time the closure runs; the conditional
+/// then refuses to overwrite the re-link's refresh token with the old
+/// account's rotated token, returns [`RefreshOutcome::SkippedIdentityChanged`]
+/// without committing, and leaves the new account's full identity intact.
+///
+/// Both `Transition::Applied` and `Transition::Rejected` map to a
+/// [`RefreshOutcome`] — the function never surfaces a precondition
+/// mismatch as an error, only a missing user or a database failure.
 ///
 /// A missing user is reported as an error (the refresh path had a stored
 /// token to rotate, so the user must exist).
@@ -757,26 +836,22 @@ pub async fn update_user_github_refresh_token(
     store: &DocumentStore,
     user_id: &str,
     new_refresh_token: &str,
-) -> Result<()> {
-    let found = store
-        .modify::<UserDoc, _>(user_id, |data| {
-            data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
+    expected_github_id: Option<i64>,
+) -> Result<RefreshOutcome> {
+    let outcome = store
+        .transition::<UserDoc, RefreshOutcome, RefreshOutcome, _>(user_id, |data| {
+            if data.github_id == expected_github_id {
+                data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
+                Ok(RefreshOutcome::Written)
+            } else {
+                Err(RefreshOutcome::SkippedIdentityChanged)
+            }
         })
         .await?;
-    if found {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("user not found: {user_id}"))
+    match outcome {
+        Transition::Applied(o) | Transition::Rejected(o) => Ok(o),
+        Transition::NotFound => Err(anyhow::anyhow!("user not found: {user_id}")),
     }
-}
-
-/// Get a user's GitHub refresh token.
-pub async fn get_user_github_refresh_token(
-    store: &DocumentStore,
-    user_id: &str,
-) -> Result<Option<secrecy::SecretString>> {
-    let doc = store.get::<UserDoc>(user_id).await?;
-    Ok(doc.and_then(|d| d.data.github_refresh_token))
 }
 
 /// Clear a user's GitHub refresh token.

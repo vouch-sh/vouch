@@ -60,11 +60,11 @@ pub use store::{InvalidIndexValue, StoreTransaction};
 
 // Re-export user types and functions
 pub use users::{
-    DeleteUserError, LastAdminGuard, MemberDowngrade, MemberDowngradeError, User, delete_user,
-    demote_or_deactivate_member, get_user_by_email, get_user_by_id, get_user_github_refresh_token,
-    get_user_org_domain, get_users_by_ids, get_users_by_org_paginated, is_last_active_org_admin,
-    update_user_active_status, update_user_admin_status, update_user_github_identity,
-    update_user_github_refresh_token,
+    DeleteUserError, GitHubLink, LastAdminGuard, MemberDowngrade, MemberDowngradeError,
+    RefreshOutcome, User, delete_user, demote_or_deactivate_member, get_user_by_email,
+    get_user_by_id, get_user_github_link, get_user_org_domain, get_users_by_ids,
+    get_users_by_org_paginated, is_last_active_org_admin, update_user_active_status,
+    update_user_admin_status, update_user_github_identity, update_user_github_refresh_token,
 };
 
 // Re-export user test helpers (only available in tests)
