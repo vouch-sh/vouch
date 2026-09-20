@@ -1038,22 +1038,24 @@ async fn test_update_user_github_identity_preserves_concurrent_admin_change() {
     );
 }
 
-/// Regression for the re-link-revert race: a refresh-token rotation (the
-/// fixed `get_user_access_token` path, which now writes only the rotated
-/// token via `update_user_github_refresh_token`) must NOT revert a
-/// concurrent re-link to a different GitHub account that commits inside
-/// the OCC window.
+/// Regression for the re-link-revert / token-clobber race: a refresh-token
+/// rotation (the fixed `get_user_access_token` path) must NOT, when a
+/// concurrent re-link to a different GitHub account commits inside the
+/// OCC window, overwrite the re-link's refresh token with the old
+/// account's rotated token. The doc must end up holding a
+/// fully-consistent identity — `github_id`, `github_login`, and
+/// `github_refresh_token` all belonging to the new account.
 ///
-/// Before the fix the refresh path re-read the user, captured
-/// `github_id`/`github_login`, and called `update_user_github_identity`
-/// with those captured values; on OCC retry `store.modify` re-read the
-/// post-relink doc but the closure re-applied the stale captured identity,
-/// silently reverting the re-link. The sibling
+/// History: `dfd69cf8` split the refresh path into a token-only
+/// `update_user_github_refresh_token` so a concurrent re-link's
+/// `github_id`/`github_login` survive the OCC retry — but the closure
+/// overwrote `github_refresh_token` unconditionally, so the re-link's
+/// new token was still clobbered while the identity fields survived.
+/// This test exercises a divergent `github_id` for the concurrent
+/// re-link (the case the lost-update surface actually endangers, which
+/// the sibling
 /// `test_update_user_github_identity_preserves_concurrent_admin_change`
-/// above could not detect this because both writers shared the same
-/// `github_id` (only the untouched `is_org_admin` field diverged); this
-/// test uses a divergent `github_id` for the concurrent re-link, the case
-/// the lost-update surface actually endangers.
+/// cannot reach because both writers share the same `github_id`).
 #[tokio::test]
 async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
     use secrecy::ExposeSecret;
@@ -1069,15 +1071,17 @@ async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
     .await
     .expect("upsert user");
 
-    // Initial link to GitHub account 111.
+    // Initial link to GitHub account 111, with refresh token "r1".
     update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
         .await
         .expect("initial link to account 111");
 
-    // The refresh path now writes only the rotated token. Inject a
-    // concurrent re-link to a second GitHub account (id 222) inside
-    // attempt 0's OCC window to deterministically force a version-conflict
-    // retry (the same seam
+    // The refresh path captured `expected_github_id = Some(111)` before
+    // the `refresh_oauth_token` round-trip and now writes only the
+    // rotated token, conditioned on `github_id` still being 111. Inject
+    // a concurrent re-link to a second GitHub account (id 222) inside
+    // attempt 0's OCC window to deterministically force a
+    // version-conflict retry (the same seam
     // `test_update_user_github_identity_preserves_concurrent_admin_change`
     // uses).
     let writer = store.clone();
@@ -1090,17 +1094,26 @@ async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
             if attempt != 0 {
                 return;
             }
-            // Concurrent re-link to account 222 commits inside the CAS window.
+            // Concurrent re-link to account 222 commits inside the CAS window,
+            // overwriting github_id (111 -> 222), github_login, and
+            // github_refresh_token (r1 -> r2).
             update_user_github_identity(&writer, &relink_user_id, 222, "g2-user", Some("r2"))
                 .await
                 .expect("concurrent relink to account 222");
         })
     }));
 
-    // Refresh-path write: rotated token only, no identity fields.
-    update_user_github_refresh_token(&hooked, &user_id, "r1-rotated")
+    // Refresh-path write: rotated token "r1-rotated" with expected
+    // github_id 111 (the pre-relink snapshot the refresh path captured
+    // alongside the refresh token).
+    let outcome = update_user_github_refresh_token(&hooked, &user_id, "r1-rotated", Some(111))
         .await
-        .expect("refresh-path write");
+        .expect("refresh-path write must not error");
+
+    assert!(
+        matches!(outcome, RefreshOutcome::SkippedIdentityChanged),
+        "when a concurrent re-link landed the write must skip, got {outcome:?}"
+    );
 
     let user = get_user_by_id(&store, &user_id)
         .await
@@ -1121,8 +1134,319 @@ async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
         user.github_refresh_token
             .as_ref()
             .map(|t| t.expose_secret()),
+        Some("r2"),
+        "the re-link's refresh token must be preserved, NOT overwritten with \
+         the pre-relink account's rotated token"
+    );
+}
+
+/// Companion to the race test above: with no concurrent re-link the
+/// refresh-path write must persist the rotated token and report
+/// `RefreshOutcome::Written`. This is the unmodified-behavior control
+/// for the conditional write — it pins that the new `expected_github_id`
+/// guard does not break the happy path.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_writes_when_identity_unchanged() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "refresh-happy@example.com",
+        Some("Refresh Happy"),
+        Some("org-refresh-happy"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", Some(111))
+        .await
+        .expect("refresh write must succeed");
+    assert!(
+        matches!(outcome, RefreshOutcome::Written),
+        "without a concurrent re-link the rotated token must be persisted, got {outcome:?}"
+    );
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(111), "github_id must be preserved");
+    assert_eq!(user.github_login.as_deref(), Some("g1-user"));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
         Some("r1-rotated"),
-        "the rotated refresh token must still be persisted"
+        "the rotated refresh token must be persisted"
+    );
+}
+
+/// The realistic race window from the bug report: the re-link commits
+/// during the `refresh_oauth_token` round-trip — by the time the
+/// refresh path's `update_user_github_refresh_token` runs, the doc's
+/// `github_id` has already changed. The closure must detect the
+/// mismatch and refuse to overwrite the re-link's refresh token with
+/// the old account's rotated token. The doc keeps the re-link's
+/// consistent identity.
+///
+/// This is the deterministic companion to the OCC-window test above
+/// (the re-link has already committed before the write call, so no
+/// test hook is needed); both reproduce the same outcome the
+/// atomic-snapshot capture of `expected_github_id` lets the
+/// conditional write detect.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_skipped_when_relink_already_committed() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "refresh-stale-expected@example.com",
+        Some("Refresh Stale"),
+        Some("org-refresh-stale"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // Initial link to account 111.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // The refresh path captured `expected_github_id = Some(111)` before
+    // the `refresh_oauth_token` round-trip. By the time the round-trip
+    // returns, a re-link to account 222 has committed.
+    update_user_github_identity(&store, &user_id, 222, "g2-user", Some("r2"))
+        .await
+        .expect("concurrent relink to account 222");
+
+    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", Some(111))
+        .await
+        .expect("refresh write must not error");
+    assert!(
+        matches!(outcome, RefreshOutcome::SkippedIdentityChanged),
+        "must skip the write when the stored identity changed, got {outcome:?}"
+    );
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(222), "github_id must be the re-link's");
+    assert_eq!(user.github_login.as_deref(), Some("g2-user"));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r2"),
+        "the re-link's refresh token must be preserved, not overwritten with r1-rotated"
+    );
+}
+
+/// `update_user_github_refresh_token` reports the missing user as an
+/// error — the refresh path had a stored token to rotate, so the user
+/// must exist. The conditional write does not surface precondition
+/// mismatches as errors, only the user-not-found and DB failure paths.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_errors_on_missing_user() {
+    let (store, _audit) = test_db().await;
+    let err =
+        update_user_github_refresh_token(&store, "no-such-user-id", "rotated-token", Some(111))
+            .await
+            .expect_err("missing user must propagate as an error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("user not found"),
+        "error must mention the missing user, got: {msg}"
+    );
+}
+
+/// The re-link side of the same invariant, reachable with no race at all.
+/// `link_user_account` passes `None` when the token response carried no
+/// `refresh_token` (GitHub omits it when the app has expiring tokens
+/// disabled). Preserving the stored token is right for a same-account
+/// re-link, but for a re-link to a *different* account it pairs the new
+/// identity with the previous account's credential — the exact mismatch
+/// the refresh path's conditional write refuses to create.
+#[tokio::test]
+async fn test_update_user_github_identity_clears_token_on_different_account_relink() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "relink-no-token@example.com",
+        Some("Relink No Token"),
+        Some("org-relink-no-token"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // Linked to account 111 while the app issued refresh tokens.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // Re-link to account 222, response carries no refresh token.
+    update_user_github_identity(&store, &user_id, 222, "g2-user", None)
+        .await
+        .expect("relink to account 222");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(222), "github_id must be the re-link's");
+    assert_eq!(user.github_login.as_deref(), Some("g2-user"));
+    assert!(
+        user.github_refresh_token.is_none(),
+        "account 111's refresh token must not survive a re-link to account 222"
+    );
+}
+
+/// The case the preserve-on-`None` behavior exists for: re-linking the
+/// *same* account when the response carries no refresh token must keep
+/// the stored one, or background refresh silently breaks.
+#[tokio::test]
+async fn test_update_user_github_identity_keeps_token_on_same_account_relink() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "relink-same-account@example.com",
+        Some("Relink Same Account"),
+        Some("org-relink-same-account"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // Same account, renamed login, no refresh token in the response.
+    update_user_github_identity(&store, &user_id, 111, "g1-renamed", None)
+        .await
+        .expect("relink to the same account");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(111));
+    assert_eq!(user.github_login.as_deref(), Some("g1-renamed"));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1"),
+        "a same-account re-link must not erase the working refresh token"
+    );
+}
+
+/// A first link on a doc with no stored `github_id` must not be treated
+/// as an account change. The legacy-doc case: `github_id` is `None`
+/// while a refresh token may already be present, so the account
+/// comparison has no stored value to match.
+#[tokio::test]
+async fn test_update_user_github_identity_first_link_keeps_token() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "first-link@example.com",
+        Some("First Link"),
+        Some("org-first-link"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // No prior identity; the link carries a token.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("first link");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(111));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1"),
+        "the first link's token must be stored"
+    );
+}
+
+/// `get_user_github_link` reads `github_id` and `github_refresh_token`
+/// from a single doc snapshot, returning `None` for an absent user and
+/// field-level `None`s for an unlinked one. This is the snapshot the
+/// refresh path uses to capture `expected_github_id` alongside the
+/// refresh token — see `update_user_github_refresh_token`.
+#[tokio::test]
+async fn test_get_user_github_link_reads_id_and_token_together() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "link-snapshot@example.com",
+        Some("Link Snapshot"),
+        Some("org-link-snapshot"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // Missing user: outer None.
+    let linked = get_user_github_link(&store, "no-such-user-id")
+        .await
+        .expect("lookup must not error");
+    assert!(linked.is_none(), "absent user must surface as None");
+
+    // Present user with no GitHub link: inner fields both None.
+    let linked = get_user_github_link(&store, &user_id)
+        .await
+        .expect("lookup must not error")
+        .expect("user must exist");
+    assert_eq!(linked.github_id, None, "github_id is None before linking");
+    assert!(
+        linked.github_refresh_token.is_none(),
+        "github_refresh_token is None before linking"
+    );
+
+    // After a link, both fields return populated from one read.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("link account 111");
+    let linked = get_user_github_link(&store, &user_id)
+        .await
+        .expect("lookup must not error")
+        .expect("user must exist");
+    assert_eq!(
+        linked.github_id,
+        Some(111),
+        "github_id populated after link"
+    );
+    assert_eq!(
+        linked
+            .github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1"),
+        "github_refresh_token populated after link"
     );
 }
 
