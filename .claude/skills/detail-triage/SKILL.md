@@ -264,6 +264,19 @@ Then poll with `detail rules requests show <rcr_...>`, review each result with
 commit the synced files as `chore(detail): …` — matching how `2673a121` and
 `ccbcd1f8` landed.
 
+**Read the generated rule against the merged tree before pulling it, and read
+its correct-pattern section, not only its detection section.** Detail generates
+from the bug-report snapshot, which predates the batch's own fixes, so a rule
+can hold up as "already correct" the exact code the batch just replaced. That
+is worse than no rule: it tells the next reviewer the defect is the model.
+`rule_879e9e96` did this on 2026-09-19, presenting the pre-#1475 re-link write
+as the pattern to follow hours after #1475 fixed it.
+
+The remedy is a fresh `detail rules create` whose description names the stale
+rule and spells out what it got wrong. Hand-editing the pulled file is
+forbidden (step 0) and the next sync would overwrite it, and the CLI has
+`create`, `pull`, `show`, `list` and `propose` — no refine verb.
+
 A good rule states an invariant, not an incident. From the 2026-09-11 batch,
 "an offset found in a lowercased string must not be mapped back into the
 original by counting characters, because Unicode lowercasing is not
@@ -322,6 +335,16 @@ addresses the report:
   remainder in the window #1238 widened.)
 - **A new guard** — does it cover every call site, or only the reported one?
   Grep the codebase for the pattern, do not trust the diff's coverage.
+- **A new branch or match arm** — the inverse of the guard question: does
+  anything *upstream* stop it being reached? A fix that adds an arm to an
+  existing match inherits every early return above it. #1474 was the new
+  `Unresolved` arm #1453 added, unreachable because a pre-existing
+  `seen.insert(...) { continue; }` gate ran before the classifier. Read the
+  enclosing function from its top, not from the diff hunk.
+- **A new write to a field another path also writes** — do the two paths share
+  an invariant, and does the new one carry it? #1472 was a token-only write
+  #1469 added, correct under OCC on its own but with no check that the identity
+  it was pairing the credential with had not changed.
 - **A new normalizer or parser** — does it alter input it should leave alone?
 - **A new error path** — does it swallow, and does that match how the adjacent
   code treats the same error?

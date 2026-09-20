@@ -107,6 +107,7 @@ zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aws-lc-rs = { workspace = true, features = ["fips"] }
+rustls = { workspace = true, features = ["fips"] }
 
 [dev-dependencies]
 wiremock = { workspace = true }

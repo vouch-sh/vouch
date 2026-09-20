@@ -28,6 +28,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-16 | 4 | 3 | 0 | 2 | 4 | 3 of 3 | 3 amended, merged; #1406 fixed by #1409; siblings in `fix/secret-ui-and-scim-refusal` | 2 of 4 | client-type rule requested (`rcr_3b87ceaa…`), not synced |
 | 2026-09-17 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | 1 amended (#1427), 3 reworked into class fixes (#1424, #1426, #1428), 1 folded (#1425 → #1428) | 1 of 5 (contradicted 09-16 record) | `secret-gate-must-key-on-auth-method` created 09-16, not synced; #1421 was in its scope |
 | 2026-09-18 | 19 | 19 | 0 | 1 | 0 | 11 of 19 | 8 merged as-is; 8 amended (#1453, #1455, #1459, #1460, #1461, #1465, #1466, #1467); #1454 reworked (staged rollout); #1451 superseded by #1470; #1452 closed | 1 of 19 (#1433, 09-16 revoke-first decision) | lexical-bound rule requested (`rcr_e013fe46…`); secret-gate refinement synced |
+| 2026-09-19 | 3 | 3 | 0 | 3 | 3 | 1 of 3 | all 3 merged: #1476 (body note), #1477 as-is, #1475 amended with the sibling fix | 0 | `rule_879e9e96…` generated but **not pulled** (stale correct-pattern); replacement `rcr_2d2214db…` requested |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -36,7 +37,9 @@ run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
 **Reading:** from 2026-09-12 through 2026-09-17, PR≤3d equals the issue count
 in every batch — every finding was in something merged in the previous three
 days — while the Detail-only column never did. 2026-09-18 broke the streak:
-19 findings, PR≤3d 0, blame from January to August. That batch is backlog. And review changed or rejected most of what
+19 findings, PR≤3d 0, blame from January to August. That batch is backlog.
+2026-09-19 resumed the streak immediately: 3 findings, all 3 in PRs merged the
+day before. And review changed or rejected most of what
 arrived in every recorded batch except 2026-09-11, so the batch's outcome is
 decided in review, not by Detail's PRs.
 
@@ -532,3 +535,58 @@ three days, after six straight batches (31 of 31) that were.
 One worktree at a time. No sleep-polling. Root `Cargo.toml` never carries
 `features`; a crate enables them in its own manifest. Comments in Amazonian
 style.
+
+## 2026-09-19 — three fixes, three defects in what they added
+
+3 issues, 3 fix PRs, Detail PR 3, PR≤3d 3. September n=120, median 15d,
+`<30d` 61, `>90d` 42.
+
+Every finding is in logic merged the previous day — #1469, #1461, #1453 — all
+three of which the 2026-09-18 triage classified "isolated" and merged or
+amended. Self-caused, not backlog.
+
+### Classes
+
+- **Identity and credential for one external account, written through
+  independent paths** (#1472, from #1469). Confirmed: the fix for the refresh
+  path left the re-link path (`update_user_github_identity`) able to pair a new
+  `github_id` with the previous account's refresh token whenever the token
+  response carried none — no race required. Fixed in the same PR. Rule
+  requested.
+- **Deterministic ID scope vs. the invariant its guard enforces** (#1473, from
+  #1461). Disqualified: all 11 other `deterministic_*_id` functions in `db/`
+  scope-match their callers' uniqueness. One instance.
+- **Pre-existing gate suppressing a newly added match arm** (#1474, from
+  #1453). One instance. Named here because step 6 does not ask this question:
+  the checklist asks whether a *new* guard covers every call site, not whether
+  an *existing* gate keeps a *new* branch from being reached.
+
+### Review outcomes
+
+- #1475 fixed only half its own invariant. The re-link sibling was found by
+  reading the other writer of the same field rather than the diff, and fixed
+  in-PR with three tests; the guard was verified by removing it and confirming
+  only the intended test failed.
+- #1476 changes a uniqueness model — GitHub installations become globally
+  unique rather than per-org. Correct: it is what both service-layer guards
+  already enforce and what the knowledge base records for `/github/connect`.
+  The race is closed; existing orphan rows still have no recovery path, and
+  the mixed-version deploy window still admits the original race. Both noted
+  in the PR body.
+- #1477 was clean. The only thing worth checking was three arms losing their
+  `continue`, which is safe because the match is the last statement in the
+  loop body.
+
+### Process
+
+A fix that adds a branch needs the same interrogation as a fix that adds a
+guard, in both directions: does anything upstream stop the new branch being
+reached, and does the new write carry the invariant the old one had.
+
+A generated rule is reviewed against the merged tree before it is pulled, and
+its *correct-pattern* section matters as much as its detection section.
+`rule_879e9e96…` was generated from the bug-report snapshot and therefore
+presented the pre-fix re-link code as the model to follow — the exact defect
+#1475 had fixed hours earlier. Hand-editing a rule is forbidden and the next
+sync would overwrite it, and the CLI has no refine verb, so the remedy is a
+fresh `create` naming the stale rule and spelling out what it got wrong.
