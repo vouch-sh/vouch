@@ -61,14 +61,14 @@ pub struct CreateGitHubInstallationParams<'a> {
 /// Errors returned by [`create_github_installation`].
 ///
 /// `Duplicate` is terminal (not retried): a replayed install callback or a
-/// concurrent connect for the same `(org_id, installation_id)` collided on
-/// the deterministic primary key. The service layer maps it to
+/// concurrent connect for the same `installation_id` collided on the
+/// deterministic primary key. The service layer maps it to
 /// `GitHubError::InstallationAlreadyConnected`. `Other` is surfaced from the
 /// document store.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateGitHubInstallationError {
-    /// An installation with the same `(org_id, installation_id)` is already
-    /// linked to this organization.
+    /// An installation with the same `installation_id` is already linked to an
+    /// organization (GitHub installations are globally unique across all orgs).
     #[error("GitHub installation already connected for this organization")]
     Duplicate,
     /// Database or unexpected infrastructure failure.
@@ -76,45 +76,60 @@ pub enum CreateGitHubInstallationError {
     Other(#[from] anyhow::Error),
 }
 
-/// Derive a deterministic document ID from `(org_id, installation_id)` so that
-/// two concurrent connect/replay attempts for the same installation in the
-/// same organization collide on the primary key of the `documents` table
-/// instead of producing duplicate rows.
+/// Derive a deterministic document ID from `installation_id` alone so that
+/// two concurrent connect/replay attempts for the same GitHub installation
+/// collide on the primary key of the `documents` table instead of producing
+/// duplicate rows.
+///
+/// The ID is scoped to `installation_id` — not `(org_id, installation_id)` —
+/// to match the service layer's global-uniqueness invariant: a GitHub
+/// installation can be linked to at most one Vouch organization. Scoping to
+/// `(org_id, installation_id)` left a TOCTOU window where two concurrent
+/// cross-org `connect_installation` calls both passed the global guard (the
+/// `installation_id` index lookup) and produced distinct primary keys, so
+/// neither insert collided and both committed — orphaning one org's row
+/// from the webhook cleanup helpers that resolve a single row by
+/// `installation_id`. Dropping `org_id` from the hash makes cross-org
+/// connects collide exactly like same-org connects do.
 ///
 /// The unique constraint on `(document_id, index_field, index_value)` does
 /// NOT enforce uniqueness across documents on `(index_field, index_value)`
 /// (see `db/enrollment.rs`), so a `create_github_installation` call that
-/// generated random IDs could not be made race-free at the SQL level. Hashing
-/// `(org_id, installation_id)` into a stable primary key closes the TOCTOU
-/// window, mirroring `deterministic_challenge_state_id` and
-/// `deterministic_org_id`. The `"github_installation\0"` domain separator
-/// prevents cross-type ID collisions. Output is hex-encoded SHA-256.
-fn deterministic_installation_id(org_id: &str, installation_id: i64) -> String {
+/// generated random IDs could not be made race-safe at the SQL level. Hashing
+/// `installation_id` into a stable primary key closes the TOCTOU window,
+/// mirroring `deterministic_challenge_state_id` and `deterministic_org_id`.
+/// The `"github_installation\0"` domain separator prevents cross-type ID
+/// collisions. Output is hex-encoded SHA-256.
+fn deterministic_installation_id(installation_id: i64) -> String {
     use aws_lc_rs::digest::{self, SHA256};
 
     let mut ctx = digest::Context::new(&SHA256);
     ctx.update(b"github_installation\0");
-    ctx.update(org_id.as_bytes());
-    ctx.update(b"\0");
     ctx.update(&installation_id.to_le_bytes());
     hex::encode(ctx.finish().as_ref())
 }
 
 /// Create a new GitHub App installation for an organization.
 ///
-/// Uses a deterministic document ID derived from `(org_id, installation_id)`
-/// so a replayed install callback (or two concurrent connects) collide on the
-/// primary key and return [`CreateGitHubInstallationError::Duplicate`] instead
-/// of creating a duplicate row. The collision is race-safe: the document store
-/// reports a unique/primary-key violation that this function maps to
+/// Uses a deterministic document ID derived from `installation_id` alone so a
+/// replayed install callback (or two concurrent connects — including cross-org)
+/// collide on the primary key and return [`CreateGitHubInstallationError::Duplicate`]
+/// instead of creating a duplicate row. The collision is race-safe: the document
+/// store reports a unique/primary-key violation that this function maps to
 /// `Duplicate`, so exactly one of N concurrent calls commits. See
 /// `db/challenge_states.rs` for the same pattern.
+///
+/// GitHub installations are globally unique: a given `installation_id` may be
+/// linked to at most one Vouch organization. This matches the service-layer
+/// guard in `connect_installation`/`reconnect_installation`, which rejects any
+/// second connect for the same `installation_id` regardless of org, and the
+/// webhook cleanup helpers, which resolve a row by `installation_id`.
 #[expect(clippy::disallowed_methods, reason = "stamps the row's installed_at")]
 pub async fn create_github_installation(
     store: &DocumentStore,
     params: &CreateGitHubInstallationParams<'_>,
 ) -> Result<String, CreateGitHubInstallationError> {
-    let id = deterministic_installation_id(params.org_id, params.installation_id);
+    let id = deterministic_installation_id(params.installation_id);
     let doc = GitHubInstallationDoc {
         org_id: params.org_id.to_string(),
         installation_id: params.installation_id,
@@ -325,14 +340,14 @@ mod tests {
 
     // ---- deterministic_installation_id ----
 
-    /// Same `(org_id, installation_id)` inputs must always produce the same
-    /// document ID. This is what makes a replay collide on the primary key
-    /// instead of creating a duplicate row.
+    /// Same `installation_id` input must always produce the same document ID.
+    /// This is what makes a replay (or a concurrent cross-org connect) collide
+    /// on the primary key instead of creating a duplicate row.
     #[test]
     fn deterministic_installation_id_is_stable() {
-        let a = deterministic_installation_id("org-1", 42);
-        let b = deterministic_installation_id("org-1", 42);
-        assert_eq!(a, b, "same inputs must produce the same ID");
+        let a = deterministic_installation_id(42);
+        let b = deterministic_installation_id(42);
+        assert_eq!(a, b, "same installation_id must produce the same ID");
         // Hex-encoded SHA-256 is 64 chars.
         assert_eq!(a.len(), 64, "ID must be hex-encoded SHA-256");
         assert!(
@@ -341,22 +356,37 @@ mod tests {
         );
     }
 
-    /// Different `installation_id` in the same org must produce a different ID
-    /// (so multi-account orgs don't collide).
+    /// Different `installation_id` values must produce different IDs (so a
+    /// multi-account org linking several distinct installations doesn't
+    /// collide).
     #[test]
     fn deterministic_installation_id_differs_by_installation_id() {
-        let a = deterministic_installation_id("org-1", 1);
-        let b = deterministic_installation_id("org-1", 2);
+        let a = deterministic_installation_id(1);
+        let b = deterministic_installation_id(2);
         assert_ne!(a, b, "different installation_id must differ");
     }
 
-    /// Same `installation_id` in a different org must produce a different ID
-    /// (so cross-org scoping holds — `org_a` and `org_b` get distinct rows).
+    /// The deterministic ID is a pure function of `installation_id` alone — it
+    /// does not mix in `org_id` — so two concurrent connects of the same
+    /// `installation_id` in different orgs produce the *same* primary key and
+    /// collide on `insert_with_id`. This is the global-uniqueness property the
+    /// service-layer guard already assumes, and the fix that closes the
+    /// cross-org TOCTOU window the previous `(org_id, installation_id)`
+    /// scoping left open.
     #[test]
-    fn deterministic_installation_id_differs_by_org() {
-        let a = deterministic_installation_id("org-a", 42);
-        let b = deterministic_installation_id("org-b", 42);
-        assert_ne!(a, b, "different org_id must differ");
+    fn deterministic_installation_id_is_globally_scoped_to_installation_id() {
+        // The function takes only `installation_id`; there is no org dimension
+        // to vary, so the same installation_id always maps to one primary key.
+        let a = deterministic_installation_id(42);
+        let b = deterministic_installation_id(42);
+        assert_eq!(
+            a, b,
+            "same installation_id must collide on the primary key regardless of org"
+        );
+
+        // A different installation_id must not accidentally collide.
+        let c = deterministic_installation_id(43);
+        assert_ne!(a, c, "distinct installation_id must not collide");
     }
 
     /// The domain separator (`b"github_installation\0"`) must keep the
@@ -371,11 +401,10 @@ mod tests {
     fn deterministic_installation_id_is_domain_separated() {
         use aws_lc_rs::digest::{self, SHA256};
 
-        let id = deterministic_installation_id("org-1", 42);
+        let id = deterministic_installation_id(42);
 
         // A digest of the raw inputs WITHOUT the domain prefix.
         let mut raw = digest::Context::new(&SHA256);
-        raw.update(b"org-1");
         raw.update(&42i64.to_le_bytes());
         let raw_id = hex::encode(raw.finish().as_ref());
 
