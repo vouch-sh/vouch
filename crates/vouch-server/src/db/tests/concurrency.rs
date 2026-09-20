@@ -1268,6 +1268,128 @@ async fn test_update_user_github_refresh_token_errors_on_missing_user() {
     );
 }
 
+/// The re-link side of the same invariant, reachable with no race at all.
+/// `link_user_account` passes `None` when the token response carried no
+/// `refresh_token` (GitHub omits it when the app has expiring tokens
+/// disabled). Preserving the stored token is right for a same-account
+/// re-link, but for a re-link to a *different* account it pairs the new
+/// identity with the previous account's credential — the exact mismatch
+/// the refresh path's conditional write refuses to create.
+#[tokio::test]
+async fn test_update_user_github_identity_clears_token_on_different_account_relink() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "relink-no-token@example.com",
+        Some("Relink No Token"),
+        Some("org-relink-no-token"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // Linked to account 111 while the app issued refresh tokens.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // Re-link to account 222, response carries no refresh token.
+    update_user_github_identity(&store, &user_id, 222, "g2-user", None)
+        .await
+        .expect("relink to account 222");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(222), "github_id must be the re-link's");
+    assert_eq!(user.github_login.as_deref(), Some("g2-user"));
+    assert!(
+        user.github_refresh_token.is_none(),
+        "account 111's refresh token must not survive a re-link to account 222"
+    );
+}
+
+/// The case the preserve-on-`None` behavior exists for: re-linking the
+/// *same* account when the response carries no refresh token must keep
+/// the stored one, or background refresh silently breaks.
+#[tokio::test]
+async fn test_update_user_github_identity_keeps_token_on_same_account_relink() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "relink-same-account@example.com",
+        Some("Relink Same Account"),
+        Some("org-relink-same-account"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("initial link to account 111");
+
+    // Same account, renamed login, no refresh token in the response.
+    update_user_github_identity(&store, &user_id, 111, "g1-renamed", None)
+        .await
+        .expect("relink to the same account");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(111));
+    assert_eq!(user.github_login.as_deref(), Some("g1-renamed"));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1"),
+        "a same-account re-link must not erase the working refresh token"
+    );
+}
+
+/// A first link on a doc with no stored `github_id` must not be treated
+/// as an account change. The legacy-doc case: `github_id` is `None`
+/// while a refresh token may already be present, so the account
+/// comparison has no stored value to match.
+#[tokio::test]
+async fn test_update_user_github_identity_first_link_keeps_token() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "first-link@example.com",
+        Some("First Link"),
+        Some("org-first-link"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+
+    // No prior identity; the link carries a token.
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("first link");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert_eq!(user.github_id, Some(111));
+    assert_eq!(
+        user.github_refresh_token
+            .as_ref()
+            .map(|t| t.expose_secret()),
+        Some("r1"),
+        "the first link's token must be stored"
+    );
+}
+
 /// `get_user_github_link` reads `github_id` and `github_refresh_token`
 /// from a single doc snapshot, returning `None` for an absent user and
 /// field-level `None`s for an unlinked one. This is the snapshot the

@@ -715,9 +715,16 @@ pub async fn update_user_active_status(
 ///
 /// A `None` refresh token means the response carried none, not that the stored
 /// one should be discarded — GitHub omits `refresh_token` when the app has
-/// expiring tokens disabled, so a re-link would otherwise erase a working
-/// token and silently break background refresh. Clearing is done explicitly,
-/// through [`super::credentials::revoke_user_credentials`].
+/// expiring tokens disabled, so a same-account re-link would otherwise erase a
+/// working token and silently break background refresh.
+///
+/// A re-link to a *different* `github_id` is the exception. The stored token
+/// belongs to the previous account, so keeping it would leave the doc holding
+/// one account's identity and another's credential — the same mismatch
+/// [`update_user_github_refresh_token`]'s conditional write refuses to create
+/// from the refresh side. That case clears the token instead. Clearing on an
+/// unlink is separate, through
+/// [`super::credentials::revoke_user_credentials`].
 pub async fn update_user_github_identity(
     store: &DocumentStore,
     user_id: &str,
@@ -727,10 +734,16 @@ pub async fn update_user_github_identity(
 ) -> Result<()> {
     let found = store
         .modify::<UserDoc, _>(user_id, |data| {
+            // Read the stored identity before overwriting it. Under OCC the
+            // closure reruns against the newest doc, so this compares against
+            // whatever a concurrent write left behind, not a stale capture.
+            let same_account = data.github_id == Some(github_id);
             data.github_id = Some(github_id);
             data.github_login = Some(github_login.to_string());
             if let Some(token) = github_refresh_token {
                 data.github_refresh_token = Some(secrecy::SecretString::from(token));
+            } else if !same_account {
+                data.github_refresh_token = None;
             }
         })
         .await?;
