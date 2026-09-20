@@ -76,6 +76,7 @@ zeroize = { workspace = true }
 aws-lc-rs = { workspace = true, features = ["fips"] }
 ctap-hid-fido2 = { workspace = true, features = ["fips"] }
 linux-keyutils-keyring-store = { workspace = true }
+rustls = { workspace = true, features = ["fips"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { workspace = true, features = ["keychain"] }

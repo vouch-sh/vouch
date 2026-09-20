@@ -46,7 +46,18 @@ enum Commands {
 async fn main() -> Result<()> {
     // Install the aws-lc-rs crypto provider for rustls before any TLS usage;
     // rustls requires an explicitly installed CryptoProvider.
-    rustls::crypto::aws_lc_rs::default_provider()
+    //
+    // On Linux the rustls `fips` feature is enabled, which restricts the
+    // provider's key-exchange groups to the FIPS-approved set.
+    // `default_fips_provider` exists only under that feature and returns the
+    // same provider, so naming it here fails the build if the feature is ever
+    // dropped rather than silently restoring non-FIPS key exchange.
+    #[cfg(target_os = "linux")]
+    let provider = rustls::crypto::default_fips_provider();
+    #[cfg(not(target_os = "linux"))]
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+
+    provider
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install rustls CryptoProvider"))?;
 
