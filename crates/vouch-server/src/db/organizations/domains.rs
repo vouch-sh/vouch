@@ -35,15 +35,6 @@ pub(crate) fn deterministic_domain_claim_id(domain: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// List additional domains for an organization.
-pub async fn list_additional_domains(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<Vec<AdditionalDomain>> {
-    let doc = store.get::<OrganizationDoc>(org_id).await?;
-    Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
-}
-
 /// Result of adding an additional domain.
 pub struct AddedDomain {
     pub domain: String,
@@ -1068,7 +1059,13 @@ mod tests {
         assert_eq!(added.domain, "acme.co.uk");
         assert!(!added.verification_token.expose_secret().is_empty());
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].domain, "acme.co.uk");
         assert!(matches!(list[0].state, AdditionalDomainState::Pending));
@@ -1384,7 +1381,13 @@ mod tests {
             .await
             .unwrap();
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(matches!(
             list[0].state,
             AdditionalDomainState::Verified { .. }
@@ -1424,7 +1427,13 @@ mod tests {
         let summary = summary.expect("entry was attached, must be removed");
         assert_eq!(summary.revoked_user_count, 0);
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(list.is_empty());
 
         // No longer indexed.
@@ -1483,7 +1492,13 @@ mod tests {
             .unwrap();
         assert_eq!(effect, RecheckEffect::StillVerified);
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(matches!(
             list[0].state,
             AdditionalDomainState::Verified {
@@ -1521,7 +1536,13 @@ mod tests {
             }
         );
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(
             matches!(list[0].state, AdditionalDomainState::Unverified { .. }),
             "entry must be flipped to unverified"
@@ -1557,7 +1578,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(
             matches!(list[0].state, AdditionalDomainState::Unverified { .. }),
             "expected flipped state"
@@ -1577,7 +1604,13 @@ mod tests {
             .await
             .unwrap();
 
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert!(
             matches!(
                 list[0].state,
@@ -1646,9 +1679,13 @@ mod tests {
         assert_eq!(removed[0].domain, "squatted.example.com");
         assert!(removed[0].never_verified);
         assert!(
-            list_additional_domains(&store, &org.id)
+            store
+                .get::<OrganizationDoc>(&org.id)
                 .await
                 .unwrap()
+                .unwrap()
+                .data
+                .additional_domains
                 .is_empty()
         );
     }
@@ -1673,9 +1710,13 @@ mod tests {
         .unwrap();
         assert!(removed.is_empty());
         assert_eq!(
-            list_additional_domains(&store, &org.id)
+            store
+                .get::<OrganizationDoc>(&org.id)
                 .await
                 .unwrap()
+                .unwrap()
+                .data
+                .additional_domains
                 .len(),
             1
         );
@@ -1753,9 +1794,13 @@ mod tests {
         .unwrap();
         assert!(removed.is_empty());
         assert_eq!(
-            list_additional_domains(&store, &org.id)
+            store
+                .get::<OrganizationDoc>(&org.id)
                 .await
                 .unwrap()
+                .unwrap()
+                .data
+                .additional_domains
                 .len(),
             1
         );
@@ -1827,7 +1872,13 @@ mod tests {
             removed.is_empty(),
             "a domain verified mid-cleanup must not be reported as removed: {removed:?}"
         );
-        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        let list = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .additional_domains;
         assert_eq!(list.len(), 1, "the verified domain must survive cleanup");
         assert!(
             matches!(list[0].state, AdditionalDomainState::Verified { .. }),
