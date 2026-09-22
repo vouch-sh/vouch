@@ -35,15 +35,6 @@ pub(crate) fn deterministic_domain_claim_id(domain: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// List additional domains for an organization.
-pub async fn list_additional_domains(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<Vec<AdditionalDomain>> {
-    let doc = store.get::<OrganizationDoc>(org_id).await?;
-    Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
-}
-
 /// Result of adding an additional domain.
 pub struct AddedDomain {
     pub domain: String,
@@ -1049,6 +1040,15 @@ mod tests {
 
     use super::super::{create_organization, fresh_store};
     use super::*;
+
+    /// Read back an organization's additional domains.
+    async fn list_additional_domains(
+        store: &DocumentStore,
+        org_id: &str,
+    ) -> Result<Vec<AdditionalDomain>> {
+        let doc = store.get::<OrganizationDoc>(org_id).await?;
+        Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
+    }
 
     #[tokio::test]
     async fn add_additional_domain_succeeds_and_is_pending() {
