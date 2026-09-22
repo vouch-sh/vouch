@@ -1057,39 +1057,6 @@ mod tests {
         );
     }
 
-    // FAPI 2.0 Message Signing §5.3.1: a bounded clock skew allowance is applied.
-    #[test]
-    fn test_jar_validate_future_iat_within_skew_accepted() {
-        let now = Timestamp::now().as_second();
-        let iat = now + 5; // 5s in future, within 10s skew
-        assert!(
-            iat <= now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 5s in future should be within 10s clock skew"
-        );
-    }
-
-    // FAPI 2.0 Message Signing §5.3.1: an issue time beyond the skew allowance is rejected.
-    #[test]
-    fn test_jar_validate_future_iat_beyond_skew_rejected() {
-        let now = Timestamp::now().as_second();
-        let iat = now + 60; // 60s in future, beyond 10s skew
-        assert!(
-            iat > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 60s in future should be beyond 10s clock skew"
-        );
-    }
-
-    // FAPI 2.0 Message Signing §5.3.1: the nbf claim bounds when the request object becomes usable.
-    #[test]
-    fn test_jar_validate_nbf_future_rejected() {
-        let now = Timestamp::now().as_second();
-        let nbf = now + 3600; // 1 hour in future
-        assert!(
-            nbf > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "nbf 1 hour in future should be rejected"
-        );
-    }
-
     // ========================================================================
     // Nesting prevention tests
     // ========================================================================
@@ -1189,43 +1156,6 @@ mod tests {
             token_data.claims.redirect_uri.is_none(),
             "Missing redirect_uri should be detected"
         );
-    }
-
-    // ========================================================================
-    // FAPI 2.0 parameter matching tests
-    // ========================================================================
-
-    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
-    // query's.
-    #[test]
-    fn test_jar_query_response_type_mismatch_detected() {
-        // Simulate: query has response_type=token but JWT has response_type=code
-        let query_rt = "token";
-        let jwt_rt = "code";
-        assert_ne!(query_rt, jwt_rt, "Mismatch should be detectable");
-    }
-
-    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
-    // query's.
-    #[test]
-    fn test_jar_query_scope_mismatch_detected() {
-        let query_scope = "openid profile";
-        let jwt_scope = "openid";
-        assert_ne!(
-            query_scope, jwt_scope,
-            "Scope mismatch should be detectable"
-        );
-    }
-
-    // RFC 9101 §6.3: a query that agrees with the request object is unremarkable.
-    #[test]
-    fn test_jar_query_params_match_accepted() {
-        let query_rt = "code";
-        let jwt_rt = "code";
-        let query_scope = "openid";
-        let jwt_scope = "openid";
-        assert_eq!(query_rt, jwt_rt);
-        assert_eq!(query_scope, jwt_scope);
     }
 
     // ========================================================================
