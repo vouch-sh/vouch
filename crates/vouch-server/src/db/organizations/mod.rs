@@ -13,9 +13,8 @@ pub(crate) use domains::deterministic_domain_claim_id;
 pub use domains::{
     AddDomainError, AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, MarkVerifiedError,
     RecheckEffect, RecheckOutcome, StaleDomainRemoval, VerifiedDomainRecord, add_additional_domain,
-    cleanup_stale_additional_domains, get_verification_token,
-    list_all_verified_additional_domains, mark_additional_domain_verified, record_recheck_result,
-    remove_additional_domain,
+    cleanup_stale_additional_domains, get_verification_token, list_all_verified_additional_domains,
+    mark_additional_domain_verified, record_recheck_result, remove_additional_domain,
 };
 mod issuer;
 pub use issuer::{
