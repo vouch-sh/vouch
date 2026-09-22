@@ -131,18 +131,6 @@ impl std::fmt::Display for Email {
     }
 }
 
-impl AsRef<str> for Email {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<Email> for String {
-    fn from(email: Email) -> Self {
-        email.0
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
