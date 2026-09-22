@@ -29,6 +29,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-17 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | 1 amended (#1427), 3 reworked into class fixes (#1424, #1426, #1428), 1 folded (#1425 → #1428) | 1 of 5 (contradicted 09-16 record) | `secret-gate-must-key-on-auth-method` created 09-16, not synced; #1421 was in its scope |
 | 2026-09-18 | 19 | 19 | 0 | 1 | 0 | 11 of 19 | 8 merged as-is; 8 amended (#1453, #1455, #1459, #1460, #1461, #1465, #1466, #1467); #1454 reworked (staged rollout); #1451 superseded by #1470; #1452 closed | 1 of 19 (#1433, 09-16 revoke-first decision) | lexical-bound rule requested (`rcr_e013fe46…`); secret-gate refinement synced |
 | 2026-09-19 | 3 | 3 | 0 | 3 | 3 | 1 of 3 | all 3 merged: #1476 (body note), #1477 as-is, #1475 amended with the sibling fix | 0 | `rule_879e9e96…` generated but **not pulled** (stale correct-pattern); replacement `rcr_2d2214db…` requested |
+| 2026-09-22 | 0 | 0 | 3 | 0 | 0 | 1 of 3 dead-code | #1482, #1483 merge as-is; #1481 rebuilt with signed commits (unsigned rustfmt follow-up) | 0 | `github-identity-credential-pair-consistency` (rcr from 09-19) verified against tree and pulled |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -590,3 +591,35 @@ presented the pre-fix re-link code as the model to follow — the exact defect
 #1475 had fixed hours earlier. Hand-editing a rule is forbidden and the next
 sync would overwrite it, and the CLI has no refine verb, so the remedy is a
 fresh `create` naming the stale rule and spelling out what it got wrong.
+
+## 2026-09-22 — no findings, three Dead Code PRs
+
+0 issues, 0 fix PRs, 3 dead-code PRs. September n=120, unchanged from 09-19.
+
+The first zero-issue pass since the 09-12 → 09-19 run of self-caused batches.
+The only merges in the window were the 09-19 record commit and an actions
+bump, so the scan had little new logic to find defects in; one pass says
+nothing about the trend.
+
+### Dead Code review
+
+- #1481 removes a read helper with 11 test callers and inlines a seven-line
+  read-back chain at each. Its rustfmt follow-up commit arrived unsigned — the
+  fourth time (#981, #1338, #1379) — so the branch is rebuilt as one signed
+  commit rather than enqueued.
+- #1482 removes two unused trait impls on `Email`; the parallel `Domain`
+  newtype never had them.
+- #1483 removes six test stubs that compared literals. They carried spec
+  citations, which matters for the coverage ratchet: the sections they cited
+  (FAPI 2.0 Message Signing §5.3.1, RFC 9101 §6.3) each keep six or more
+  citing tests that call the real code, so no requirement became uncited.
+
+### Process
+
+A Dead Code PR that deletes tests is a coverage-ratchet question before it is
+a dead-code question: check that every section the deleted tests cite is
+still cited by a test that exercises production code.
+
+The rule regenerated on 09-19 to replace the stale one was read against the
+merged tree before pulling and matched it line for line — the check the
+09-19 record asked for, done once, cost two greps.
