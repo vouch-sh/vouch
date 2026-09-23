@@ -243,7 +243,10 @@ once, serially, at the end.
 For every proven finding:
 
 1. **Attribute it** — `git log -L` or `git blame` on the seed line to find the
-   commit and PR that introduced it.
+   commit and PR that introduced it. Check `git rev-parse
+   --is-shallow-repository` first: on a shallow clone, blame assigns every
+   older line to the clone's boundary commit. Deepen it
+   (`git fetch --deepen=3000 origin main`) before attributing.
 2. **Dedup** — search open issues (including `[Detail Bug]` issues) and
    knowledge-base `decisions/` for the same function and behavior. A match is
    "already known", not a new finding.
