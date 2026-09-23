@@ -1,6 +1,6 @@
 ---
 name: bug-hunt
-description: Hunt for bugs the way Detail does — pick targets from recent changes and their siblings, have parallel agents form hypotheses and prove each one with a test that fails on main, then dedup and report by class. Parallel agents share one checkout and one target/ so the workspace is compiled once. Use when asked to "hunt for bugs", "run a bug hunt", "scan recent changes for bugs", or "find bugs like Detail".
+description: Hunt for bugs the way Detail does — pick targets from recent changes and their siblings, have parallel agents form hypotheses and prove each one with a test that fails on main, then dedup, report by class, and draft Detail-quality issues with a reproducing test. Parallel agents share one checkout and one target/ so the workspace is compiled once. Use when asked to "hunt for bugs", "run a bug hunt", "scan recent changes for bugs", "find bugs like Detail", or "file the bug-hunt findings".
 ---
 
 # Bug Hunt
@@ -166,10 +166,15 @@ queue on Cargo's lock anyway). Give each the hypothesis, the recorded SHA, the
    config override instead.
 6. Run the failing test a second time. A result that changes between runs is
    "not proven (nondeterministic)".
-7. When done, save the file's full text into the result, then delete the
-   file and its binaries:
+7. When done, keep the evidence the issue in step 6 is built from, then
+   delete the file and its binaries. Save the test verbatim, and the output
+   of the failing run exactly as cargo printed it (trim only unrelated
+   lines), under the run's record directory:
 
    ```bash
+   R=.local/bug-hunt-<YYYY-MM-DD>/tests
+   mkdir -p $R && cp crates/vouch-tests/tests/bughunt_<id>.rs $R/
+   # the failing run's output, from the terminal, into $R/bughunt_<id>.out
    rm -f crates/vouch-tests/tests/bughunt_<id>.rs target/debug/deps/bughunt_<id>-*
    ```
 
@@ -266,10 +271,73 @@ Write the record to `.local/bug-hunt-<YYYY-MM-DD>.md`:
 - a short list of the not-proven hypotheses worth a human look, with the
   reason each could not be proven.
 
-Do not file issues or open fix PRs on your own. Show the user the summary and
-ask which findings to file or fix.
+Show the user the summary, then continue to step 6. Do not open fix PRs from
+this skill.
 
-## Step 6: Clean up
+## Step 6: Draft and file issues
+
+Every issue is built from the evidence the run produced, not rewritten from
+memory. A reader must be able to reproduce the bug from the issue alone:
+paste the test into the named path, run the named command, and see the named
+failure. The template is `references/issue-template.md`; follow it section by
+section.
+
+### Decide the grouping
+
+- **One issue per class.** Findings that break the same invariant (step 5's
+  classification, three or more sites) become one issue. It has a checklist
+  with one item per site, and a subsection for each site with its own code,
+  test, and output. The repo policy is to fix a class in one change with a
+  guardrail. One issue per site would invite point fixes that leave siblings
+  behind.
+- **One issue per isolated finding.** A finding that shares its invariant
+  with fewer than two others gets its own issue. Cross-link issues that share
+  a root cause.
+- **Security findings do not go in a public issue first.** Check the
+  repository's visibility (`gh repo view --json visibility` or the GitHub
+  tools). If it is public, and a finding lets someone gain access, credentials, or
+  another tenant's data, draft it the same way but do not file it. Ask the user
+  whether to open a private security advisory
+  (`gh api -X POST repos/<owner>/<repo>/security-advisories`) or to fix first
+  and file afterwards. Pull those sites out of any class issue and link to
+  them by title only.
+
+### Draft
+
+Write one Markdown file per issue under
+`.local/bug-hunt-<YYYY-MM-DD>/issues/NN-<id>.md`, with the title on the first
+line. Checks before a draft is final:
+
+- The failing test is complete and compiles as written, at the path the
+  issue names. It includes its positive control. It is copied from
+  `tests/bughunt_<id>.rs`, not retyped.
+- The output block is the real output from the run, not a paraphrase.
+- Every normative claim quotes `specs/` verbatim with its section and
+  strength (MUST / SHOULD / MAY). A converted file under `specs/w3c/`,
+  `specs/fido/` or `specs/oasis/` is marked as such until the quote is
+  checked against its source URL.
+- A finding that contradicts a recorded decision says so and links it. The
+  spec outranks the decision.
+- No internal review labels (CLAUDE.md "What NOT to Do" #11). Run
+  `rg -n '\b([A-Z]{1,4}[0-9]{1,2}|GAP[0-9]+)\b'` over the drafts.
+
+### File
+
+Filing is outward-facing, so show the user the list of titles, the grouping,
+and any held-back security drafts, and file only what they approve. Then,
+for each approved draft:
+
+```bash
+gh issue create --repo <owner>/<repo> --title "<first line>" \
+  --body-file <draft without the title line> --label bug --label <component>
+```
+
+(or the GitHub `issue_write` tool). Component labels are `server`, `cli`,
+`agent`, per `.claude/rules/commits-and-issues.md`. Record each issue number
+next to its finding in `.local/bug-hunt-<YYYY-MM-DD>.md`. Future runs match
+new hypotheses against these issues in step 5's dedup.
+
+## Step 7: Clean up
 
 ```bash
 rm -f crates/vouch-tests/tests/bughunt_*.rs target/debug/deps/bughunt_*
