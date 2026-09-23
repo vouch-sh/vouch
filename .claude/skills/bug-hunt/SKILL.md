@@ -209,7 +209,14 @@ its own server instead of writing a test:
 
    Set `VOUCH_TLS_CERT` / `VOUCH_TLS_KEY` (base64 PEM, self-signed is fine)
    when the hypothesis needs HTTPS or the mTLS listener
-   (`VOUCH_MTLS_PORT`).
+   (`VOUCH_MTLS_PORT`). In TLS mode the server binds `[::]:443`, `[::]:80`
+   and `[::]:<mtls port>`, so it will not start in a container without IPv6;
+   there, prove mTLS behavior with an integration test that injects the
+   client certificate (`test_utils::http_post_form_with_cert`), which is the
+   same input the listener hands the handler.
+5. Stop a server by its PID (`kill $(cat .local/bughunt/<id>/pid)`), never
+   with `pkill -f`: the pattern also matches, and kills, the shell running
+   the command.
 3. Without an encryption key, documents are plain JSON in the `documents`
    table's `data` column. Seed or corrupt rows with Python's `sqlite3`
    module (the `sqlite3` CLI may be absent). The server caches sessions and
