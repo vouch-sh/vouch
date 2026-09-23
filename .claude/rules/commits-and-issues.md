@@ -100,29 +100,12 @@ Dependency/CI bots use `dependencies` and `github_actions`.
 
 ### Issue Body Template
 
-```markdown
-## Description
-[What happened and why it matters]
-
-## Reproduction Steps
-1. [Step one]
-2. [Step two]
-3. Observe: [...]
-
-## Expected Behavior
-[What should happen]
-
-## Actual Behavior
-[What actually happened]
-
-## Environment
-- Version: [project version or commit]
-- Crate/feature flags: [e.g. vouch-server, yubikey-tests]
-- Backend (if DB-related): SQLite / PostgreSQL / Aurora DSQL
-
-## Logs / Evidence
-[Relevant excerpts]
-```
+Use `.github/ISSUE_TEMPLATE/bug_report.md`, the same template the GitHub issue
+form offers. It covers the summary, reproduction steps, expected and actual
+behavior, environment, and logs/evidence, plus optional sections for affected
+sites, a failing test, the defective code, the specification, a suggested fix,
+and history. Fill those whenever you have them. Security vulnerabilities never
+go in a public issue; report them as `SECURITY.md` describes.
 
 ### Triage Rules
 

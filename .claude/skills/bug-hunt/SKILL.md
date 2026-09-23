@@ -279,8 +279,10 @@ this skill.
 Every issue is built from the evidence the run produced, not rewritten from
 memory. A reader must be able to reproduce the bug from the issue alone:
 paste the test into the named path, run the named command, and see the named
-failure. The template is `references/issue-template.md`; follow it section by
-section.
+failure. Every issue uses the repository's template,
+`.github/ISSUE_TEMPLATE/bug_report.md`, the same one people file with.
+`references/issue-template.md` says how to fill each section from the run's
+evidence. A bug hunt fills every optional section.
 
 ### Decide the grouping
 
@@ -293,14 +295,13 @@ section.
 - **One issue per isolated finding.** A finding that shares its invariant
   with fewer than two others gets its own issue. Cross-link issues that share
   a root cause.
-- **Security findings do not go in a public issue first.** Check the
-  repository's visibility (`gh repo view --json visibility` or the GitHub
-  tools). If it is public, and a finding lets someone gain access, credentials, or
-  another tenant's data, draft it the same way but do not file it. Ask the user
-  whether to open a private security advisory
-  (`gh api -X POST repos/<owner>/<repo>/security-advisories`) or to fix first
-  and file afterwards. Pull those sites out of any class issue and link to
-  them by title only.
+- **Security vulnerabilities never become issues.** `SECURITY.md` says to
+  email security@vouch.sh and not to open public GitHub issues. A finding that
+  lets someone gain access, credentials, or another tenant's data is drafted as
+  a report under `.local/bug-hunt-<YYYY-MM-DD>/security/`
+  (`references/issue-template.md`, "Security findings") and handed to the
+  user to send. Take those sites out of any class issue, and leave them
+  out of every public issue, PR and commit.
 
 ### Draft
 
