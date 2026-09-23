@@ -50,6 +50,11 @@ Work through the steps in order.
    du -sh target
    ```
 
+   A fresh container can lack system libraries: `hidapi` (pulled in through
+   `vouch-cli`) needs `libudev-dev` and `pkg-config` on Debian/Ubuntu. Install
+   them and re-run the same command; the dependencies already compiled are
+   kept.
+
    Record the `du` figure in the report. Before each later build, stop the
    run if free space is below twice the size of one test binary
    (`ls -l target/debug/deps/negative_auth-*`). On a "no space left on device"
@@ -117,10 +122,18 @@ Detail has found in this repository:
 - A blind `store.get()` + `store.update()` instead of `store.modify()`.
 - A secret in a plain `String` reachable through `Debug`.
 
-Drop hypotheses that contradict a recorded decision (knowledge base
-`decisions/`, a closed issue marked wontfix, a PR body that deliberately left
-it). A hypothesis resting on a spec requirement must quote the sentence from
-`specs/` with its section number; a paraphrase is not a basis for a finding.
+**When in doubt, the spec decides.** Whenever the correct behavior is in
+question, the oracle is the text in `specs/`, not the code, its comments, or
+a local convention. A hypothesis resting on a spec requirement must quote the
+sentence from `specs/` with its section number and its real strength (MUST,
+SHOULD, MAY); a paraphrase is not a basis for a finding.
+
+A recorded decision (knowledge base `decisions/`, a closed issue marked
+wontfix, a PR body that deliberately left it) drops a hypothesis only when
+the spec is silent or permits the recorded behavior. When a recorded decision
+contradicts a MUST or MUST NOT, keep the hypothesis and mark it "contradicts
+recorded decision <link>": the spec outranks the decision, including a merged
+PR (`.claude/rules/specs-are-source-of-truth.md`).
 
 Keep at most about 30 hypotheses per run, ranked by how bad the failure would
 be if real. Precision beats volume.
@@ -144,7 +157,9 @@ queue on Cargo's lock anyway). Give each the hypothesis, the recorded SHA, the
 3. Run only your own binary: `$PROVE bughunt_<id>`. If Cargo prints
    "Blocking waiting for file lock", that is another prover building; wait.
 4. The test must **fail by assertion**, with a message that states the
-   hypothesis. A compile error, a harness setup panic, or a timeout is not a
+   hypothesis. When the expected behavior comes from a spec, the test asserts
+   what the spec requires and cites it above the test (repo convention:
+   section number plus the quoted sentence). A compile error, a harness setup panic, or a timeout is not a
    proof — fix the test or report "not proven".
 5. No wall-clock waits (CLAUDE.md "Tests never wait on the wall clock"). Use
    `ArrivalTime::for_test`, `TestVerification::Verified { auth_time }`, or the
