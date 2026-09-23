@@ -80,6 +80,7 @@ docs/book/
 .claude/plans/
 # Temporary prover tests written by the bug-hunt skill
 crates/vouch-tests/tests/bughunt_*.rs
+crates/*/src/bughunt_tests.rs
 .mcp.json
 # Local helper scripts stay untracked by default; the ones below are checked in
 # because they are environment-independent (no local paths, no credentials) and

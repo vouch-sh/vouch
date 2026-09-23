@@ -224,7 +224,8 @@ its own server instead of writing a test:
 **Private-only bugs.** When a hypothesis can only be reached through a
 `pub(crate)` item, the prover returns `needs in-crate test` with the test
 text instead of editing `src/`. After every prover has finished, the
-orchestrator puts all such tests in one temporary module, declares it in the
+orchestrator puts all such tests in one temporary module
+(`crates/<crate>/src/bughunt_tests.rs`, gitignored), declares it in the
 crate root, runs `cargo test -p vouch-server bughunt` once, records each
 result, and then reverts both files (`git checkout -- crates/vouch-server/src/`
 and `rm` the module). This is the only step that changes `src/`, and it runs
