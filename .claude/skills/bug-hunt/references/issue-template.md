@@ -65,10 +65,6 @@ Same template, with these differences:
 
 ## Security findings
 
-Do not use this template for a vulnerability, and never file a public issue for
-one: `SECURITY.md` says to email security@vouch.sh. Draft the report under
-`.local/bug-hunt-<date>/security/<id>.md` with the contents `SECURITY.md`
-asks for: description, steps to reproduce, affected components, and impact.
-Add the same failing test and spec quotes a public issue would have. Hand
-the draft to the user to send. The skill never sends it, and never mentions
-it in a public issue, PR or commit.
+Use the same template. `SECURITY.md` says not to open public issues for
+vulnerabilities, so a security draft is filed only after the user confirms it
+by name (see step 6 in `SKILL.md`). Until then it stays in `.local/`.

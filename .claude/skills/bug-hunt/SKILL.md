@@ -295,13 +295,12 @@ evidence. A bug hunt fills every optional section.
 - **One issue per isolated finding.** A finding that shares its invariant
   with fewer than two others gets its own issue. Cross-link issues that share
   a root cause.
-- **Security vulnerabilities never become issues.** `SECURITY.md` says to
-  email security@vouch.sh and not to open public GitHub issues. A finding that
-  lets someone gain access, credentials, or another tenant's data is drafted as
-  a report under `.local/bug-hunt-<YYYY-MM-DD>/security/`
-  (`references/issue-template.md`, "Security findings") and handed to the
-  user to send. Take those sites out of any class issue, and leave them
-  out of every public issue, PR and commit.
+- **Security findings are flagged, not filed by default.** `SECURITY.md` says
+  not to open public GitHub issues for vulnerabilities. Draft a finding that lets
+  someone gain access, credentials, or another tenant's data like any other
+  issue, but mark it `SECURITY` in the list shown to the user. File it only
+  after the user confirms that specific issue; otherwise keep the draft in
+  `.local/`.
 
 ### Draft
 
@@ -325,7 +324,7 @@ line. Checks before a draft is final:
 ### File
 
 Filing is outward-facing, so show the user the list of titles, the grouping,
-and any held-back security drafts, and file only what they approve. Then,
+with the `SECURITY` drafts marked, and file only what they approve. Then,
 for each approved draft:
 
 ```bash
