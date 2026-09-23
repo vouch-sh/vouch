@@ -176,6 +176,51 @@ queue on Cargo's lock anyway). Give each the hypothesis, the recorded SHA, the
 Each prover returns: id, verdict (`proven` / `not proven` / `disproven`), the
 test text, the assertion output, and the seed file:line.
 
+**Live server.** Some hypotheses are proven most directly against a running
+server: a real TLS client against the mTLS listener, a row state that no
+public API produces (a legacy duplicate, a corrupted document), or a race set
+up by editing the database between two requests. For those, the prover runs
+its own server instead of writing a test:
+
+1. The orchestrator builds the binary once, with the same env vars, the same
+   feature set as `vouch-tests`, and **`--profile test`**, so it reuses the
+   shared build. A plain `cargo build` uses the `dev` profile and recompiles
+   the dependencies into a second copy on disk.
+
+   ```bash
+   CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo build --profile test \
+     -p vouch-server --features test-utils --bin vouch-server
+   ```
+
+2. Each prover starts `target/debug/vouch-server` on its own loopback port
+   with its own database under `.local/bughunt/<id>/`. No IdP and no
+   encryption key are needed: certification test mode
+   (`VOUCH_CERTIFICATION_TEST_TOKEN`) waives the IdP requirement and enables
+   the `/certification/complete-login` bypass. It also disables rate limiting,
+   so bind to `127.0.0.1` only and never point it at shared infrastructure.
+
+   ```bash
+   VOUCH_RP_ID=localhost VOUCH_LISTEN_ADDR=127.0.0.1:<port> \
+   VOUCH_JWT_SECRET=<random, 32+ chars> \
+   VOUCH_CERTIFICATION_TEST_TOKEN=<random> \
+   VOUCH_DATABASE_URL="sqlite:.local/bughunt/<id>/vouch.db?mode=rwc" \
+     target/debug/vouch-server > .local/bughunt/<id>/server.log 2>&1 &
+   ```
+
+   Set `VOUCH_TLS_CERT` / `VOUCH_TLS_KEY` (base64 PEM, self-signed is fine)
+   when the hypothesis needs HTTPS or the mTLS listener
+   (`VOUCH_MTLS_PORT`).
+3. Without an encryption key, documents are plain JSON in the `documents`
+   table's `data` column. Seed or corrupt rows with Python's `sqlite3`
+   module (the `sqlite3` CLI may be absent). The server caches sessions and
+   some documents, so restart it after an edit unless the edit is meant to
+   race the cache.
+4. The proof is a script: the exact requests (`curl`) and database edits,
+   with the responses that show the defect. It must reproduce on a second run
+   from a fresh database, the same bar as a failing test. Save the script
+   and its output in the result, then stop the server and delete
+   `.local/bughunt/<id>/`.
+
 **Private-only bugs.** When a hypothesis can only be reached through a
 `pub(crate)` item, the prover returns `needs in-crate test` with the test
 text instead of editing `src/`. After every prover has finished, the
