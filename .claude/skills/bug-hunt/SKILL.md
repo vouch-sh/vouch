@@ -214,9 +214,6 @@ its own server instead of writing a test:
    there, prove mTLS behavior with an integration test that injects the
    client certificate (`test_utils::http_post_form_with_cert`), which is the
    same input the listener hands the handler.
-5. Stop a server by its PID (`kill $(cat .local/bughunt/<id>/pid)`), never
-   with `pkill -f`: the pattern also matches, and kills, the shell running
-   the command.
 3. Without an encryption key, documents are plain JSON in the `documents`
    table's `data` column. Seed or corrupt rows with Python's `sqlite3`
    module (the `sqlite3` CLI may be absent). The server caches sessions and
@@ -227,6 +224,9 @@ its own server instead of writing a test:
    from a fresh database, the same bar as a failing test. Save the script
    and its output in the result, then stop the server and delete
    `.local/bughunt/<id>/`.
+5. Stop a server by its PID (`kill $(cat .local/bughunt/<id>/pid)`), never
+   with `pkill -f`: the pattern also matches, and kills, the shell running
+   the command.
 
 **Private-only bugs.** When a hypothesis can only be reached through a
 `pub(crate)` item, the prover returns `needs in-crate test` with the test
