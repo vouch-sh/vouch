@@ -290,7 +290,28 @@ paste the test into the named path, run the named command, and see the named
 failure. Every issue uses the repository's template,
 `.github/ISSUE_TEMPLATE/bug_report.md`, the same one people file with.
 `references/issue-template.md` says how to fill each section from the run's
-evidence. A bug hunt fills every optional section.
+evidence.
+
+**Keep each issue on topic and short.** A reader should know what is broken,
+where, and how bad it is within the first screen. The first bug-hunt run
+filed issues of 300 to 1000 lines, which is too long.
+
+- One issue covers one defect, or one class. A second defect found on the
+  same path gets its own issue (cross-linked), not a section in this one.
+- The Summary is at most five bullets of one or two sentences each. Say a
+  fact once and do not repeat it in Expected, Actual and Logs.
+- Keep only what the reader needs to reproduce and fix the bug: the failing
+  test, the smallest code excerpt, the one spec sentence that decides the
+  behavior, and the introducing PR. Leave out narrative, background on how
+  the run worked, and every code path that was checked and found fine.
+- Trim test output to the failing assertion and the result line. Drop the
+  scaffolding output, backtrace notes and repeated `failures:` blocks.
+- History is one or two lines: the introducing PR, plus a closed sibling fix
+  if there is one. The full blame trail stays in the run record.
+- Leave an optional template section out, or write one line, when it adds
+  nothing.
+- Aim for under about 150 lines, not counting the test code. A class issue
+  may be longer only because it lists more sites.
 
 ### Decide the grouping
 
