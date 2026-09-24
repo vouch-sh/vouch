@@ -87,9 +87,8 @@ pub enum CreateGitHubInstallationError {
 /// `(org_id, installation_id)` left a TOCTOU window where two concurrent
 /// cross-org `connect_installation` calls both passed the global guard (the
 /// `installation_id` index lookup) and produced distinct primary keys, so
-/// neither insert collided and both committed — orphaning one org's row
-/// from the webhook cleanup helpers that resolve a single row by
-/// `installation_id`. Dropping `org_id` from the hash makes cross-org
+/// neither insert collided and both committed, linking one installation to
+/// two organizations. Dropping `org_id` from the hash makes cross-org
 /// connects collide exactly like same-org connects do.
 ///
 /// The unique constraint on `(document_id, index_field, index_value)` does
@@ -122,8 +121,9 @@ fn deterministic_installation_id(installation_id: i64) -> String {
 /// GitHub installations are globally unique: a given `installation_id` may be
 /// linked to at most one Vouch organization. This matches the service-layer
 /// guard in `connect_installation`/`reconnect_installation`, which rejects any
-/// second connect for the same `installation_id` regardless of org, and the
-/// webhook cleanup helpers, which resolve a row by `installation_id`.
+/// second connect for the same `installation_id` regardless of org. The
+/// webhook helpers still act on every row for an `installation_id`, since a
+/// row written before this ID scheme can sit beside another.
 #[expect(clippy::disallowed_methods, reason = "stamps the row's installed_at")]
 pub async fn create_github_installation(
     store: &DocumentStore,
@@ -200,94 +200,89 @@ pub async fn get_github_installation_by_installation_id(
     Ok(doc.map(GitHubInstallation::from))
 }
 
-/// Delete GitHub installation by installation ID.
+/// Delete every row recorded for an installation ID, in one transaction.
+///
+/// [`create_github_installation`] writes one row per `installation_id`, but a
+/// row written before its document ID was derived from `installation_id` can
+/// sit beside another for the same installation. An `installation.deleted`
+/// webhook removes all of them.
 pub async fn delete_github_installation_by_installation_id(
     store: &DocumentStore,
     installation_id: i64,
 ) -> Result<bool> {
-    let doc = store
-        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
+    let deleted = store
+        .delete_by_index::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
         .await?;
-
-    if let Some(doc) = doc {
-        store.delete(&doc.id).await?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(deleted > 0)
 }
 
-/// Resolve a GitHub installation's document ID from its `installation_id` index.
+/// Apply `modifier` to every row recorded for an installation ID, each through
+/// optimistic concurrency (`store.modify`), so concurrent webhook events never
+/// lose an update. Every modifier here is idempotent, so a failure part way
+/// through converges when GitHub redelivers the webhook.
 ///
-/// Returns `Some(doc_id)` on a hit or `None` if no matching installation exists.
-/// The resolved `doc_id` is the stable primary key used by `store.modify()`.
-async fn resolve_installation_doc_id(
+/// Returns `true` if any row was modified, `false` if none exists (including
+/// one deleted between the lookup and its modify).
+async fn modify_installation_rows<F>(
     store: &DocumentStore,
     installation_id: i64,
-) -> Result<Option<String>> {
-    let doc = store
-        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
+    modifier: F,
+) -> Result<bool>
+where
+    F: Fn(&mut GitHubInstallationDoc),
+{
+    let docs = store
+        .find_all::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
         .await?;
-    Ok(doc.map(|d| d.id))
+    let mut modified = false;
+    for doc in docs {
+        if store
+            .modify::<GitHubInstallationDoc, _>(&doc.id, &modifier)
+            .await?
+        {
+            modified = true;
+        }
+    }
+    Ok(modified)
 }
 
-/// Suspend GitHub installation (used by webhook handler).
-///
-/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
-/// targeting the same installation never produce a lost update. If the
-/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
+/// Suspend every row for a GitHub installation (used by webhook handler).
+/// See [`modify_installation_rows`].
 #[expect(clippy::disallowed_methods, reason = "stamps the row's suspended_at")]
 pub async fn suspend_github_installation(
     store: &DocumentStore,
     installation_id: i64,
 ) -> Result<bool> {
-    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
-        return Ok(false);
-    };
-    store
-        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
-            data.suspended_at = Some(Timestamp::now());
-        })
-        .await
+    let suspended_at = Timestamp::now();
+    modify_installation_rows(store, installation_id, |data| {
+        data.suspended_at = Some(suspended_at);
+    })
+    .await
 }
 
-/// Unsuspend GitHub installation (used by webhook handler).
-///
-/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
-/// targeting the same installation never produce a lost update. If the
-/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
+/// Unsuspend every row for a GitHub installation (used by webhook handler).
+/// See [`modify_installation_rows`].
 pub async fn unsuspend_github_installation(
     store: &DocumentStore,
     installation_id: i64,
 ) -> Result<bool> {
-    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
-        return Ok(false);
-    };
-    store
-        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
-            data.suspended_at = None;
-        })
-        .await
+    modify_installation_rows(store, installation_id, |data| {
+        data.suspended_at = None;
+    })
+    .await
 }
 
-/// Update repositories for a GitHub installation.
-///
-/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
-/// targeting the same installation never produce a lost update. If the
-/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
+/// Replace the repositories of every row for a GitHub installation.
+/// See [`modify_installation_rows`].
 pub async fn update_github_installation_repos(
     store: &DocumentStore,
     installation_id: i64,
     repos: &[String],
 ) -> Result<bool> {
-    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
-        return Ok(false);
-    };
-    let repos_owned = repos.to_vec();
-    store
-        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
-            data.repositories = Some(repos_owned.clone());
-        })
-        .await
+    modify_installation_rows(store, installation_id, |data| {
+        data.repositories = Some(repos.to_vec());
+    })
+    .await
 }
 
 /// Update repositories for a GitHub installation by
@@ -297,32 +292,25 @@ pub async fn update_github_installation_repos(
 /// optimistic-concurrency retry re-reads the current repo list and re-applies
 /// the delta to fresh state: two concurrent delta webhooks for the same
 /// installation both land. The merge is idempotent (adds are deduplicated,
-/// removals filter by name, the result is sorted). If the installation is
-/// deleted between index-resolve and modify, returns `Ok(false)`.
+/// removals filter by name, the result is sorted). It is applied to every row
+/// for the installation; see [`modify_installation_rows`].
 pub async fn update_github_installation_repos_delta(
     store: &DocumentStore,
     installation_id: i64,
     added: &[String],
     removed: &[String],
 ) -> Result<bool> {
-    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
-        return Ok(false);
-    };
-    // Owned copies for the `Fn` closure (may run once per OCC retry).
-    let added_owned = added.to_vec();
-    let removed_owned = removed.to_vec();
-    store
-        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
-            let repos = data.repositories.get_or_insert_default();
-            for repo in &added_owned {
-                if !repos.contains(repo) {
-                    repos.push(repo.clone());
-                }
+    modify_installation_rows(store, installation_id, |data| {
+        let repos = data.repositories.get_or_insert_default();
+        for repo in added {
+            if !repos.contains(repo) {
+                repos.push(repo.clone());
             }
-            repos.retain(|r| !removed_owned.contains(r));
-            repos.sort();
-        })
-        .await
+        }
+        repos.retain(|r| !removed.contains(r));
+        repos.sort();
+    })
+    .await
 }
 
 /// Get all linked GitHub installation IDs (across all orgs).
