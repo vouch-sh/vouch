@@ -30,6 +30,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-18 | 19 | 19 | 0 | 1 | 0 | 11 of 19 | 8 merged as-is; 8 amended (#1453, #1455, #1459, #1460, #1461, #1465, #1466, #1467); #1454 reworked (staged rollout); #1451 superseded by #1470; #1452 closed | 1 of 19 (#1433, 09-16 revoke-first decision) | lexical-bound rule requested (`rcr_e013fe46…`); secret-gate refinement synced |
 | 2026-09-19 | 3 | 3 | 0 | 3 | 3 | 1 of 3 | all 3 merged: #1476 (body note), #1477 as-is, #1475 amended with the sibling fix | 0 | `rule_879e9e96…` generated but **not pulled** (stale correct-pattern); replacement `rcr_2d2214db…` requested |
 | 2026-09-22 | 0 | 0 | 3 | 0 | 0 | 1 of 3 dead-code | #1482, #1483 merge as-is; #1481 rebuilt with signed commits (unsigned rustfmt follow-up) | 0 | `github-identity-credential-pair-consistency` (rcr from 09-19) verified against tree and pulled |
+| 2026-09-24 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1504 amended: comments trimmed, CLI-grant lookup refusals audited, five latent email siblings fixed | 0 (#1500 had no record) | 0 (instance) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -623,3 +624,27 @@ still cited by a test that exercises production code.
 The rule regenerated on 09-19 to replace the stale one was read against the
 merged tree before pulling and matched it line for line — the check the
 09-19 record asked for, done once, cost two greps.
+
+## 2026-09-24
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 121 | 14 | 194 | 62 | 42 |
+
+1 issue, 1 fix PR. The finding (#1503) blames #1500, our bug-hunt fix merged
+eight hours earlier. #1500 split `user_deactivated` out as its own audit
+reason but kept the `email: None` that only made sense before the split. The
+same file already held the org-visibility test for this class, and #1500 did
+not extend it to the new reason.
+
+The sibling hunt found one real instance and five latent sites where an
+audit row took its email from an optional token claim, even though the user
+record was loaded or loadable. It also found an adjacent gap: the CLI FIDO2
+grant wrote no row for the lookup refusals that browser login audits. All of
+it was fixed in #1504, per the fix-in-the-same-PR preference.
+
+### Process
+
+When a fix changes which reason an audit row records, check the other
+columns of the same row too: email, authenticator, and client. #1500
+corrected the reason and left the attribution as it was.
