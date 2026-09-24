@@ -1595,7 +1595,8 @@ pub async fn forge_short_lived_access_token(
 /// never decode a JWT, so an opaque cookie is the faithful fixture. The row's
 /// `expires_at` is one second in the past, which is the expired-but-not-yet-
 /// reaped window: the expiry-filtering `get_session_by_token_hash` answers
-/// `None` while the row still exists.
+/// `None` while the row still exists. `client_id` is the OAuth client the row
+/// records it was issued to.
 #[expect(
     clippy::disallowed_methods,
     reason = "test fixtures construct their own instants"
@@ -1604,6 +1605,7 @@ pub async fn create_test_expired_session_row(
     state: &AppState,
     user_id: &str,
     email: &str,
+    client_id: Option<&str>,
 ) -> (String, String) {
     let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
     let token_hash = crate::crypto::hash_token(&token);
@@ -1622,7 +1624,7 @@ pub async fn create_test_expired_session_row(
             authorization_details: Option::None,
             hardware_aaguid: Option::None,
             org_domain: Option::None,
-            client_id: Option::None,
+            client_id,
             source_code_hash: Option::None,
         },
     )
