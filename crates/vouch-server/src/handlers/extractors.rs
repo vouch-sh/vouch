@@ -351,8 +351,12 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
         let from_tls = parts
             .extensions
             .get::<axum::extract::ConnectInfo<crate::infra::mtls_listener::PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
+            .and_then(|ci| {
+                let (leaf, intermediates) = ci.0.0.split_first()?;
+                let mut cert = crate::services::oidc::mtls::parse_client_certificate(leaf).ok()?;
+                cert.intermediates = intermediates.to_vec();
+                Some(cert)
+            });
 
         Ok(Self(from_tls))
     }
@@ -739,77 +743,62 @@ mod tests {
     // OptionalClientCert Tests
     // ========================================================================
 
-    /// When `PeerClientCert` contains invalid DER bytes, the `.ok()` in
-    /// `from_request_parts` swallows the parse error and yields `None` rather
-    /// than returning an error response. This keeps the extractor infallible.
-    #[tokio::test]
-    async fn test_optional_client_cert_with_invalid_der_returns_none() {
+    /// Run `OptionalClientCert` over a request carrying `chain` as the
+    /// connection's presented certificates, or no `PeerClientCert` at all.
+    async fn extract_client_cert(
+        chain: Option<Vec<Vec<u8>>>,
+    ) -> Option<crate::services::oidc::mtls::ClientCertificate> {
         use crate::infra::mtls_listener::PeerClientCert;
         use axum::extract::ConnectInfo;
 
+        let state = crate::test_utils::test_app_state().await;
         let mut request = http::Request::builder().body(()).unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(PeerClientCert(Some(vec![
-                0xFF, 0xFF, 0xDE, 0xAD,
-            ]))));
-        let (parts, _) = request.into_parts();
+        if let Some(chain) = chain {
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(PeerClientCert(chain)));
+        }
+        let (mut parts, _) = request.into_parts();
+        let Ok(OptionalClientCert(cert)) =
+            OptionalClientCert::from_request_parts(&mut parts, &state).await;
+        cert
+    }
 
-        // OptionalClientCert::from_request_parts requires Arc<AppState>, but all it
-        // does with _state is ignore it — the cert extraction only reads extensions.
-        // We exercise the same code path by replicating the extractor logic inline,
-        // which lets us verify the `.ok()` swallows the DER parse error.
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
+    /// Invalid DER yields `None` rather than an error response, keeping the
+    /// extractor infallible.
+    #[tokio::test]
+    async fn test_optional_client_cert_with_invalid_der_returns_none() {
+        let cert = extract_client_cert(Some(vec![vec![0xFF, 0xFF, 0xDE, 0xAD]])).await;
         assert!(
             cert.is_none(),
             "Invalid DER must yield None, not an error or panic"
         );
     }
 
-    /// When no `PeerClientCert` extension is present (non-mTLS connection),
-    /// the extractor must yield `None` without panicking.
+    /// No `PeerClientCert` extension (the non-mTLS port) yields `None`.
     #[tokio::test]
     async fn test_optional_client_cert_no_extension_returns_none() {
-        use crate::infra::mtls_listener::PeerClientCert;
-        use axum::extract::ConnectInfo;
-
-        let request = http::Request::builder().body(()).unwrap();
-        let (parts, _) = request.into_parts();
-
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
-        assert!(cert.is_none(), "Missing extension must yield None");
+        assert!(extract_client_cert(None).await.is_none());
     }
 
-    /// When `PeerClientCert` wraps `None` (client connected but presented no cert),
-    /// the extractor must yield `None` without panicking.
+    /// A client that connected without presenting a certificate yields `None`.
     #[tokio::test]
-    async fn test_optional_client_cert_with_none_der_returns_none() {
-        use crate::infra::mtls_listener::PeerClientCert;
-        use axum::extract::ConnectInfo;
+    async fn test_optional_client_cert_with_empty_chain_returns_none() {
+        assert!(extract_client_cert(Some(Vec::new())).await.is_none());
+    }
 
-        let mut request = http::Request::builder().body(()).unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(PeerClientCert(None)));
-        let (parts, _) = request.into_parts();
-
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
-        assert!(cert.is_none(), "PeerClientCert(None) must yield None");
+    /// RFC 8705 §2.1 validates the chain at the application layer, so the
+    /// intermediates the client sent must reach the certificate alongside the
+    /// leaf.
+    #[tokio::test]
+    async fn test_optional_client_cert_carries_intermediates() {
+        let leaf = crate::test_utils::make_test_cert_der("leaf.example.com");
+        let intermediate = crate::test_utils::make_test_cert_der("intermediate.example.com");
+        let cert = extract_client_cert(Some(vec![leaf.clone(), intermediate.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(cert.der, leaf);
+        assert_eq!(cert.intermediates, vec![intermediate]);
     }
 
     #[test]

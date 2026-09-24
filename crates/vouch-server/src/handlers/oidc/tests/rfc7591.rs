@@ -1510,6 +1510,34 @@ async fn test_rfc7591_accepts_tls_client_auth_registration_without_jwks() {
     );
 }
 
+// RFC 7591 §2: "The authorization server MAY reject any requested client
+// metadata values ... by returning an error response as described in Section
+// 3.2.2." Without client CAs a tls_client_auth client could never
+// authenticate (RFC 8705 §2.1 needs a validated chain), so it is refused.
+#[tokio::test]
+async fn test_rfc7591_refuses_tls_client_auth_without_client_ca() {
+    let (app, state) = test_app_without_client_ca().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-no-ca").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=test-client"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(error["error"], "invalid_client_metadata", "{body}");
+}
+
 #[tokio::test]
 async fn test_rfc7591_empty_optional_strings_are_not_stored() {
     // An empty string is a third state next to "absent" and "set" that means

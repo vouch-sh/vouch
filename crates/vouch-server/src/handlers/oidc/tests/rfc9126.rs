@@ -1947,7 +1947,7 @@ async fn test_rfc9126_par_accepts_mtls_with_matching_cert() {
     let user = create_test_user(&state.store, "par-mtls-ok@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-client");
+    let cert_der = test_client_ca().issue("par-mtls-client");
     let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
         .expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
@@ -1984,7 +1984,7 @@ async fn test_rfc9126_par_rejects_mtls_without_cert() {
     let user = create_test_user(&state.store, "par-mtls-nocert@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-nocert-client");
+    let cert_der = test_client_ca().issue("par-mtls-nocert-client");
     let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
         .expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
@@ -2019,14 +2019,14 @@ async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Client is registered against cert A's subject DN.
-    let cert_a_der = make_test_cert_der("par-mtls-registered");
+    let cert_a_der = test_client_ca().issue("par-mtls-registered");
     let parsed_a =
         crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn_a).await;
 
     // Caller presents cert B — different subject DN.
-    let cert_b_der = make_test_cert_der("par-mtls-imposter");
+    let cert_b_der = test_client_ca().issue("par-mtls-imposter");
 
     let body = format!(
         "response_type=code\
@@ -2271,7 +2271,7 @@ async fn par_post_full(
             0,
         ))));
     parts.extensions.insert(axum::extract::ConnectInfo(
-        crate::infra::mtls_listener::PeerClientCert(cert_der),
+        crate::infra::mtls_listener::PeerClientCert(cert_der.into_iter().collect()),
     ));
     let request = axum::http::Request::from_parts(parts, body_inner);
     let response = app
@@ -3281,7 +3281,7 @@ async fn test_rfc9126_par_accepts_mtls_with_request_object() {
     let user = create_test_user(&state.store, "par-mtls-ro@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-ro-client");
+    let cert_der = test_client_ca().issue("par-mtls-ro-client");
     let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
         .expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
@@ -3320,7 +3320,7 @@ async fn test_rfc9126_par_accepts_mtls_with_dpop_and_pkce() {
     let user = create_test_user(&state.store, "par-mtls-dpop-pkce@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-dpop-client");
+    let cert_der = test_client_ca().issue("par-mtls-dpop-client");
     let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
         .expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");

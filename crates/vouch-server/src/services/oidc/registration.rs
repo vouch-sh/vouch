@@ -442,6 +442,18 @@ pub async fn register_client(
     // because the application type decides whether a custom URI scheme may be
     // registered, and inferring that type needs the auth method.
     let jwks_auth = validate_jwks_and_auth_method(&mut request, &validated.auth_method_str)?;
+    // RFC 7591 §2: "The authorization server MAY reject any requested client
+    // metadata values ... by returning an error response as described in
+    // Section 3.2.2." Without client CAs a `tls_client_auth` client could
+    // never authenticate, so it is refused rather than registered.
+    if jwks_auth.auth_method == TokenEndpointAuthMethod::TlsClientAuth
+        && state.client_cert_trust.is_none()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "tls_client_auth is not enabled on this server",
+        ));
+    }
 
     // 7. Resolve the application type, then validate redirect URIs against it.
     let app_type = resolve_client_type(

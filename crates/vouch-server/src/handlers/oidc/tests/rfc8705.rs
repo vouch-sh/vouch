@@ -273,7 +273,7 @@ async fn test_rfc8705_token_mtls_authorization_code_succeeds() {
     let user = create_test_user(&state.store, "mtls-token-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("mtls-token-ok");
+    let cert_der = test_client_ca().issue("mtls-token-ok");
     let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
     let thumbprint = cert_thumbprint(&cert_der);
@@ -320,7 +320,7 @@ async fn test_rfc8705_token_mtls_invalid_grant_when_code_already_used() {
     let user = create_test_user(&state.store, "mtls-token-reuse@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("mtls-token-reuse");
+    let cert_der = test_client_ca().issue("mtls-token-reuse");
     let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -365,7 +365,7 @@ async fn test_rfc8705_token_mtls_invalid_client_when_cert_mismatch() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Client is registered against cert A's subject DN.
-    let cert_a_der = make_test_cert_der("registered");
+    let cert_a_der = test_client_ca().issue("registered");
     let parsed_a = parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -380,7 +380,7 @@ async fn test_rfc8705_token_mtls_invalid_client_when_cert_mismatch() {
     let code = issue_code(&state, &user, &auth_id, &client_id, TestCodeSpec::default()).await;
 
     // Caller presents cert B — different subject DN.
-    let cert_b_der = make_test_cert_der("imposter");
+    let cert_b_der = test_client_ca().issue("imposter");
 
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
@@ -407,7 +407,7 @@ async fn test_rfc8705_token_mtls_invalid_request_when_dpop_required_but_missing(
     let user = create_test_user(&state.store, "mtls-token-needs-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("mtls-needs-dpop");
+    let cert_der = test_client_ca().issue("mtls-needs-dpop");
     let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -454,7 +454,7 @@ async fn test_rfc8705_token_mtls_plus_dpop_succeeds() {
     let user = create_test_user(&state.store, "mtls-dpop-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("mtls-dpop-ok");
+    let cert_der = test_client_ca().issue("mtls-dpop-ok");
     let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -523,7 +523,7 @@ async fn test_rfc8705_token_mtls_plus_dpop_invalid_grant_when_jkt_mismatch() {
     let user = create_test_user(&state.store, "mtls-dpop-mismatch@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("mtls-dpop-mismatch");
+    let cert_der = test_client_ca().issue("mtls-dpop-mismatch");
     let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -910,7 +910,7 @@ async fn test_rfc8705_device_token_mtls_succeeds_with_registered_cert() {
     let user = create_test_user(&state.store, "device-mtls-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("device-mtls-ok");
+    let cert_der = test_client_ca().issue("device-mtls-ok");
     let parsed = parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
     let thumbprint = cert_thumbprint(&cert_der);
@@ -970,7 +970,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Client registered against cert A's subject DN.
-    let cert_a_der = make_test_cert_der("device-registered");
+    let cert_a_der = test_client_ca().issue("device-registered");
     let parsed_a = parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -986,7 +986,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_cert_mismatch() {
         setup_authorized_device_for_client(&state, &user, &auth_id, &client_id, "mismatch").await;
 
     // Attacker presents cert B — a different self-signed cert.
-    let cert_b_der = make_test_cert_der("device-imposter");
+    let cert_b_der = test_client_ca().issue("device-imposter");
     let (status, body) =
         poll_device_token_with_cert(&app, &device_code, &client_id, Some(cert_b_der)).await;
 
@@ -1028,7 +1028,7 @@ async fn test_rfc8705_device_token_mtls_invalid_client_when_no_cert() {
     let user = create_test_user(&state.store, "device-mtls-nocert@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("device-nocert-registered");
+    let cert_der = test_client_ca().issue("device-nocert-registered");
     let parsed = parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
     let client_id = create_mtls_client_with_cert_binding(
@@ -1278,7 +1278,7 @@ async fn mtls_client_with_token(
 ) -> MtlsClientWithToken {
     let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let cert_der = make_test_cert_der(label);
+    let cert_der = test_client_ca().issue(label);
     let subject_dn = parse_client_certificate(&cert_der)
         .expect("parse cert")
         .subject_dn
@@ -1431,7 +1431,7 @@ async fn test_rfc8705_introspect_succeeds_with_registered_certificate() {
 async fn test_rfc8705_revoke_and_introspect_reject_mismatched_certificate() {
     let (app, state) = test_app().await;
     let c = mtls_client_with_token(&state, "mtls-mismatch").await;
-    let other_cert = make_test_cert_der("mtls-mismatch-other");
+    let other_cert = test_client_ca().issue("mtls-mismatch-other");
 
     for endpoint in ["/oauth/revoke", "/oauth/introspect"] {
         let (status, body) = http_post_form_with_cert(
@@ -1459,7 +1459,7 @@ async fn test_rfc8705_revoke_and_introspect_reject_mismatched_certificate() {
 async fn test_rfc8705_device_code_endpoint_requires_registered_certificate() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-endpoint-mtls@example.com").await;
-    let cert_der = make_test_cert_der("device-endpoint-mtls");
+    let cert_der = test_client_ca().issue("device-endpoint-mtls");
     let subject_dn = parse_client_certificate(&cert_der)
         .expect("parse cert")
         .subject_dn
@@ -1482,4 +1482,67 @@ async fn test_rfc8705_device_code_endpoint_requires_registered_certificate() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp}");
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_client", "{resp}");
+}
+
+// ========================================================================
+// RFC 8705 Section 2.1 — PKI method (tls_client_auth) chain validation
+// ========================================================================
+
+/// Register a `client_credentials` service client authenticating with
+/// `tls_client_auth` for `CN=<cn>`, and return its `client_id`.
+async fn create_tls_client_auth_service(state: &crate::AppState, cn: &str) -> String {
+    create_test_client(
+        &state.store,
+        "tls-client-auth-owner",
+        TestClientSpec {
+            name: format!("{cn}-service"),
+            application_type: db::OAuthClientType::Service,
+            redirect_uris: vec![],
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
+            tls_client_auth_subject_dn: Some(format!("CN={cn}")),
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .client_id
+}
+
+// RFC 8705 §2: "The authorization server MUST enforce the binding between
+// client and certificate, as described in either Section 2.1 or 2.2 below."
+// §2.1: the PKI method "relies on a validated certificate chain [RFC5280] and
+// a single subject distinguished name (DN) or a single subject alternative
+// name (SAN) to authenticate the client." A certificate the caller minted
+// and signed itself, carrying the client's DN, chains to no configured CA.
+#[tokio::test]
+async fn test_rfc8705_tls_client_auth_rejects_self_signed_cert_with_matching_dn() {
+    let (app, state) = test_app().await;
+    let client_id = create_tls_client_auth_service(&state, "victim.example.com").await;
+    let body = format!("grant_type=client_credentials&client_id={client_id}");
+
+    let attacker_cert = make_test_cert_der("victim.example.com");
+    let (status, resp) =
+        http_post_form_with_cert(&app, "/oauth/token", &body, &[], Some(attacker_cert)).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp}");
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("JSON");
+    assert_eq!(error["error"], "invalid_client", "{resp}");
+}
+
+// RFC 8705 §2.1: a certificate from a trusted CA with the registered DN
+// authenticates the client.
+#[tokio::test]
+async fn test_rfc8705_tls_client_auth_accepts_ca_issued_cert_with_matching_dn() {
+    let (app, state) = test_app().await;
+    let client_id = create_tls_client_auth_service(&state, "service.example.com").await;
+    let body = format!("grant_type=client_credentials&client_id={client_id}");
+
+    let cert = test_client_ca().issue("service.example.com");
+    let (status, resp) =
+        http_post_form_with_cert(&app, "/oauth/token", &body, &[], Some(cert)).await;
+
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let token: serde_json::Value = serde_json::from_str(&resp).expect("JSON");
+    assert!(token["access_token"].is_string(), "{resp}");
 }

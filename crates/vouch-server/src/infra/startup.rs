@@ -547,6 +547,27 @@ async fn build_app_state(
     let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
+    let client_cert_trust = match config.mtls_client_ca_certs.as_deref() {
+        Some(path) => {
+            tracing::info!("Loading tls_client_auth client CA certificates from {path}");
+            let pem =
+                std::fs::read(path).context("Failed to read VOUCH_MTLS_CLIENT_CA_CERTS file")?;
+            Some(
+                crate::services::oidc::mtls::ClientCertTrust::from_pem(&pem)
+                    .context("Invalid VOUCH_MTLS_CLIENT_CA_CERTS bundle")?,
+            )
+        }
+        None => {
+            if config.tls_configured() {
+                tracing::warn!(
+                    "tls_client_auth disabled: VOUCH_MTLS_CLIENT_CA_CERTS is not set, so no \
+                     client certificate chain can be validated (RFC 8705 section 2.1)"
+                );
+            }
+            None
+        }
+    };
+
     // Build unified IdP list (OIDC + SAML) from the configured `idps` Vec.
     let enrollment_domains = match &config.allowed_domains {
         Some(domains) => domains.join(", "),
@@ -637,6 +658,7 @@ async fn build_app_state(
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps,
+        client_cert_trust,
     });
 
     // Per-org issuer signing keys exist only when the document store encrypts

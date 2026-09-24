@@ -89,6 +89,29 @@ redirect. On Linux, binding below 1024 needs `CAP_NET_BIND_SERVICE`.
 
 ### Mutual-TLS Client Authentication Issues
 
+A client whose certificate fails authentication receives only `invalid_client`. The server logs
+the reason at `warn` with the client ID: search the log for `mTLS client authentication failed`.
+
+**`certificate chain not trusted` for a client using `tls_client_auth`**
+
+The client's certificate does not chain to a CA in `VOUCH_MTLS_CLIENT_CA_CERTS`, has expired or
+is not yet valid, or carries an extended key usage without client authentication. Check the chain
+against the same bundle the server loads:
+
+```bash
+openssl verify -purpose sslclient -CAfile /etc/vouch/mtls-client-cas.pem \
+  -untrusted intermediates.pem client.crt
+```
+
+A self-signed certificate never passes; register such a client with
+`self_signed_tls_client_auth` and its certificate in the JWKS `x5c` instead.
+
+**`tls_client_auth is not enabled`**
+
+`VOUCH_MTLS_CLIENT_CA_CERTS` is not set, so the server cannot validate any `tls_client_auth`
+certificate. Set it to the bundle of CAs that issue your clients' certificates and restart. See
+[TLS, Ports, and mTLS](../configuration/tls.md#client-certificate-authorities-for-tls_client_auth).
+
 **`subject mismatch` for a client using `tls_client_auth`**
 
 The registered `tls_client_auth_subject_dn` must be the **RFC 4514** string

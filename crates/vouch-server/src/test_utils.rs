@@ -120,6 +120,7 @@ pub fn test_config() -> ServerConfig {
         metrics_bearer_token: None,
         certification_test_token: None,
         extra_ca_certs: None,
+        mtls_client_ca_certs: None,
         pool_config: crate::db::pool::PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
@@ -228,6 +229,7 @@ where
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps,
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -277,6 +279,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -369,6 +372,7 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -419,6 +423,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -465,6 +470,18 @@ pub async fn test_app_with_idps(
 /// failing at the TLS handshake.
 pub async fn test_app_with_http_client(http_client: reqwest::Client) -> (Router, Arc<AppState>) {
     let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create a test app with no `tls_client_auth` client CA, as a server
+/// started without `VOUCH_MTLS_CLIENT_CA_CERTS`.
+pub async fn test_app_without_client_ca() -> (Router, Arc<AppState>) {
+    let mut state = test_app_state().await;
+    Arc::get_mut(&mut state)
+        .expect("a fresh test state has one owner")
+        .client_cert_trust = None;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
@@ -662,51 +679,164 @@ fn build_test_request(
     Request::from_parts(parts, body)
 }
 
-/// Generate a self-signed P-256 certificate DER for testing.
-pub fn make_test_cert_der(cn: &str) -> Vec<u8> {
-    use der::{Decode as _, Encode, asn1::Utf8StringRef};
-    use p256::ecdsa::SigningKey;
-    use spki::EncodePublicKey as _;
-    use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
-    use x509_cert::serial_number::SerialNumber;
-    use x509_cert::time::Validity;
+/// A single-RDN `CN=<cn>` name.
+fn test_cert_name(cn: &str) -> x509_cert::name::RdnSequence {
+    use der::asn1::Utf8StringRef;
 
-    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-
-    let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
-    let cn_value = Utf8StringRef::new(cn).expect("valid CN");
     let atv = x509_cert::attr::AttributeTypeAndValue {
-        oid: cn_oid,
-        value: der::asn1::Any::from(cn_value),
+        oid: der::oid::ObjectIdentifier::new_unwrap("2.5.4.3"),
+        value: der::asn1::Any::from(Utf8StringRef::new(cn).expect("valid CN")),
     };
     let mut rdn_set = der::asn1::SetOfVec::new();
     rdn_set.insert(atv).expect("insert RDN");
-    let subject =
-        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)]);
+    x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)])
+}
+
+/// Build a certificate for `subject_key` under `profile`, signed by `signer`,
+/// valid for one day from now. `extra` extensions are added after the
+/// profile's own.
+fn build_test_cert(
+    profile: x509_cert::builder::Profile,
+    subject: x509_cert::name::RdnSequence,
+    subject_key: &p256::ecdsa::SigningKey,
+    signer: &p256::ecdsa::SigningKey,
+    extra: &[x509_cert::ext::pkix::ExtendedKeyUsage],
+) -> Vec<u8> {
+    use der::{Decode as _, Encode};
+    use spki::EncodePublicKey as _;
+    use x509_cert::builder::{Builder as _, CertificateBuilder};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Validity;
 
     let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
     let serial = SerialNumber::new(&[1u8]).expect("serial");
-    let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
+    let spki_der = subject_key
+        .verifying_key()
+        .to_public_key_der()
+        .expect("spki DER");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
 
-    let builder = CertificateBuilder::new(
-        Profile::Leaf {
-            issuer: subject.clone(),
-            enable_key_agreement: false,
-            enable_key_encipherment: false,
-        },
-        serial,
-        validity,
-        subject,
-        spki,
-        &key,
-    )
-    .expect("cert builder");
-
-    let cert = builder
+    let mut builder = CertificateBuilder::new(profile, serial, validity, subject, spki, signer)
+        .expect("cert builder");
+    for ext in extra {
+        builder.add_extension(ext).expect("add extension");
+    }
+    builder
         .build::<p256::ecdsa::DerSignature>()
-        .expect("build cert");
-    cert.to_der().expect("DER encode")
+        .expect("build cert")
+        .to_der()
+        .expect("DER encode")
+}
+
+fn random_test_key() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng)
+}
+
+fn leaf_profile(issuer: x509_cert::name::RdnSequence) -> x509_cert::builder::Profile {
+    x509_cert::builder::Profile::Leaf {
+        issuer,
+        enable_key_agreement: false,
+        enable_key_encipherment: false,
+    }
+}
+
+/// Generate a self-signed P-256 certificate DER for testing.
+///
+/// It chains to no trust anchor, so it suits `self_signed_tls_client_auth`
+/// (RFC 8705 §2.2) and certificate-bound tokens (§3), and is refused by
+/// `tls_client_auth` (§2.1). Use [`TestClientCa::issue`] for the latter.
+pub fn make_test_cert_der(cn: &str) -> Vec<u8> {
+    let key = random_test_key();
+    let name = test_cert_name(cn);
+    build_test_cert(leaf_profile(name.clone()), name, &key, &key, &[])
+}
+
+/// Test CA that issues `tls_client_auth` client certificates. Every test
+/// `AppState` trusts it, as a deployment trusts the CAs in
+/// `VOUCH_MTLS_CLIENT_CA_CERTS`.
+pub struct TestClientCa {
+    key: p256::ecdsa::SigningKey,
+    name: x509_cert::name::RdnSequence,
+    der: Vec<u8>,
+}
+
+/// The process-wide test client CA.
+pub fn test_client_ca() -> &'static TestClientCa {
+    static CA: std::sync::OnceLock<TestClientCa> = std::sync::OnceLock::new();
+    CA.get_or_init(|| {
+        let key = random_test_key();
+        let name = test_cert_name("Vouch Test Client CA");
+        let der = build_test_cert(
+            x509_cert::builder::Profile::Root,
+            name.clone(),
+            &key,
+            &key,
+            &[],
+        );
+        TestClientCa { key, name, der }
+    })
+}
+
+impl TestClientCa {
+    /// Issue a client certificate for `CN=<cn>`, signed by this CA.
+    pub fn issue(&self, cn: &str) -> Vec<u8> {
+        self.issue_with_eku(cn, &[])
+    }
+
+    /// Issue a client certificate for `CN=<cn>` carrying `eku` as its
+    /// extended key usage.
+    pub fn issue_with_eku(&self, cn: &str, eku: &[der::oid::ObjectIdentifier]) -> Vec<u8> {
+        let extra: Vec<_> = if eku.is_empty() {
+            Vec::new()
+        } else {
+            vec![x509_cert::ext::pkix::ExtendedKeyUsage(eku.to_vec())]
+        };
+        build_test_cert(
+            leaf_profile(self.name.clone()),
+            test_cert_name(cn),
+            &random_test_key(),
+            &self.key,
+            &extra,
+        )
+    }
+
+    /// Issue an intermediate CA and a client certificate for `CN=<cn>` under
+    /// it. Returns `(leaf_der, intermediate_der)`.
+    pub fn issue_via_intermediate(&self, cn: &str) -> (Vec<u8>, Vec<u8>) {
+        let intermediate_key = random_test_key();
+        let intermediate_name = test_cert_name("Vouch Test Intermediate CA");
+        let intermediate = build_test_cert(
+            x509_cert::builder::Profile::SubCA {
+                issuer: self.name.clone(),
+                path_len_constraint: Some(0),
+            },
+            intermediate_name.clone(),
+            &intermediate_key,
+            &self.key,
+            &[],
+        );
+        let leaf = build_test_cert(
+            leaf_profile(intermediate_name),
+            test_cert_name(cn),
+            &random_test_key(),
+            &intermediate_key,
+            &[],
+        );
+        (leaf, intermediate)
+    }
+
+    /// The CA certificate as a PEM bundle, the form
+    /// `VOUCH_MTLS_CLIENT_CA_CERTS` holds.
+    pub fn pem(&self) -> String {
+        der::pem::encode_string("CERTIFICATE", der::pem::LineEnding::LF, &self.der)
+            .expect("PEM encode")
+    }
+
+    /// Trust anchors holding only this CA.
+    pub(crate) fn trust(&self) -> crate::services::oidc::mtls::ClientCertTrust {
+        crate::services::oidc::mtls::ClientCertTrust::from_pem(self.pem().as_bytes())
+            .expect("test CA is a valid trust anchor")
+    }
 }
 
 /// Build a request with an injected mTLS client certificate DER.
@@ -736,7 +866,7 @@ fn build_test_request_with_cert(
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
     parts
         .extensions
-        .insert(ConnectInfo(PeerClientCert(cert_der)));
+        .insert(ConnectInfo(PeerClientCert(cert_der.into_iter().collect())));
     Request::from_parts(parts, body)
 }
 

@@ -192,10 +192,13 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             TokenEndpointAuthMethod::ClientSecretPost,
             TokenEndpointAuthMethod::PrivateKeyJwt,
         ];
-        // mTLS client auth methods are available whenever TLS is fully
-        // configured (cert AND key) — the mTLS listener only starts then.
-        if state.config().tls_configured() {
+        // mTLS client auth needs TLS fully configured (cert AND key) — the
+        // mTLS listener only starts then. `tls_client_auth` also needs client
+        // CAs to validate the certificate chain against.
+        if state.config().tls_configured() && state.client_cert_trust.is_some() {
             methods.push(TokenEndpointAuthMethod::TlsClientAuth);
+        }
+        if state.config().tls_configured() {
             methods.push(TokenEndpointAuthMethod::SelfSignedTlsClientAuth);
         }
         methods

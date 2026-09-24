@@ -527,6 +527,7 @@ mod tests {
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
+            mtls_client_ca_certs: None,
             pool_config: db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
@@ -558,6 +559,7 @@ mod tests {
             org_keys_cache: Default::default(),
             policy: Default::default(),
             idps: Vec::new(),
+            client_cert_trust: None,
         })
     }
 
