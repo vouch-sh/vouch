@@ -2174,7 +2174,7 @@ async fn lookup_and_verify_registration_token(
                     "RFC 7592 token verification failed: client_id {client_id}'s owner is \
                      deactivated or deleted"
                 );
-                return Err(invalid_token());
+                return Err(invalid_registration_token());
             }
             Err(e) => {
                 tracing::error!("DB error looking up the owner of client {client_id}: {e}");
