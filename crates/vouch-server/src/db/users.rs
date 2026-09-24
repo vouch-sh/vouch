@@ -287,6 +287,51 @@ async fn org_admin_successor(
     Ok(admin_ids.into_iter().next())
 }
 
+/// Transfer `user_id`'s organization-scoped OAuth clients to the org's next
+/// active admin ([`org_admin_successor`]).
+///
+/// Application management is creator-only: every check compares the caller
+/// against `client.user_id`. An org-scoped application belongs to the
+/// organization, so when its creator leaves (deleted) or can no longer sign in
+/// (deactivated), it moves to an active admin who can still rotate its
+/// secrets, update its redirect URIs, or delete it. Personal and public
+/// clients are left to the caller. With no other active admin in the org,
+/// nothing moves.
+///
+/// Must run in a transaction that read the org row's version before calling
+/// this and bumps it afterwards (as [`delete_user`],
+/// [`demote_or_deactivate_member`], and `update_scim_user` do), so two
+/// concurrent departures cannot each hand their applications to the other.
+///
+/// Returns `false` when a client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn transfer_org_clients(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: Option<&str>,
+    user_id: &str,
+) -> Result<bool> {
+    use super::documents::oauth::{AccessScope, OAuthClientDoc};
+
+    let Some(successor) = org_admin_successor(tx, org_id, user_id).await? else {
+        return Ok(true);
+    };
+    let clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+    for client in clients {
+        if client.data.access_scope != AccessScope::Organization {
+            continue;
+        }
+        let mut data = client.data;
+        data.user_id = Some(successor.clone());
+        if !tx
+            .compare_and_update(&client.id, client.version, &data)
+            .await?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Whether `member` counts toward "at least one active admin per
 /// organization", ignoring the member the caller is about to change.
 ///
@@ -444,7 +489,14 @@ pub async fn demote_or_deactivate_member(
         let mut updated = user_doc.data.clone();
         match change {
             MemberDowngrade::Demote => updated.is_org_admin = false,
-            MemberDowngrade::Deactivate => updated.active = false,
+            MemberDowngrade::Deactivate => {
+                updated.active = false;
+                if user_doc.data.active
+                    && !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await?
+                {
+                    return Err(MemberDowngradeError::OccConflict);
+                }
+            }
         }
         // Guard the user row on the version this transaction read, so a
         // concurrent edit to the same member is not overwritten blindly.
@@ -611,16 +663,14 @@ pub async fn delete_user(
             return Err(DeleteUserError::LastAdmin);
         }
 
-        let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = match (d.access_scope, successor.as_deref()) {
-                (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
-                    Some(admin_id.to_string())
-                }
-                _ => None,
-            };
-        })
-        .await?;
+        if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
+            return Err(DeleteUserError::OccConflict);
+        }
+        // Whatever the user still owns (personal and public clients, and
+        // org-scoped ones when no other admin exists) has no other legitimate
+        // owner and is unlinked.
+        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| d.user_id = None)
+            .await?;
 
         // Serialize deletions within an organization on the org row.
         //
