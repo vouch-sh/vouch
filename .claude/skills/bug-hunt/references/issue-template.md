@@ -3,9 +3,14 @@
 Every issue uses the repository's template, `.github/ISSUE_TEMPLATE/bug_report.md`,
 the same one a person gets from the GitHub issue form. This file says how to
 fill each of its sections from the run's evidence in `.local/bug-hunt-<date>/`,
-to the standard of Detail's issues (e.g. vouch#1440, vouch#1447). A bug hunt
-fills **every** optional section: it always has the test, the code, and the
-history. Nothing is written from memory.
+to the standard of Detail's issues (e.g. vouch#1440, vouch#1447). Nothing is
+written from memory.
+
+Be brief. Each section below is a sentence or a short block, not an essay.
+Fill an optional section only when it tells the reader something the others
+do not. Cut anything a fixer would skip: side findings (each gets its own
+issue), paths that were checked and found fine, repeated facts, and
+long blame narratives. The length rules are in `SKILL.md`, step 6.
 
 ## Title
 
@@ -37,17 +42,17 @@ For a class, write "Introduced in" once for each site under History instead.
 
 | Template section | Filled from |
 |---|---|
-| **Summary** | The hypothesis and the verdict. Context names the function and file. Expected vs. actual names its source: a spec, an operator doc, or the sibling path that does it right. Impact is honest about limits, e.g. "masked in production because…". |
+| **Summary** | At most five short bullets: context (the function and file), the bug, expected vs. actual with its source (a spec, an operator doc, or the sibling path that does it right), and impact, honest about limits (e.g. "masked in production because…"). |
 | **Affected sites** | A class only (step 5's grouping): one checkbox per site with `file:line` and a one-line defect. A single finding writes "None: single site". |
 | **Reproduction Steps** | The manual path a person running the server or CLI would take: real requests with placeholders (`curl`), config, or CLI commands, ending in "Observe: <the exact response or state>". For a live-server proof, this is the proof script in prose. |
 | **Failing test** | The test **verbatim** from `tests/bughunt_<id>.rs`, including its positive control, with the path to save it at, the exact command, and the **real** output from `tests/bughunt_<id>.out`. In-crate tests say which module file to add and which `cargo test -p <crate> --lib <filter>` to run. A live-server proof gives the full script and its output here. Add one sentence: the positive control passes, so the failure is the defect and not the setup. |
 | **Expected / Actual Behavior** | One short paragraph each, matching the test's assertion. |
-| **Code with the Bug** | The smallest excerpt from the tree at `<sha>` that shows the defect. Mark each defective line with `// <-- BUG 🔴 <why>`. Then a short explanation, one bullet per step from input to wrong result. Then **Codebase inconsistency**: the sibling path, doc comment or operator doc that already does or promises the right thing, with an excerpt. |
+| **Code with the Bug** | The smallest excerpt from the tree at `<sha>` that shows the defect. Mark each defective line with `// <-- BUG 🔴 <why>`. Then a short explanation, one bullet per step from input to wrong result. Then **Codebase inconsistency**: the sibling path, doc comment or operator doc that already does or promises the right thing, with an excerpt. A claim about how the sibling *behaves* (for example "the applications API returns 401") needs a comparison test that ran and is shown under Failing test. Otherwise describe only what its code says. |
 | **Specification** | Each normative statement: document, section, strength (MUST / SHOULD / MAY), a verbatim quote, and the `specs/` path. Mark a converted file as unverified until it is checked against its source URL. If the specs are silent, say so. If the finding contradicts a recorded decision, link it, say the spec outranks it (`.claude/rules/specs-are-source-of-truth.md`), and say which part of the decision still holds. |
-| **Environment** | Commit `<sha>`, the crate, the feature flags the test used (`test-utils`), the backend the test ran on (usually SQLite in-memory), and the OS for CLI and agent findings. |
-| **Logs / Evidence** | Anything beyond the test output: server log lines, the database state before and after, a second backend. "None beyond the failing test" otherwise. |
+| **Environment** | Commit `<sha>`, the crate, the feature flags the test used (`test-utils`), the backend the test ran on (usually SQLite in-memory, followed by "only SQLite was run"), and the OS for CLI and agent findings. Do not predict other backends. |
+| **Logs / Evidence** | Only evidence beyond the test output, such as a server log line or the database state. Otherwise one line: "None beyond the failing test". |
 | **Suggested Fix** | The change at the layer where the invariant belongs, plus the guardrail that stops the next sibling (a shared helper or type, a single chokepoint, a test over every path), naming the siblings it covers. End with: the failing test becomes the regression test; it passes after the fix and fails if the fix is reverted. |
-| **History** | From `git log -L` / blame on full history: the introducing commit and PR, what that change was doing, why the defect slipped in, later commits that kept it, and closed issues that fixed a narrower sibling (e.g. "#1440 fixed the same gap in `POST /logout` but not `/oauth/revoke`"). |
+| **History** | One or two lines, from `git log -L` / blame on full history: the introducing PR, and a closed issue that fixed a narrower sibling if there is one (e.g. "#1440 fixed the same gap in `POST /logout` but not `/oauth/revoke`"). A regression claim ("the old code accepted this") needs a run against the older commit. The full blame trail stays in the run record. |
 
 ## A class issue
 
@@ -55,7 +60,9 @@ Same template, with these differences:
 
 - **Summary** names the one invariant every site breaks and where it is
   stated, the site count, and the worst site's impact first.
-- **Affected sites** lists every site.
+- **Affected sites** lists every site, and every site listed has its own
+  proof under Failing test. A site with the same shape but no proof is left
+  out and recorded as not proven.
 - **Failing test** has one subsection per site (`### <site>`), each with its own test,
   command and output. Several sites may share one test file.
 - **Code with the Bug** has one excerpt per site.

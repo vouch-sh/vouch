@@ -181,6 +181,14 @@ queue on Cargo's lock anyway). Give each the hypothesis, the recorded SHA, the
 Each prover returns: id, verdict (`proven` / `not proven` / `disproven`), the
 test text, the assertion output, and the seed file:line.
 
+**Every site needs its own proof.** A sibling with "the same shape" as a
+proven site is a new hypothesis, not a finding. Give it its own prover, or its
+own case in the same test file, before it may appear in an issue. The same
+goes for any other claim an issue makes about behavior: "the sibling API
+refuses this", "the old code accepted it, so this is a regression", "the
+compound form is also broken". Each is proven by a run (a comparison test
+that passes is fine) or it is left out of the issue.
+
 **Live server.** Some hypotheses are proven most directly against a running
 server: a real TLS client against the mTLS listener, a row state that no
 public API produces (a legacy duplicate, a corrupted document), or a race set
@@ -282,7 +290,28 @@ paste the test into the named path, run the named command, and see the named
 failure. Every issue uses the repository's template,
 `.github/ISSUE_TEMPLATE/bug_report.md`, the same one people file with.
 `references/issue-template.md` says how to fill each section from the run's
-evidence. A bug hunt fills every optional section.
+evidence.
+
+**Keep each issue on topic and short.** A reader should know what is broken,
+where, and how bad it is within the first screen. The first bug-hunt run
+filed issues of 300 to 1000 lines, which is too long.
+
+- One issue covers one defect, or one class. A second defect found on the
+  same path gets its own issue (cross-linked), not a section in this one.
+- The Summary is at most five bullets of one or two sentences each. Say a
+  fact once and do not repeat it in Expected, Actual and Logs.
+- Keep only what the reader needs to reproduce and fix the bug: the failing
+  test, the smallest code excerpt, the one spec sentence that decides the
+  behavior, and the introducing PR. Leave out narrative, background on how
+  the run worked, and every code path that was checked and found fine.
+- Trim test output to the failing assertion and the result line. Drop the
+  scaffolding output, backtrace notes and repeated `failures:` blocks.
+- History is one or two lines: the introducing PR, plus a closed sibling fix
+  if there is one. The full blame trail stays in the run record.
+- Leave an optional template section out, or write one line, when it adds
+  nothing.
+- Aim for under about 150 lines, not counting the test code. A class issue
+  may be longer only because it lists more sites.
 
 ### Decide the grouping
 
@@ -320,6 +349,23 @@ line. Checks before a draft is final:
   spec outranks the decision.
 - No internal review labels (CLAUDE.md "What NOT to Do" #11). Run
   `rg -n '\b([A-Z]{1,4}[0-9]{1,2}|GAP[0-9]+)\b'` over the drafts.
+- **No unproven claims.** An issue states only what a run showed, what the
+  code at `<sha>` literally says, and quotes from `specs/`. Prove a claim or
+  drop it; never file it with an "unproven", "untested" or "from reading the
+  code" label. Unproven leads go in the run record's not-proven list, not in
+  the issue. That covers sibling sites, the behavior of a sibling path used
+  as the "right way" comparison, regression claims about older code,
+  predictions about backends that were not run ("expected on PostgreSQL",
+  "backend-independent"; write "only SQLite was run"), and claims about
+  external services (what GitHub or an IdP would do). Sweep before filing:
+
+  ```bash
+  rg -n -i 'unproven|untested|not tested|not proven|not verified|not run|by inspection|reading the code|expected to behave|backend-independent|fails today' \
+    .local/bug-hunt-<YYYY-MM-DD>/issues/
+  ```
+
+  Each hit is either proven now or deleted. A hit that only states a limit of
+  the run ("only SQLite was run") may stay.
 
 ### File
 
@@ -336,6 +382,39 @@ gh issue create --repo <owner>/<repo> --title "<first line>" \
 `agent`, per `.claude/rules/commits-and-issues.md`. Record each issue number
 next to its finding in `.local/bug-hunt-<YYYY-MM-DD>.md`. Future runs match
 new hypotheses against these issues in step 5's dedup.
+
+File from the main session, one issue at a time, not from subagents. An agent
+that is stopped partway through a write leaves a truncated issue behind.
+
+**The tracker tooling rewrites some bodies.** The GitHub MCP `issue_write`
+tool has been seen to change these, even inside code blocks:
+
+- It drops an `!` directly before `[`, so `vec![..]` becomes `vec[..]` and
+  `#![expect(..)]` becomes `#[expect(..)]`. Keep a tracker-safe copy of each
+  draft (`issues/safe/`) that writes `vec! [..]` and `#! [..]`. Rust accepts
+  the spaced form. Add this note once, at the top of the Failing test
+  section:
+
+  > Note: in the code below, macro calls and inner attributes are written with a space, as `vec! [..]` and `#! [..]`. The issue tracker's tooling removes an exclamation mark that directly precedes an opening square bracket. The spaced form compiles identically.
+
+- It escapes `[x]:<y>` link-definition shapes inside inline code.
+- It wraps a long URL that is part of an unbroken run of text inside a code
+  block. Elide such a URL (`"…"`) and say so under the block.
+
+So **verify every posted body**. Fetch it back and diff it against the safe
+draft (body only, from line 4):
+
+```bash
+curl -sS https://api.github.com/repos/<owner>/<repo>/issues/<n> \
+  | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["body"])' > posted.txt
+diff <(tail -n +4 .local/bug-hunt-<date>/issues/safe/<file>.md) <(cat posted.txt; echo) && echo IDENTICAL
+```
+
+The unauthenticated API can serve the old body for a minute after an update.
+Re-fetch before deciding a difference is real. On a real difference, fix the
+safe draft and update the issue in place, then diff again. Also scan each safe
+draft for adjacent code fences (a copied output block that kept its own
+fences), which break the rendering.
 
 ## Step 7: Clean up
 
