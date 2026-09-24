@@ -322,9 +322,16 @@ pub(crate) async fn exchange_fido2_assertion(
                 },
             )
             .await
-            .map_err(|e| {
-                tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
+            .map_err(|e| match e {
+                ServiceError::NotFound(_) | ServiceError::Forbidden(_) => {
+                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
+                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
+                }
+                // A storage fault says nothing about the grant, so it stays a 500.
+                e => {
+                    tracing::error!("FIDO2 assertion grant: authenticator lookup failed: {e}");
+                    e
+                }
             })
         },
     )?;

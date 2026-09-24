@@ -624,7 +624,7 @@ pub(crate) async fn browser_login_complete(
                 crate::error::ServiceError::NotFound(entity) => {
                     format!("{entity}_not_found")
                 }
-                crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
+                crate::error::ServiceError::Forbidden(reason) => (*reason).to_string(),
                 _ => "lookup_error".to_string(),
             };
             // Credential lookup failed — no user row was loaded, so no email.
@@ -637,12 +637,18 @@ pub(crate) async fn browser_login_complete(
                 &reason,
             )
             .await;
-            // Return generic error to prevent credential enumeration
-            return Err(ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "auth_failed",
-                Tr::new("login-error-auth-failed").to_string(),
-            ));
+            return Err(match e {
+                // Return generic error to prevent credential enumeration
+                ServiceError::NotFound(_) | ServiceError::Forbidden(_) => ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "auth_failed",
+                    Tr::new("login-error-auth-failed").to_string(),
+                ),
+                e => {
+                    tracing::error!("Browser login authenticator lookup failed: {e}");
+                    e
+                }
+            });
         }
     };
 
@@ -1713,35 +1719,25 @@ mod tests {
         assert_rejected_with_state_intact(&credential_id, &foreign, "invalid_input").await;
     }
 
-    #[tokio::test]
-    async fn test_login_failed_audit_event_is_org_visible() {
-        // Browser login audit events were inserted with a `None` email,
-        // leaving `email_domain`/`email_hmac` NULL — invisible to org-scoped
-        // audit queries, whose domain `IN` filter never matches NULL. Drive a
-        // real signature-verification failure through the endpoint and assert
-        // the resulting login_failed row is found by a domain-scoped query.
-        let (app, state) = crate::test_utils::test_app().await;
+    /// Register an authenticator for `user_id` and return its credential ID.
+    async fn register_credential(state: &crate::AppState, user_id: &str) -> Vec<u8> {
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, user_id).await;
+        crate::db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("load authenticator")
+            .expect("authenticator exists")
+            .credential_id
+    }
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "audit-event@example.com").await;
-        let credential_id: Vec<u8> = b"browser-login-audit-cred".to_vec();
-        crate::db::create_authenticator(
-            &state.store,
-            &crate::db::CreateAuthenticatorParams {
-                user_id: &user.id,
-                name: "Test Key",
-                credential_id: &credential_id,
-                public_key: &[0u8; 32],
-                aaguid: None,
-                user_handle: Some(user.id.as_bytes()),
-                attestation_verified: false,
-                counter: 0,
-            },
-        )
-        .await
-        .expect("create authenticator");
-
-        // Fresh (unconsumed) state JWT.
+    /// POST `/login/webauthn/complete` for `credential_id` with a fresh state
+    /// token and `user_id` as the user handle. The signature is zeros, so a
+    /// request that reaches verification fails it.
+    async fn post_complete(
+        app: &axum::Router,
+        state: &crate::AppState,
+        user_id: &str,
+        credential_id: &[u8],
+    ) -> (StatusCode, String) {
         let now = jiff::Timestamp::now();
         let auth_state = BrowserAuthenticationState {
             challenge: vec![0u8; 32],
@@ -1755,17 +1751,17 @@ mod tests {
             .await
             .expect("encode auth state");
 
-        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let user_uuid = Uuid::parse_str(user_id).expect("user id is a uuid");
         let client_data = serde_json::json!({
             "origin": state.config().base_url,
             "type": "webauthn.get",
         })
         .to_string();
 
-        let enc = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": enc(&credential_id),
+            "credential_id": enc(credential_id),
             "authenticator_data": enc(&[0u8; 37]),
             "client_data_json": enc(client_data.as_bytes()),
             "signature": enc(&[0u8; 64]),
@@ -1773,13 +1769,53 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
-            &app,
+        crate::test_utils::http_post_json(
+            app,
             "/login/webauthn/complete",
             &body,
             &[("Origin", state.config().base_url.as_str())],
         )
-        .await;
+        .await
+    }
+
+    /// The `failure_reason` of each `login_failed` audit event for `user_id`.
+    async fn login_failure_reasons(state: &crate::AppState, user_id: &str) -> Vec<String> {
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let mut reasons = Vec::new();
+        for event in events {
+            let data: serde_json::Value =
+                serde_json::from_str(&event.data).expect("event data JSON");
+            let reason = data
+                .get("failure_reason")
+                .and_then(serde_json::Value::as_str)
+                .expect("failure_reason is a string");
+            reasons.push(reason.to_string());
+        }
+        reasons
+    }
+
+    #[tokio::test]
+    async fn test_login_failed_audit_event_is_org_visible() {
+        // Browser login audit events were inserted with a `None` email,
+        // leaving `email_domain`/`email_hmac` NULL — invisible to org-scoped
+        // audit queries, whose domain `IN` filter never matches NULL. Drive a
+        // real signature-verification failure through the endpoint and assert
+        // the resulting login_failed row is found by a domain-scoped query.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "audit-event@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -1806,6 +1842,47 @@ mod tests {
         );
         let event = events.first().expect("one event");
         assert_eq!(event.email_domain.as_deref(), Some("example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_lookup_storage_fault_is_server_error() {
+        let (app, state) = crate::test_utils::test_app().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "lookup-fault@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+        crate::test_utils::corrupt_document(&state.store, &user.id).await;
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
+        assert_eq!(
+            login_failure_reasons(&state, &user.id).await,
+            ["lookup_error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_deactivated_user_is_audited_as_deactivated() {
+        use crate::db::documents::user::UserDoc;
+
+        let (app, state) = crate::test_utils::test_app().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "lookup-inactive@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+        state
+            .store
+            .modify::<UserDoc, _>(&user.id, |d| d.active = false)
+            .await
+            .expect("deactivate user");
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
+        assert!(resp_body.contains("auth_failed"), "{resp_body}");
+        assert_eq!(
+            login_failure_reasons(&state, &user.id).await,
+            ["user_deactivated"]
+        );
     }
 
     // ── finalize_login_session audit ordering ──────────────────────────────
