@@ -524,10 +524,8 @@ pub async fn delete_user(
         store.run_delete_test_hook(user_id).await;
 
         // Return `false` when the user document is missing so callers can
-        // surface a 404 and skip the audit event. `tx.delete` returns
-        // `Ok(())` regardless of whether anything was removed, so this
-        // existence check is the only signal that the user was already
-        // gone. Mirrors `delete_scim_group` / `delete_custom_policy`.
+        // surface a 404 and skip the audit event. A concurrent delete that
+        // commits after this read is caught by `tx.delete`'s row count below.
         let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
@@ -651,10 +649,10 @@ pub async fn delete_user(
         }
 
         // 7. Delete the user
-        tx.delete(user_id).await?;
+        let removed = tx.delete(user_id).await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(removed)
     })
 }
 
@@ -759,29 +757,22 @@ pub async fn update_user_github_identity(
 pub enum RefreshOutcome {
     /// The rotated refresh token was persisted.
     Written,
-    /// The write was skipped because the stored `github_id` no longer
-    /// matches the value the caller captured before the
-    /// access-token refresh round-trip — a concurrent re-link to a
-    /// different GitHub account committed during that window. The
-    /// rotated token belongs to the pre-relink account and would clobber
-    /// the re-link's refresh token, so the conditional write refuses to
-    /// commit; the doc keeps the new account's full identity intact
-    /// (`github_id`, `github_login`, and `github_refresh_token` all
-    /// belonging to the re-link).
-    SkippedIdentityChanged,
+    /// The write was skipped because the stored link no longer matches
+    /// the [`GitHubLink`] the caller read before the refresh round-trip.
+    /// A re-link, a revocation that cleared the token, or a concurrent
+    /// refresh committed during that window, so the rotated token must
+    /// not land: it would replace the re-link's token, restore a revoked
+    /// credential, or overwrite a newer rotation.
+    SkippedLinkChanged,
 }
 
 /// A user's stored GitHub link state, captured from a single doc snapshot.
 ///
 /// `github_id` and `github_refresh_token` are read together — not via
 /// two separate queries — so they describe the same account at the same
-/// moment. The access-token refresh path uses `github_id` as the
-/// "expected identity" for [`update_user_github_refresh_token`]'s
-/// conditional write; if the two fields were read in separate queries, a
-/// concurrent re-link could land between them and the caller would
-/// capture the new `github_id` alongside the *old* refresh token,
-/// defeating the guard. Bundling them into a single `store.get` closes
-/// the last split-snapshot race in the refresh path.
+/// moment. The access-token refresh path passes this snapshot to
+/// [`update_user_github_refresh_token`], whose conditional write lands only
+/// while the stored link still matches it.
 ///
 /// `None` is returned when the user document does not exist. The inner
 /// `Option`s cover users with no GitHub link at all, and — for
@@ -818,30 +809,19 @@ pub async fn get_user_github_link(
     }))
 }
 
-/// Update only a user's GitHub refresh token, conditioned on the stored
-/// GitHub identity not having changed since the caller read it.
+/// Update only a user's GitHub refresh token, conditioned on the stored link
+/// being the one the caller refreshed.
 ///
-/// Used by the access-token refresh path, which has no reason to rewrite
-/// `github_id`/`github_login`: those fields are already in the doc, and
-/// re-writing them from a value captured before the OCC window would
-/// silently revert a concurrent re-link to a different GitHub account
-/// (the failure mode this function's predecessor introduced). Touching
-/// only the refresh token lets a concurrent `update_user_github_identity`
-/// (the linking path) survive naturally across the OCC retry.
+/// `read` is the [`GitHubLink`] the caller took from [`get_user_github_link`]
+/// before the `refresh_oauth_token` round-trip. The closure rotates the stored
+/// token only when the doc still holds the same `github_id` and the same
+/// refresh token. Anything that committed during the round-trip changes one of
+/// them: a re-link replaces both, revocation clears the token (and keeps
+/// `github_id`), and a concurrent refresh rotates the token. Each ends as
+/// [`RefreshOutcome::SkippedLinkChanged`] without committing.
 ///
-/// `expected_github_id` is the `github_id` the caller read alongside
-/// the refresh token — i.e. via [`get_user_github_link`] — *before* the
-/// `refresh_oauth_token` API round-trip. The closure rotates the stored
-/// token only when the doc's current `github_id` still matches it. When
-/// a concurrent re-link commits during that round-trip, the doc's
-/// `github_id` has changed by the time the closure runs; the conditional
-/// then refuses to overwrite the re-link's refresh token with the old
-/// account's rotated token, returns [`RefreshOutcome::SkippedIdentityChanged`]
-/// without committing, and leaves the new account's full identity intact.
-///
-/// Both `Transition::Applied` and `Transition::Rejected` map to a
-/// [`RefreshOutcome`] — the function never surfaces a precondition
-/// mismatch as an error, only a missing user or a database failure.
+/// Only `github_refresh_token` is written, so a concurrent re-link's
+/// `github_id`/`github_login` survive the OCC retry.
 ///
 /// A missing user is reported as an error (the refresh path had a stored
 /// token to rotate, so the user must exist).
@@ -849,15 +829,27 @@ pub async fn update_user_github_refresh_token(
     store: &DocumentStore,
     user_id: &str,
     new_refresh_token: &str,
-    expected_github_id: Option<i64>,
+    read: &GitHubLink,
 ) -> Result<RefreshOutcome> {
+    use secrecy::ExposeSecret;
+    use subtle::ConstantTimeEq;
+
     let outcome = store
         .transition::<UserDoc, RefreshOutcome, RefreshOutcome, _>(user_id, |data| {
-            if data.github_id == expected_github_id {
+            let same_token = match (&data.github_refresh_token, &read.github_refresh_token) {
+                (Some(stored), Some(refreshed)) => bool::from(
+                    stored
+                        .expose_secret()
+                        .as_bytes()
+                        .ct_eq(refreshed.expose_secret().as_bytes()),
+                ),
+                (Some(_) | None, None) | (None, Some(_)) => false,
+            };
+            if same_token && data.github_id == read.github_id {
                 data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
                 Ok(RefreshOutcome::Written)
             } else {
-                Err(RefreshOutcome::SkippedIdentityChanged)
+                Err(RefreshOutcome::SkippedLinkChanged)
             }
         })
         .await?;

@@ -9,7 +9,7 @@ use super::documents::oauth::{
     AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
     RegistrationSource, TokenEndpointAuthMethod,
 };
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
 use crate::crypto::alg::JwsAlgorithm;
 use crate::error::ServiceError;
 use anyhow::Result;
@@ -1833,11 +1833,19 @@ pub struct UpdateClientRegistrationParams<'a> {
 /// `dpop_bound_access_tokens` / `tls_client_certificate_bound_access_tokens`
 /// pair that derives it — are preserved; the caller has already refused any
 /// request that tried to change them.
+///
+/// `presented_token_hash` is the hash of the registration access token that
+/// authorized the request. The write re-checks it against the stored hash, and
+/// requires the client to be active: a concurrent PUT that rotated the token,
+/// or a DELETE that consumed it, commits between the caller's verification and
+/// this write. RFC 7592 §2.2 requires an error for a token that is "not
+/// valid", so the write returns `Ok(None)` and changes nothing.
 pub async fn update_oauth_client_registration(
     store: &DocumentStore,
     id: &str,
+    presented_token_hash: &str,
     params: &UpdateClientRegistrationParams<'_>,
-) -> Result<OAuthClient> {
+) -> Result<Option<OAuthClient>> {
     // Check whether jwks_uri is changing BEFORE modifying the parent doc so we
     // can delete the stale cache first. A reader that races between the cache
     // delete and the parent update will re-fetch (safe). A reader that sees the
@@ -1855,8 +1863,11 @@ pub async fn update_oauth_client_registration(
         super::jwks_cache::delete_jwks_cache(store, id).await?;
     }
 
-    store
-        .modify::<OAuthClientDoc, _>(id, |data| {
+    let outcome = store
+        .transition::<OAuthClientDoc, (), (), _>(id, |data| {
+            if !data.active || !registration_token_is(data, presented_token_hash) {
+                return Err(());
+            }
             data.redirect_uris = params.redirect_uris.to_vec();
             if let Some(gt) = params.grant_types {
                 data.grant_types = Some(gt.to_vec());
@@ -1891,15 +1902,52 @@ pub async fn update_oauth_client_registration(
             data.tls_client_auth_san_uri = params.tls_client_auth_san_uri.map(String::from);
             data.tls_client_auth_san_ip = params.tls_client_auth_san_ip.map(String::from);
             data.tls_client_auth_san_email = params.tls_client_auth_san_email.map(String::from);
+            Ok(())
         })
         .await?;
+    match outcome {
+        Transition::Applied(()) => {}
+        Transition::Rejected(()) | Transition::NotFound => return Ok(None),
+    }
 
     let updated = store
         .get::<OAuthClientDoc>(id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Client not found after update"))?;
 
-    Ok(OAuthClient::from(updated))
+    Ok(Some(OAuthClient::from(updated)))
+}
+
+/// Whether `data` holds `token_hash` as its registration access token.
+fn registration_token_is(data: &OAuthClientDoc, token_hash: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    data.registration_access_token_hash
+        .as_deref()
+        .is_some_and(|stored| bool::from(stored.as_bytes().ct_eq(token_hash.as_bytes())))
+}
+
+/// Consume a client's registration access token for an RFC 7592 DELETE.
+///
+/// Clears the stored hash only while the client is active and still holds
+/// `token_hash`. Of concurrent DELETEs, and of a DELETE racing a PUT that
+/// rotates the token, exactly one caller sees `true`; the rest hold a token
+/// that is no longer valid. The caller deletes the client only on `true`.
+pub async fn consume_registration_access_token(
+    store: &DocumentStore,
+    id: &str,
+    token_hash: &str,
+) -> Result<bool> {
+    let outcome = store
+        .transition::<OAuthClientDoc, (), (), _>(id, |data| {
+            if !data.active || !registration_token_is(data, token_hash) {
+                return Err(());
+            }
+            data.registration_access_token_hash = None;
+            Ok(())
+        })
+        .await?;
+    Ok(matches!(outcome, Transition::Applied(())))
 }
 
 /// Revoke whichever client holds `token_hash` as its registration access token.

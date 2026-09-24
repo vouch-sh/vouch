@@ -156,7 +156,8 @@ pub async fn validate_and_consume_signature_nonce(
 /// Delete a DPoP nonce, for tests that need the server to have forgotten one.
 #[cfg(test)]
 pub async fn delete_dpop_nonce(store: &DocumentStore, nonce: &str) -> Result<()> {
-    store.delete(&deterministic_dpop_nonce_id(nonce)).await
+    store.delete(&deterministic_dpop_nonce_id(nonce)).await?;
+    Ok(())
 }
 
 /// Delete expired signature nonces. Returns count deleted.

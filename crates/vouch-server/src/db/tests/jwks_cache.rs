@@ -42,7 +42,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             software_id: None,
             software_version: None,
             registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
+            registration_access_token_hash: Some("presented-hash"),
             registration_metadata: None,
             id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
@@ -79,6 +79,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
     update_oauth_client_registration(
         &store,
         &client.id,
+        "presented-hash",
         &UpdateClientRegistrationParams {
             redirect_uris: &[],
             grant_types: None,
@@ -107,7 +108,8 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
         },
     )
     .await
-    .expect("update_oauth_client_registration failed");
+    .expect("update_oauth_client_registration failed")
+    .expect("the presented token is current");
 
     let cache = get_jwks_cache(&store, &client.id)
         .await

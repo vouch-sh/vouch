@@ -403,6 +403,14 @@ pub struct DocumentStore {
     /// [`Self::set_update_by_index_stale_once`].
     #[cfg(test)]
     update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Test-only seam for [`StoreTransaction::delete`]: ids whose document
+    /// row is removed once, inside the transaction, just before the delete
+    /// statement runs. To the transaction that is exactly what a concurrent
+    /// delete committed after its existence check looks like on PostgreSQL
+    /// READ COMMITTED. Drained on first use. Compiled out of non-test builds.
+    /// See [`Self::set_delete_vanished_once`].
+    #[cfg(test)]
+    delete_vanished_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Test-only fault-injection budget for [`DocumentStore::delete_by_index`]:
     /// the next `n` `delete_by_index` calls succeed (each consuming one
     /// unit), after which every subsequent `delete_by_index` returns a
@@ -548,6 +556,8 @@ impl DocumentStore {
             #[cfg(test)]
             update_by_index_stale_once: None,
             #[cfg(test)]
+            delete_vanished_once: None,
+            #[cfg(test)]
             delete_by_index_remaining_successes: None,
             #[cfg(test)]
             find_remaining_successes: None,
@@ -562,6 +572,14 @@ impl DocumentStore {
     #[cfg(test)]
     pub(crate) fn set_update_by_index_stale_once(&mut self, ids: Vec<String>) {
         self.update_by_index_stale_once = Some(Arc::new(std::sync::Mutex::new(ids)));
+    }
+
+    /// Install the [`StoreTransaction::delete`] vanished-row seam: the next
+    /// transactional delete of each listed id finds the row already gone.
+    /// Consumed on first use. See the field doc for the rationale.
+    #[cfg(test)]
+    pub(crate) fn set_delete_vanished_once(&mut self, ids: Vec<String>) {
+        self.delete_vanished_once = Some(Arc::new(std::sync::Mutex::new(ids)));
     }
 
     /// Install a hook that runs inside `modify` between the read and the CAS.
@@ -880,6 +898,8 @@ impl DocumentStore {
             statement_count: 0,
             #[cfg(test)]
             update_by_index_stale_once: self.update_by_index_stale_once.clone(),
+            #[cfg(test)]
+            delete_vanished_once: self.delete_vanished_once.clone(),
         })
     }
 
@@ -1507,20 +1527,22 @@ impl DocumentStore {
     // Delete
     // ========================================================================
 
-    /// Delete a document by ID (and its index entries).
+    /// Delete a document by ID (and its index entries). Returns whether this
+    /// call removed the document row; `false` when it was already gone.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn delete(&self, id: &str) -> Result<()> {
+    pub async fn delete(&self, id: &str) -> Result<bool> {
         #[cfg(test)]
         {
             self.consume_delete_success_budget()?;
         }
         crate::with_dsql_retry!(async {
             let mut tx = self.begin().await?;
-            tx.delete(id).await?;
-            tx.commit().await
+            let removed = tx.delete(id).await?;
+            tx.commit().await?;
+            Ok(removed)
         })
     }
 
@@ -1829,6 +1851,10 @@ pub struct StoreTransaction<'a> {
     /// non-test builds.
     #[cfg(test)]
     update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// See [`DocumentStore::set_delete_vanished_once`]. Compiled out of
+    /// non-test builds.
+    #[cfg(test)]
+    delete_vanished_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl StoreTransaction<'_> {
@@ -2088,12 +2114,17 @@ impl StoreTransaction<'_> {
     // ========================================================================
 
     /// Delete a document by ID (and its index entries) within this
-    /// transaction.
+    /// transaction. Returns whether this statement removed the document row.
+    ///
+    /// The row count is the only reliable "I deleted it" signal: an earlier
+    /// `get` in the same transaction does not stop a concurrent transaction
+    /// from deleting the row first under READ COMMITTED, and the losing
+    /// DELETE then affects no rows without erroring.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn delete(&mut self, id: &str) -> Result<()> {
+    pub async fn delete(&mut self, id: &str) -> Result<bool> {
         let delete_idx_stmt = Query::delete()
             .from_table(DocumentIndexes::Table)
             .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
@@ -2106,9 +2137,27 @@ impl StoreTransaction<'_> {
             .and_where(Expr::col(Documents::Id).eq(id))
             .to_owned();
 
-        crate::tx_execute!(self.tx, delete_doc_stmt)?;
+        // Test-only: remove the row first, as a concurrent delete would.
+        // See `DocumentStore::set_delete_vanished_once`.
+        #[cfg(test)]
+        {
+            let vanished = self
+                .delete_vanished_once
+                .as_ref()
+                .and_then(|list| {
+                    let mut ids = list.lock().ok()?;
+                    let pos = ids.iter().position(|v| v == id)?;
+                    Some(ids.remove(pos))
+                })
+                .is_some();
+            if vanished {
+                crate::tx_execute!(self.tx, delete_doc_stmt.clone())?;
+            }
+        }
 
-        Ok(())
+        let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     /// Atomically delete a document by ID if it exists and is not expired.

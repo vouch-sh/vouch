@@ -617,6 +617,14 @@ async fn test_update_scim_group_wrong_org_returns_false() {
 
 // ---- update_custom_policy ----
 
+/// Seed the organization row `create_custom_policy` counts against.
+async fn seed_org(store: &DocumentStore, org_id: &str) {
+    store
+        .insert_with_id(org_id, &test_org_doc(&format!("{org_id}.example")))
+        .await
+        .expect("seed org");
+}
+
 /// After `update_custom_policy`, only the updated fields change and version increments.
 #[tokio::test]
 async fn test_update_custom_policy_only_intended_fields_change() {
@@ -624,6 +632,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
 
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-policy-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -689,6 +698,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
 async fn test_update_custom_policy_field_update_keep() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-keep-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -730,6 +740,7 @@ async fn test_update_custom_policy_field_update_keep() {
 async fn test_update_custom_policy_field_update_clear() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-clear-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -770,6 +781,7 @@ async fn test_update_custom_policy_field_update_clear() {
 async fn test_update_custom_policy_wrong_org_returns_none() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "real-org").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -915,6 +927,7 @@ async fn test_update_custom_policy_concurrent_org_change_returns_none() {
     use crate::db::documents::posture_policy::CustomPosturePolicyDoc;
 
     let (store, _audit) = test_db().await;
+    seed_org(&store, "org-occ-race").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -1202,11 +1215,13 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
     let writer = store.clone();
     let mut hooked = store.clone();
     let new_hash_for_hook = new_hash.clone();
+    let old_hash_for_hook = old_hash.clone();
     let redirect_uris_for_hook = redirect_uris.clone();
     let victim_id_for_hook = victim_id.clone();
     hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
         let writer = writer.clone();
         let new_hash = new_hash_for_hook.clone();
+        let old_hash = old_hash_for_hook.clone();
         let redirect_uris = redirect_uris_for_hook.clone();
         let victim_id = victim_id_for_hook.clone();
         Box::pin(async move {
@@ -1222,6 +1237,7 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
             update_oauth_client_registration(
                 &writer,
                 &victim_id,
+                &old_hash,
                 &UpdateClientRegistrationParams {
                     redirect_uris: &redirect_uris,
                     grant_types: None,
@@ -1248,6 +1264,7 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
                 },
             )
             .await
+            .expect("victim PUT must not error")
             .expect("victim PUT must rotate the token");
         })
     }));

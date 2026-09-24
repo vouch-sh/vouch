@@ -102,31 +102,24 @@ impl GitHubService<'_> {
         user_id: &str,
     ) -> GitHubResult<Option<SecretString>> {
         // Read the GitHub identity (id + refresh token) from a single doc
-        // snapshot. Reading them in two queries would let a concurrent
-        // re-link land between the reads — capturing the new `github_id`
-        // alongside the old refresh token — which would defeat the
-        // identity check the conditional write below performs.
-        let linked = match db::get_user_github_link(self.store, user_id)
+        // snapshot. The conditional write below compares the stored link
+        // against this snapshot, so both fields must describe one moment.
+        let Some(linked) = db::get_user_github_link(self.store, user_id)
             .await
             .map_err(GitHubError::Database)?
-        {
-            Some(linked) => linked,
-            None => return Ok(None),
+        else {
+            return Ok(None);
         };
-        let refresh_token = match linked.github_refresh_token {
-            Some(token) => token,
-            None => return Ok(None),
+        let Some(refresh_token) = linked.github_refresh_token.as_ref() else {
+            return Ok(None);
         };
-        let expected_github_id = linked.github_id;
 
         let app = self.require_app()?;
         let client_id = self.oauth_client_id()?;
         let client_secret = self.oauth_client_secret()?;
 
-        // Refresh the token. RACE WINDOW: a concurrent re-link to a
-        // different GitHub account (`update_user_github_identity`) can
-        // commit during this `refresh_oauth_token` round-trip and replace
-        // both `github_id` and `github_refresh_token` in the doc.
+        // Refresh the token. RACE WINDOW: a re-link, a revocation, or
+        // another refresh can commit during this round-trip.
         let token_response = refresh_oauth_token(
             app.http_client(),
             client_id,
@@ -143,30 +136,22 @@ impl GitHubService<'_> {
         // failures so they surface instead of silently discarding the only
         // copy of the new token.
         if let Some(new_refresh_token) = &token_response.refresh_token {
-            // Write only the refresh token, and only when the stored
-            // `github_id` still matches the one captured above. Re-deriving
-            // `github_id`/`github_login` from a read captured before the OCC
-            // window and re-applying them on retry would silently revert a
-            // concurrent re-link; unconditionally overwriting the refresh
-            // token would clobber the re-link's token with the old
-            // account's rotated one. The conditional write closes both
-            // failure modes — see `update_user_github_refresh_token`.
+            // Write only the refresh token, and only when the stored link is
+            // still the one refreshed above — see
+            // `update_user_github_refresh_token`.
             let outcome = db::update_user_github_refresh_token(
                 self.store,
                 user_id,
                 new_refresh_token.expose_secret(),
-                expected_github_id,
+                &linked,
             )
             .await
             .map_err(GitHubError::Database)?;
-            if matches!(outcome, db::RefreshOutcome::SkippedIdentityChanged) {
-                // A concurrent re-link committed during the refresh
-                // round-trip: the rotated token belongs to the pre-relink
-                // account, so the write was skipped to preserve the new
-                // account's refresh token. There is no usable access token
-                // for the doc's current identity; signal the caller to
-                // route recovery the same way the missing-refresh-token
-                // branch does.
+            if outcome == db::RefreshOutcome::SkippedLinkChanged {
+                // The link changed during the round-trip: re-linked, revoked,
+                // or rotated by another refresh. There is no usable access
+                // token for the doc's current state; route recovery the same
+                // way the missing-refresh-token branch does.
                 return Ok(None);
             }
         }

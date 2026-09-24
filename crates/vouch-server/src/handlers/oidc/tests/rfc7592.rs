@@ -3329,7 +3329,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
     // The victim's internal doc id is only known after registration, which
     // runs after the app (and hook) are built. The hook gates on this slot so
     // it only fires for the victim doc, and only while the slot is set.
-    let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
     let slot_for_hook = Arc::clone(&slot);
     let new_hash_for_hook = new_hash.clone();
     let redirect_uris_for_hook = redirect_uris.clone();
@@ -3351,8 +3351,10 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                     return;
                 }
                 // Only rotate the victim doc, and only once the slot is set.
-                let victim = slot.lock().expect("slot lock").clone();
-                if victim.as_deref() != Some(doc_id.as_str()) {
+                let Some((victim, current_hash)) = slot.lock().expect("slot lock").clone() else {
+                    return;
+                };
+                if victim != doc_id {
                     return;
                 }
                 // Run the victim's RFC 7592 PUT (rotating to T_new) inside the
@@ -3364,6 +3366,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                 crate::db::update_oauth_client_registration(
                     &writer,
                     &doc_id,
+                    &current_hash,
                     &crate::db::UpdateClientRegistrationParams {
                         redirect_uris: &redirect_uris,
                         grant_types: None,
@@ -3390,6 +3393,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                     },
                 )
                 .await
+                .expect("hook rotation must not error")
                 .expect("hook rotation must succeed");
             })
         }));
@@ -3406,7 +3410,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
         .expect("lookup")
         .expect("client must exist");
     let victim_id = victim.id.clone();
-    *slot.lock().expect("slot lock") = Some(victim_id.clone());
+    *slot.lock().expect("slot lock") = Some((victim_id.clone(), crate::crypto::hash_token(&t_old)));
 
     // The attacker replays the leaked T_old against a non-existent client_id;
     // the misdirected-token path revokes whichever client holds hash(T_old),
@@ -3834,4 +3838,156 @@ async fn test_rfc7592_put_consistent_auth_code_restatement_unaffected() {
         Some(vec!["authorization_code".to_string()])
     );
     assert_eq!(stored.response_types, Some(vec!["code".to_string()]));
+}
+
+// ========================================================================
+// RFC 7592 §2.2/§2.3: the token is re-checked inside the write
+// ========================================================================
+
+/// An app whose store, on the first write attempt against the armed client
+/// doc, sets that doc's registration access token hash to the armed value
+/// before the write compares versions. It stands in for a concurrent PUT
+/// (`Some(hash)`, a rotation) or DELETE (`None`, a consumed token) that
+/// committed after this request verified its token.
+type ArmedTokenWrite = std::sync::Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+
+async fn app_with_concurrent_token_write() -> (
+    axum::Router,
+    std::sync::Arc<crate::AppState>,
+    ArmedTokenWrite,
+) {
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let armed: ArmedTokenWrite = std::sync::Arc::default();
+    let slot = armed.clone();
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(std::sync::Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let mut guard = slot.lock().expect("slot lock");
+            let fire = attempt == 0 && guard.as_ref().is_some_and(|(id, _)| id == doc_id);
+            let write = if fire { guard.take() } else { None };
+            drop(guard);
+            Box::pin(async move {
+                let Some((doc_id, hash)) = write else {
+                    return;
+                };
+                writer
+                    .modify::<OAuthClientDoc, _>(&doc_id, |d| {
+                        d.registration_access_token_hash.clone_from(&hash);
+                    })
+                    .await
+                    .expect("concurrent token write");
+            })
+        }));
+    })
+    .await;
+    (app, state, armed)
+}
+
+async fn arm(
+    state: &crate::AppState,
+    armed: &ArmedTokenWrite,
+    client_id: &str,
+    hash: Option<String>,
+) {
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    *armed.lock().expect("slot lock") = Some((client.id, hash));
+}
+
+// RFC 7592 §2.2: "If the registration access token used to make this request
+// is not valid, the server MUST respond with an error". A PUT whose token was
+// rotated by a concurrent PUT after verification must not overwrite that
+// rotation.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_token_rotated_before_write() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let body = serde_json::json!({ "redirect_uris": ["https://example.com/callback"] });
+
+    // Control: an un-raced PUT succeeds.
+    let (control_id, control_token) = register_dynamic_client(&app).await;
+    let (status, response) = put_client_config(&app, &control_id, &control_token, &body).await;
+    assert_eq!(status, StatusCode::OK, "control PUT: {response}");
+
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let concurrent = crate::crypto::hash_token("concurrent-rotation");
+    arm(&state, &armed, &client_id, Some(concurrent.clone())).await;
+
+    let (status, response) = put_client_config(&app, &client_id, &token, &body).await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    assert!(response.contains("invalid_token"), "{response}");
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(concurrent.as_str()),
+        "the concurrent rotation must survive"
+    );
+}
+
+// RFC 7592 §2.3 requires the same error for an invalid token on DELETE. A
+// DELETE whose token was rotated after verification must not delete.
+#[tokio::test]
+async fn test_rfc7592_delete_rejects_token_rotated_before_write() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    arm(
+        &state,
+        &armed,
+        &client_id,
+        Some(crate::crypto::hash_token("concurrent-rotation")),
+    )
+    .await;
+
+    let (status, response) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client must not be deleted"
+    );
+}
+
+// Of two DELETEs with one token, only the one that consumes the token deletes
+// and audits; the other finds the token already consumed.
+#[tokio::test]
+async fn test_rfc7592_delete_loses_to_concurrent_delete() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    arm(&state, &armed, &client_id, None).await;
+
+    let (status, response) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(events.is_empty(), "the losing DELETE must not audit");
 }

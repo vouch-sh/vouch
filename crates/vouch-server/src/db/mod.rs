@@ -158,14 +158,15 @@ pub use oauth::{
     MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient, OAuthClientSecret,
     OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain, RedirectUriError,
     UpdateClientRegistrationParams, UpdateOAuthClientParams, client_keys_to_stored,
-    create_oauth_client, create_oauth_client_secret, delete_expired_jwt_assertion_jtis,
-    delete_oauth_client, delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id,
-    get_oauth_client_by_id, get_oauth_client_secret_by_id, get_oauth_client_secrets,
-    get_oauth_clients_for_user, get_oauth_secret_by_hash, get_oauth_usage_stats,
-    is_loopback_redirect_host, is_valid_post_logout_redirect_uri_str, parse_jwks_set,
-    record_oauth_event, resolve_event_org_domain, revoke_all_oauth_client_secrets,
-    revoke_oauth_client_secret, revoke_registration_access_token, store_jwt_assertion_jti,
-    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
+    consume_registration_access_token, create_oauth_client, create_oauth_client_secret,
+    delete_expired_jwt_assertion_jtis, delete_oauth_client,
+    delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id, get_oauth_client_by_id,
+    get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
+    get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
+    is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
+    resolve_event_org_domain, revoke_all_oauth_client_secrets, revoke_oauth_client_secret,
+    revoke_registration_access_token, store_jwt_assertion_jti, update_oauth_client,
+    update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials, validate_redirect_uri,
 };
 
@@ -246,11 +247,12 @@ pub use enrollment::{EnrollUserError, EnrolledUser, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
-    ActivePreconfiguredConfig, CreateCustomPolicyParams, CustomPosturePolicy, FieldUpdate,
-    UpdateCustomPolicyParams, compare_and_set_preconfigured_active, create_custom_policy,
-    create_preconfigured_active, delete_custom_policy, get_active_custom_policies,
-    get_active_preconfigured_slugs, get_custom_policy, get_preconfigured_active_with_version,
-    list_custom_policies, set_preconfigured_active, update_custom_policy,
+    ActivePreconfiguredConfig, CreateCustomPolicyError, CreateCustomPolicyParams,
+    CustomPosturePolicy, FieldUpdate, MAX_CUSTOM_POLICIES, UpdateCustomPolicyParams,
+    compare_and_set_preconfigured_active, create_custom_policy, create_preconfigured_active,
+    delete_custom_policy, get_active_custom_policies, get_active_preconfigured_slugs,
+    get_custom_policy, get_preconfigured_active_with_version, list_custom_policies,
+    set_preconfigured_active, update_custom_policy,
 };
 
 #[cfg(test)]

@@ -1106,12 +1106,12 @@ async fn test_update_user_github_refresh_token_preserves_concurrent_relink() {
     // Refresh-path write: rotated token "r1-rotated" with expected
     // github_id 111 (the pre-relink snapshot the refresh path captured
     // alongside the refresh token).
-    let outcome = update_user_github_refresh_token(&hooked, &user_id, "r1-rotated", Some(111))
+    let outcome = update_user_github_refresh_token(&hooked, &user_id, "r1-rotated", &link_111_r1())
         .await
         .expect("refresh-path write must not error");
 
     assert!(
-        matches!(outcome, RefreshOutcome::SkippedIdentityChanged),
+        matches!(outcome, RefreshOutcome::SkippedLinkChanged),
         "when a concurrent re-link landed the write must skip, got {outcome:?}"
     );
 
@@ -1164,7 +1164,7 @@ async fn test_update_user_github_refresh_token_writes_when_identity_unchanged() 
         .await
         .expect("initial link to account 111");
 
-    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", Some(111))
+    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", &link_111_r1())
         .await
         .expect("refresh write must succeed");
     assert!(
@@ -1227,11 +1227,11 @@ async fn test_update_user_github_refresh_token_skipped_when_relink_already_commi
         .await
         .expect("concurrent relink to account 222");
 
-    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", Some(111))
+    let outcome = update_user_github_refresh_token(&store, &user_id, "r1-rotated", &link_111_r1())
         .await
         .expect("refresh write must not error");
     assert!(
-        matches!(outcome, RefreshOutcome::SkippedIdentityChanged),
+        matches!(outcome, RefreshOutcome::SkippedLinkChanged),
         "must skip the write when the stored identity changed, got {outcome:?}"
     );
 
@@ -1257,15 +1257,116 @@ async fn test_update_user_github_refresh_token_skipped_when_relink_already_commi
 #[tokio::test]
 async fn test_update_user_github_refresh_token_errors_on_missing_user() {
     let (store, _audit) = test_db().await;
-    let err =
-        update_user_github_refresh_token(&store, "no-such-user-id", "rotated-token", Some(111))
-            .await
-            .expect_err("missing user must propagate as an error");
+    let err = update_user_github_refresh_token(
+        &store,
+        "no-such-user-id",
+        "rotated-token",
+        &link_111_r1(),
+    )
+    .await
+    .expect_err("missing user must propagate as an error");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("user not found"),
         "error must mention the missing user, got: {msg}"
     );
+}
+
+/// The link a refresh read before its round-trip: account 111, token "r1".
+fn link_111_r1() -> GitHubLink {
+    GitHubLink {
+        github_id: Some(111),
+        github_refresh_token: Some(secrecy::SecretString::from("r1")),
+    }
+}
+
+/// A refresh in flight when the user's credentials are revoked must not
+/// write its rotated token back. Revocation clears the token and keeps
+/// `github_id`, so an identity-only precondition would pass. The hook runs
+/// the revocation inside the refresh write's OCC window.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_skipped_after_concurrent_revocation() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "refresh-revoked@example.com",
+        None,
+        Some("org-refresh-revoked"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("link account 111");
+
+    let writer = store.clone();
+    let revoke_user_id = user_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let revoke_user_id = revoke_user_id.clone();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            revoke_user_credentials(&writer, &revoke_user_id, Some("deactivation"), None)
+                .await
+                .expect("concurrent revocation");
+        })
+    }));
+
+    let outcome = update_user_github_refresh_token(&hooked, &user_id, "r1-rotated", &link_111_r1())
+        .await
+        .expect("refresh write must not error");
+
+    assert_eq!(outcome, RefreshOutcome::SkippedLinkChanged);
+    let link = get_user_github_link(&store, &user_id)
+        .await
+        .expect("read link")
+        .expect("user exists");
+    assert_eq!(link.github_id, Some(111), "revocation keeps github_id");
+    assert!(
+        link.github_refresh_token.is_none(),
+        "the revoked token must stay withdrawn"
+    );
+}
+
+/// Two refreshes read the same token; the first rotates it. The second's
+/// write must not replace the newer rotation with its own.
+#[tokio::test]
+async fn test_update_user_github_refresh_token_skipped_after_concurrent_rotation() {
+    use secrecy::ExposeSecret;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "refresh-rotated@example.com",
+        None,
+        Some("org-refresh-rotated"),
+        false,
+    )
+    .await
+    .expect("upsert user");
+    update_user_github_identity(&store, &user_id, 111, "g1-user", Some("r1"))
+        .await
+        .expect("link account 111");
+
+    let first = update_user_github_refresh_token(&store, &user_id, "r2-first", &link_111_r1())
+        .await
+        .expect("first refresh write");
+    assert_eq!(first, RefreshOutcome::Written);
+
+    let second = update_user_github_refresh_token(&store, &user_id, "r2-second", &link_111_r1())
+        .await
+        .expect("second refresh write");
+    assert_eq!(second, RefreshOutcome::SkippedLinkChanged);
+    let stored = get_user_github_link(&store, &user_id)
+        .await
+        .expect("read link")
+        .expect("user exists")
+        .github_refresh_token;
+    assert_eq!(stored.as_ref().map(|t| t.expose_secret()), Some("r2-first"));
 }
 
 /// The re-link side of the same invariant, reachable with no race at all.
@@ -2231,4 +2332,225 @@ async fn test_mutual_admin_demote_concurrent() {
         remaining >= 1,
         "at least one admin must survive; results a={result_a:?} b={result_b:?}"
     );
+}
+
+// ---- custom policy cap ----
+
+async fn seed_policy_org(store: &DocumentStore, org_id: &str) {
+    store
+        .insert_with_id(org_id, &test_org_doc(&format!("{org_id}.example")))
+        .await
+        .expect("seed org");
+}
+
+async fn create_policy(
+    store: &DocumentStore,
+    org_id: &str,
+    name: &str,
+) -> std::result::Result<CustomPosturePolicy, CreateCustomPolicyError> {
+    create_custom_policy(
+        store,
+        CreateCustomPolicyParams {
+            name,
+            description: None,
+            policy_text: "true",
+            org_id,
+            builder_spec: None,
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_create_custom_policy_stops_at_cap() {
+    let (store, _audit) = test_db().await;
+    seed_policy_org(&store, "org-policy-cap").await;
+    for i in 0..MAX_CUSTOM_POLICIES {
+        create_policy(&store, "org-policy-cap", &format!("p{i}"))
+            .await
+            .expect("under the cap");
+    }
+
+    let over = create_policy(&store, "org-policy-cap", "one-too-many").await;
+
+    assert!(
+        matches!(over, Err(CreateCustomPolicyError::LimitReached)),
+        "expected LimitReached, got {over:?}"
+    );
+    assert_eq!(
+        list_custom_policies(&store, "org-policy-cap")
+            .await
+            .expect("list")
+            .len(),
+        MAX_CUSTOM_POLICIES
+    );
+}
+
+// The count and the insert share one transaction that version-bumps the org
+// row, so concurrent creators cannot all pass the same count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_create_custom_policy_concurrent_creates_respect_cap() {
+    let (store, _audit) = test_db().await;
+    seed_policy_org(&store, "org-policy-race").await;
+    for i in 0..MAX_CUSTOM_POLICIES.saturating_sub(1) {
+        create_policy(&store, "org-policy-race", &format!("seed{i}"))
+            .await
+            .expect("seed under the cap");
+    }
+
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let store = store.clone();
+        handles.push(tokio::spawn(async move {
+            create_policy(&store, "org-policy-race", &format!("race{i}")).await
+        }));
+    }
+    let mut created = 0;
+    for handle in handles {
+        let result = handle.await.expect("join");
+        assert!(
+            !matches!(result, Err(CreateCustomPolicyError::Other(_))),
+            "unexpected error: {result:?}"
+        );
+        if result.is_ok() {
+            created += 1;
+        }
+    }
+
+    assert_eq!(created, 1, "only one creator may take the last slot");
+    assert_eq!(
+        list_custom_policies(&store, "org-policy-race")
+            .await
+            .expect("list")
+            .len(),
+        MAX_CUSTOM_POLICIES
+    );
+}
+
+#[tokio::test]
+async fn test_create_custom_policy_requires_org() {
+    let (store, _audit) = test_db().await;
+    let result = create_policy(&store, "no-such-org", "orphan").await;
+    assert!(
+        matches!(
+            result,
+            Err(CreateCustomPolicyError::Other(
+                crate::error::ServiceError::NotFound(_)
+            ))
+        ),
+        "expected NotFound, got {result:?}"
+    );
+}
+
+// ---- deletes report only the delete that removed the row ----
+
+/// A store on which `id` is removed by a concurrent delete after the delete's
+/// existence check and before its own delete statement.
+fn store_with_concurrent_delete(store: &DocumentStore, id: &str) -> DocumentStore {
+    let mut hooked = store.clone();
+    hooked.set_delete_vanished_once(vec![id.to_string()]);
+    hooked
+}
+
+#[tokio::test]
+async fn test_delete_custom_policy_loses_to_concurrent_delete() {
+    let (store, _audit) = test_db().await;
+    seed_policy_org(&store, "org-policy-delete").await;
+    let policy = create_policy(&store, "org-policy-delete", "doomed")
+        .await
+        .expect("create");
+
+    let removed = delete_custom_policy(
+        &store_with_concurrent_delete(&store, &policy.id),
+        &policy.id,
+        "org-policy-delete",
+    )
+    .await
+    .expect("delete must not error");
+
+    assert!(!removed, "the losing delete must report nothing removed");
+    assert!(
+        get_custom_policy(&store, &policy.id)
+            .await
+            .expect("get")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_delete_scim_token_loses_to_concurrent_delete() {
+    let (store, _audit) = test_db().await;
+    seed_policy_org(&store, "org-token-delete").await;
+    let token_id = create_scim_token(
+        &store,
+        &CreateScimTokenParams {
+            org_id: "org-token-delete",
+            token_hash: "token-delete-hash",
+            description: None,
+            expires_at: None,
+            scope: ScimScopeSet::default(),
+        },
+    )
+    .await
+    .expect("create token");
+
+    let removed = delete_scim_token(
+        &store_with_concurrent_delete(&store, &token_id),
+        &token_id,
+        "org-token-delete",
+    )
+    .await
+    .expect("delete must not error");
+
+    assert!(!removed, "the losing delete must report nothing removed");
+}
+
+#[tokio::test]
+async fn test_store_delete_reports_whether_it_removed_the_row() {
+    let (store, _audit) = test_db().await;
+    let id = store
+        .insert(&test_org_doc("delete-report.example"))
+        .await
+        .expect("insert")
+        .id;
+
+    assert!(store.delete(&id).await.expect("first delete"));
+    assert!(!store.delete(&id).await.expect("second delete"));
+}
+
+#[tokio::test]
+async fn test_delete_scim_group_loses_to_concurrent_delete() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let group = create_scim_group(&store, TEST_ORG_ID, "Doomed", None, &[])
+        .await
+        .expect("create group");
+
+    let removed = delete_scim_group(
+        &store_with_concurrent_delete(&store, &group.id),
+        &group.id,
+        TEST_ORG_ID,
+    )
+    .await
+    .expect("delete must not error");
+
+    assert!(!removed, "the losing delete must report nothing removed");
+}
+
+#[tokio::test]
+async fn test_delete_user_loses_to_concurrent_delete() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(&store, "doomed@example.com", None, None, false)
+        .await
+        .expect("upsert user");
+
+    let removed = delete_user(
+        &store_with_concurrent_delete(&store, &user_id),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete must not error");
+
+    assert!(!removed, "the losing delete must report nothing removed");
 }
