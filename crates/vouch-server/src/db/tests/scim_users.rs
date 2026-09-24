@@ -94,7 +94,7 @@ async fn test_scim_user_list_and_filter() {
     let (users, _) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"user2@example.com\""),
+        Some(&user_filter("userName eq \"user2@example.com\"")),
         1,
         100,
     )
@@ -142,7 +142,7 @@ async fn test_scim_filter_user_name_eq_is_case_insensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"Alice@Example.com\""),
+        Some(&user_filter("userName eq \"Alice@Example.com\"")),
         1,
         100,
     )
@@ -174,7 +174,7 @@ async fn test_scim_filter_email_eq_is_case_insensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("email eq \"BOB@example.com\""),
+        Some(&user_filter("email eq \"BOB@example.com\"")),
         1,
         100,
     )
@@ -232,7 +232,7 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"Carol@Example.com\""),
+        Some(&user_filter("userName eq \"Carol@Example.com\"")),
         1,
         100,
     )
@@ -248,7 +248,7 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     let (users, total) = list_scim_users(
         &store,
         "other-org",
-        Some("userName eq \"Carol-Other@Example.com\""),
+        Some(&user_filter("userName eq \"Carol-Other@Example.com\"")),
         1,
         100,
     )
@@ -285,7 +285,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "Ext-Case-123""#),
+        Some(&user_filter(r#"externalId eq "Ext-Case-123""#)),
         1,
         100,
     )
@@ -299,7 +299,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "ext-case-123""#),
+        Some(&user_filter(r#"externalId eq "ext-case-123""#)),
         1,
         100,
     )
@@ -336,7 +336,7 @@ async fn test_scim_filter_external_id_co_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "CaseSensitive""#),
+        Some(&user_filter(r#"externalId co "CaseSensitive""#)),
         1,
         100,
     )
@@ -350,7 +350,7 @@ async fn test_scim_filter_external_id_co_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "casesensitive""#),
+        Some(&user_filter(r#"externalId co "casesensitive""#)),
         1,
         100,
     )
@@ -382,10 +382,15 @@ async fn test_scim_filter_user_name_co_remains_case_insensitive() {
     .await
     .expect("Failed to create user");
 
-    let (users, total) =
-        list_scim_users(&store, TEST_ORG_ID, Some(r#"userName co "SWCASE""#), 1, 100)
-            .await
-            .expect("Failed to filter users");
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(&user_filter(r#"userName co "SWCASE""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
     assert_eq!(
         total, 1,
         "userName is caseExact: false; co must stay case-insensitive"
