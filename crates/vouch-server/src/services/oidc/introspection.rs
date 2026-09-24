@@ -305,7 +305,7 @@ pub async fn revoke_token(
     // When we know the user, revoke ALL their sessions (human presence
     // attestation means logout = full logout). M2M tokens, and tokens that
     // couldn't be decoded, fall back to single-token deletion by hash.
-    let revoked = if let Some(ref user_id) = sub
+    let (revoked, deleted_row) = if let Some(ref user_id) = sub
         && !is_m2m
     {
         match db::delete_sessions_for_user(&state.store, user_id).await {
@@ -319,46 +319,85 @@ pub async fn revoke_token(
                             redact_email(email),
                         );
                     }
-                    true
-                } else {
-                    false
                 }
+                (count > 0, None)
             }
             Err(e) => {
                 tracing::warn!("Failed to delete sessions during revocation: {}", e,);
-                false
+                (false, None)
             }
         }
     } else {
         // M2M token, or token that couldn't be decoded — revoke ONLY the
         // named token per RFC 7009 §2.1.
         let token_hash = hash_token(token);
-        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(deleted) => {
-                if deleted {
-                    state.session_cache.invalidate(&token_hash);
+
+        // RFC 7009 §2.1: the server "verifies whether the token was issued to
+        // the client making the revocation request". A token that no longer
+        // decodes (expired, or not a JWT) has no `client_id` claim to check
+        // above, so the session row's `client_id` is checked instead.
+        if decoded.is_none() {
+            match db::find_session_by_token_hash(&state.store, &token_hash).await {
+                Ok(Some(row))
+                    if row
+                        .client_id
+                        .as_deref()
+                        .is_some_and(|issued_to| issued_to != caller_client_id) =>
+                {
+                    return RevocationResult {
+                        revoked: false,
+                        user_email: None,
+                    };
                 }
-                deleted
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to look up session during revocation: {}", e);
+                    return RevocationResult {
+                        revoked: false,
+                        user_email: None,
+                    };
+                }
             }
+        }
+
+        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
+            Ok(Some(row)) => {
+                state.session_cache.invalidate(&token_hash);
+                (true, Some(row))
+            }
+            Ok(None) => (false, None),
             Err(e) => {
                 tracing::warn!("Failed to delete session during revocation: {}", e,);
-                false
+                (false, None)
             }
         }
     };
 
     if revoked {
-        // Best-effort logout audit event
-        if let Some(ref user_id) = sub {
-            let params = db::AuthEventParams {
-                user_id: user_id.clone(),
-                event_type: db::AuthEventType::Logout,
-                success: true,
-                client: client_info,
-                ..Default::default()
+        // The decoded token names the user. A token that no longer decodes is
+        // attributed to the session row it deleted, so the `Logout` audit
+        // event is recorded whenever a row was deleted.
+        let principal = match (sub, deleted_row) {
+            (Some(user_id), _) => Some((user_id, email)),
+            (None, Some(row)) => Some((row.user_id, Some(row.user_email))),
+            (None, None) => None,
+        };
+        let Some((user_id, email)) = principal else {
+            return RevocationResult {
+                revoked: true,
+                user_email: None,
             };
-            db::record_auth_event(&state.audit, params, email.clone()).await;
-        }
+        };
+
+        // Best-effort logout audit event
+        let params = db::AuthEventParams {
+            user_id,
+            event_type: db::AuthEventType::Logout,
+            success: true,
+            client: client_info,
+            ..Default::default()
+        };
+        db::record_auth_event(&state.audit, params, email.clone()).await;
 
         return RevocationResult {
             revoked: true,

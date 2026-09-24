@@ -469,44 +469,28 @@ async fn clear_user_session(
 
     let token_hash = hash_token(&token);
 
-    // Look up the row WITHOUT the expiry filter so an expired-but-present
-    // session still yields `user_id`/`user_email` for the audit. The cache
-    // is bypassed for the same reason: its miss path delegates to the
-    // expiry-filtering lookup and would answer `None` for an expired row.
-    // Best-effort: on a DB error the session is still deleted below; only
-    // the audit event's user context is lost.
-    let session_info = match db::find_session_by_token_hash(&state.store, &token_hash).await {
-        Ok(info) => info,
-        Err(e) => {
-            tracing::warn!(error = %e, "RP-Initiated Logout: session lookup for audit failed");
-            None
-        }
-    };
-
+    // The deleted row, expired or not, carries the user for the `Logout`
+    // audit event (see `db::delete_session_by_token_hash`).
     match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-        Ok(deleted) => {
-            if deleted {
-                state.session_cache.invalidate(&token_hash);
-                tracing::info!(
-                    rp_client_id = rp_client_id,
-                    "Session cleared during RP-Initiated Logout"
-                );
+        Ok(Some(session)) => {
+            state.session_cache.invalidate(&token_hash);
+            tracing::info!(
+                rp_client_id = rp_client_id,
+                "Session cleared during RP-Initiated Logout"
+            );
 
-                if let Some(session) = session_info {
-                    let client_info = ClientInfo::from(headers);
-                    let params = db::AuthEventParams {
-                        user_id: session.user_id.clone(),
-                        event_type: db::AuthEventType::Logout,
-                        success: true,
-                        client_id: rp_client_id.map(str::to_string),
-                        client: client_info,
-                        ..Default::default()
-                    };
-                    db::record_auth_event(&state.audit, params, Some(session.user_email.clone()))
-                        .await;
-                }
-            }
+            let client_info = ClientInfo::from(headers);
+            let params = db::AuthEventParams {
+                user_id: session.user_id.clone(),
+                event_type: db::AuthEventType::Logout,
+                success: true,
+                client_id: rp_client_id.map(str::to_string),
+                client: client_info,
+                ..Default::default()
+            };
+            db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
         }
+        Ok(None) => {}
         Err(e) => {
             tracing::warn!("Failed to delete session during RP-Initiated Logout: {e}");
         }
@@ -956,7 +940,7 @@ mod tests {
         let user = create_test_user(&state.store, "rp-logout-expired@example.com").await;
 
         let (token, token_hash) =
-            create_test_expired_session_row(&state, &user.id, &user.email).await;
+            create_test_expired_session_row(&state, &user.id, &user.email, None).await;
 
         // Sanity: the expiry-filtering lookup returns `None` — the
         // precondition the bug report describes.

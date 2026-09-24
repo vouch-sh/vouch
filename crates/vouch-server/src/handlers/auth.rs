@@ -161,50 +161,24 @@ pub(crate) async fn logout(
     {
         let token_hash = hash_token(token);
 
-        // Look up the session row to capture `user_id`/`user_email` for the
-        // `Logout` audit event. Use the expiry-agnostic lookup: a `POST
-        // /logout` deletes the row below regardless of expiry (see
-        // `db::delete_session_by_token_hash`), so the audit must fire whenever
-        // the row exists. The expiry-filtering `get_session_by_token_hash`
-        // returns `None` for an expired-but-present row, which would silently
-        // drop the `Logout` audit event in the window between DB expiry and
-        // the next reaper tick. The cache is bypassed for the same reason:
-        // its miss path delegates to the expiry-filtering lookup.
-        //
-        // The lookup is best-effort: on a DB error, the session is still
-        // deleted below; only the audit event's user context is lost.
-        let session_info = match db::find_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::warn!(error = %e, "Logout: session lookup for audit failed");
-                None
-            }
-        };
-
+        // The deleted row, expired or not, carries the user for the `Logout`
+        // audit event (see `db::delete_session_by_token_hash`).
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(deleted) => {
-                if deleted {
-                    state.session_cache.invalidate(&token_hash);
-                    tracing::info!("Session deleted during logout");
+            Ok(Some(session)) => {
+                state.session_cache.invalidate(&token_hash);
+                tracing::info!("Session deleted during logout");
 
-                    // Best-effort logout audit event
-                    if let Some(session) = session_info {
-                        let params = db::AuthEventParams {
-                            user_id: session.user_id.clone(),
-                            event_type: db::AuthEventType::Logout,
-                            success: true,
-                            client: client_info,
-                            ..Default::default()
-                        };
-                        db::record_auth_event(
-                            &state.audit,
-                            params,
-                            Some(session.user_email.clone()),
-                        )
-                        .await;
-                    }
-                }
+                // Best-effort logout audit event
+                let params = db::AuthEventParams {
+                    user_id: session.user_id.clone(),
+                    event_type: db::AuthEventType::Logout,
+                    success: true,
+                    client: client_info,
+                    ..Default::default()
+                };
+                db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
             }
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!("Failed to delete session during logout: {}", e);
             }
@@ -520,7 +494,7 @@ mod tests {
         let user = create_test_user(&state.store, "logout-expired@example.com").await;
 
         let (token, token_hash) =
-            create_test_expired_session_row(&state, &user.id, &user.email).await;
+            create_test_expired_session_row(&state, &user.id, &user.email, None).await;
 
         // Sanity: the expiry-filtering lookup returns `None` for this row, so
         // a fix that still gated the audit on that lookup would skip the
