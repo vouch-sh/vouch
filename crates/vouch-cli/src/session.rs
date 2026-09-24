@@ -123,8 +123,11 @@ pub(crate) async fn store_session_in_agent(
                 .await
             {
                 Ok(()) => true,
+                // The agent answered and refused, e.g. an insecure server URL
+                // it was not configured to allow. Surface it: the session is
+                // then served from the config file, not the agent.
                 Err(e) => {
-                    tracing::debug!("Failed to store session in agent: {e}");
+                    tracing::warn!("The agent did not store the session: {e}");
                     false
                 }
             }
