@@ -1450,6 +1450,9 @@ pub struct TestSessionSpec<'a> {
     /// Authentication assurance. Default: [`TestVerification::Verified`] with
     /// `auth_time` now.
     pub verification: TestVerification,
+    /// Granted scope. Default: `None`, meaning every scope. A scope without
+    /// `email` mints a token with no `email` claim.
+    pub scope: Option<crate::services::oidc::ScopeSet>,
 }
 
 impl Default for TestSessionSpec<'_> {
@@ -1468,6 +1471,7 @@ impl Default for TestSessionSpec<'_> {
             verification: TestVerification::Verified {
                 auth_time: Some(jiff::Timestamp::now().as_second()),
             },
+            scope: Option::None,
         }
     }
 }
@@ -1530,7 +1534,7 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
             email: spec.email,
             authenticator_id: spec.auth_id,
             client_id,
-            scope: Some(ScopeSet::all()),
+            scope: Some(spec.scope.clone().unwrap_or_else(ScopeSet::all)),
             binding: TokenBinding::new(dpop_witness.as_ref(), mtls_thumbprint),
             act: Option::None,
             audience: spec.audience,

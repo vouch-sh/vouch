@@ -343,14 +343,15 @@ async fn get_real_state_jwt(app: &axum::Router, client_id: &str, pkcs8: &[u8]) -
         .to_string()
 }
 
-/// Helper: post a FIDO2 assertion grant carrying `credential_id`, with every
-/// other field a well-formed placeholder. Returns the challenge state JWT the
+/// Helper: post a FIDO2 assertion grant carrying `credential_id` and
+/// `user_handle`, with every other field a well-formed placeholder. Returns the challenge state JWT the
 /// assertion referenced, so a caller can check whether it was consumed.
 async fn post_assertion_with_credential_id(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
     email: &str,
     credential_id: &str,
+    user_handle: uuid::Uuid,
 ) -> (String, StatusCode, String) {
     let user = create_test_user(&state.store, email).await;
     let (client, pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
@@ -369,7 +370,7 @@ async fn post_assertion_with_credential_id(
         "authenticator_data": placeholder,
         "signature": placeholder,
         "client_data_json": placeholder,
-        "user_handle": URL_SAFE_NO_PAD.encode(uuid::Uuid::now_v7().as_bytes()),
+        "user_handle": URL_SAFE_NO_PAD.encode(user_handle.as_bytes()),
     });
     let assertion =
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
@@ -410,9 +411,14 @@ async fn test_fido2_token_short_credential_id_leaves_challenge_unconsumed() {
     // without a fresh challenge round-trip.
     let (app, state) = test_app().await;
     let short = URL_SAFE_NO_PAD.encode([0u8; 8]);
-    let (state_jwt, status, body) =
-        post_assertion_with_credential_id(&app, &state, "fido2-short-cred@example.com", &short)
-            .await;
+    let (state_jwt, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-short-cred@example.com",
+        &short,
+        uuid::Uuid::now_v7(),
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -438,9 +444,14 @@ async fn test_fido2_token_oversized_credential_id_leaves_challenge_unconsumed() 
         <vouch_common::CredentialIdData as vouch_common::Bounds>::MAX_BYTES
             + 1
     ]);
-    let (state_jwt, status, body) =
-        post_assertion_with_credential_id(&app, &state, "fido2-long-cred@example.com", &oversized)
-            .await;
+    let (state_jwt, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-long-cred@example.com",
+        &oversized,
+        uuid::Uuid::now_v7(),
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -464,9 +475,14 @@ async fn test_fido2_token_oversized_credential_id_leaves_challenge_unconsumed() 
 async fn test_fido2_token_unknown_credential_is_invalid_grant() {
     let (app, state) = test_app().await;
     let unknown = URL_SAFE_NO_PAD.encode([7u8; 32]);
-    let (_, status, body) =
-        post_assertion_with_credential_id(&app, &state, "fido2-unknown-cred@example.com", &unknown)
-            .await;
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-unknown-cred@example.com",
+        &unknown,
+        uuid::Uuid::now_v7(),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -498,12 +514,114 @@ async fn test_fido2_token_authenticator_storage_fault_is_server_error() {
         &state,
         "fido2-storage-fault-client@example.com",
         &URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+        uuid::Uuid::now_v7(),
     )
     .await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "server_error", "{body}");
+}
+
+/// Register an authenticator for `owner_id` and return its base64url
+/// credential ID.
+async fn owner_credential_id(state: &crate::AppState, owner_id: &str) -> String {
+    let auth_id = create_test_authenticator(&state.store, owner_id).await;
+    let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+        .await
+        .expect("load authenticator")
+        .expect("authenticator exists");
+    URL_SAFE_NO_PAD.encode(&authenticator.credential_id)
+}
+
+/// The `login_failed` audit rows recorded for `user_id`.
+async fn login_failed_rows(
+    state: &crate::AppState,
+    user_id: &str,
+    email_domains: Option<Vec<String>>,
+) -> Vec<db::AuditEvent> {
+    state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            user_id: Some(user_id.to_string()),
+            email_domains,
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+}
+
+fn failure_reason(row: &db::AuditEvent) -> String {
+    let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+    data["failure_reason"]
+        .as_str()
+        .expect("failure_reason is a string")
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_fido2_token_deactivated_owner_is_audited_in_org_feed() {
+    // The CLI grant records the same refusal row as browser login. The
+    // assertion names the credential's owner, so the row carries the owner's
+    // domain and an org-scoped query finds it.
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "fido2-deactivated@example.com").await;
+    let credential_id = owner_credential_id(&state, &owner.id).await;
+    state
+        .store
+        .modify::<crate::db::documents::user::UserDoc, _>(&owner.id, |d| d.active = false)
+        .await
+        .expect("deactivate user");
+
+    let owner_uuid = uuid::Uuid::parse_str(&owner.id).expect("user id is a uuid");
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-deactivated-client@example.com",
+        &credential_id,
+        owner_uuid,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "{body}");
+
+    let rows = login_failed_rows(&state, &owner.id, Some(vec!["example.com".to_string()])).await;
+    assert_eq!(rows.len(), 1, "one org-visible login_failed row: {rows:?}");
+    let row = rows.first().expect("one row");
+    assert_eq!(failure_reason(row), "user_deactivated");
+    assert_eq!(row.email_domain.as_deref(), Some("example.com"));
+}
+
+#[tokio::test]
+async fn test_fido2_token_owner_mismatch_is_audited_without_email() {
+    // The asserted user_handle is not the credential's owner and the
+    // assertion has not run, so the row names neither account's email.
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "fido2-mismatch-owner@example.com").await;
+    let credential_id = owner_credential_id(&state, &owner.id).await;
+    let asserted = uuid::Uuid::now_v7();
+
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-mismatch-client@example.com",
+        &credential_id,
+        asserted,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let rows = login_failed_rows(&state, &asserted.to_string(), None).await;
+    assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+    let row = rows.first().expect("one row");
+    assert_eq!(failure_reason(row), "user_mismatch");
+    assert_eq!(row.email_domain, None);
+    assert!(
+        login_failed_rows(&state, &owner.id, None).await.is_empty(),
+        "the refusal must not be attributed to the credential's owner"
+    );
 }
 
 #[tokio::test]

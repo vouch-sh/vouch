@@ -77,12 +77,9 @@ pub(crate) async fn rename_key_form(
     // deactivated user holding a live session would otherwise reach the
     // state-changing rename below. Mirrors the sibling `delete_key` in this
     // file and `handlers::keys::rename_key`; see `session::load_active_user`.
-    if super::session::load_active_user(&state, &token.sub)
-        .await
-        .is_err()
-    {
+    let Ok(user) = super::session::load_active_user(&state, &token.sub).await else {
         return Redirect::to("/enroll/start").into_response();
-    }
+    };
 
     let name = match ResourceLabel::parse(&form.name) {
         Ok(name) => name,
@@ -112,7 +109,7 @@ pub(crate) async fn rename_key_form(
                 client: client_info,
                 ..Default::default()
             };
-            db::record_auth_event(&state.audit, event, token.email.clone()).await;
+            db::record_auth_event(&state.audit, event, Some(user.email)).await;
             Redirect::to("/enroll/keys").into_response()
         }
         Err(err) => {
@@ -147,7 +144,7 @@ pub(crate) async fn delete_key(
     // otherwise reach the destructive delete below. Mirrors the sibling
     // `handlers::keys::delete_key` and `register_start`; see
     // `session::load_active_user`.
-    let _user = super::session::load_active_user(&state, &token.sub).await?;
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether we just deleted the key this very session is bound to (so the
     // browser knows to re-authenticate rather than reload into a dead session).
@@ -167,7 +164,7 @@ pub(crate) async fn delete_key(
         client: client_info,
         ..Default::default()
     };
-    db::record_auth_event(&state.audit, event, token.email.clone()).await;
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

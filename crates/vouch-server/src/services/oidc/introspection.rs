@@ -388,6 +388,19 @@ pub async fn revoke_token(
                 user_email: None,
             };
         };
+        // A token minted without the `email` scope carries no email claim.
+        // The user record supplies it so the event stays in the org-scoped
+        // audit feed. An M2M token names a client, not a user.
+        let email = match email {
+            None if !is_m2m => match db::get_user_by_id(&state.store, &user_id).await {
+                Ok(user) => user.map(|u| u.email),
+                Err(e) => {
+                    tracing::warn!("Failed to load user for revocation audit: {e}");
+                    None
+                }
+            },
+            email => email,
+        };
 
         // Best-effort logout audit event
         let params = db::AuthEventParams {

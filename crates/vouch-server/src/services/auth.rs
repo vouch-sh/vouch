@@ -50,30 +50,86 @@ pub(crate) struct AuthenticatorLookupResult {
     pub user: User,
 }
 
+/// Error from [`lookup_and_verify_authenticator`].
+///
+/// Refusals are separate variants so callers can audit each one. Only
+/// [`LookupError::Deactivated`] names an account: there the asserted
+/// `user_handle` matched the credential's owner.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LookupError {
+    /// Credential or owning user row not found.
+    #[error("not found: {0}")]
+    NotFound(&'static str),
+
+    /// The asserted `user_handle` is not the credential's owner. The assertion
+    /// has not run, so neither account is proven and the refusal names no email.
+    #[error("forbidden: user_mismatch")]
+    UserMismatch,
+
+    /// The credential's owner is deactivated. Carries the owner's email so the
+    /// refusal audit row lands in the owner's org-scoped audit feed.
+    #[error("forbidden: user_deactivated")]
+    Deactivated { email: String },
+
+    /// A storage or internal fault. Callers return it as a 5xx, not a refusal.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
+}
+
+/// Record a `login_failed` audit event for a failed authenticator lookup.
+///
+/// `user_id` is the asserted `user_handle`. Browser login and the FIDO2
+/// assertion grant both call this, so a refusal leaves the same row on
+/// either path.
+pub(crate) async fn record_lookup_failure(
+    audit: &db::audit::AuditStore,
+    client: db::ClientInfo,
+    user_id: Uuid,
+    error: &LookupError,
+) {
+    let (reason, email) = match error {
+        LookupError::NotFound(entity) => (format!("{entity}_not_found"), None),
+        LookupError::UserMismatch => ("user_mismatch".to_string(), None),
+        LookupError::Deactivated { email } => ("user_deactivated".to_string(), Some(email.clone())),
+        LookupError::Service(_) => ("lookup_error".to_string(), None),
+    };
+    let params = db::AuthEventParams {
+        user_id: user_id.to_string(),
+        event_type: db::AuthEventType::LoginFailed,
+        success: false,
+        failure_reason: Some(reason),
+        client,
+        ..db::AuthEventParams::default()
+    };
+    db::record_auth_event(audit, params, email).await;
+}
+
 /// Look up an authenticator and verify it belongs to the specified user.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::NotFound` if the credential or user is not found.
-/// Returns `ServiceError::Forbidden` if the credential doesn't belong to the user.
+/// Returns [`LookupError::NotFound`] if the credential or owning user is not
+/// found; [`LookupError::UserMismatch`] if the credential doesn't belong to
+/// the asserted user; or [`LookupError::Deactivated`] if the credential's
+/// owner is deactivated (carrying the owner's email for audit attribution).
 pub(crate) async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
-) -> ServiceResult<AuthenticatorLookupResult> {
+) -> Result<AuthenticatorLookupResult, LookupError> {
     let row = db::get_authenticator_with_user_by_credential_id(&state.store, params.credential_id)
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
-        .ok_or(ServiceError::NotFound("credential"))?;
+        .ok_or(LookupError::NotFound("credential"))?;
 
     let (authenticator, user) = (row.authenticator, row.user);
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != params.user_id.to_string() {
-        return Err(ServiceError::Forbidden("user_mismatch"));
+        return Err(LookupError::UserMismatch);
     }
 
     if !user.active {
-        return Err(ServiceError::Forbidden("user_deactivated"));
+        return Err(LookupError::Deactivated { email: user.email });
     }
 
     Ok(AuthenticatorLookupResult {
