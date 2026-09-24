@@ -348,7 +348,11 @@ impl SessionCache {
             ));
         }
         match self.get(token_hash) {
-            CacheLookup::Hit(session) => return Ok(Some(session)),
+            // An entry ages by its insertion time, not the session's expiry,
+            // so a hit is judged against `arrival` as the DB lookup is.
+            CacheLookup::Hit(session) => {
+                return Ok(Some(session).filter(|s| s.expires_at > arrival.timestamp()));
+            }
             CacheLookup::NegativeHit => return Ok(None),
             CacheLookup::Miss => {}
         }
