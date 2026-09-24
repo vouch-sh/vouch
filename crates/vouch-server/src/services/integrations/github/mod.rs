@@ -23,8 +23,7 @@
 //! │  - verify_webhook_signature()   │
 //! │  - handle_webhook_event()       │
 //! │  - link_user_account()          │
-//! │  - connect_installation()       │
-//! │  - reconnect_installation()     │
+//! │  - link_installation()          │
 //! └─────────────────────────────────┘
 //!     │
 //!     ├─► app.rs (GitHub API calls)
@@ -48,7 +47,7 @@ pub(crate) use app::{
     GitHubApp, GitHubInstallationId, exchange_oauth_code, get_github_user,
     list_user_accessible_installations, minimal_git_permissions, refresh_oauth_token,
 };
-pub(crate) use installations::{ConnectInstallationParams, ReconnectInstallationParams};
+pub(crate) use installations::{InstallationLinkFlow, LinkInstallationParams};
 pub(crate) use oauth::LinkAccountParams;
 
 /// Error types for GitHub service operations.

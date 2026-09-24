@@ -589,6 +589,12 @@ async fn build_app_state(
                 config.github_webhook_secret.is_some(),
                 config.github_oauth_configured(),
             );
+            if !config.github_oauth_configured() {
+                tracing::warn!(
+                    "GitHub App installations cannot be linked without \
+                     VOUCH_GITHUB_APP_CLIENT_ID and VOUCH_GITHUB_APP_CLIENT_SECRET"
+                );
+            }
             Some(Arc::new(app))
         }
         Ok(None) => {

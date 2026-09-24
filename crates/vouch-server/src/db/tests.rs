@@ -9,7 +9,7 @@
 //! - [`arrival_anchored_expiry`] — Request-deciding expiry comparisons read the caller's instant, not an ambient clock.
 //! - [`audit_events`] — Auth/key/device audit event logging and expiry.
 //! - [`authenticators`] — Authenticator (security key) CRUD and counting.
-//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows.
+//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows, and the transfer of org-scoped applications when their creator is deleted or deactivated.
 //! - [`challenge_states`] — FIDO2 challenge state single-use enforcement.
 //! - [`concurrency`] — Concurrent-replay and CAS regressions for single-use primitives and state-transition helpers.
 //! - [`device_auth`] — Device authorization grant (RFC 8628): request lifecycle, polling, atomic consumption, single-use semantics.

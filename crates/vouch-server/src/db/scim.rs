@@ -862,6 +862,15 @@ pub async fn update_scim_user(
             return Err(ScimUpdateError::LastAdmin);
         }
 
+        // A deactivated user can no longer manage their org-scoped
+        // applications, so they move to an active admin, as on delete.
+        if !active
+            && user_doc.data.active
+            && !super::users::transfer_org_clients(&mut tx, Some(org_id), user_id).await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
         let mut updated = user_doc.data.clone();
         updated.name = name.map(String::from);
         updated.external_id = external_id.map(String::from);

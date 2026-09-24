@@ -31,8 +31,8 @@ use vouch_common::protocol;
 /// POST /oauth/register — RFC 7591 Dynamic Client Registration.
 ///
 /// Accepts an optional Bearer token. When present, the authenticated user
-/// becomes the owner of the newly registered client. When absent (open
-/// registration), the client is created without user association.
+/// becomes the owner of the newly registered client, and must be active. When
+/// absent (open registration), the client is created without user association.
 ///
 /// Returns 201 Created with the client information response.
 pub(crate) async fn register(
@@ -46,7 +46,28 @@ pub(crate) async fn register(
     // a `WWW-Authenticate` challenge — propagate it rather than falling back to
     // open registration.
     let user_id = match token {
-        Ok(OptionalAuthenticatedToken(token)) => token.map(|t| t.sub),
+        Ok(OptionalAuthenticatedToken(Some(token))) => {
+            // A deactivated account "cannot authenticate anywhere"
+            // (`load_active_user`), so its still-live token is invalid "for
+            // other reasons" (RFC 6750 §3.1 `invalid_token`) and cannot own a
+            // client. A database error stays a 500.
+            match crate::handlers::session::load_active_user(&state, &token.sub).await {
+                Ok(user) => Some(user.id),
+                Err(ServiceError::Api {
+                    status: StatusCode::UNAUTHORIZED,
+                    message,
+                    ..
+                }) => {
+                    return into_registration_response(ServiceError::api(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_token",
+                        message,
+                    ));
+                }
+                Err(e) => return into_registration_response(e),
+            }
+        }
+        Ok(OptionalAuthenticatedToken(None)) => None,
         Err(e) => return into_registration_response(e),
     };
 

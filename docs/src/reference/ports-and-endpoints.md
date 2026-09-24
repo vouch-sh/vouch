@@ -141,7 +141,7 @@ The server itself makes outbound HTTPS calls; egress rules must allow them:
 | Your upstream IdP (discovery, JWKS, token) | Always — at startup and during enrollment |
 | Your SAML IdP metadata URL | At startup, if a SAML IdP is configured |
 | AWS KMS, S3, STS | When KMS keys, S3 configuration, or the AWS integration are used |
-| `api.github.com` | When the GitHub App integration is used |
+| `api.github.com`, `github.com` | When the GitHub App integration is used (`github.com` serves the OAuth token exchange) |
 | DNS resolvers | Domain-ownership TXT verification |
 | An OAuth client's `jwks_uri` | At dynamic client registration — restricted to public IPs by SSRF protection |
 

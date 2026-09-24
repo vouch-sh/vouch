@@ -625,6 +625,120 @@ async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
     );
 }
 
+/// A creator and an admin in the test org, and one org-scoped and one personal
+/// application created by the creator. Returns
+/// `(creator_id, admin_id, org_app, personal_app)`.
+async fn creator_with_apps(store: &DocumentStore, admin: bool) -> (String, String, String, String) {
+    seed_test_org(store).await;
+    let (creator_id, _) = upsert_user_with_org(
+        store,
+        "deact-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (admin_id, _) = upsert_user_with_org(
+        store,
+        "deact-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        admin,
+    )
+    .await
+    .expect("create admin");
+    let org_app = create_scoped_client(
+        store,
+        &creator_id,
+        "Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    let personal_app = create_scoped_client(
+        store,
+        &creator_id,
+        "Personal App",
+        AccessScope::Personal,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    (creator_id, admin_id, org_app, personal_app)
+}
+
+async fn owner_of(store: &DocumentStore, client_id: &str) -> Option<String> {
+    get_oauth_client_by_id(store, client_id)
+        .await
+        .expect("lookup client")
+        .expect("client exists")
+        .user_id
+}
+
+/// A deactivated creator cannot sign in, and management is creator-only, so
+/// an admin deactivation moves their org-scoped applications to an active
+/// admin, as a delete does. Personal applications stay with the creator.
+#[tokio::test]
+async fn test_deactivate_member_transfers_org_scoped_apps_to_org_admin() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, admin_id, org_app, personal_app) = creator_with_apps(&store, true).await;
+
+    assert!(
+        demote_or_deactivate_member(&store, &creator_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivate")
+    );
+
+    assert_eq!(owner_of(&store, &org_app).await, Some(admin_id));
+    assert_eq!(owner_of(&store, &personal_app).await, Some(creator_id));
+}
+
+/// SCIM `active: false` transfers the same way, and reactivation does not
+/// move the applications back.
+#[tokio::test]
+async fn test_scim_deactivation_transfers_org_scoped_apps_to_org_admin() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, admin_id, org_app, personal_app) = creator_with_apps(&store, true).await;
+
+    assert!(
+        update_scim_user(&store, &creator_id, TEST_ORG_ID, None, None, false)
+            .await
+            .expect("scim deactivate")
+    );
+    assert_eq!(owner_of(&store, &org_app).await, Some(admin_id.clone()));
+    assert_eq!(
+        owner_of(&store, &personal_app).await,
+        Some(creator_id.clone())
+    );
+
+    assert!(
+        update_scim_user(&store, &creator_id, TEST_ORG_ID, None, None, true)
+            .await
+            .expect("scim reactivate")
+    );
+    assert_eq!(
+        owner_of(&store, &org_app).await,
+        Some(admin_id),
+        "reactivation does not transfer the application back"
+    );
+}
+
+/// With no other active admin, a deactivation leaves the application with its
+/// creator rather than unlinking it: reactivating the creator restores it.
+#[tokio::test]
+async fn test_deactivation_keeps_org_app_when_no_admin_remains() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, _member_id, org_app, _personal_app) = creator_with_apps(&store, false).await;
+
+    assert!(
+        demote_or_deactivate_member(&store, &creator_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivate")
+    );
+
+    assert_eq!(owner_of(&store, &org_app).await, Some(creator_id));
+}
+
 /// A deactivated org admin must not inherit applications — they cannot
 /// authenticate, so the transfer would strand the app just as surely.
 #[tokio::test]

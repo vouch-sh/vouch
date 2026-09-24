@@ -52,6 +52,65 @@ async fn bearer_token_unique(app_state: &std::sync::Arc<crate::AppState>, suffix
 // Authentication
 // ========================================================================
 
+// A deactivated account's still-live access token cannot register a client
+// it would own. RFC 6750 §3.1 `invalid_token`: "The access token provided is
+// expired, revoked, malformed, or invalid for other reasons. The resource
+// SHOULD respond with the HTTP 401 (Unauthorized) status code."
+#[tokio::test]
+async fn test_rfc7591_deactivated_user_token_cannot_register() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7591-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate")
+    );
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Deactivated Owner",
+    });
+    let resp = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &format!("Bearer {token}")),
+        ],
+    )
+    .await;
+
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{}", resp.body);
+    let error: serde_json::Value = serde_json::from_str(&resp.body).expect("JSON");
+    assert_eq!(error["error"], "invalid_token", "{}", resp.body);
+    let challenge = resp
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(challenge.contains("invalid_token"), "{challenge}");
+    let owned = db::get_oauth_clients_for_user(&state.store, &user.id)
+        .await
+        .expect("list clients");
+    assert!(
+        owned.is_empty(),
+        "no client is created for a deactivated owner"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7591_open_registration_succeeds_without_bearer() {
     // RFC 7591 "open registration": POST /oauth/register without a Bearer token
