@@ -415,6 +415,125 @@ async fn test_github_installation_deleted_between_resolve_and_modify() {
     assert!(!found, "modify on deleted doc must return Ok(false)");
 }
 
+/// Insert an installation row under a random document ID, the shape rows had
+/// before `create_github_installation` derived the ID from `installation_id`,
+/// so two can exist for one installation.
+async fn insert_random_id_github_installation(
+    store: &DocumentStore,
+    installation_id: i64,
+    org_id: &str,
+) -> String {
+    let doc = crate::db::documents::github::GitHubInstallationDoc {
+        org_id: org_id.to_owned(),
+        installation_id,
+        github_account_login: "acme".to_owned(),
+        github_account_type: "Organization".to_owned(),
+        permissions: std::collections::HashMap::new(),
+        repository_selection: "all".to_owned(),
+        installed_at: "2026-01-01T00:00:00Z".parse().expect("timestamp"),
+        installed_by_user_id: None,
+        suspended_at: None,
+        repositories: None,
+    };
+    store.insert(&doc).await.expect("insert").id
+}
+
+/// Every installation webhook reaches every row for the installation, not
+/// only the newest: a row left behind would stay connected, unsuspended, or
+/// on stale repositories for its organization.
+#[tokio::test]
+async fn test_github_installation_webhooks_reach_every_row() {
+    use crate::db::documents::github::GitHubInstallationDoc;
+
+    let (store, _audit) = test_db().await;
+    let rows = [
+        insert_random_id_github_installation(&store, 40_001, "org-a").await,
+        insert_random_id_github_installation(&store, 40_001, "org-b").await,
+    ];
+    let control = create_test_github_installation(&store, 40_002, "org-c").await;
+    let docs = || async {
+        let mut docs = Vec::new();
+        for id in &rows {
+            docs.push(
+                store
+                    .get::<GitHubInstallationDoc>(id)
+                    .await
+                    .expect("get")
+                    .map(|d| d.data),
+            );
+        }
+        docs
+    };
+
+    assert!(
+        suspend_github_installation(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(
+            doc.expect("webhook helper").suspended_at.is_some(),
+            "every row is suspended"
+        );
+    }
+
+    assert!(
+        update_github_installation_repos(&store, 40_001, &["r1".to_owned()])
+            .await
+            .expect("webhook helper")
+    );
+    assert!(
+        update_github_installation_repos_delta(
+            &store,
+            40_001,
+            &["r2".to_owned()],
+            &["r1".to_owned()]
+        )
+        .await
+        .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert_eq!(
+            doc.expect("webhook helper").repositories,
+            Some(vec!["r2".to_owned()])
+        );
+    }
+
+    assert!(
+        unsuspend_github_installation(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(
+            doc.expect("webhook helper").suspended_at.is_none(),
+            "every row is unsuspended"
+        );
+    }
+
+    assert!(
+        delete_github_installation_by_installation_id(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(doc.is_none(), "every row is deleted by one webhook");
+    }
+    assert!(
+        !delete_github_installation_by_installation_id(&store, 40_001)
+            .await
+            .expect("webhook helper"),
+        "a redelivered delete finds nothing left"
+    );
+
+    let other = store
+        .get::<GitHubInstallationDoc>(&control)
+        .await
+        .expect("get")
+        .expect("another installation is untouched");
+    assert!(other.data.suspended_at.is_none());
+}
+
 // ---- update_scim_group ----
 
 /// After `update_scim_group`, only the updated fields change and version increments.
