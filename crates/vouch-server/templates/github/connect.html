@@ -24,8 +24,8 @@
         </div>
         {% endif %}
 
-        {# Link GitHub Account section - shown when OAuth is configured but user hasn't linked yet #}
-        {% if oauth_configured && !github_linked %}
+        {# Linking an installation requires a linked GitHub account #}
+        {% if !github_linked %}
         <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-4 mb-6">
             <h2 class="text-sm font-medium text-blue-300 mb-2">{{ self.tr("github-connect-link-heading") }}</h2>
             <p class="text-xs text-blue-400 mb-3">
@@ -121,11 +121,13 @@
             </div>
         </div>
 
+        {% if github_linked %}
         <div class="border-t border-vouch-subtle pt-4">
             <a href="{{ github_app_url }}" class="btn-primary w-full text-center block">
                 {% if connected_accounts.is_empty() %}{{ self.tr("github-connect-button") }}{% else %}{{ self.tr("github-connect-button-another") }}{% endif %}
             </a>
         </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

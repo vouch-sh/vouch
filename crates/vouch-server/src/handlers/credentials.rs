@@ -1451,105 +1451,10 @@ mod tests {
     // The GitHub handler's success path is otherwise unreachable in a hermetic
     // test: `GitHubApp::get_installation_token` posts to a hardcoded
     // `https://api.github.com/app/installations/{id}/access_tokens`. This test
-    // intercepts that call with an in-process TLS mock (a `reqwest::Client`
-    // that resolves `api.github.com` to a local `TcpListener` and trusts its
-    // self-signed cert), so no real egress occurs. It is the direct regression
+    // intercepts that call with `GitHubMock`, so no real egress occurs. It is the direct regression
     // catcher for the bug: the GitHub audit row's `agent` must carry the DPoP
     // proof's `source` claim, mirroring the SSH and AWS siblings.
     // ------------------------------------------------------------------------
-
-    /// Self-signed P-256 cert (SAN: localhost) + PKCS#8 key for the in-process
-    /// TLS mock that intercepts GitHub installation-token calls. Throwaway,
-    /// valid until 2036 (mirrors `vouch-tests/tests/pq_tls.rs`).
-    const GIT_MOCK_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
-HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
-MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
-ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
-G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
-DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
-HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
-BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
-KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
------END CERTIFICATE-----\n";
-    const GIT_MOCK_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
-+palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
-DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
------END PRIVATE KEY-----\n";
-
-    /// `Content-Length` of an HTTP/1.1 request header block, or 0 if absent.
-    fn content_length_of(headers: &[u8]) -> usize {
-        let Ok(s) = std::str::from_utf8(headers) else {
-            return 0;
-        };
-        for line in s.split("\r\n") {
-            if let Some((k, v)) = line.split_once(':')
-                && k.eq_ignore_ascii_case("content-length")
-            {
-                return v.trim().parse().unwrap_or(0);
-            }
-        }
-        0
-    }
-
-    /// Serve one canned GitHub installation-token response over TLS, then exit.
-    async fn serve_github_installation_token(listener: tokio::net::TcpListener) {
-        use rustls::pki_types::pem::PemObject;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls::pki_types::CertificateDer::pem_slice_iter(GIT_MOCK_CERT_PEM.as_bytes())
-                .collect::<Result<Vec<_>, _>>()
-                .expect("parse mock cert");
-        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(GIT_MOCK_KEY_PEM.as_bytes())
-            .expect("parse mock key");
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .expect("mock server config");
-        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
-
-        let (stream, _) = listener.accept().await.expect("mock accept");
-        let mut tls = acceptor.accept(stream).await.expect("mock tls accept");
-
-        // Read the full HTTP request (headers + Content-Length body).
-        let mut buf: Vec<u8> = Vec::with_capacity(8192);
-        let mut tmp = [0u8; 4096];
-        loop {
-            let n = tls.read(&mut tmp).await.expect("mock read");
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&tmp[..n]);
-            if let Some(hend) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                let body_start = hend.saturating_add(4);
-                let content_length = content_length_of(&buf[..hend]);
-                if buf.len() >= body_start.saturating_add(content_length) {
-                    break;
-                }
-            }
-            if buf.len() > 64 * 1024 {
-                break;
-            }
-        }
-
-        let body = serde_json::json!({
-            "token": "ghs_test_installation_token",
-            "expires_at": "2099-01-01T00:00:00Z",
-            "permissions": {"contents": "write", "metadata": "read"}
-        });
-        let body_bytes = serde_json::to_vec(&body).expect("serialize mock body");
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body_bytes.len()
-        );
-        tls.write_all(head.as_bytes())
-            .await
-            .expect("mock write head");
-        tls.write_all(&body_bytes).await.expect("mock write body");
-        drop(tls.shutdown().await);
-    }
 
     /// End-to-end GitHub token issuance with a DPoP proof carrying
     /// `source: "claude-code"` must record `agent: "claude-code"` on the
@@ -1558,27 +1463,25 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// while its SSH and AWS siblings set `agent: token.dpop_source.clone()`.
     #[tokio::test]
     async fn test_github_token_audit_agent_attributed_from_dpop_source() {
-        // 1. In-process TLS mock for api.github.com installation-token endpoint.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock listener");
-        let mock_addr = listener.local_addr().expect("mock addr");
-        tokio::spawn(serve_github_installation_token(listener));
+        // 1. In-process TLS mock for the installation-token endpoint.
+        let mock = GitHubMock::spawn(|_| async {
+            (
+                200,
+                serde_json::json!({
+                    "token": "ghs_test_installation_token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "permissions": {"contents": "write", "metadata": "read"}
+                }),
+            )
+        })
+        .await;
 
-        // 2. Outbound client that redirects api.github.com to the mock and
-        //    accepts its self-signed cert.
-        let http_client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .resolve("api.github.com", mock_addr)
-            .build()
-            .expect("build mock http client");
-
-        // 3. AppState with a loaded GitHubApp wired to the mock client.
-        let state = test_app_state_with_github_app(http_client).await;
+        // 2. AppState with a loaded GitHubApp wired to the mock client.
+        let state = test_app_state_with_github_app(mock.client()).await;
         let config = state.config();
         let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
 
-        // 4. Org + user + installation DB row (owner "acme").
+        // 3. Org + user + installation DB row (owner "acme").
         let org = create_test_org(&state.store, "example.com").await;
         let user =
             create_test_user_in_org(&state.store, "gh-agent@example.com", &org.id, false).await;
@@ -1602,7 +1505,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         .await
         .expect("create installation");
 
-        // 5. DPoP-bound, hardware-verified session + proof carrying source.
+        // 4. DPoP-bound, hardware-verified session + proof carrying source.
         let (key, jwk) = generate_dpop_key_pair();
         let jkt = vouch_common::jwk::JwkThumbprintKey::from_json(&jwk)
             .expect("test JWK carries the required members")
@@ -1633,7 +1536,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
             Some("claude-code"),
         );
 
-        // 6. POST /v1/credentials/github/token with owner=acme.
+        // 5. POST /v1/credentials/github/token with owner=acme.
         let body = serde_json::json!({ "owner": "acme", "repositories": [] });
         let body_str = body.to_string();
         let auth = format!("DPoP {token}");
@@ -1650,7 +1553,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
             "DPoP-bound GitHub token request should succeed: {resp_body}"
         );
 
-        // 7. The github_credential audit row must carry the AI agent attribution.
+        // 6. The github_credential audit row must carry the AI agent attribution.
         let events = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
