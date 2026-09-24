@@ -241,6 +241,67 @@ async fn test_session_expiry_boundary() {
     assert!(session.is_none(), "session must be expired 1s after expiry");
 }
 
+/// The cached lookup applies the same boundary: a session cached while live
+/// is not returned from the cache once `arrival` reaches its `expires_at`,
+/// though the cache entry is still within its TTL.
+#[tokio::test]
+async fn test_session_cache_hit_expiry_boundary() {
+    use crate::arrival::ArrivalTime;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "cache-expiry@example.com", None)
+        .await
+        .expect("Failed to create user");
+    let expires_at: jiff::Timestamp = "2030-01-01T00:00:00Z".parse().unwrap();
+    let token_hash = "cache_expiry_boundary_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "cache-expiry@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("Failed to create session");
+
+    let cache = SessionCache::new(100, 30);
+    let at = |offset_secs: i64| {
+        ArrivalTime::for_test(
+            expires_at
+                .checked_add(jiff::Span::new().seconds(offset_secs))
+                .unwrap(),
+        )
+    };
+    let lookup = |arrival| cache.get_session_by_token_hash(&store, token_hash, arrival);
+
+    // Warms the cache with the live session.
+    assert!(
+        lookup(at(-1)).await.expect("lookup").is_some(),
+        "session must be valid 1s before expiry"
+    );
+    assert!(
+        lookup(at(0)).await.expect("lookup").is_none(),
+        "a cache hit must be expired at expires_at"
+    );
+    assert!(
+        lookup(at(1)).await.expect("lookup").is_none(),
+        "a cache hit must be expired 1s after expiry"
+    );
+    assert!(
+        lookup(at(-1)).await.expect("lookup").is_some(),
+        "the entry is still cached and valid before expiry"
+    );
+}
+
 /// Helper: create an OAuth access-token session for `user_id` with a given
 /// `token_hash` and optional `source_code_hash`, returning the session id.
 async fn create_oauth_session(
