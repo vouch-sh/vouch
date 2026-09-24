@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
     Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, get_attribute,
-    optional_string, required_attribute, strip_prefix_ignore_ascii_case, unqualified,
+    optional_string, required_attribute,
 };
 use super::types::{
     ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
@@ -25,6 +25,7 @@ use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::error::ServiceError;
+use crate::scim_filter::{self, unqualified};
 
 /// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
 ///
@@ -39,9 +40,14 @@ pub(crate) async fn list_groups(
     let start_index = query.start_index.unwrap_or(1);
     let count = query.count.unwrap_or(100).min(100);
 
-    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
-        return (status, json).into_response();
-    }
+    let filter = match super::validate_list_params::<db::GroupListFilter>(
+        query.filter.as_deref(),
+        start_index,
+        urn::GROUP,
+    ) {
+        Ok(filter) => filter,
+        Err((status, json)) => return (status, json).into_response(),
+    };
 
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
@@ -56,11 +62,7 @@ pub(crate) async fn list_groups(
     let (groups, total) = match db::list_scim_groups(
         &state.store,
         &auth.org_id,
-        // RFC 7644 §3.10: the attribute may carry its core schema URN prefix.
-        query
-            .filter
-            .as_deref()
-            .map(|filter| unqualified(filter.trim_start(), urn::GROUP)),
+        filter.as_ref(),
         start_index,
         count,
     )
@@ -70,10 +72,6 @@ pub(crate) async fn list_groups(
         Err(e) => {
             if let Some(filter_err) = e.downcast_ref::<ScimFilterError>() {
                 let (detail, error_type) = match filter_err {
-                    ScimFilterError::UnsupportedOperator(_) => {
-                        tracing::debug!("SCIM filter parse error: {e}");
-                        ("Invalid filter expression", "invalidFilter")
-                    }
                     ScimFilterError::FilterTooBroad => (
                         "Filter is too broad; add a more specific filter",
                         "invalidFilter",
@@ -326,18 +324,18 @@ const GROUP_ATTRIBUTES: &[Attribute<db::ScimGroupState>] = &[
 #[derive(Debug, PartialEq, Eq)]
 struct MembersPath<'p> {
     /// The member user id a `value eq` filter selects.
-    filter: Option<&'p str>,
+    filter: Option<String>,
     sub_attribute: Option<&'p str>,
 }
 
 /// Parses `path` as a [`MembersPath`], or `None` when it addresses another
 /// attribute.
 ///
-/// Attribute names and the `eq` operator are case insensitive (RFC 7643
-/// §2.1, RFC 7644 §3.4.2.2); the quoted id is returned verbatim. `value eq`
-/// is the only filter members support, so any other filter is 400
-/// `invalidFilter` (RFC 7644 §3.12 Table 9: "the specified attribute and
-/// filter comparison combination is not supported").
+/// The bracketed filter is parsed by [`scim_filter::parse`], so the
+/// attribute may carry the core Group schema URN and the id is a decoded JSON
+/// string. `value eq` is the only filter members support, so any other filter
+/// is 400 `invalidFilter` (RFC 7644 §3.12 Table 9: "the specified attribute
+/// and filter comparison combination is not supported").
 fn parse_members_path(path: &str) -> Result<Option<MembersPath<'_>>, AttributeError> {
     let root_end = path.find(['[', '.']).unwrap_or(path.len());
     let (root, rest) = path.split_at(root_end);
@@ -352,19 +350,14 @@ fn parse_members_path(path: &str) -> Result<Option<MembersPath<'_>>, AttributeEr
                     "{path}: members supports only a [value eq \"<id>\"] filter"
                 ))
             };
-            let inner = inner.trim_start();
-            let inner = strip_prefix_ignore_ascii_case(inner, "value")
-                .ok_or_else(unsupported)?
-                .trim_start();
-            let inner = strip_prefix_ignore_ascii_case(inner, "eq")
-                .ok_or_else(unsupported)?
-                .trim_start();
-            let inner = inner.strip_prefix('"').ok_or_else(unsupported)?;
-            let (id, after) = inner.split_once('"').ok_or_else(unsupported)?;
-            let after = after
-                .trim_start()
-                .strip_prefix(']')
-                .ok_or_else(unsupported)?;
+            // The filter runs to the last `]`: only `.subAttr` may follow it,
+            // and an ATTRNAME cannot contain one.
+            let (expression, after) = inner.rsplit_once(']').ok_or_else(unsupported)?;
+            let exp = scim_filter::parse(expression, urn::GROUP).map_err(|_| unsupported())?;
+            if !exp.is("value") || exp.op != scim_filter::CompareOp::Eq {
+                return Err(unsupported());
+            }
+            let id = exp.string_value().map_err(|_| unsupported())?.to_owned();
             (Some(id), after)
         }
         None => (None, rest),
@@ -441,7 +434,7 @@ fn apply_members_op(
     let targets_value = target
         .sub_attribute
         .map(|sub_attribute| sub_attribute.eq_ignore_ascii_case("value"));
-    match (op, target.filter, targets_value) {
+    match (op, target.filter.as_deref(), targets_value) {
         (PatchOp::Add(value), None, None) => {
             members.extend(member_ids(path, value)?);
             Ok(())
@@ -873,7 +866,7 @@ mod members_path_tests {
             assert_eq!(
                 parsed(path),
                 Some(MembersPath {
-                    filter: Some("AbC-123"),
+                    filter: Some("AbC-123".to_owned()),
                     sub_attribute: None
                 }),
                 "{path}"
@@ -881,12 +874,32 @@ mod members_path_tests {
         }
     }
 
+    // RFC 7644 §3.4.2.2: `attrPath = [URI ":"] ATTRNAME *1subAttr` inside a
+    // valuePath's brackets too, and `compValue` is a JSON string.
+    #[test]
+    fn value_filter_accepts_core_urn_and_json_escapes() {
+        assert_eq!(
+            parsed(r#"members[urn:ietf:params:scim:schemas:core:2.0:Group:value eq "u1"]"#),
+            Some(MembersPath {
+                filter: Some("u1".to_owned()),
+                sub_attribute: None
+            })
+        );
+        assert_eq!(
+            parsed(r#"members[value eq "a\"b"]"#),
+            Some(MembersPath {
+                filter: Some(r#"a"b"#.to_owned()),
+                sub_attribute: None
+            })
+        );
+    }
+
     #[test]
     fn value_filter_with_sub_attribute() {
         assert_eq!(
             parsed(r#"members[value eq "u1"].display"#),
             Some(MembersPath {
-                filter: Some("u1"),
+                filter: Some("u1".to_owned()),
                 sub_attribute: Some("display")
             })
         );
@@ -916,7 +929,7 @@ mod members_path_tests {
         assert_eq!(
             parsed("members[value eq \"İstanbul-user\"]"),
             Some(MembersPath {
-                filter: Some("İstanbul-user"),
+                filter: Some("İstanbul-user".to_owned()),
                 sub_attribute: None
             })
         );

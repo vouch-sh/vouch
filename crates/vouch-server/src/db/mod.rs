@@ -128,14 +128,16 @@ pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, R
 pub use config::{AuthEventParams, AuthEventType, ClientInfo, record_auth_event};
 
 // Re-export SCIM types and functions
-pub(crate) use scim::MAX_SCIM_TOKENS;
 pub use scim::{
     CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimGroupState,
     ScimGroupUpdateError, ScimScope, ScimScopeSet, ScimToken, ScimUpdateError, ScimUserRecord,
     create_scim_group, create_scim_token, create_scim_user, delete_expired_scim_tokens,
     delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
-    get_scim_token_by_hash, get_scim_user, list_scim_groups, list_scim_tokens, list_scim_users,
-    record_scim_audit, update_scim_group, update_scim_token_last_used, update_scim_user,
+    get_scim_token_by_hash, get_scim_user, list_scim_tokens, record_scim_audit, update_scim_group,
+    update_scim_token_last_used, update_scim_user,
+};
+pub(crate) use scim::{
+    GroupListFilter, MAX_SCIM_TOKENS, UserListFilter, list_scim_groups, list_scim_users,
 };
 
 // Re-export audit payload types: the sealed AuditData marker plus the

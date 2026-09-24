@@ -92,6 +92,19 @@ Paths may carry the core schema URN (`urn:ietf:params:scim:schemas:core:2.0:User
 attribute names are matched case-insensitively, as RFC 7644 requires. List filters accept the same
 qualified names.
 
+List filters (`GET /scim/v2/Users?filter=…`, `GET /scim/v2/Groups?filter=…`) support one comparison
+with `eq`, `co`, or `sw` on these attributes:
+
+| Resource | Attributes |
+|----------|------------|
+| User | `userName` (also accepted as `email`), `externalId` |
+| Group | `displayName`, `externalId` |
+
+The value is a JSON string, so a quote or backslash in it is escaped (`displayName eq "Team \"A\""`).
+Any other filter — another attribute such as `id` or `emails.value`, another operator, `pr`, or an
+`and`/`or`/`not` expression — returns `400` with `"scimType": "invalidFilter"` rather than an
+unfiltered list.
+
 An operation with no `path` — a value object such as `{"op": "replace", "value": {"active": false}}` —
 sets every attribute in the table the object carries, Group `members` included.
 

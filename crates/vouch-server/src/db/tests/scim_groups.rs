@@ -312,7 +312,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "GroupCase""#),
+        Some(&group_filter(r#"externalId co "GroupCase""#)),
         1,
         100,
     )
@@ -326,7 +326,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "groupcase""#),
+        Some(&group_filter(r#"externalId co "groupcase""#)),
         1,
         100,
     )
@@ -353,7 +353,7 @@ async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName co "ENGINEER""#),
+        Some(&group_filter(r#"displayName co "ENGINEER""#)),
         1,
         100,
     )
@@ -387,7 +387,7 @@ async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -414,7 +414,7 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "Engineering""#),
+        Some(&group_filter(r#"displayName eq "Engineering""#)),
         1,
         100,
     )
@@ -426,7 +426,7 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "ENGINEERING""#),
+        Some(&group_filter(r#"displayName eq "ENGINEERING""#)),
         1,
         100,
     )
@@ -473,7 +473,7 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -503,7 +503,7 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -529,7 +529,7 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "Ext-Case-1""#),
+        Some(&group_filter(r#"externalId eq "Ext-Case-1""#)),
         1,
         100,
     )
@@ -541,7 +541,7 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "ext-case-1""#),
+        Some(&group_filter(r#"externalId eq "ext-case-1""#)),
         1,
         100,
     )

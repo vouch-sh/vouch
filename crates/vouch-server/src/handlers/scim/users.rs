@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::extract::{ScimJson, ScimQuery};
 use super::patch::{
     Attribute, AttributeError, PatchOp, PatchOperation, apply_patch_op, optional_string,
-    required_attribute, unqualified,
+    required_attribute,
 };
 use super::types::{
     ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchRequest,
@@ -25,6 +25,7 @@ use crate::db;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::email::Email;
 use crate::redact_email;
+use crate::scim_filter::{self, unqualified};
 
 /// The 400 returned when a SCIM write would leave the organization with no
 /// active admin.
@@ -60,9 +61,14 @@ pub(crate) async fn list_users(
     let start_index = query.start_index.unwrap_or(1);
     let count = query.count.unwrap_or(100).min(100);
 
-    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
-        return (status, json).into_response();
-    }
+    let filter = match super::validate_list_params::<db::UserListFilter>(
+        query.filter.as_deref(),
+        start_index,
+        urn::USER,
+    ) {
+        Ok(filter) => filter,
+        Err((status, json)) => return (status, json).into_response(),
+    };
 
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers, arrival).await {
@@ -77,11 +83,7 @@ pub(crate) async fn list_users(
     let (users, total) = match db::list_scim_users(
         &state.store,
         &auth.org_id,
-        // RFC 7644 §3.10: the attribute may carry its core schema URN prefix.
-        query
-            .filter
-            .as_deref()
-            .map(|filter| unqualified(filter.trim_start(), urn::USER)),
+        filter.as_ref(),
         start_index,
         count,
     )
@@ -91,10 +93,6 @@ pub(crate) async fn list_users(
         Err(e) => {
             if let Some(filter_err) = e.downcast_ref::<ScimFilterError>() {
                 let (detail, error_type) = match filter_err {
-                    ScimFilterError::UnsupportedOperator(_) => {
-                        tracing::debug!("SCIM filter parse error: {e}");
-                        ("Invalid filter expression", "invalidFilter")
-                    }
                     ScimFilterError::FilterTooBroad => (
                         "Filter is too broad; add a more specific filter",
                         "invalidFilter",
@@ -467,7 +465,8 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
         PatchOp::Replace(value) => (value, false),
     };
     if let Some((_, rest)) = path.split_once('[') {
-        let Some((filter, _)) = rest.split_once(']') else {
+        // The filter runs to the last `]`: only `.subAttr` may follow it.
+        let Some((filter, _)) = rest.rsplit_once(']') else {
             return Err(AttributeError::invalid_filter(format!(
                 "{path} has an unterminated value filter"
             )));
@@ -508,43 +507,29 @@ fn apply_emails_op(email: &Email, path: &str, op: PatchOp<'_>) -> Result<(), Att
 /// presents: `value` is the stored email, `type` is `work`, and `primary` is
 /// `true` (see `user_to_scim`).
 ///
-/// Vouch supports a single `eq` comparison. RFC 7644 §3.12 Table 9 lists
-/// `invalidFilter` for "PATCH (Path Filter - Section 3.5.2)" when "the
-/// specified attribute and filter comparison combination is not supported",
-/// which is what a compound or other-operator filter gets.
-///
-/// The attribute may carry the core schema URN prefix: §3.4.2.2's ABNF is
-/// `attrPath  = [URI ":"] ATTRNAME *1subAttr`.
+/// Vouch supports a single `eq` comparison, parsed by
+/// [`scim_filter::parse`]. RFC 7644 §3.12 Table 9 lists `invalidFilter` for
+/// "PATCH (Path Filter - Section 3.5.2)" when "the specified attribute and
+/// filter comparison combination is not supported", which is what a compound
+/// or other-operator filter gets.
 fn email_filter_matches(email: &Email, path: &str, filter: &str) -> Result<bool, AttributeError> {
     let unsupported = || {
         AttributeError::invalid_filter(format!(
             "{path}: emails supports only a [value|type|primary eq <literal>] filter"
         ))
     };
-    let mut parts = filter.trim().splitn(3, char::is_whitespace);
-    let (Some(attribute), Some(operator), Some(literal)) =
-        (parts.next(), parts.next(), parts.next())
-    else {
-        return Err(unsupported());
-    };
-    if !operator.eq_ignore_ascii_case("eq") {
+    let exp = scim_filter::parse(filter, urn::USER).map_err(|_| unsupported())?;
+    if exp.op != scim_filter::CompareOp::Eq {
         return Err(unsupported());
     }
-    let literal = literal.trim();
-    // A filter's string literal is a JSON string (RFC 7644 §3.4.2.2), so it
-    // is parsed as one and may carry escapes.
-    let string = || serde_json::from_str::<String>(literal).map_err(|_| unsupported());
-    let attribute = unqualified(attribute, urn::USER);
-    if attribute.eq_ignore_ascii_case("value") {
-        Ok(Email::new(&string()?) == *email)
-    } else if attribute.eq_ignore_ascii_case("type") {
-        Ok(string()?.eq_ignore_ascii_case("work"))
-    } else if attribute.eq_ignore_ascii_case("primary") {
-        match literal {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(unsupported()),
-        }
+    if exp.is("value") {
+        let value = exp.string_value().map_err(|_| unsupported())?;
+        Ok(Email::new(value) == *email)
+    } else if exp.is("type") {
+        let value = exp.string_value().map_err(|_| unsupported())?;
+        Ok(value.eq_ignore_ascii_case("work"))
+    } else if exp.is("primary") {
+        exp.value.as_bool().ok_or_else(unsupported)
     } else {
         Err(unsupported())
     }

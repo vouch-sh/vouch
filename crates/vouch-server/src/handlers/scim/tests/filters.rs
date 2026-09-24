@@ -384,3 +384,139 @@ async fn test_rfc7644_filter_accepts_core_urn_qualified_attribute() {
         assert_eq!(listed["totalResults"], 1, "{uri}: {body}");
     }
 }
+
+/// `GET /scim/v2/{resource}?filter=<filter>`, returning the status and body.
+async fn list_filtered(
+    app: &axum::Router,
+    auth_header: &str,
+    resource: &str,
+    filter: &str,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = http_get(
+        app,
+        &format!("/scim/v2/{resource}?filter={}", urlencoding::encode(filter)),
+        &[("Authorization", auth_header)],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+/// Create `names` as Users (`userName`) or Groups (`displayName`).
+async fn create_resources(app: &axum::Router, auth_header: &str, resource: &str, names: &[&str]) {
+    for name in names {
+        let body = if resource == "Users" {
+            serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "userName": name,
+            })
+        } else {
+            serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "displayName": name,
+            })
+        };
+        let (status, body) = http_post_json(
+            app,
+            &format!("/scim/v2/{resource}"),
+            &body.to_string(),
+            &[("Authorization", auth_header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{name}: {body}");
+    }
+}
+
+// RFC 7644 §3.4.2.2: "When specified, only those resources matching the filter
+// expression SHALL be returned." A filter Vouch does not evaluate is 400
+// `invalidFilter` (§3.12 Table 9), never every resource in the org.
+#[tokio::test]
+async fn test_rfc7644_unsupported_filter_is_invalid_filter_not_everything() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-unsupported-filter", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    create_resources(
+        &app,
+        &auth_header,
+        "Users",
+        &["a@test-org.example.com", "b@test-org.example.com"],
+    )
+    .await;
+    create_resources(&app, &auth_header, "Groups", &["One", "Two"]).await;
+
+    for (resource, filter) in [
+        ("Users", r#"emails.value eq "a@test-org.example.com""#),
+        ("Users", r#"id eq "nonexistent""#),
+        ("Users", r#"title eq "x""#),
+        ("Users", "userName pr"),
+        (
+            "Users",
+            r#"userName eq "a@test-org.example.com" and active eq false"#,
+        ),
+        ("Users", r#"not (userName eq "a@test-org.example.com")"#),
+        ("Groups", r#"id eq "nonexistent""#),
+        ("Groups", r#"displayName eq "One" or displayName eq "Two""#),
+    ] {
+        let (status, error) = list_filtered(&app, &auth_header, resource, filter).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{resource} {filter}: {error}"
+        );
+        assert_eq!(
+            error["scimType"], "invalidFilter",
+            "{resource} {filter}: {error}"
+        );
+    }
+}
+
+// Whitespace is read leniently: a tab or a run of spaces between tokens
+// filters the same as one space, instead of widening to every user.
+#[tokio::test]
+async fn test_rfc7644_filter_whitespace_runs_still_filter() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-filter-whitespace", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    create_resources(
+        &app,
+        &auth_header,
+        "Users",
+        &["a@test-org.example.com", "b@test-org.example.com"],
+    )
+    .await;
+
+    for filter in [
+        "userName  eq \"a@test-org.example.com\"",
+        "userName\teq \"a@test-org.example.com\"",
+        " userName eq \"a@test-org.example.com\" ",
+    ] {
+        let (status, listed) = list_filtered(&app, &auth_header, "Users", filter).await;
+        assert_eq!(status, StatusCode::OK, "{filter:?}: {listed}");
+        assert_eq!(listed["totalResults"], 1, "{filter:?}: {listed}");
+    }
+}
+
+// RFC 7644 §3.4.2.2: `compValue` is "built on JSON Data Interchange format
+// ABNF rules", so a backslash and a quote in a value are escaped.
+#[tokio::test]
+async fn test_rfc7644_filter_value_is_a_json_string() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-filter-escapes", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+    create_resources(
+        &app,
+        &auth_header,
+        "Groups",
+        &[r"Domain\Admins", r#"Team "A""#],
+    )
+    .await;
+
+    for filter in [
+        r#"displayName eq "Domain\\Admins""#,
+        r#"displayName eq "Team \"A\"""#,
+        r#"displayName co "\\Adm""#,
+    ] {
+        let (status, listed) = list_filtered(&app, &auth_header, "Groups", filter).await;
+        assert_eq!(status, StatusCode::OK, "{filter}: {listed}");
+        assert_eq!(listed["totalResults"], 1, "{filter}: {listed}");
+    }
+}
