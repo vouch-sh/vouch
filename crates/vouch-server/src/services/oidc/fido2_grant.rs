@@ -29,7 +29,8 @@ use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
     LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
+    create_oauth_access_token, lookup_and_verify_authenticator, record_lookup_failure,
+    verify_login_assertion,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -314,7 +315,7 @@ pub(crate) async fn exchange_fido2_assertion(
             }
         },
         async {
-            lookup_and_verify_authenticator(
+            let e = match lookup_and_verify_authenticator(
                 state,
                 AuthenticatorLookupParams {
                     credential_id: grant.payload.credential_id.as_bytes(),
@@ -322,20 +323,22 @@ pub(crate) async fn exchange_fido2_assertion(
                 },
             )
             .await
-            .map_err(|e| match e {
+            {
+                Ok(found) => return Ok(found),
+                Err(e) => e,
+            };
+            record_lookup_failure(&state.audit, params.client_info.clone(), user_id, &e).await;
+            Err(match e {
                 // A storage fault says nothing about the grant, so it stays a 500.
                 LookupError::Service(err) => {
                     tracing::error!("FIDO2 assertion grant: authenticator lookup failed: {err}");
                     err
                 }
-                // Credential/user not found, owner mismatch, or deactivated
-                // owner: the grant is refused. Remap to a generic invalid_grant
-                // without leaking which sub-case failed. The deactivated user
-                // surfaced by `LookupError::Deactivated` is discarded here — no
-                // audit row is written on this path (only a Prometheus metric),
-                // mirroring the pre-fix behavior.
-                other => {
-                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {other}");
+                // Generic invalid_grant: the response does not say which refusal applied.
+                refusal @ (LookupError::NotFound(_)
+                | LookupError::UserMismatch
+                | LookupError::Deactivated { .. }) => {
+                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {refusal}");
                     ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
                 }
             })

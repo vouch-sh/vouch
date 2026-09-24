@@ -473,7 +473,7 @@ pub(crate) async fn rename_key(
     // deactivated user holding a live session would otherwise reach the
     // state-changing rename below. Mirrors `delete_key` and `register_start`
     // in this file; see `session::load_active_user`.
-    let _user = super::session::load_active_user(&state, &token.sub).await?;
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
@@ -485,7 +485,7 @@ pub(crate) async fn rename_key(
         client: client_info,
         ..Default::default()
     };
-    db::record_auth_event(&state.audit, event, token.email.clone()).await;
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -512,7 +512,7 @@ pub(crate) async fn delete_key(
     // by a writer that bypasses `services::auth::revoke_then_persist`) would
     // otherwise reach the destructive delete below. Mirrors `register_start`
     // and the credentials/device handlers; see `session::load_active_user`.
-    let _user = super::session::load_active_user(&state, &token.sub).await?;
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -532,7 +532,7 @@ pub(crate) async fn delete_key(
         client: client_info,
         ..Default::default()
     };
-    db::record_auth_event(&state.audit, event, token.email.clone()).await;
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),
@@ -1528,6 +1528,99 @@ mod tests {
             serde_json::from_str(&event.data).expect("audit data is valid JSON");
         assert_eq!(data["authenticator_id"], auth_id);
         assert_eq!(data["success"], true);
+    }
+
+    /// Key rename and removal audit rows take the email from the loaded user,
+    /// not the token. A token minted without the `email` scope has no email
+    /// claim, and a row without an email domain drops out of org-scoped audit
+    /// queries. Covers both the `/v1/keys` and `/enroll/keys` handlers.
+    #[tokio::test]
+    async fn test_key_audit_events_are_org_visible_without_email_scope() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "no-email-scope@example.com").await;
+        let session_key = create_test_authenticator(&state.store, &user.id).await;
+        let v1_key = create_test_authenticator(&state.store, &user.id).await;
+        let enroll_key = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&session_key),
+                scope: Some(crate::services::oidc::ScopeSet::parse("openid")),
+                ..Default::default()
+            },
+        )
+        .await;
+        let bearer = format!("Bearer {token}");
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{v1_key}"),
+            Some(r#"{"name":"Renamed"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &bearer),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{v1_key}"),
+            &[("Authorization", &bearer)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/enroll/keys/{enroll_key}/rename"),
+            "name=Renamed",
+            &[
+                ("Cookie", &cookie),
+                ("Origin", state.config().base_url.as_str()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        let (status, body) = http_delete(
+            &app,
+            &format!("/enroll/keys/{enroll_key}"),
+            &[
+                ("Authorization", &bearer),
+                ("Origin", state.config().base_url.as_str()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string(), "key_removed".to_string()]),
+                email_domains: Some(vec!["example.com".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let mut seen = Vec::new();
+        for event in &events {
+            let data: serde_json::Value =
+                serde_json::from_str(&event.data).expect("audit data is valid JSON");
+            let authenticator_id = data["authenticator_id"].as_str().expect("authenticator_id");
+            seen.push((event.event_type.clone(), authenticator_id.to_string()));
+        }
+        seen.sort();
+        let mut expected = vec![
+            ("key_removed".to_string(), enroll_key.clone()),
+            ("key_removed".to_string(), v1_key.clone()),
+            ("key_renamed".to_string(), enroll_key.clone()),
+            ("key_renamed".to_string(), v1_key.clone()),
+        ];
+        expected.sort();
+        assert_eq!(seen, expected, "every key event is org-visible: {events:?}");
     }
 
     /// A rejected rename (invalid name) must not write a `key_renamed`

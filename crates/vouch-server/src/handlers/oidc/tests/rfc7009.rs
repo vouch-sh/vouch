@@ -352,6 +352,41 @@ async fn test_rfc7009_revoke_expired_row_records_logout() {
     assert_eq!(logout_events(&state, &user.id).await, 1);
 }
 
+/// A token minted without the `email` scope carries no email claim. The
+/// deleted session row supplies the email, so the `Logout` event keeps its
+/// domain and stays in the org-scoped audit feed.
+#[tokio::test]
+async fn test_rfc7009_revoke_without_email_scope_records_org_visible_logout() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "revoke-no-email@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            client_id: Some(&client.client_id),
+            scope: Some(crate::services::oidc::ScopeSet::parse("openid")),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
+
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec![db::AuditEventKind::Logout.as_str().to_string()]),
+            user_id: Some(user.id.clone()),
+            email_domains: Some(vec!["example.com".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "org-visible Logout event: {events:?}");
+}
+
 // RFC 7009 §2.1: "The authorization server first validates the client
 // credentials (in case of a confidential client) and then verifies whether the
 // token was issued to the client making the revocation request." An expired

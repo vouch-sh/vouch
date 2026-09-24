@@ -52,46 +52,56 @@ pub(crate) struct AuthenticatorLookupResult {
 
 /// Error from [`lookup_and_verify_authenticator`].
 ///
-/// Splits the deactivated sub-case out of [`ServiceError::Forbidden`] so the
-/// browser-login handler can attribute the refusal audit row to the
-/// credential owner's org domain. [`ServiceError::Forbidden`] carries only a
-/// `&'static str` reason; the deactivated branch has already loaded the
-/// credential's owner (the asserted `user_handle` matched) and discarding
-/// the user — as the generic error type does — leaves the `login_failed`
-/// audit row with a `NULL email_domain`, invisible to the documented
-/// domain-scoped operator audit feed (`email_domain IN (...)` never matches
-/// `NULL`). Carrying the owner's email here lets the caller pass it to
-/// `log_login_failure`, populating the row's `email_domain`/`email_hmac`.
-/// Only the email is carried (not the whole `User`) to mirror the
-/// `EnrollUserError::Deactivated { .., email }` precedent — the email is
-/// "for the refusal audit event" — and to keep the error variant small.
+/// Refusals are separate variants so callers can audit each one. Only
+/// [`LookupError::Deactivated`] names an account: there the asserted
+/// `user_handle` matched the credential's owner.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LookupError {
     /// Credential or owning user row not found.
     #[error("not found: {0}")]
     NotFound(&'static str),
 
-    /// The credential does not belong to the asserted user — the asserted
-    /// `user_handle` differs from the credential's owner. Two accounts are
-    /// involved and neither is verified by the not-yet-run assertion, so the
-    /// refusal audit row is deliberately written without an email to avoid
-    /// attributing it to the credential owner's (or the asserted user's)
-    /// org domain.
+    /// The asserted `user_handle` is not the credential's owner. The assertion
+    /// has not run, so neither account is proven and the refusal names no email.
     #[error("forbidden: user_mismatch")]
     UserMismatch,
 
-    /// The credential's owner is deactivated. Carries the owner's email —
-    /// the credential's owner, which the asserted `user_handle` matched — so
-    /// the refusal audit row can carry the owner's email/domain and remain
-    /// visible to org-scoped audit queries. This is the only lookup-failure
-    /// sub-case where an account is unambiguously identified.
+    /// The credential's owner is deactivated. Carries the owner's email so the
+    /// refusal audit row lands in the owner's org-scoped audit feed.
     #[error("forbidden: user_deactivated")]
     Deactivated { email: String },
 
-    /// A storage or other internal fault, surfaced unchanged so the handler
-    /// maps it to a 5xx rather than masking a server fault as a client 401.
+    /// A storage or internal fault. Callers return it as a 5xx, not a refusal.
     #[error(transparent)]
     Service(#[from] ServiceError),
+}
+
+/// Record a `login_failed` audit event for a failed authenticator lookup.
+///
+/// `user_id` is the asserted `user_handle`. Browser login and the FIDO2
+/// assertion grant both call this, so a refusal leaves the same row on
+/// either path.
+pub(crate) async fn record_lookup_failure(
+    audit: &db::audit::AuditStore,
+    client: db::ClientInfo,
+    user_id: Uuid,
+    error: &LookupError,
+) {
+    let (reason, email) = match error {
+        LookupError::NotFound(entity) => (format!("{entity}_not_found"), None),
+        LookupError::UserMismatch => ("user_mismatch".to_string(), None),
+        LookupError::Deactivated { email } => ("user_deactivated".to_string(), Some(email.clone())),
+        LookupError::Service(_) => ("lookup_error".to_string(), None),
+    };
+    let params = db::AuthEventParams {
+        user_id: user_id.to_string(),
+        event_type: db::AuthEventType::LoginFailed,
+        success: false,
+        failure_reason: Some(reason),
+        client,
+        ..db::AuthEventParams::default()
+    };
+    db::record_auth_event(audit, params, email).await;
 }
 
 /// Look up an authenticator and verify it belongs to the specified user.
@@ -119,12 +129,6 @@ pub(crate) async fn lookup_and_verify_authenticator(
     }
 
     if !user.active {
-        // The credential was found and the asserted user_handle matches its
-        // owner, so the account attempting login is unambiguously this user.
-        // Surface the owner's email so the handler can attribute the refusal
-        // audit row to this account's email/domain (the `user_id` written to
-        // the audit row is already the asserted user_handle, which matched
-        // the credential owner here).
         return Err(LookupError::Deactivated { email: user.email });
     }
 

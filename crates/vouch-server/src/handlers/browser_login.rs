@@ -620,34 +620,11 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            // Only the deactivated branch surfaces a loaded user (the
-            // credential's owner, which the asserted user_handle matched);
-            // its refusal audit row is attributed to that user's email/domain
-            // so it stays visible to org-scoped audit queries. user_mismatch
-            // and not_found stay `None`: no unambiguously attributable account
-            // exists, and attributing user_mismatch to the credential owner's
-            // domain would be a separate (wrong-domain) attribution bug.
-            let (reason, loaded_email) = match &e {
-                crate::services::auth::LookupError::NotFound(entity) => {
-                    (format!("{entity}_not_found"), None)
-                }
-                crate::services::auth::LookupError::Deactivated { email } => {
-                    ("user_deactivated".to_string(), Some(email.clone()))
-                }
-                crate::services::auth::LookupError::UserMismatch => {
-                    ("user_mismatch".to_string(), None)
-                }
-                crate::services::auth::LookupError::Service(_) => {
-                    ("lookup_error".to_string(), None)
-                }
-            };
-            log_login_failure(
+            crate::services::auth::record_lookup_failure(
                 &state.audit,
                 client_info.clone(),
-                &user_id.to_string(),
-                loaded_email.as_deref(),
-                None,
-                &reason,
+                user_id,
+                &e,
             )
             .await;
             return Err(match e {
@@ -1902,15 +1879,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_deactivated_user_browser_login_failed_is_org_visible() {
-        // Regression: the lookup-error arm passed `email: None` to
-        // `log_login_failure` for every `Forbidden` sub-case, so the
-        // `login_failed` row for `user_deactivated` was written with a
-        // `NULL email_domain`. SQL `NULL IN (...)` never matches, so the row
-        // was dropped from the documented domain-scoped operator audit feed
-        // (`/api/v1/org/audit-events`, `/admin/audit`) — even when filtered by
-        // that user's id. The credential owner is unambiguously identified on
-        // this sub-case (the asserted `user_handle` matched), so the fix
-        // surfaces the loaded user and attributes the row to its domain.
+        // A deactivated owner is the one refusal that names an account, so
+        // its row carries the owner's domain and an org-scoped query finds it.
         use crate::db::documents::user::UserDoc;
 
         let (app, state) = crate::test_utils::test_app().await;
@@ -1929,8 +1899,7 @@ mod tests {
             ["user_deactivated"]
         );
 
-        // Org-scoped query — the documented operator surface. With the bug,
-        // `email_domain` was NULL so this returned zero rows.
+        // The org-scoped query that `/api/v1/org/audit-events` and `/admin/audit` run.
         let by_domain = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
@@ -1952,7 +1921,6 @@ mod tests {
              (email_domains) audit queries; got {by_domain:?}"
         );
 
-        // `email_domain` must be populated (was NULL before the fix).
         let by_user = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
@@ -1972,14 +1940,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_browser_login_user_mismatch_failure_keeps_email_domain_null() {
-        // The fix attributes the `user_deactivated` sub-case to the credential
-        // owner's domain, but the sibling `user_mismatch` sub-case must stay
-        // `email: None`. Here two accounts are involved (the credential owner
-        // and the asserted `user_handle` differ) and the not-yet-run assertion
-        // verifies neither, so attributing the row to the credential owner's
-        // domain would be a separate (wrong-domain) attribution bug. Drive a
-        // real user_mismatch (attacker asserts the owner's credential) and
-        // assert the resulting login_failed row has a NULL `email_domain`.
+        // The asserted user_handle is not the credential's owner and the
+        // assertion has not run, so the row names neither account's email.
         let (app, state) = crate::test_utils::test_app().await;
         let owner = crate::test_utils::create_test_user(&state.store, "owner@example.com").await;
         let attacker =
