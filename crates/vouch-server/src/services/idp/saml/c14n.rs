@@ -20,20 +20,23 @@
 //! - `Node::text()` -- text content for text nodes
 //! - `Node::parent()` -- parent node (for prefix resolution walk)
 //!
-//! # Known Limitation: Prefix Resolution
+//! # Prefix Resolution
 //!
-//! roxmltree does NOT expose the original prefix on `tag_name()`. We reconstruct
-//! prefixes by walking namespace declarations from the element up through ancestors,
-//! preferring the declaration closest to the element. In the rare case where
-//! multiple prefixes map to the same namespace URI, the prefix declared closest to
-//! the element is used. This is documented as a known limitation and a
-//! `tracing::warn` is emitted when detected.
+//! roxmltree does not expose the original prefix on `tag_name()` or on an
+//! attribute's name, only the resolved namespace URI. Exc-c14n renders a
+//! namespace declaration by the prefix a name was written with, so
+//! [`element_prefix`] and [`attr_prefix`] read that prefix from the source text
+//! at the node's or attribute's byte range (the `positions` feature). Only when
+//! the written prefix does not resolve to the name's URI do they fall back to
+//! walking namespace declarations from the element up through its ancestors,
+//! preferring the declaration closest to the element; a `tracing::warn` is
+//! emitted when that fallback finds several prefixes for one URI at one depth.
 //!
 //! Element and attribute prefix resolution differ: an element in the default
 //! namespace is emitted unprefixed (the default binding is a valid "prefix" for
 //! an element name), but an unprefixed attribute never takes the default namespace
-//! per XML Names. [`find_attr_prefix_for_uri`] therefore excludes the default
-//! binding and resolves an attribute's prefix to the closest non-empty (prefixed)
+//! per XML Names. The attribute fallback, [`find_attr_prefix_for_uri`], therefore
+//! excludes the default binding and resolves to the closest non-empty (prefixed)
 //! binding, so an element co-declaring the same URI as both `xmlns="urn:X"` and
 //! `xmlns:a="urn:X"` with a `a:attr="v"` attribute canonicalizes as `a:attr` with
 //! `xmlns:a="urn:X"` rendered -- matching libxml2/xmlsec1 byte-for-byte.
@@ -206,7 +209,7 @@ fn canonicalize_node(
             // prefix here would emit a bare-colon `:attr` name and drop the
             // `xmlns:prefix` declaration the attribute depends on, diverging from
             // libxml2/xmlsec1 (the engine every mainstream SAML IdP signs with).
-            if let Some(p) = find_attr_prefix_for_uri(node, attr_ns) {
+            if let Some(p) = attr_prefix(node, attr) {
                 output.push_str(p);
                 output.push(':');
             }
@@ -293,7 +296,7 @@ fn collect_namespaces(
         // the default binding -- a byte-for-byte divergence from libxml2/xmlsec1.
         // roxmltree rejects an undeclared prefix, so `None` does not occur.
         // Skip to match the emitter, which renders no declaration here.
-        let Some(prefix) = find_attr_prefix_for_uri(node, attr_ns) else {
+        let Some(prefix) = attr_prefix(node, &attr) else {
             continue;
         };
         result.insert((prefix.to_string(), attr_ns.to_string()));
@@ -329,11 +332,10 @@ fn collect_namespaces(
 /// For elements: searches namespace declarations on this node first, then walks
 /// ancestors. This ensures the closest declaration wins (handles shadowing).
 ///
-/// # Multi-prefix-same-URI (Known Limitation)
-///
-/// When multiple prefixes are bound to the same URI in the same scope,
-/// the prefix declared first (closest to the element) is returned, and a
-/// warning is emitted. In practice, SAML documents do not use this pattern.
+/// This is the fallback for [`element_prefix`], used only when the element's
+/// written prefix cannot be read from the source. When multiple prefixes are
+/// bound to the same URI in the same scope, the prefix declared first (closest
+/// to the element) is returned, and a warning is emitted.
 fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&'a str> {
     let mut candidates: Vec<(&'a str, usize)> = Vec::new();
     let mut depth = 0usize;
@@ -402,12 +404,10 @@ fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&
 /// occurs: roxmltree only assigns a namespace to a `prefix:local` attribute
 /// when a prefixed binding exists).
 ///
-/// # Multi-prefix-same-URI (Known Limitation)
-///
-/// When multiple non-empty prefixes are bound to the same URI at the same
-/// depth, the one declared first (closest to the element) is returned and a
-/// `tracing::warn` is emitted. In practice, SAML documents do not use this
-/// pattern.
+/// This is the fallback for [`attr_prefix`], used only when the attribute's
+/// written prefix cannot be read from the source. When multiple non-empty
+/// prefixes are bound to the same URI at the same depth, the one declared
+/// first (closest to the element) is returned and a `tracing::warn` is emitted.
 fn find_attr_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&'a str> {
     let mut candidates: Vec<(&'a str, usize)> = Vec::new();
     let mut depth = 0usize;
@@ -537,6 +537,29 @@ fn element_prefix<'a>(node: roxmltree::Node<'_, 'a>) -> Option<&'a str> {
     }
 }
 
+/// Return the prefix an attribute was written with.
+///
+/// exc-c14n §1.1: "An element E in a document subset visibly utilizes a
+/// namespace declaration, i.e. a namespace prefix P and bound value V, if E
+/// or an attribute node in the document subset with parent E has a qualified
+/// name in which P is the namespace prefix." When one URI is bound to two
+/// prefixes in scope, a URI search cannot tell `b:attr` from `a:attr`, so the
+/// prefix is read from the attribute's qualified name at `range_qname()` and
+/// used only when it resolves to the attribute's namespace URI.
+fn attr_prefix<'input>(
+    node: roxmltree::Node<'_, 'input>,
+    attr: &roxmltree::Attribute<'_, 'input>,
+) -> Option<&'input str> {
+    let ns_uri = attr.namespace()?;
+    node.document()
+        .input_text()
+        .get(attr.range_qname())
+        .and_then(|qname| qname.split_once(':'))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| node.lookup_namespace_uri(Some(prefix)) == Some(ns_uri))
+        .or_else(|| find_attr_prefix_for_uri(node, ns_uri))
+}
+
 /// Concatenate every text child of an element, skipping comments.
 ///
 /// This is the only correct way to read a signed element's value. Signature
@@ -626,6 +649,50 @@ mod tests {
         doc.root()
             .descendants()
             .find(|n| n.is_element() && n.tag_name().name() == local_name)
+    }
+
+    // =========================================================================
+    // Attribute prefix when one URI is bound to two prefixes in scope
+    // =========================================================================
+
+    // exc-c14n §1.1: "An element E in a document subset visibly utilizes a
+    // namespace declaration, i.e. a namespace prefix P and bound value V, if E
+    // or an attribute node in the document subset with parent E has a
+    // qualified name in which P is the namespace prefix." An attribute keeps
+    // the prefix it was written with, whichever binding for its URI is
+    // closest. Expected strings come from libxml2 2.14.6 exclusive C14N of
+    // the `e` subtree.
+    #[test]
+    fn attribute_keeps_its_own_prefix_among_bindings_for_one_uri() {
+        let cases = [
+            (
+                r#"<p xmlns:b="urn:X"><e b:attr="v"/></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" b:attr="v"/></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" a:attr="v"/></p>"#,
+                r#"<e xmlns:a="urn:X" a:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" a:x="1" b:y="2"/></p>"#,
+                r#"<e xmlns:a="urn:X" xmlns:b="urn:X" a:x="1" b:y="2"></e>"#,
+            ),
+            (
+                r#"<e xmlns:a="urn:X" xmlns:b="urn:X" b:attr="v"/>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e b:attr="1"><f xmlns:a="urn:X" b:attr="2"/></e></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="1"><f b:attr="2"></f></e>"#,
+            ),
+        ];
+        for (xml, expected) in cases {
+            assert_eq!(c14n(xml, "e", &[]), expected, "{xml}");
+        }
     }
 
     // =========================================================================
