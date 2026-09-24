@@ -1060,6 +1060,23 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
     .expect("Failed to create authenticator")
 }
 
+/// Overwrite a document's stored body with text that does not decode, so the
+/// next read of that document fails at the storage layer.
+pub async fn corrupt_document(store: &DocumentStore, id: &str) {
+    let pool = match store.pool() {
+        Pool::Sqlite(p) => Some(p),
+        Pool::Postgres(_) => None,
+    }
+    .expect("the test database is SQLite");
+    let rows = sqlx::query("UPDATE documents SET data = 'not-json' WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("corrupt document")
+        .rows_affected();
+    assert_eq!(rows, 1, "no document with id {id}");
+}
+
 /// Resolve the session-time `hardware_aaguid` / `org_domain` snapshot the way
 /// production call sites do — by fetching the authenticator and the user's
 /// organization domain. Used by every test session helper so tests exercise

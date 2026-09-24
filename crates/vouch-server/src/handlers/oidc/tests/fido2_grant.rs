@@ -457,6 +457,55 @@ async fn test_fido2_token_oversized_credential_id_leaves_challenge_unconsumed() 
     assert_challenge_unspent(&state, &state_jwt).await;
 }
 
+// RFC 6749 §5.2: `invalid_grant` means "The provided authorization grant ...
+// is invalid", so it fits an unknown credential. A storage fault says nothing
+// about the grant and must stay a server error.
+#[tokio::test]
+async fn test_fido2_token_unknown_credential_is_invalid_grant() {
+    let (app, state) = test_app().await;
+    let unknown = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    let (_, status, body) =
+        post_assertion_with_credential_id(&app, &state, "fido2-unknown-cred@example.com", &unknown)
+            .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "{body}");
+}
+
+#[tokio::test]
+async fn test_fido2_token_authenticator_storage_fault_is_server_error() {
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "fido2-storage-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &owner.id).await;
+    let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+        .await
+        .expect("load authenticator")
+        .expect("authenticator exists");
+    corrupt_document(&state.store, &owner.id).await;
+    assert!(
+        db::get_authenticator_with_user_by_credential_id(
+            &state.store,
+            &authenticator.credential_id
+        )
+        .await
+        .is_err(),
+        "the lookup must fail at the storage layer"
+    );
+
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-storage-fault-client@example.com",
+        &URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "server_error", "{body}");
+}
+
 #[tokio::test]
 async fn test_fido2_token_invalid_credential_id_encoding_rejected() {
     let (app, state) = test_app().await;
