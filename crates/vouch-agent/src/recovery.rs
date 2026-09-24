@@ -43,7 +43,7 @@ async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std:
 
     // Reject insecure server URLs (unless explicitly allowed)
     if vouch_common::check_url_security(&server_url).is_insecure() {
-        if std::env::var("VOUCH_ALLOW_INSECURE").is_ok() {
+        if crate::server::allow_insecure() {
             tracing::warn!(
                 "Recovering session over insecure HTTP: {server_url}. VOUCH_ALLOW_INSECURE is set."
             );
@@ -97,12 +97,9 @@ async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std:
         .and_then(|s| Timestamp::from_second(s).ok())
         .unwrap_or_else(Timestamp::now);
 
-    // Store session in agent state
+    // Store the session with its server URL (enables SSH lazy loading)
     let session = Session::new(token, email.clone(), expires_at);
-    state.store_session(session).await;
-
-    // Store server URL in SSH agent state (enables lazy loading)
-    state.set_ssh_server_url(server_url).await;
+    state.store_session(session, Some(server_url)).await;
 
     // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
     let hours = expires_in.checked_div(3600).unwrap_or(0);

@@ -202,7 +202,16 @@ struct Cli {
     server: Option<String>,
 
     /// Allow insecure HTTP connections to non-localhost servers.
-    #[arg(long, env = "VOUCH_ALLOW_INSECURE", global = true, hide = true)]
+    ///
+    /// Parsed by the same function the agent reads `VOUCH_ALLOW_INSECURE`
+    /// with, so `1` and `true` both enable it and `0` and `false` both refuse.
+    #[arg(
+        long,
+        env = "VOUCH_ALLOW_INSECURE",
+        global = true,
+        hide = true,
+        value_parser = vouch_common::parse_allow_insecure
+    )]
     allow_insecure: bool,
 
     /// Enable verbose output.
@@ -946,6 +955,62 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- VOUCH_ALLOW_INSECURE --
+
+    /// `VOUCH_ALLOW_INSECURE` is parsed by `vouch_common::parse_allow_insecure`,
+    /// the function the agent reads it with. `1`, the value the CLI's own
+    /// messages give, parses on every subcommand, `0` and `false` refuse, and
+    /// an unrecognized value is a parse error rather than either answer.
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn test_allow_insecure_env_values() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        let prior = std::env::var_os("VOUCH_ALLOW_INSECURE");
+        let mut outcomes = Vec::new();
+        for value in ["1", "true", "0", "false", "maybe"] {
+            // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+            unsafe { std::env::set_var("VOUCH_ALLOW_INSECURE", value) };
+            let parsed = Cli::try_parse_from(["vouch", "doctor"]).map(|cli| cli.allow_insecure);
+            outcomes.push((value, parsed.ok()));
+        }
+        // SAFETY: as above; restores the prior value before any assertion.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_ALLOW_INSECURE", value),
+                None => std::env::remove_var("VOUCH_ALLOW_INSECURE"),
+            }
+        }
+
+        assert_eq!(
+            outcomes,
+            vec![
+                ("1", Some(true)),
+                ("true", Some(true)),
+                ("0", Some(false)),
+                ("false", Some(false)),
+                ("maybe", None),
+            ]
+        );
+    }
+
+    /// The `--allow-insecure` flag still takes no value. Holds `ENV_LOCK`
+    /// because clap also reads `VOUCH_ALLOW_INSECURE`.
+    #[tokio::test]
+    async fn test_allow_insecure_flag() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        let parsed = Cli::try_parse_from(["vouch", "--allow-insecure", "doctor"])
+            .map(|cli| cli.allow_insecure)
+            .ok();
+        assert_eq!(parsed, Some(true));
+    }
 
     // -- uses_server --
 

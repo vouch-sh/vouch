@@ -66,7 +66,7 @@ impl AgentServer {
 
         // Surface the insecure-URL override at boot, not just when an insecure
         // URL is actually stored — a set-but-unused flag is still a misconfiguration.
-        if std::env::var_os("VOUCH_ALLOW_INSECURE").is_some() {
+        if allow_insecure() {
             warn!(
                 "VOUCH_ALLOW_INSECURE is set: insecure (plain HTTP) server URLs will be accepted. Do not use in production."
             );
@@ -282,6 +282,15 @@ async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Respo
     }
 }
 
+/// Whether `VOUCH_ALLOW_INSECURE` allows plain-HTTP server URLs, read with
+/// the parser the CLI uses. An unrecognized value is reported and refused.
+pub(crate) fn allow_insecure() -> bool {
+    vouch_common::allow_insecure_from_env().unwrap_or_else(|e| {
+        warn!("{e}; treating it as off");
+        false
+    })
+}
+
 /// Handle `store_session` request.
 async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Response {
     let Some(params): Option<StoreSessionParams> = extract_params(request) else {
@@ -294,43 +303,55 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
         Err(e) => return Response::invalid_params(request.id, &format!("invalid expires_at: {e}")),
     };
 
-    let user_email = params.user_email;
-    let session = Session::new(params.token, user_email.clone(), expires_at);
-
-    state.store_session(session).await;
-
-    // Store server URL in SSH agent state for lazy provisioning/refresh
-    if let Some(url) = params.server_url {
-        // Validate: must be a valid URL; reject insecure HTTP for non-localhost
-        if let Ok(parsed) = url::Url::parse(&url) {
-            if parsed.scheme() == "https" || parsed.scheme() == "http" {
+    // The server URL is judged before anything is stored: a session is kept
+    // only together with its own server, never beside a previous session's.
+    let server_url = match params.server_url {
+        Some(url) => match url::Url::parse(&url) {
+            Ok(parsed) if parsed.scheme() == "https" || parsed.scheme() == "http" => {
                 match vouch_common::check_url_security(&url) {
-                    vouch_common::UrlSecurity::Secure => {
-                        state.set_ssh_server_url(url).await;
-                    }
+                    vouch_common::UrlSecurity::Secure => Some(url),
                     vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
-                        if std::env::var("VOUCH_ALLOW_INSECURE").is_ok() {
+                        if allow_insecure() {
                             warn!(
                                 "Using insecure HTTP server URL: {insecure_url}. VOUCH_ALLOW_INSECURE is set."
                             );
-                            state.set_ssh_server_url(url).await;
+                            Some(url)
                         } else {
+                            // The caller logged in elsewhere, so the previous
+                            // session is no longer the current one either.
+                            state.clear_session().await;
                             warn!(
                                 "Rejecting insecure HTTP server URL: {insecure_url}. Set VOUCH_ALLOW_INSECURE=1 to override."
+                            );
+                            return Response::invalid_params(
+                                request.id,
+                                &format!(
+                                    "insecure HTTP server URL {insecure_url} refused; set \
+                                     VOUCH_ALLOW_INSECURE=1 for the agent to allow it"
+                                ),
                             );
                         }
                     }
                 }
-            } else {
+            }
+            Ok(parsed) => {
                 debug!(
                     "Ignoring server_url with unsupported scheme: {}",
                     parsed.scheme()
                 );
+                None
             }
-        } else {
-            debug!("Ignoring invalid server_url");
-        }
-    }
+            Err(_) => {
+                debug!("Ignoring invalid server_url");
+                None
+            }
+        },
+        None => None,
+    };
+
+    let user_email = params.user_email;
+    let session = Session::new(params.token, user_email.clone(), expires_at);
+    state.store_session(session, server_url).await;
 
     info!("Session stored");
     audit::log_event(AuditEvent::SessionStored { email: user_email });
@@ -502,6 +523,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::sync::watch;
+
+    /// Serialises tests that mutate process environment variables. A
+    /// `tokio::sync::Mutex` so it can be held across `.await` without
+    /// tripping `await_holding_lock`.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Build an `AgentServer` backed by a temp-dir listener.
     fn make_server(shutdown_rx: watch::Receiver<bool>) -> Arc<AgentServer> {
@@ -732,15 +758,11 @@ mod tests {
         reason = "env mutation to redirect the audit log to a tempdir in an isolated test; the var is restored before assertions"
     )]
     async fn cache_credential_audit_reflects_caching_outcome() {
-        // Env-var access is process-global; serialise against other env users.
-        // `tokio::sync::Mutex` (not `std::sync::Mutex`) is held across the
-        // `.await` on `handle_request` so `await_holding_lock` does not fire.
-        static AUDIT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        let _guard = AUDIT_ENV_LOCK.lock().await;
+        let _guard = ENV_LOCK.lock().await;
 
         let dir = tempdir().expect("tempdir");
         let prior = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: `AUDIT_ENV_LOCK` serialises this test against any other env
+        // SAFETY: `ENV_LOCK` serialises this test against any other env
         // mutation in the test binary; the var is restored below, before any
         // assertion can panic, so a failing test cannot leak the redirect.
         unsafe {
@@ -828,6 +850,139 @@ mod tests {
         assert!(
             !audit_text.contains(oversized_type.as_str()),
             "rejected key must not appear in the audit log as cached: {audit_text}"
+        );
+    }
+
+    /// A `store_session` request for `token` with `server_url`.
+    fn store_session_request(id: u64, token: &str, server_url: &str) -> Request {
+        let params = StoreSessionParams {
+            token: secrecy::SecretString::from(token),
+            user_email: format!("{token}@example.com"),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+            server_url: Some(server_url.to_string()),
+        };
+        Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            method: Method::StoreSession,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        }
+    }
+
+    /// Set (or remove) the env vars the store_session tests read, returning
+    /// the prior values to restore.
+    #[expect(unsafe_code, reason = "test env mutation; callers hold ENV_LOCK")]
+    fn set_env(
+        vars: &[(&'static str, Option<&std::ffi::OsStr>)],
+    ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        let prior = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in vars {
+            // SAFETY: callers hold ENV_LOCK, and restore the prior values
+            // before asserting.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        prior
+    }
+
+    fn restore_env(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        let prior: Vec<_> = prior.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+        set_env(&prior);
+    }
+
+    /// A session is stored only with its own server URL. When the agent
+    /// refuses a plain-HTTP URL, the caller gets an error, no session is kept
+    /// (so the new token cannot be paired with the previous session's server),
+    /// and no `session_stored` event is written for it.
+    #[tokio::test]
+    async fn store_session_refused_url_keeps_no_session() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let prior = set_env(&[
+            ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+            ("VOUCH_ALLOW_INSECURE", None),
+        ]);
+
+        let state = AgentState::new();
+        let prod = handle_request(
+            &store_session_request(1, "prod", "https://prod.example.com"),
+            &state,
+        )
+        .await;
+        let prod_url = state.get_ssh_server_url().await;
+        let dev = handle_request(
+            &store_session_request(2, "dev", "http://dev.example.com"),
+            &state,
+        )
+        .await;
+        let session_after = state.get_session().await;
+        let url_after = state.get_ssh_server_url().await;
+        let audit_path = dir.path().join("vouch").join("audit.log");
+        let audit_text = std::fs::read_to_string(&audit_path).unwrap_or_default();
+
+        restore_env(prior);
+
+        assert!(prod.error.is_none(), "an https URL is accepted: {prod:?}");
+        assert_eq!(prod_url.as_deref(), Some("https://prod.example.com"));
+        let error = dev
+            .error
+            .expect("a refused URL must be an error, not success");
+        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert!(
+            session_after.is_none(),
+            "no session is kept after the refusal"
+        );
+        assert!(
+            url_after.is_none(),
+            "no server URL is kept after the refusal"
+        );
+        assert_eq!(
+            audit_text.matches("\"event\":\"session_stored\"").count(),
+            1,
+            "only the accepted session is audited: {audit_text}"
+        );
+    }
+
+    /// `VOUCH_ALLOW_INSECURE` is read with the parser the CLI uses: `false` and
+    /// `0` refuse a plain-HTTP URL, and `1` allows it.
+    #[tokio::test]
+    async fn store_session_reads_allow_insecure_values() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let mut outcomes = Vec::new();
+        for value in ["false", "0", "1"] {
+            let prior = set_env(&[
+                ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+                ("VOUCH_ALLOW_INSECURE", Some(std::ffi::OsStr::new(value))),
+            ]);
+            let state = AgentState::new();
+            let response = handle_request(
+                &store_session_request(1, "dev", "http://dev.example.com"),
+                &state,
+            )
+            .await;
+            let url = state.get_ssh_server_url().await;
+            restore_env(prior);
+            outcomes.push((value, response.error.is_none(), url));
+        }
+
+        assert_eq!(
+            outcomes,
+            vec![
+                ("false", false, None),
+                ("0", false, None),
+                ("1", true, Some("http://dev.example.com".to_string())),
+            ]
         );
     }
 }
