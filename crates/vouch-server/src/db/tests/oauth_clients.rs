@@ -488,7 +488,7 @@ async fn test_oauth_usage_recording() {
     )
     .await;
 
-    let stats = get_oauth_usage_stats(&audit, &client.id, None)
+    let stats = get_oauth_usage_stats(&audit, &client.id)
         .await
         .expect("Failed to get stats");
 

@@ -1697,7 +1697,6 @@ pub struct OAuthUsageStats {
 pub async fn get_oauth_usage_stats(
     audit: &AuditStore,
     oauth_client_id: &str,
-    since: Option<&str>,
 ) -> Result<Vec<OAuthUsageStats>> {
     let mut stats: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
@@ -1705,7 +1704,6 @@ pub async fn get_oauth_usage_stats(
         let audit_event_type = event_type.kind().as_str();
         let filter = AuditEventFilter {
             event_types: Some(vec![audit_event_type.to_string()]),
-            since: since.map(String::from),
             ..AuditEventFilter::default()
         };
         let events = audit.query_events(&filter).await?;

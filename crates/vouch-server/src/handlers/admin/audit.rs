@@ -18,23 +18,51 @@ use std::sync::Arc;
 use crate::filters;
 use crate::handlers::extractors::AdminPage;
 use crate::handlers::session::AuthContext;
+use crate::infra::i18n::Tr;
 
 /// Page size for the audit log.
 const AUDIT_PAGE_SIZE: u64 = 50;
 
 /// Query parameters for audit page (pagination + optional semantic filter).
+///
+/// The four text inputs come from a GET form, and a browser submits every
+/// input of one, so a field the admin left empty arrives as `user_id=`. Each
+/// is trimmed and a blank one is read as absent: an empty value filters
+/// nothing, rather than matching no row.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct AuditParams {
     pub after: Option<String>,
     pub filter: Option<String>,
     /// Filter to a specific user ID (exact match).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub user_id: Option<String>,
     /// Filter to a specific email address (exact match, case-insensitive).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub email: Option<String>,
-    /// Only events created on or after this RFC 3339 timestamp.
+    /// Only events created after this RFC 3339 instant.
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub since: Option<String>,
-    /// Only events created before this RFC 3339 timestamp.
+    /// Only events created before this RFC 3339 instant.
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub until: Option<String>,
+}
+
+/// Trim a form value and read a blank one as absent.
+fn blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Parse a date-range bound as an RFC 3339 instant. An offset form such as
+/// `2026-01-01T08:00:00-05:00` names the same instant as
+/// `2026-01-01T13:00:00Z`; the store compares instants, not the text.
+fn parse_bound(raw: Option<&str>, invalid: Tr<'static>) -> Result<Option<Timestamp>, Tr<'static>> {
+    raw.map(|s| s.parse::<Timestamp>().map_err(|_| invalid))
+        .transpose()
 }
 
 impl AuditParams {
@@ -98,6 +126,8 @@ pub(crate) struct AdminAuditTemplate {
     pub since: Option<String>,
     pub until: Option<String>,
     pub has_advanced_filters: bool,
+    /// Set when a date-range bound is not a timestamp; no events are listed.
+    pub filter_error: Option<Tr<'static>>,
 }
 
 impl_template_response!(AdminAuditTemplate);
@@ -125,6 +155,38 @@ pub(crate) async fn admin_audit_page(
         return Redirect::to("/integrations").into_response();
     };
 
+    let bounds = parse_bound(
+        params.since.as_deref(),
+        Tr::new("admin-audit-filter-invalid-since"),
+    )
+    .and_then(|since| {
+        parse_bound(
+            params.until.as_deref(),
+            Tr::new("admin-audit-filter-invalid-until"),
+        )
+        .map(|until| (since, until))
+    });
+    let (since, until) = match bounds {
+        Ok(bounds) => bounds,
+        Err(filter_error) => {
+            let has_advanced_filters = params.has_advanced_filters();
+            let page = AdminAuditTemplate {
+                auth,
+                events: Vec::new(),
+                has_more: false,
+                next_cursor: None,
+                filter: params.filter,
+                user_id: params.user_id,
+                email: params.email,
+                since: params.since,
+                until: params.until,
+                has_advanced_filters,
+                filter_error: Some(filter_error),
+            };
+            return (StatusCode::BAD_REQUEST, page).into_response();
+        }
+    };
+
     let event_types = params.filter.as_deref().and_then(audit_filter_event_types);
 
     let filter = AuditEventFilter {
@@ -132,8 +194,8 @@ pub(crate) async fn admin_audit_page(
         event_types,
         user_id: params.user_id.clone(),
         email: params.email.clone(),
-        since: params.since.clone(),
-        until: params.until.clone(),
+        since,
+        until,
         before_id: params.after.clone(),
         ..AuditEventFilter::default()
     };
@@ -203,6 +265,7 @@ pub(crate) async fn admin_audit_page(
         since: params.since,
         until: params.until,
         has_advanced_filters,
+        filter_error: None,
     }
     .into_response()
 }
@@ -661,6 +724,149 @@ mod tests {
         assert!(
             body.contains("login_success"),
             "audit page should list the mixed-case-domain event; body did not contain event_type"
+        );
+    }
+
+    /// An org admin's session cookie for `/admin/audit`.
+    async fn admin_cookie(state: &AppState, domain: &str) -> (String, String) {
+        let org = create_test_org(&state.store, domain).await;
+        let admin =
+            create_test_user_in_org(&state.store, &format!("admin@{domain}"), &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        (
+            format!("{}={token}", vouch_common::SESSION_COOKIE_NAME),
+            admin.id,
+        )
+    }
+
+    const MARKER: &str = "auditfiltermarker";
+
+    /// Seed an event for `domain` at `2026-01-01T12:00:00Z` carrying [`MARKER`].
+    async fn seed_noon_event(state: &AppState, domain: &str) {
+        state
+            .audit
+            .insert_event_for_test(
+                crate::db::audit::AuditEventKind::OrgDomainAdded,
+                Some(domain),
+                "2026-01-01T12:00:00Z".parse().unwrap(),
+                &format!(r#"{{"marker":"{MARKER}"}}"#),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A browser submits every input of the GET filter form, so filling in
+    /// only Email sends the other three empty. Empty and whitespace-only
+    /// values filter nothing, and "Clear filters" reflects only real ones.
+    #[tokio::test]
+    async fn test_audit_page_blank_form_fields_are_not_filters() {
+        let (app, state) = test_app().await;
+        let (cookie, admin_id) = admin_cookie(&state, "audit-blank.example").await;
+        state
+            .audit
+            .insert_json_event_for_test(
+                crate::db::audit::AuditEventKind::OrgDomainAdded,
+                Some(&admin_id),
+                Some("admin@audit-blank.example"),
+                &format!(r#"{{"marker":"{MARKER}"}}"#),
+            )
+            .await
+            .unwrap();
+
+        let (status, body) = http_get(
+            &app,
+            "/admin/audit?email=admin%40audit-blank.example&user_id=&since=&until=",
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(MARKER),
+            "email-only submission must list the event"
+        );
+
+        let (status, body) = http_get(
+            &app,
+            "/admin/audit?email=&user_id=%20%20&since=%20&until=",
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(MARKER),
+            "a blank submission must list the event"
+        );
+        assert!(
+            !body.contains("Clear filters"),
+            "blank fields are not filters to clear"
+        );
+    }
+
+    /// `2026-01-01T08:00:00-05:00` is `13:00:00Z`: the bounds compare
+    /// instants, so an event at `12:00:00Z` is before it whatever the offset.
+    #[tokio::test]
+    async fn test_audit_page_offset_bounds_compare_as_instants() {
+        let (app, state) = test_app().await;
+        let (cookie, _) = admin_cookie(&state, "audit-offset.example").await;
+        seed_noon_event(&state, "audit-offset.example").await;
+        let bound = "2026-01-01T08%3A00%3A00-05%3A00";
+
+        let (status, body) = http_get(
+            &app,
+            &format!("/admin/audit?until={bound}"),
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(MARKER),
+            "until 13:00Z must include a 12:00Z event"
+        );
+
+        let (status, body) = http_get(
+            &app,
+            &format!("/admin/audit?since={bound}"),
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !body.contains(MARKER),
+            "since 13:00Z must exclude a 12:00Z event"
+        );
+    }
+
+    /// A bound that is not a timestamp is reported, not applied as a filter.
+    #[tokio::test]
+    async fn test_audit_page_rejects_invalid_bound() {
+        let (app, state) = test_app().await;
+        let (cookie, _) = admin_cookie(&state, "audit-invalid.example").await;
+        seed_noon_event(&state, "audit-invalid.example").await;
+
+        let (status, body) =
+            http_get(&app, "/admin/audit?since=yesterday", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("is not a valid timestamp"),
+            "the page must say which bound is invalid"
+        );
+        assert!(
+            body.contains("yesterday"),
+            "the submitted value stays in the form"
+        );
+        assert!(
+            !body.contains(MARKER),
+            "no events are listed for an invalid filter"
         );
     }
 
