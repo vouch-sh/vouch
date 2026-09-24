@@ -28,7 +28,7 @@ use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
     create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::ScopeSet;
@@ -323,14 +323,20 @@ pub(crate) async fn exchange_fido2_assertion(
             )
             .await
             .map_err(|e| match e {
-                ServiceError::NotFound(_) | ServiceError::Forbidden(_) => {
-                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
-                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
-                }
                 // A storage fault says nothing about the grant, so it stays a 500.
-                e => {
-                    tracing::error!("FIDO2 assertion grant: authenticator lookup failed: {e}");
-                    e
+                LookupError::Service(err) => {
+                    tracing::error!("FIDO2 assertion grant: authenticator lookup failed: {err}");
+                    err
+                }
+                // Credential/user not found, owner mismatch, or deactivated
+                // owner: the grant is refused. Remap to a generic invalid_grant
+                // without leaking which sub-case failed. The deactivated user
+                // surfaced by `LookupError::Deactivated` is discarded here — no
+                // audit row is written on this path (only a Prometheus metric),
+                // mirroring the pre-fix behavior.
+                other => {
+                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {other}");
+                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
                 }
             })
         },
