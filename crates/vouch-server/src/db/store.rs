@@ -1585,7 +1585,7 @@ impl DocumentStore {
     /// explicit cutoff, so a test can place the cutoff inside the same second
     /// as a row's `expires_at`.
     async fn delete_expired_before(&self, doc_type: &str, now: &Timestamp) -> Result<u64> {
-        let now = whole_second_bound(now);
+        let now = TimestampSeconds::from(now);
 
         // Find expired document IDs
         let select_stmt = Query::select()
@@ -2137,7 +2137,7 @@ impl StoreTransaction<'_> {
             .from_table(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).gt(whole_second_bound(now)))
+            .and_where(Expr::col(Documents::ExpiresAt).gt(TimestampSeconds::from(now)))
             .to_owned();
         let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
         let won = result.rows_affected() == 1;
@@ -2509,28 +2509,40 @@ impl StoreTransaction<'_> {
     }
 }
 
-/// Truncate an RFC 3339 bound to whole seconds for a lexicographic `TEXT`
-/// comparison against `expires_at` or `created_at`.
+/// An instant as the text of its whole second in UTC, e.g. `2026-01-01T13:00:16`,
+/// for a lexicographic comparison against a `TEXT` timestamp column
+/// (`expires_at`, `created_at`).
 ///
 /// Columns hold [`jiff::Timestamp::to_string`] output, which trims trailing
 /// zero fractional digits: `…16Z`, `…16.5Z`, and `…16.537239482Z` are all
 /// valid. Byte order matches time order only when one string is a prefix of
-/// the other. Bound `…16.537239482Z` sorts row `…16.5Z` as later because
-/// `'Z'` > `'3'`. A bound with no fraction is a prefix of every value in its
+/// the other. A bound of `…16.537239482Z` sorts a row of `…16.5Z` as later
+/// because `'Z'` > `'3'`. The whole second is a prefix of every value in that
 /// second, so it sorts correctly on both sides. Rows in that second compare at
 /// whole-second granularity: an expiry check accepts them for up to 1 s more,
 /// and a sweep leaves them for the next pass.
-pub(crate) fn whole_second_bound_str(bound: &str) -> &str {
-    let bound = bound.strip_suffix('Z').unwrap_or(bound);
-    match bound.split_once('.') {
-        Some((whole_seconds, _fraction)) => whole_seconds,
-        None => bound,
+///
+/// It is built only from a [`Timestamp`], because only
+/// [`jiff::Timestamp::to_string`] guarantees the UTC `…Z` form the comparison
+/// relies on: an RFC 3339 string with an offset compares shifted by it.
+pub(crate) struct TimestampSeconds(String);
+
+impl From<&Timestamp> for TimestampSeconds {
+    fn from(instant: &Timestamp) -> Self {
+        let text = instant.to_string();
+        let text = text.strip_suffix('Z').unwrap_or(&text);
+        let whole_seconds = match text.split_once('.') {
+            Some((whole_seconds, _fraction)) => whole_seconds,
+            None => text,
+        };
+        Self(whole_seconds.to_owned())
     }
 }
 
-/// [`whole_second_bound_str`] for a [`Timestamp`].
-fn whole_second_bound(now: &Timestamp) -> String {
-    whole_second_bound_str(&now.to_string()).to_owned()
+impl From<TimestampSeconds> for sea_query::Value {
+    fn from(seconds: TimestampSeconds) -> Self {
+        seconds.0.into()
+    }
 }
 
 impl std::fmt::Debug for StoreTransaction<'_> {

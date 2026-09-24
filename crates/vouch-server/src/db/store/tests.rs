@@ -333,19 +333,15 @@ async fn delete_if_not_expired_consumes_row_expiring_later_in_the_same_second() 
 }
 
 #[test]
-fn whole_second_bound_str_truncates_fraction_and_zulu() {
+fn timestamp_seconds_truncates_fraction_and_zulu() {
+    let bound = |s: &str| TimestampSeconds::from(&s.parse().unwrap()).0;
     assert_eq!(
-        whole_second_bound_str("2030-01-01T00:00:16.537239482Z"),
+        bound("2030-01-01T00:00:16.537239482Z"),
         "2030-01-01T00:00:16"
     );
-    assert_eq!(
-        whole_second_bound_str("2030-01-01T00:00:16Z"),
-        "2030-01-01T00:00:16"
-    );
-    assert_eq!(
-        whole_second_bound_str("2030-01-01T00:00:16"),
-        "2030-01-01T00:00:16"
-    );
+    assert_eq!(bound("2030-01-01T00:00:16Z"), "2030-01-01T00:00:16");
+    // An offset instant renders in UTC, so it compares as the same instant.
+    assert_eq!(bound("2030-01-01T08:00:16-05:00"), "2030-01-01T13:00:16");
 }
 
 #[tokio::test]

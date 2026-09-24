@@ -116,7 +116,10 @@ entirely, and events then accumulate without bound.
 ## Browsing and exporting
 
 `/admin/audit` provides a paginated view scoped to your organization, with filters for event
-type, user ID, email, and a date range.
+type, user ID, email, and a date range. A filter field left empty is ignored. The **Since** and
+**Until** bounds take RFC 3339 timestamps, either UTC (`2026-01-01T13:00:00Z`) or with an offset
+(`2026-01-01T08:00:00-05:00`, the same instant); anything else is reported on the page instead of
+being applied.
 
 For programmatic access — SIEM ingestion, backfills, ad hoc scripting — use the audit events
 API described below. The raw `audit_events` table is still available as an operator escape

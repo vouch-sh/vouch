@@ -61,7 +61,7 @@ pub(crate) async fn fetch_user_history(
                 .collect(),
         ),
         user_id: Some(user_id.to_string()),
-        since: Some(floor.to_string()),
+        since: Some(floor),
         limit: Some(FETCH_LIMIT),
         ..AuditEventFilter::default()
     };

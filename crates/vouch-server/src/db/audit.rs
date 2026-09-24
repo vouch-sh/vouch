@@ -13,7 +13,7 @@ use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
 use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
-use super::store::whole_second_bound_str;
+use super::store::TimestampSeconds;
 use crate::crypto::document_crypto::DocumentCrypto;
 
 // ============================================================================
@@ -266,12 +266,10 @@ pub struct AuditEventFilter {
     /// verified additional domains (see `Organization::matching_email_domains`),
     /// not a single caller-chosen domain.
     pub email_domains: Option<Vec<String>>,
-    /// Filter events created strictly after this timestamp (RFC 3339,
-    /// matching [`jiff::Timestamp::to_string`] output).
-    pub since: Option<String>,
-    /// Filter events created strictly before this timestamp (RFC 3339,
-    /// matching [`jiff::Timestamp::to_string`] output).
-    pub until: Option<String>,
+    /// Filter events created strictly after this instant.
+    pub since: Option<Timestamp>,
+    /// Filter events created strictly before this instant.
+    pub until: Option<Timestamp>,
     /// Cursor for pagination: only return events with ID less than this
     /// (events are ordered newest-first, so "before" means older events).
     pub before_id: Option<String>,
@@ -605,10 +603,10 @@ impl AuditStore {
                 );
             }
             if let Some(ref since) = filter.since {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(whole_second_bound_str(since)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(TimestampSeconds::from(since)));
             }
             if let Some(ref until) = filter.until {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(whole_second_bound_str(until)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(TimestampSeconds::from(until)));
             }
 
             // `after_id` (forward/ascending polling) takes precedence over
@@ -671,11 +669,11 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns an error if the delete fails.
-    pub async fn delete_old_events(&self, kind: AuditEventKind, before: &str) -> Result<u64> {
+    pub async fn delete_old_events(&self, kind: AuditEventKind, before: Timestamp) -> Result<u64> {
         let stmt = Query::delete()
             .from_table(AuditEvents::Table)
             .and_where(Expr::col(AuditEvents::EventType).eq(kind.as_str()))
-            .and_where(Expr::col(AuditEvents::CreatedAt).lt(whole_second_bound_str(before)))
+            .and_where(Expr::col(AuditEvents::CreatedAt).lt(TimestampSeconds::from(&before)))
             .to_owned();
 
         let result = crate::db_execute!(&self.pool, stmt)?;
@@ -702,7 +700,7 @@ impl AuditStore {
                 Retention::Keep => None,
             };
             if let Some(cutoff) = cutoff {
-                let deleted = self.delete_old_events(*kind, &cutoff.to_string()).await?;
+                let deleted = self.delete_old_events(*kind, cutoff).await?;
                 total = total.saturating_add(deleted);
             }
         }
@@ -857,7 +855,10 @@ mod tests {
 
         // Delete events before far future should delete everything
         let deleted = audit
-            .delete_old_events(AuditEventKind::LoginSuccess, "2099-01-01T00:00:00Z")
+            .delete_old_events(
+                AuditEventKind::LoginSuccess,
+                "2099-01-01T00:00:00Z".parse().unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(deleted, 1);
@@ -1188,7 +1189,7 @@ mod tests {
         // A bound far in the past excludes everything.
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2000-01-01T00:00:00Z".to_string()),
+                until: Some("2000-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1201,7 +1202,7 @@ mod tests {
         // A bound far in the future includes it.
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2999-01-01T00:00:00Z".to_string()),
+                until: Some("2999-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1254,7 +1255,7 @@ mod tests {
         // security audit log, versus silently dropping sub-second events.
         let events = audit
             .query_events(&AuditEventFilter {
-                since: Some("2026-01-01T00:00:00Z".to_string()),
+                since: Some("2026-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1304,7 +1305,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2026-01-01T00:00:16.537239482Z".to_string()),
+                until: Some("2026-01-01T00:00:16.537239482Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1317,7 +1318,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2026-01-01T00:00:17.000000000Z".to_string()),
+                until: Some("2026-01-01T00:00:17.000000000Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await

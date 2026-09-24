@@ -319,7 +319,7 @@ pub(crate) async fn detail_application_page(
     // Get usage stats. A failure renders the page without them rather than
     // failing the whole detail view, but "no usage" and "stats unavailable"
     // look identical to the reader, so log the cause.
-    let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id, None).await {
+    let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id).await {
         Ok(stats) => stats
             .into_iter()
             .map(|s| UsageStat {
