@@ -327,25 +327,29 @@ pub async fn create_scim_token(
 
 /// Delete a SCIM token, scoped to the given organization.
 ///
-/// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no
-/// matching token was found for the given org (prevents cross-org
-/// deletion).
+/// Returns `Ok(true)` only when this call removed the token. `Ok(false)` covers
+/// a token that does not exist, belongs to another org, or was removed by a
+/// concurrent delete, so exactly one of several concurrent deletes reports
+/// success and gets audited.
 pub async fn delete_scim_token(
     store: &DocumentStore,
     token_id: &str,
     org_id: &str,
 ) -> Result<bool> {
-    let Some(doc) = store.get::<ScimTokenDoc>(token_id).await? else {
-        return Ok(false);
-    };
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Prevent cross-org deletion
-    if doc.data.org_id.as_deref() != Some(org_id) {
-        return Ok(false);
-    }
+        let Some(doc) = tx.get::<ScimTokenDoc>(token_id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id.as_deref() != Some(org_id) {
+            return Ok(false);
+        }
 
-    store.delete(token_id).await?;
-    Ok(true)
+        let removed = tx.delete(token_id).await?;
+        tx.commit().await?;
+        Ok(removed)
+    })
 }
 
 /// List SCIM tokens, optionally filtered by organization.
@@ -1402,10 +1406,10 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
 
         tx.delete_by_index::<ScimGroupMemberDoc>("group_id", id)
             .await?;
-        tx.delete(id).await?;
+        let removed = tx.delete(id).await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(removed)
     })
 }
 

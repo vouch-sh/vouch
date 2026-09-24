@@ -3,8 +3,8 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db;
 use crate::db::documents::audit::{CustomPolicyAdminData, PreconfiguredPolicyToggleData};
+use crate::db::{self, MAX_CUSTOM_POLICIES};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
@@ -28,9 +28,6 @@ const REDIRECT_BASE: &str = "/admin/policies";
 fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
     (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
-
-/// Maximum number of custom policies per org (active + inactive).
-const MAX_CUSTOM_POLICIES: usize = 20;
 
 /// Maximum length of a policy description, in Unicode characters. Matches the
 /// `maxlength` the admin form advertises.
@@ -410,19 +407,6 @@ pub(crate) async fn create_custom_policy(
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
-    // Check total custom policy count limit
-    let custom_count = db::list_custom_policies(&state.store, &org_id)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?
-        .len();
-
-    if custom_count >= MAX_CUSTOM_POLICIES {
-        return Ok(redirect_error(
-            jar,
-            format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
-        ));
-    }
-
     let description = form.description.clone().filter(|d| !d.is_empty());
 
     let policy = db::create_custom_policy(
@@ -435,8 +419,17 @@ pub(crate) async fn create_custom_policy(
             builder_spec: verified_builder_spec(&form),
         },
     )
-    .await
-    .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
+    .await;
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(db::CreateCustomPolicyError::LimitReached) => {
+            return Ok(redirect_error(
+                jar,
+                format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
+            ));
+        }
+        Err(db::CreateCustomPolicyError::Other(e)) => return Err(e),
+    };
 
     let policy_hash = policy_text_hash(&form.policy_text);
     let data = CustomPolicyAdminData {

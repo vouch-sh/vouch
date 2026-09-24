@@ -1712,6 +1712,28 @@ pub async fn delete_client_configuration(
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
+    // Consume the token before deleting. Of concurrent DELETEs, or a DELETE
+    // racing a PUT that rotates the token, only the request that consumes it
+    // proceeds; the rest hold a token that is no longer valid (RFC 7592
+    // §2.3) and must not delete or audit.
+    let consumed = db::consume_registration_access_token(
+        &state.store,
+        &client.id,
+        &hash_token(registration_access_token),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to consume registration token for {client_id}: {e}");
+        ServiceError::Internal("Failed to delete client".to_string())
+    })?;
+    if !consumed {
+        tracing::debug!(
+            "RFC 7592 DELETE for client_id {client_id} lost its registration access token \
+             to a concurrent request"
+        );
+        return Err(invalid_registration_token());
+    }
+
     // Delete the client and revoke every session it minted (M2M and
     // user-issued). RFC 7592 §2.3: "the authorization server SHOULD ...
     // invalidate all existing authorization grants and currently active
@@ -1973,6 +1995,7 @@ pub async fn update_client_configuration(
     let updated = db::update_oauth_client_registration(
         &state.store,
         &client.id,
+        &hash_token(registration_access_token),
         &UpdateClientRegistrationParams {
             redirect_uris: &redirect_uris,
             grant_types: Some(&validated.grant_types),
@@ -2015,6 +2038,12 @@ pub async fn update_client_configuration(
         }
         tracing::error!("Failed to update client {client_id}: {e}");
         ServiceError::Internal("Failed to update client".to_string())
+    })?
+    .ok_or_else(|| {
+        // RFC 7592 §2.2: a concurrent PUT or DELETE replaced the token after
+        // the verification above, so it is no longer valid.
+        tracing::debug!("RFC 7592 PUT for client_id {client_id} lost its token to a race");
+        invalid_registration_token()
     })?;
 
     db::record_oauth_event(
@@ -2043,6 +2072,19 @@ pub async fn update_client_configuration(
     response.registration_access_token = Some(new_reg_token.into());
 
     Ok(response)
+}
+
+/// The single 401 every registration-token failure returns. RFC 6750 §3.1:
+/// registration endpoints are OAuth protected resources, so a bearer-token
+/// failure is `invalid_token`, not the client-authentication error
+/// `invalid_client`. One response for every rejection avoids disclosing client
+/// existence or type.
+fn invalid_registration_token() -> ServiceError {
+    ServiceError::api(
+        StatusCode::UNAUTHORIZED,
+        OAuthErrorCode::InvalidToken.as_str(),
+        "Invalid registration access token",
+    )
 }
 
 /// Look up a client by `client_id` and verify its registration access token.
@@ -2074,24 +2116,12 @@ async fn lookup_and_verify_registration_token(
     client_id: &str,
     token: &str,
 ) -> Result<OAuthClient, ServiceError> {
-    // RFC 6750 §3.1: registration endpoints are OAuth protected resources, so a
-    // bearer-token failure is `invalid_token`, not the client-authentication
-    // error `invalid_client`. The exact same response is reused for every
-    // rejection below to avoid disclosing client existence or type.
-    let invalid_token = || {
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            OAuthErrorCode::InvalidToken.as_str(),
-            "Invalid registration access token",
-        )
-    };
-
     let client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
         Ok(Some(client)) => client,
         Ok(None) => {
             tracing::debug!("RFC 7592 token verification failed: client_id {client_id} not found");
             revoke_token_for_unknown_client(state, token).await;
-            return Err(invalid_token());
+            return Err(invalid_registration_token());
         }
         Err(e) => {
             // A real database failure is not an auth determination; keep it as
@@ -2104,7 +2134,7 @@ async fn lookup_and_verify_registration_token(
 
     if !client.active {
         tracing::debug!("RFC 7592 token verification failed: client_id {client_id} is inactive");
-        return Err(invalid_token());
+        return Err(invalid_registration_token());
     }
 
     let stored_hash = match client.registration_access_token_hash.as_deref() {
@@ -2114,7 +2144,7 @@ async fn lookup_and_verify_registration_token(
                 "RFC 7592 token verification failed: client_id {client_id} has no \
                  registration access token (admin-created client)"
             );
-            return Err(invalid_token());
+            return Err(invalid_registration_token());
         }
     };
 
@@ -2129,7 +2159,7 @@ async fn lookup_and_verify_registration_token(
             "RFC 7592 token verification failed: bearer token does not match the stored \
              hash for client_id {client_id}"
         );
-        return Err(invalid_token());
+        return Err(invalid_registration_token());
     }
 
     // A client registered by a user is managed on that user's behalf, so it
@@ -2144,7 +2174,7 @@ async fn lookup_and_verify_registration_token(
                     "RFC 7592 token verification failed: client_id {client_id}'s owner is \
                      deactivated or deleted"
                 );
-                return Err(invalid_token());
+                return Err(invalid_registration_token());
             }
             Err(e) => {
                 tracing::error!("DB error looking up the owner of client {client_id}: {e}");
