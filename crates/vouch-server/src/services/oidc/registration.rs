@@ -2132,6 +2132,27 @@ async fn lookup_and_verify_registration_token(
         return Err(invalid_token());
     }
 
+    // A client registered by a user is managed on that user's behalf, so it
+    // follows the user's deactivation: a deactivated (or deleted) owner's
+    // registration access token is invalid "for other reasons" (RFC 6750
+    // §3.1). Open-registration clients have no owner and are unaffected.
+    if let Some(owner_id) = client.user_id.as_deref() {
+        match db::get_user_by_id(&state.store, owner_id).await {
+            Ok(Some(owner)) if owner.active => {}
+            Ok(_) => {
+                tracing::debug!(
+                    "RFC 7592 token verification failed: client_id {client_id}'s owner is \
+                     deactivated or deleted"
+                );
+                return Err(invalid_token());
+            }
+            Err(e) => {
+                tracing::error!("DB error looking up the owner of client {client_id}: {e}");
+                return Err(ServiceError::Internal("Database error".to_string()));
+            }
+        }
+    }
+
     Ok(client)
 }
 
