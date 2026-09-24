@@ -4,12 +4,20 @@
 //! Provides:
 //! - Certificate DER parsing and field extraction
 //! - `x5t#S256` thumbprint computation (RFC 8705 Section 3.1)
-//! - `tls_client_auth` subject/SAN matching (RFC 8705 Section 2.1.2)
+//! - `tls_client_auth` chain validation against operator-configured trust
+//!   anchors (RFC 8705 Section 2.1) and subject/SAN matching (Section 2.1.2)
 //! - `self_signed_tls_client_auth` JWKS x5c matching (RFC 8705 Section 2.2.2)
+
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use der::{Decode, oid::ObjectIdentifier};
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::server::danger::ClientCertVerifier;
+
+use crate::arrival::ArrivalTime;
 use subtle::ConstantTimeEq;
 use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
@@ -43,6 +51,11 @@ impl std::fmt::Display for CertThumbprint {
 /// Parsed client certificate with extracted identity fields.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientCertificate {
+    /// DER encoding of the leaf certificate.
+    pub der: Vec<u8>,
+    /// DER encodings of the intermediate certificates the client sent after
+    /// the leaf in its TLS `Certificate` message, in the order sent.
+    pub intermediates: Vec<Vec<u8>>,
     /// `x5t#S256`: base64url-encoded SHA-256 of the DER certificate.
     /// RFC 8705 Section 3.1 / RFC 7515 Section 4.1.8.
     pub thumbprint: CertThumbprint,
@@ -78,6 +91,106 @@ pub(crate) enum MtlsError {
     /// Certificate not registered for this client.
     #[error("certificate not registered for this client")]
     CertificateNotRegistered,
+    /// Certificate chain does not validate against the client CA bundle.
+    #[error("certificate chain not trusted: {0}")]
+    UntrustedChain(String),
+    /// The client CA bundle has no usable certificate.
+    #[error("invalid client CA bundle: {0}")]
+    InvalidTrustAnchors(String),
+}
+
+/// Trust anchors for `tls_client_auth` client certificates, loaded from
+/// `VOUCH_MTLS_CLIENT_CA_CERTS`.
+///
+/// RFC 8705 §2.1: the PKI method "relies on a validated certificate chain
+/// [RFC5280] and a single subject distinguished name (DN) or a single subject
+/// alternative name (SAN) to authenticate the client." The mTLS listener
+/// accepts any certificate, because `self_signed_tls_client_auth` (§2.2)
+/// clients present certificates that chain to nothing, so the §2.1 chain is
+/// validated here instead. Revocation is not checked: §2.1 leaves "if and how
+/// to check a certificate's revocation status" to the deployment.
+#[derive(Clone)]
+pub(crate) struct ClientCertTrust(Arc<dyn ClientCertVerifier>);
+
+impl std::fmt::Debug for ClientCertTrust {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientCertTrust")
+    }
+}
+
+impl ClientCertTrust {
+    /// Build the trust store from a PEM bundle of CA certificates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MtlsError::InvalidTrustAnchors`] if the bundle holds no
+    /// certificate or any certificate in it does not parse as a trust anchor.
+    pub(crate) fn from_pem(pem: &[u8]) -> Result<Self, MtlsError> {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(pem) {
+            let cert = cert.map_err(|e| MtlsError::InvalidTrustAnchors(e.to_string()))?;
+            roots
+                .add(cert)
+                .map_err(|e| MtlsError::InvalidTrustAnchors(e.to_string()))?;
+        }
+        if roots.is_empty() {
+            return Err(MtlsError::InvalidTrustAnchors(
+                "no certificates found".to_string(),
+            ));
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .map_err(|e| MtlsError::InvalidTrustAnchors(e.to_string()))?;
+        Ok(Self(verifier))
+    }
+
+    /// Validate the certificate's chain to a trust anchor for TLS client
+    /// authentication, as of the request's arrival.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MtlsError::UntrustedChain`] if the chain does not validate:
+    /// an unknown issuer, a self-signed leaf, an expired or not-yet-valid
+    /// certificate, or an extended key usage that excludes client auth.
+    pub(crate) fn validate<'c>(
+        &self,
+        cert: &'c ClientCertificate,
+        arrival: ArrivalTime,
+    ) -> Result<ValidatedChain<'c>, MtlsError> {
+        let secs = u64::try_from(arrival.as_second())
+            .map_err(|_| MtlsError::UntrustedChain("arrival time before 1970".to_string()))?;
+        let intermediates: Vec<CertificateDer<'_>> = cert
+            .intermediates
+            .iter()
+            .map(|der| CertificateDer::from(der.as_slice()))
+            .collect();
+        self.0
+            .verify_client_cert(
+                &CertificateDer::from(cert.der.as_slice()),
+                &intermediates,
+                UnixTime::since_unix_epoch(std::time::Duration::from_secs(secs)),
+            )
+            .map_err(|e| MtlsError::UntrustedChain(e.to_string()))?;
+        Ok(ValidatedChain(cert))
+    }
+}
+
+/// A client certificate whose chain [`ClientCertTrust::validate`] accepted.
+///
+/// [`verify_tls_client_auth`] takes this rather than a bare
+/// [`ClientCertificate`], so a subject match alone cannot authenticate a
+/// `tls_client_auth` client.
+pub(crate) struct ValidatedChain<'c>(&'c ClientCertificate);
+
+impl ValidatedChain<'_> {
+    /// Treat `cert` as validated, for unit tests of the subject/SAN matching.
+    #[cfg(test)]
+    pub(crate) fn for_test(cert: &ClientCertificate) -> ValidatedChain<'_> {
+        ValidatedChain(cert)
+    }
 }
 
 /// Compute the `x5t#S256` thumbprint of a DER-encoded certificate.
@@ -134,6 +247,8 @@ pub(crate) fn parse_client_certificate(der: &[u8]) -> Result<ClientCertificate, 
     }
 
     Ok(ClientCertificate {
+        der: der.to_vec(),
+        intermediates: Vec::new(),
         thumbprint,
         subject_dn,
         san_dns,
@@ -313,13 +428,14 @@ fn normalize_dn_spacing(dn: &str) -> String {
 ///
 /// Exactly one of the `tls_client_auth_*` fields must match.
 pub(crate) fn verify_tls_client_auth(
-    cert: &ClientCertificate,
+    chain: ValidatedChain<'_>,
     expected_subject_dn: Option<&str>,
     expected_san_dns: Option<&str>,
     expected_san_email: Option<&str>,
     expected_san_uri: Option<&str>,
     expected_san_ip: Option<&str>,
 ) -> Result<(), MtlsError> {
+    let ValidatedChain(cert) = chain;
     if let Some(expected) = expected_subject_dn {
         let found = cert.subject_dn.as_deref().unwrap_or("");
         // Compare DNs via a canonical form, not one specific rendering:
@@ -523,10 +639,30 @@ mod tests {
         let subject_dn = cert.subject_dn.as_deref().unwrap();
 
         // Matching subject DN should succeed
-        assert!(verify_tls_client_auth(&cert, Some(subject_dn), None, None, None, None).is_ok());
+        assert!(
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some(subject_dn),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
 
         // Non-matching should fail
-        assert!(verify_tls_client_auth(&cert, Some("CN=wrong"), None, None, None, None).is_err());
+        assert!(
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN=wrong"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -584,7 +720,14 @@ mod tests {
         let cert_der = make_test_cert("all-none-test");
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
-        let result = verify_tls_client_auth(&cert, None, None, None, None, None);
+        let result = verify_tls_client_auth(
+            ValidatedChain::for_test(&cert),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert!(
             matches!(result, Err(MtlsError::CertificateNotRegistered)),
@@ -899,7 +1042,15 @@ mod tests {
             let der = make_self_signed_cert_with_subject(subject.clone());
             let cert = parse_client_certificate(&der).expect("parse");
             assert_eq!(
-                verify_tls_client_auth(&cert, Some(rendering), None, None, None, None).is_ok(),
+                verify_tls_client_auth(
+                    ValidatedChain::for_test(&cert),
+                    Some(rendering),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .is_ok(),
                 accepted,
                 "`{rendering}` against subject {:?}",
                 cert.subject_dn
@@ -919,14 +1070,29 @@ mod tests {
 
         // Matching DNS SAN succeeds
         assert!(
-            verify_tls_client_auth(&cert, None, Some("test.example.com"), None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                Some("test.example.com"),
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "matching DNS SAN should succeed"
         );
 
         // Non-matching DNS SAN fails
         assert!(
-            verify_tls_client_auth(&cert, None, Some("other.example.com"), None, None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                Some("other.example.com"),
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "non-matching DNS SAN should fail"
         );
     }
@@ -943,14 +1109,29 @@ mod tests {
 
         // Matching email SAN succeeds
         assert!(
-            verify_tls_client_auth(&cert, None, None, Some("user@example.com"), None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                Some("user@example.com"),
+                None,
+                None
+            )
+            .is_ok(),
             "matching email SAN should succeed"
         );
 
         // Non-matching email SAN fails
         assert!(
-            verify_tls_client_auth(&cert, None, None, Some("other@example.com"), None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                Some("other@example.com"),
+                None,
+                None
+            )
+            .is_err(),
             "non-matching email SAN should fail"
         );
     }
@@ -967,15 +1148,29 @@ mod tests {
 
         // Matching URI SAN succeeds
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, Some("https://example.com"), None)
-                .is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                Some("https://example.com"),
+                None
+            )
+            .is_ok(),
             "matching URI SAN should succeed"
         );
 
         // Non-matching URI SAN fails
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, Some("https://other.com"), None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                Some("https://other.com"),
+                None
+            )
+            .is_err(),
             "non-matching URI SAN should fail"
         );
     }
@@ -995,13 +1190,29 @@ mod tests {
 
         // Matching IP SAN succeeds
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, None, Some("192.168.1.1")).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                None,
+                Some("192.168.1.1")
+            )
+            .is_ok(),
             "matching IP SAN should succeed"
         );
 
         // Non-matching IP SAN fails
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, None, Some("10.0.0.1")).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                None,
+                Some("10.0.0.1")
+            )
+            .is_err(),
             "non-matching IP SAN should fail"
         );
     }
@@ -1045,14 +1256,30 @@ mod tests {
                 "test fixture: {form:?} must be a valid Ipv6Addr"
             );
             assert!(
-                verify_tls_client_auth(&cert, None, None, None, None, Some(form)).is_ok(),
+                verify_tls_client_auth(
+                    ValidatedChain::for_test(&cert),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(form)
+                )
+                .is_ok(),
                 "registered form {form:?} must match the cert's IPv6 SAN (same address)"
             );
         }
 
         // A genuinely different IPv6 address must still be rejected.
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, None, Some("2001:db8::2")).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                None,
+                Some("2001:db8::2")
+            )
+            .is_err(),
             "a different IPv6 address must not match"
         );
     }
@@ -1066,7 +1293,14 @@ mod tests {
         let cert_der = make_self_signed_cert_with_san("test-san-ip-bad", &[], &[], &[], &[ip]);
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
-        let result = verify_tls_client_auth(&cert, None, None, None, None, Some("not-an-ip"));
+        let result = verify_tls_client_auth(
+            ValidatedChain::for_test(&cert),
+            None,
+            None,
+            None,
+            None,
+            Some("not-an-ip"),
+        );
         assert!(
             matches!(result, Err(MtlsError::SubjectMismatch { .. })),
             "unparseable registered IP must yield SubjectMismatch, got: {result:?}"
@@ -1091,13 +1325,28 @@ mod tests {
         // IPv4-mapped IPv6 cert SAN, but they are different GeneralName
         // encodings and must not compare equal.
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, None, Some("18.52.86.120")).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                None,
+                Some("18.52.86.120")
+            )
+            .is_err(),
             "IPv4 text must not match an IPv4-mapped IPv6 SAN (different family)"
         );
         // The native IPv6 text form of the same mapped address must match.
         assert!(
-            verify_tls_client_auth(&cert, None, None, None, None, Some("::ffff:18.52.86.120"))
-                .is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                None,
+                None,
+                None,
+                Some("::ffff:18.52.86.120")
+            )
+            .is_ok(),
             "the IPv6 text form of the mapped address must match"
         );
     }
@@ -1306,13 +1555,27 @@ mod tests {
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
         assert!(
-            verify_tls_client_auth(&cert, None, Some("client.example.com"), None, None, None)
-                .is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                Some("client.example.com"),
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "lowercase registered name must match mixed-case SAN"
         );
         assert!(
-            verify_tls_client_auth(&cert, None, Some("CLIENT.EXAMPLE.COM"), None, None, None)
-                .is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                Some("CLIENT.EXAMPLE.COM"),
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "uppercase registered name must match mixed-case SAN"
         );
     }
@@ -1330,8 +1593,15 @@ mod tests {
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
         assert!(
-            verify_tls_client_auth(&cert, None, Some("other.example.com"), None, None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                None,
+                Some("other.example.com"),
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a different DNS name must still mismatch"
         );
     }
@@ -1355,7 +1625,15 @@ mod tests {
         let lowercased_attr = rendered.replace("CN=", "cn=");
         assert_ne!(rendered, lowercased_attr, "precondition: strings differ");
         assert!(
-            verify_tls_client_auth(&cert, Some(&lowercased_attr), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some(&lowercased_attr),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "attribute-type case must not affect DN matching"
         );
     }
@@ -1367,7 +1645,15 @@ mod tests {
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
         assert!(
-            verify_tls_client_auth(&cert, Some("cn=different"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("cn=different"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a different DN must still mismatch after canonicalization"
         );
     }
@@ -1380,7 +1666,15 @@ mod tests {
         let cert = parse_client_certificate(&cert_der).expect("parse");
 
         assert!(
-            verify_tls_client_auth(&cert, Some("not a dn at all"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("not a dn at all"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "an unparseable registered DN must not match"
         );
     }
@@ -1717,19 +2011,43 @@ mod tests {
         let spaced = "O=Acme, CN=foo";
         assert_ne!(rendered, spaced, "precondition: strings differ by spacing");
         assert!(
-            verify_tls_client_auth(&cert, Some(spaced), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some(spaced),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "multi-RDN DN differing only by whitespace after the comma must authenticate"
         );
 
         // Bare-comma form still matches.
         assert!(
-            verify_tls_client_auth(&cert, Some("O=Acme,CN=foo"), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("O=Acme,CN=foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "multi-RDN DN with bare commas must authenticate"
         );
 
         // Lowercase attribute-type names still match (value case preserved).
         assert!(
-            verify_tls_client_auth(&cert, Some("o=Acme, cn=foo"), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("o=Acme, cn=foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "multi-RDN DN with lowercase attribute types must authenticate"
         );
     }
@@ -1746,22 +2064,54 @@ mod tests {
 
         // Different attribute value (CN=bar vs CN=foo), comma-space rendering.
         assert!(
-            verify_tls_client_auth(&cert, Some("O=Acme, CN=bar"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("O=Acme, CN=bar"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a multi-RDN DN with a different value must mismatch"
         );
         // Different organization value.
         assert!(
-            verify_tls_client_auth(&cert, Some("O=Other, CN=foo"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("O=Other, CN=foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a multi-RDN DN with a different org value must mismatch"
         );
         // Fewer RDNs (single-RDN registration vs multi-RDN cert).
         assert!(
-            verify_tls_client_auth(&cert, Some("CN=foo"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN=foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a single-RDN registration must not match a multi-RDN cert"
         );
         // Same RDNs in a different order — DN ordering is significant.
         assert!(
-            verify_tls_client_auth(&cert, Some("CN=foo, O=Acme"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN=foo, O=Acme"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a different RDN ordering must mismatch (DN ordering is significant)"
         );
     }
@@ -1801,7 +2151,15 @@ mod tests {
             "precondition: cert rendering differs from the `oneline` form by `=`-spacing"
         );
         assert!(
-            verify_tls_client_auth(&cert, Some(openssl_oneline), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some(openssl_oneline),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "OpenSSL `oneline` output must authenticate against the matching cert"
         );
 
@@ -1816,7 +2174,15 @@ mod tests {
             "o = Acme, cn = foo",
         ] {
             assert!(
-                verify_tls_client_auth(&cert, Some(registered), None, None, None, None).is_ok(),
+                verify_tls_client_auth(
+                    ValidatedChain::for_test(&cert),
+                    Some(registered),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .is_ok(),
                 "`=`-spacing/case variant {registered:?} must authenticate"
             );
         }
@@ -1838,12 +2204,28 @@ mod tests {
 
         // OpenSSL `-nameopt oneline` output for a single-CN subject.
         assert!(
-            verify_tls_client_auth(&cert, Some("CN = foo"), None, None, None, None).is_ok(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN = foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "single-RDN OpenSSL `oneline` `CN = foo` must authenticate"
         );
         for registered in ["CN= foo", "CN =foo", "CN  =  foo", "cn = foo"] {
             assert!(
-                verify_tls_client_auth(&cert, Some(registered), None, None, None, None).is_ok(),
+                verify_tls_client_auth(
+                    ValidatedChain::for_test(&cert),
+                    Some(registered),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .is_ok(),
                 "single-RDN `=`-spacing/case variant {registered:?} must authenticate"
             );
         }
@@ -1861,26 +2243,90 @@ mod tests {
 
         // Same `=`-spacing as the OpenSSL default, but a different CN value.
         assert!(
-            verify_tls_client_auth(&cert, Some("O = Acme, CN = bar"), None, None, None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("O = Acme, CN = bar"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a `=`-spaced DN with a different value must mismatch"
         );
         // Different org value.
         assert!(
-            verify_tls_client_auth(&cert, Some("O = Other, CN = foo"), None, None, None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("O = Other, CN = foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a `=`-spaced DN with a different org value must mismatch"
         );
         // Fewer RDNs (single-RDN registration vs multi-RDN cert).
         assert!(
-            verify_tls_client_auth(&cert, Some("CN = foo"), None, None, None, None).is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN = foo"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a `=`-spaced single-RDN registration must not match a multi-RDN cert"
         );
         // Same RDNs, different order — DN ordering is significant.
         assert!(
-            verify_tls_client_auth(&cert, Some("CN = foo, O = Acme"), None, None, None, None)
-                .is_err(),
+            verify_tls_client_auth(
+                ValidatedChain::for_test(&cert),
+                Some("CN = foo, O = Acme"),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "a `=`-spaced DN with a different RDN order must mismatch"
         );
+    }
+
+    // ========================================================================
+    // ClientCertTrust — loading VOUCH_MTLS_CLIENT_CA_CERTS
+    // ========================================================================
+
+    #[test]
+    fn test_client_cert_trust_rejects_empty_bundle() {
+        assert!(matches!(
+            ClientCertTrust::from_pem(b""),
+            Err(MtlsError::InvalidTrustAnchors(_))
+        ));
+    }
+
+    #[test]
+    fn test_client_cert_trust_rejects_bundle_without_certificates() {
+        assert!(matches!(
+            ClientCertTrust::from_pem(b"not a PEM bundle"),
+            Err(MtlsError::InvalidTrustAnchors(_))
+        ));
+    }
+
+    #[test]
+    fn test_client_cert_trust_rejects_malformed_certificate() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        assert!(matches!(
+            ClientCertTrust::from_pem(pem.as_bytes()),
+            Err(MtlsError::InvalidTrustAnchors(_))
+        ));
+    }
+
+    #[test]
+    fn test_client_cert_trust_accepts_ca_bundle() {
+        let pem = crate::test_utils::test_client_ca().pem();
+        assert!(ClientCertTrust::from_pem(pem.as_bytes()).is_ok());
     }
 }

@@ -4,7 +4,8 @@
 //! Provides a custom axum [`Listener`] implementation that:
 //! 1. Accepts TCP connections
 //! 2. Performs TLS handshake with optional client certificate verification
-//! 3. Extracts the peer certificate DER for injection into request extensions
+//! 3. Extracts the peer certificate chain DER for injection into request
+//!    extensions
 //!
 //! The mTLS listener runs on a separate port (default 8443) from the main
 //! HTTPS listener (443), matching RFC 8705's `mtls_endpoint_aliases` pattern.
@@ -21,30 +22,34 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
-/// DER-encoded peer client certificate extracted from TLS handshake.
+/// DER-encoded certificate chain the client presented in the TLS handshake,
+/// leaf first; empty when the client presented none.
 ///
 /// Injected as a connection extension via [`axum::extract::ConnectInfo`] so
-/// handlers can extract the client certificate for authentication.
+/// handlers can extract the client certificate for authentication. The
+/// intermediates travel with the leaf because `tls_client_auth` (RFC 8705
+/// §2.1) validates the chain at the application layer.
 #[derive(Clone, Debug)]
-pub(crate) struct PeerClientCert(pub Option<Vec<u8>>);
+pub(crate) struct PeerClientCert(pub Vec<Vec<u8>>);
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, MtlsListener>>
     for PeerClientCert
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, MtlsListener>) -> Self {
-        Self(stream.io().peer_cert_der.clone())
+        Self(stream.io().peer_chain_der.clone())
     }
 }
 
 /// TLS stream with extracted peer certificate.
 ///
 /// Wraps `tokio_rustls::server::TlsStream<TcpStream>` and delegates
-/// `AsyncRead`/`AsyncWrite`. The peer certificate DER is extracted
+/// `AsyncRead`/`AsyncWrite`. The peer certificate chain DER is extracted
 /// during the TLS handshake and stored for later injection.
 pub(crate) struct MtlsStream {
     inner: tokio_rustls::server::TlsStream<TcpStream>,
-    /// DER-encoded leaf client certificate, if the client presented one.
-    peer_cert_der: Option<Vec<u8>>,
+    /// DER-encoded client certificate chain, leaf first; empty if the client
+    /// presented none.
+    peer_chain_der: Vec<Vec<u8>>,
 }
 
 impl AsyncRead for MtlsStream {
@@ -139,17 +144,16 @@ impl Listener for MtlsListener {
                 }
             };
 
-            // Extract peer certificate (leaf cert only)
-            let peer_cert_der = tls_stream
+            let peer_chain_der = tls_stream
                 .get_ref()
                 .1
                 .peer_certificates()
-                .and_then(|certs| certs.first())
-                .map(|cert| cert.to_vec());
+                .map(|certs| certs.iter().map(|cert| cert.to_vec()).collect())
+                .unwrap_or_default();
 
             let stream = MtlsStream {
                 inner: tls_stream,
-                peer_cert_der,
+                peer_chain_der,
             };
 
             return (stream, remote_addr);
@@ -172,7 +176,9 @@ impl Listener for MtlsListener {
 /// where clients present self-signed certificates that won't chain to any
 /// CA. The TLS handshake proves possession of the private key; the
 /// application layer verifies the certificate matches the client's
-/// registered JWKS `x5c`.
+/// registered JWKS `x5c`, or for `tls_client_auth` (Section 2.1) validates
+/// the chain against `VOUCH_MTLS_CLIENT_CA_CERTS` before matching the
+/// subject.
 ///
 /// Clients may also connect without a certificate — the application
 /// layer handles unauthenticated connections.
@@ -224,8 +230,9 @@ pub(crate) fn reload_mtls_from_config(
 /// handshake still proves the client possesses the private key for the
 /// presented certificate — this verifier simply skips chain validation.
 ///
-/// This supports both:
-/// - `tls_client_auth` (RFC 8705 §2.1): app layer checks subject/SAN
+/// This supports:
+/// - `tls_client_auth` (RFC 8705 §2.1): app layer validates the chain
+///   against the configured client CAs, then checks subject/SAN
 /// - `self_signed_tls_client_auth` (RFC 8705 §2.2): app layer checks x5c
 /// - Unauthenticated connections: app layer handles auth via other methods
 #[derive(Debug)]
@@ -296,17 +303,6 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_peer_client_cert_clone() {
-        let cert = PeerClientCert(Some(vec![1, 2, 3]));
-        let cloned = cert.clone();
-        assert_eq!(cloned.0, Some(vec![1, 2, 3]));
-
-        let empty = PeerClientCert(None);
-        let cloned_empty = empty.clone();
-        assert!(cloned_empty.0.is_none());
-    }
 
     /// Build a self-signed server cert and PKCS#8 key for testing.
     ///

@@ -11,6 +11,10 @@ repository = "https://github.com/vouch-sh/vouch"
 publish = false
 
 [workspace.lints.rust]
+# Apple ld's "__eh_frame section too large (max 16MB)" note on the vouch-server
+# lib test binary is a known false positive with no rustc filter yet:
+# https://github.com/rust-lang/rust/issues/159105. Remove when rustc filters it.
+linker_messages = "allow"
 unsafe_code = "deny"
 unreachable_pub = "warn"
 non_ascii_idents = "deny"

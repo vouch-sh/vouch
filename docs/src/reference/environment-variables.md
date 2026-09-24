@@ -28,6 +28,7 @@ families, and `DSQL_USER`. They are listed in their relevant sections below.
 | `VOUCH_MTLS_PORT` | No | `8443` | Port for the mTLS listener used by RFC 8705 certificate-bound tokens. The listener starts automatically whenever TLS is configured; there is no flag to disable it, and a bind failure here is fatal. |
 | `VOUCH_TRUSTED_PROXIES` | No | _(empty)_ | Comma-separated CIDRs of trusted reverse proxies (e.g. `10.0.0.0/8`). When empty, `X-Forwarded-For` is ignored entirely and the TCP peer is treated as the client — which behind a load balancer means **every user shares one rate-limit bucket**. An invalid CIDR is a fatal startup error. See [Behind a Reverse Proxy](../configuration/reverse-proxy.md). |
 | `VOUCH_EXTRA_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of additional certificate authorities for the server's outbound HTTPS client. Needed when your IdP, or another service the server calls, uses an internal CA. An unreadable file is a fatal startup error. |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of the certificate authorities that issue client certificates for `tls_client_auth` OAuth clients. A `tls_client_auth` client authenticates only with a certificate that chains to one of these CAs **and** matches its registered subject. When unset, `tls_client_auth` is disabled: it is not advertised in discovery, registration refuses it, and existing `tls_client_auth` clients cannot authenticate. `self_signed_tls_client_auth` is unaffected. Read once at startup; an unreadable file or a bundle with no valid certificate is a fatal startup error. Separate from `VOUCH_EXTRA_CA_CERTS`, which trusts servers Vouch calls, not clients that call Vouch. See [TLS, Ports, and mTLS](../configuration/tls.md#client-certificate-authorities-for-tls_client_auth). |
 
 ## Upstream Identity Provider
 
@@ -322,6 +323,8 @@ offending variable.
 | `VOUCH_LOG_FORMAT` is not `text` or `json` | `Invalid VOUCH_LOG_FORMAT` |
 | `VOUCH_TRUSTED_PROXIES` has a malformed CIDR | `Invalid CIDR in VOUCH_TRUSTED_PROXIES` |
 | `VOUCH_EXTRA_CA_CERTS` file is unreadable | Read failure |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` file is unreadable | `Failed to read VOUCH_MTLS_CLIENT_CA_CERTS file` |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` holds no valid CA certificate | `Invalid VOUCH_MTLS_CLIENT_CA_CERTS bundle` |
 | `VOUCH_DATABASE_URL` scheme is not `sqlite:`/`postgres:`/`postgresql:` | Unsupported scheme |
 | A KMS key ID is set but the KMS client cannot be built | Names the key |
 | S3 configuration is enabled but the object cannot be fetched or parsed | `Failed to fetch S3 configuration` |

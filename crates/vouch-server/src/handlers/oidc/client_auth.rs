@@ -382,14 +382,15 @@ pub(crate) async fn complete_client_auth(
 
     // `authenticate_client` returns no secret verification for an
     // mTLS-registered client; the certificate is its credential.
-    let mtls_verification = authenticate_client_mtls(state, &client, client_cert.0.as_ref())
-        .await
-        .map_err(|e| {
-            with_client_auth_challenge(
-                presentation,
-                e.into_service_error().into_oauth_response().into_response(),
-            )
-        })?;
+    let mtls_verification =
+        authenticate_client_mtls(state, &client, client_cert.0.as_ref(), arrival)
+            .await
+            .map_err(|e| {
+                with_client_auth_challenge(
+                    presentation,
+                    e.into_service_error().into_oauth_response().into_response(),
+                )
+            })?;
 
     Ok(Some(ClientAuthOutcome {
         client,

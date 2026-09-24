@@ -628,9 +628,10 @@ async fn resolve_non_jwt_auth(
         }
     };
     // RFC 8705 §2: an mTLS-registered client authenticates by its certificate.
-    let mtls_verification = authenticate_client_mtls(state, &client, client_cert.0.as_ref())
-        .await
-        .map_err(|e| e.into_service_error().into_oauth_response().into_response())?;
+    let mtls_verification =
+        authenticate_client_mtls(state, &client, client_cert.0.as_ref(), arrival)
+            .await
+            .map_err(|e| e.into_service_error().into_oauth_response().into_response())?;
     if let Some(verification) = mtls_verification {
         return Ok((client, ClientAuthProof::MutualTls(verification)));
     }

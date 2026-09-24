@@ -541,6 +541,12 @@ pub struct Args {
     #[arg(long, env = "VOUCH_EXTRA_CA_CERTS")]
     pub extra_ca_certs: Option<String>,
 
+    /// Path to a PEM file of CA certificates that issue `tls_client_auth`
+    /// client certificates (RFC 8705 §2.1). Multiple certs can be
+    /// concatenated in one file. Unset disables `tls_client_auth`.
+    #[arg(long, env = "VOUCH_MTLS_CLIENT_CA_CERTS")]
+    pub mtls_client_ca_certs: Option<String>,
+
     /// Maximum number of database connections in the pool.
     #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
     pub db_max_connections: u32,
@@ -855,6 +861,9 @@ pub struct ServerConfig {
     /// Path to a PEM file containing extra CA certificates to trust for
     /// outbound HTTPS requests (e.g., peers with self-signed certs).
     pub extra_ca_certs: Option<String>,
+    /// Path to a PEM file of CA certificates that issue `tls_client_auth`
+    /// client certificates. Read once at startup.
+    pub mtls_client_ca_certs: Option<String>,
     /// Database pool configuration.
     pub pool_config: crate::db::pool::PoolConfig,
     /// Maximum entries in the session lookup cache.
@@ -1053,6 +1062,7 @@ impl ServerConfig {
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
             certification_test_token: args.certification_test_token.map(SecretString::from),
             extra_ca_certs: args.extra_ca_certs,
+            mtls_client_ca_certs: args.mtls_client_ca_certs,
             pool_config: crate::db::pool::PoolConfig {
                 max_connections: args.db_max_connections,
                 min_connections: args.db_min_connections,

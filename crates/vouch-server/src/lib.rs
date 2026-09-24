@@ -123,6 +123,9 @@ pub struct AppState {
     /// operators listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order
     /// controls login page button order; `id` is the lookup key at callback time.
     pub idps: Vec<services::idp::ConfiguredIdp>,
+    /// Trust anchors for `tls_client_auth` client certificates, from
+    /// `VOUCH_MTLS_CLIENT_CA_CERTS`. `None` disables `tls_client_auth`.
+    pub(crate) client_cert_trust: Option<services::oidc::mtls::ClientCertTrust>,
 }
 
 impl AppState {
@@ -279,6 +282,7 @@ mod redirect_tests {
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
+            mtls_client_ca_certs: None,
             pool_config: crate::db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
@@ -315,6 +319,7 @@ mod redirect_tests {
             org_keys_cache: Default::default(),
             policy: Default::default(),
             idps: Vec::new(),
+            client_cert_trust: None,
         }
     }
 

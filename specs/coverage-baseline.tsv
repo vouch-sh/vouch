@@ -952,11 +952,6 @@ rfc5280#4.2.1.11#b193806b	MUST	That is, either the inhibitPolicyMapping field or
 rfc5280#4.2.1.11#e1af336f	MUST	Conforming CAs MUST mark this extension as critical.
 rfc5280#4.2.1.11#f877e7e3	MUST	Applications that support the inhibitPolicyMapping field MUST also implement support for the policyMappings extension.
 rfc5280#4.2.1.11#ff311ff7	MUST	If the policyConstraints extension is marked as critical and the inhibitPolicyMapping field is present, applications that do not implement support for the inhib
-rfc5280#4.2.1.12#00713d0e	SHOULD NOT	Conforming CAs SHOULD NOT mark this extension as critical if the anyExtendedKeyUsage KeyPurposeId is present.
-rfc5280#4.2.1.12#0766d238	MUST NOT	If there is no purpose consistent with both extensions, then the certificate MUST NOT be used for any purpose.
-rfc5280#4.2.1.12#15c8cd4b	MUST	Object identifiers used to identify key purposes MUST be assigned in accordance with IANA or ITU-T Recommendation X.660 [X.660].
-rfc5280#4.2.1.12#c5854943	MUST	If a certificate contains both a key usage extension and an extended key usage extension, then both extensions MUST be processed independently and the certifica
-rfc5280#4.2.1.12#fb5c62fe	MUST	If the extension is present, then the certificate MUST only be used for one of the purposes indicated.
 rfc5280#4.2.1.13#3a1d4ff5	SHOULD	When present, DistributionPointName SHOULD include at least one LDAP or HTTP URI.
 rfc5280#4.2.1.13#524d9299	MUST NOT	The DistributionPointName MUST NOT use the nameRelativeToCRLIssuer alternative when cRLIssuer contains more than one distinguished name.
 rfc5280#4.2.1.13#5e12133d	SHOULD NOT	Conforming CAs SHOULD NOT use nameRelativeToCRLIssuer to specify distribution point names.
@@ -1112,17 +1107,8 @@ rfc5280#5.3.2#48b526af	SHOULD NOT	When a revocation is first posted by a CRL iss
 rfc5280#5.3.3#0212e485	MUST	CRL issuers MUST mark this extension as critical since an implementation that ignored this extension could not correctly attribute CRL entries to certificates.
 rfc5280#5.3.3#4f7c0255	MUST	Conforming CRL issuers MUST include in this extension the distinguished name (DN) from the issuer field of the certificate that corresponds to this CRL entry.
 rfc5280#5.3.3#e1367b23	MUST	The encoding of the DN MUST be identical to the encoding used in the certificate.
-rfc5280#6#de69a19a	MUST	Conforming implementations of this specification are not required to implement this algorithm, but MUST provide functionality equivalent to the external behavio
-rfc5280#6.1#479df5da	MUST NOT	A certificate MUST NOT appear more than once in a prospective certification path.
-rfc5280#6.1#f3aeeaef	MUST	Note that clients MUST reject the certificate if it contains an unsupported critical extension.
-rfc5280#6.1#fe16e729	MUST	A conforming implementation MUST include an X.509 path processing procedure that is functionally equivalent to the external behavior of this algorithm.
 rfc5280#6.1.1#30bbae8c	MUST	(h) initial-permitted-subtrees, which indicates for each name type (e.g., X.500 distinguished names, email addresses, or IP addresses) a set of subtrees within 
 rfc5280#6.1.2#10b0d6f9	MUST	(b) permitted_subtrees: a set of root names for each name type (e.g., X.500 distinguished names, email addresses, or IP addresses) defining a set of subtrees wi
-rfc5280#6.1.3#8e401b43	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (1) The signature on the certificate can be verified using wor
-rfc5280#6.1.3#91988766	MUST	The certificate MUST satisfy each of the following:
-rfc5280#6.1.3#97003592	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (3) At the current time, the certificate is not revoked. This 
-rfc5280#6.1.3#b889d273	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (4) The certificate issuer name is the working_issuer_name.
-rfc5280#6.1.3#d5ec7c9b	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (2) The certificate validity period includes the current time.
 rfc5280#6.1.4#1ef08509	MUST	(If certificate i is a version 1 or version 2 certificate, then the application MUST either verify that certificate i is a CA certificate through out-of-band me
 rfc5280#6.3#718aa5d0	MUST	Conforming implementations that support CRLs are not required to implement this algorithm, but they MUST be functionally equivalent to the external behavior res
 rfc5280#6.3.3#f8a07955	MUST	The trust anchor for the certification path MUST be the same as the trust anchor used to validate the target certificate.

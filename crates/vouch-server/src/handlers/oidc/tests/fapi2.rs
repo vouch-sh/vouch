@@ -982,22 +982,17 @@ async fn test_discovery_mtls_absent_with_partial_tls_config() {
     );
 }
 
-#[tokio::test]
-async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
-    // When TLS is configured, token_endpoint_auth_methods_supported must include
-    // tls_client_auth and self_signed_tls_client_auth, and mtls_endpoint_aliases
-    // must be present.
-    //
-    // Build a fresh AppState with a TLS cert set — test_app() has tls_cert: None.
-    use crate::services::oidc::discovery::build_discovery_document;
+/// An `AppState` with TLS fully configured (placeholder cert and key —
+/// `test_app()` has none) and `client_cert_trust` as given.
+async fn tls_configured_state(
+    client_cert_trust: Option<crate::services::oidc::mtls::ClientCertTrust>,
+) -> std::sync::Arc<crate::AppState> {
     use crate::test_utils::{test_config, test_db};
     use arc_swap::ArcSwap;
     use std::sync::Arc;
 
     let pool = test_db().await;
     let mut config = test_config();
-    // Set placeholder TLS cert and key to enable mTLS discovery
-    // advertisement (requires full TLS configuration).
     config.tls_cert = Some("placeholder-cert".to_string());
     config.tls_key = Some(secrecy::SecretString::from("placeholder-key".to_string()));
 
@@ -1015,7 +1010,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
     let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
     let audit = crate::db::audit::AuditStore::new(pool.clone(), crypto);
 
-    let state = Arc::new(crate::AppState {
+    Arc::new(crate::AppState {
         db: pool,
         store,
         audit,
@@ -1033,8 +1028,18 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
-    });
+        client_cert_trust,
+    })
+}
 
+#[tokio::test]
+async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
+    // When TLS and client CAs are configured, token_endpoint_auth_methods_supported
+    // must include tls_client_auth and self_signed_tls_client_auth, and
+    // mtls_endpoint_aliases must be present.
+    use crate::services::oidc::discovery::build_discovery_document;
+
+    let state = tls_configured_state(Some(test_client_ca().trust())).await;
     let doc = build_discovery_document(&state);
 
     assert!(
@@ -1054,6 +1059,28 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
     assert!(
         doc.mtls_endpoint_aliases.is_some(),
         "mtls_endpoint_aliases must be present when TLS is configured"
+    );
+}
+
+// RFC 8705 §2.1: tls_client_auth "relies on a validated certificate chain",
+// so without client CAs it cannot authenticate anyone and is not advertised.
+// self_signed_tls_client_auth (§2.2) validates no chain and stays.
+#[tokio::test]
+async fn test_discovery_omits_tls_client_auth_without_client_ca() {
+    use crate::services::oidc::discovery::build_discovery_document;
+
+    let state = tls_configured_state(None).await;
+    let doc = build_discovery_document(&state);
+
+    assert!(
+        !doc.token_endpoint_auth_methods_supported
+            .contains(&TokenEndpointAuthMethod::TlsClientAuth),
+        "tls_client_auth must not be advertised without client CAs"
+    );
+    assert!(
+        doc.token_endpoint_auth_methods_supported
+            .contains(&TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
+        "self_signed_tls_client_auth must still be advertised"
     );
 }
 
