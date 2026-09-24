@@ -21,24 +21,34 @@ use crate::db::{self, User};
 // Installation Connection Types
 // ============================================================================
 
-/// Parameters for connecting a new GitHub installation.
-pub(crate) struct ConnectInstallationParams<'a> {
-    /// The GitHub installation ID.
-    pub installation_id: u64,
-    /// The organization ID to connect to.
-    pub org_id: &'a str,
-    /// The user performing the connection.
-    pub user: &'a User,
+/// How an installation reached the link step, recorded as the audit event.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InstallationLinkFlow {
+    /// GitHub redirected the admin back after they installed the App.
+    Install,
+    /// The admin picked an installation their GitHub account can already see.
+    Reconnect,
 }
 
-/// Parameters for reconnecting an existing GitHub installation.
-pub(crate) struct ReconnectInstallationParams<'a> {
-    /// The GitHub installation ID to reconnect.
+impl InstallationLinkFlow {
+    fn event_type(self) -> &'static str {
+        match self {
+            Self::Install => "installation_connected",
+            Self::Reconnect => "installation_reconnected",
+        }
+    }
+}
+
+/// Parameters for linking a GitHub installation to an organization.
+pub(crate) struct LinkInstallationParams<'a> {
+    /// The GitHub installation ID, as supplied by the browser.
     pub installation_id: u64,
-    /// The organization ID to connect to.
+    /// The organization ID to link to.
     pub org_id: &'a str,
-    /// The user performing the reconnection.
+    /// The org admin performing the link.
     pub user: &'a User,
+    /// Which flow the request came from.
+    pub flow: InstallationLinkFlow,
 }
 
 /// Result of a successful installation connection.
@@ -133,20 +143,46 @@ impl GitHubService<'_> {
         }
     }
 
-    /// Connect a new GitHub App installation to an organization.
+    /// Link a GitHub App installation to an organization.
     ///
-    /// This is called after the user installs the GitHub App and is redirected
-    /// back with an installation ID.
-    pub(crate) async fn connect_installation(
+    /// The installation ID comes from the browser, and the App JWT can read
+    /// every installation of the App, so the App's view proves nothing about
+    /// the caller. The link requires the caller's own GitHub account to see
+    /// the installation in `GET /user/installations`.
+    pub(crate) async fn link_installation(
         &self,
-        params: ConnectInstallationParams<'_>,
+        params: LinkInstallationParams<'_>,
     ) -> GitHubResult<InstallationConnectResult> {
         let app = self.require_app()?;
+
+        if params.user.github_login.is_none() {
+            return Err(GitHubError::GitHubAccountNotLinked);
+        }
+
+        let access_token = self
+            .get_user_access_token(&params.user.id)
+            .await?
+            .ok_or_else(|| {
+                GitHubError::Internal(
+                    "Failed to get access token - please re-link your GitHub account".to_string(),
+                )
+            })?;
+
+        let user_installations =
+            list_user_accessible_installations(app.http_client(), access_token.expose_secret())
+                .await
+                .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
+        if !user_installations
+            .iter()
+            .any(|i| i.id == params.installation_id)
+        {
+            return Err(GitHubError::InstallationAccessDenied);
+        }
 
         // Already-linked guard. Rows written before installation IDs became
         // deterministic carry random document IDs, so a replayed callback for
         // one of them would not collide on insert; the index lookup catches
-        // those, and skips the GitHub API round trip for every replay.
+        // those, and skips the details round trip for every replay.
         if db::get_github_installation_by_installation_id(
             self.store,
             params.installation_id.cast_signed(),
@@ -158,16 +194,15 @@ impl GitHubService<'_> {
             return Err(GitHubError::InstallationAlreadyConnected);
         }
 
-        // Fetch installation details from GitHub
         let details = app
             .get_installation_details(GitHubInstallationId(params.installation_id))
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Store installation in database. The guard above is a fast path; a
-        // replayed callback or two concurrent connects that pass it collide on
-        // the deterministic document ID and surface as `Duplicate`, which maps
-        // to `InstallationAlreadyConnected` — race-safe, no duplicate row.
+        // The guard above is a fast path; a replayed callback or two
+        // concurrent links that pass it collide on the deterministic document
+        // ID and surface as `Duplicate`, which maps to
+        // `InstallationAlreadyConnected` — race-safe, no duplicate row.
         db::create_github_installation(
             self.store,
             &db::CreateGitHubInstallationParams {
@@ -196,14 +231,15 @@ impl GitHubService<'_> {
         .await;
 
         tracing::info!(
-            "GitHub installation connected: {} -> org {}",
+            flow = ?params.flow,
+            "GitHub installation linked: {} -> org {} by user {}",
             details.account.login,
-            params.org_id
+            params.org_id,
+            params.user.id
         );
 
-        // Log audit event
         self.log_installation_event(
-            "installation_connected",
+            params.flow.event_type(),
             params.user,
             params.org_id,
             params.installation_id,
@@ -213,114 +249,6 @@ impl GitHubService<'_> {
 
         Ok(InstallationConnectResult {
             account_login: details.account.login,
-        })
-    }
-
-    /// Reconnect an existing GitHub installation to an organization.
-    ///
-    /// This allows an org admin to link an existing GitHub installation (that they
-    /// have access to via their OAuth token) to their Vouch organization.
-    pub(crate) async fn reconnect_installation(
-        &self,
-        params: ReconnectInstallationParams<'_>,
-    ) -> GitHubResult<InstallationConnectResult> {
-        let app = self.require_app()?;
-
-        // Verify user has linked their GitHub account
-        if params.user.github_login.is_none() {
-            return Err(GitHubError::GitHubAccountNotLinked);
-        }
-
-        // Get fresh access token
-        let access_token = self
-            .get_user_access_token(&params.user.id)
-            .await?
-            .ok_or_else(|| {
-                GitHubError::Internal(
-                    "Failed to get access token - please re-link your GitHub account".to_string(),
-                )
-            })?;
-
-        // Verify user actually has access to this installation
-        let user_installations =
-            list_user_accessible_installations(app.http_client(), access_token.expose_secret())
-                .await
-                .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
-
-        let user_installation = user_installations
-            .iter()
-            .find(|i| i.id == params.installation_id)
-            .ok_or(GitHubError::InstallationAccessDenied)?;
-
-        // Verify installation is not already linked
-        if db::get_github_installation_by_installation_id(
-            self.store,
-            params.installation_id.cast_signed(),
-        )
-        .await
-        .map_err(GitHubError::Database)?
-        .is_some()
-        {
-            return Err(GitHubError::InstallationAlreadyConnected);
-        }
-
-        // Fetch full installation details from GitHub App API
-        let details = app
-            .get_installation_details(GitHubInstallationId(params.installation_id))
-            .await
-            .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
-
-        // Store installation in database. The already-linked guard above is a
-        // fast path; a concurrent reconnect that passes the guard and our own
-        // insert collide on the deterministic document ID and surface as
-        // `Duplicate`, which we map to `InstallationAlreadyConnected` — closing
-        // the guard's TOCTOU window race-free.
-        db::create_github_installation(
-            self.store,
-            &db::CreateGitHubInstallationParams {
-                org_id: params.org_id,
-                installation_id: params.installation_id.cast_signed(),
-                github_account_login: &user_installation.account.login,
-                github_account_type: &user_installation.account.account_type,
-                permissions: &details.permissions,
-                repository_selection: &details.repository_selection,
-                installed_by_user_id: Some(&params.user.id),
-            },
-        )
-        .await
-        .map_err(|e| match e {
-            db::CreateGitHubInstallationError::Duplicate => {
-                GitHubError::InstallationAlreadyConnected
-            }
-            db::CreateGitHubInstallationError::Other(err) => GitHubError::Database(err),
-        })?;
-
-        self.store_installation_repositories(
-            app,
-            params.installation_id,
-            &details.repository_selection,
-        )
-        .await;
-
-        tracing::info!(
-            "GitHub installation reconnected: {} -> org {} by user {}",
-            user_installation.account.login,
-            params.org_id,
-            params.user.id
-        );
-
-        // Log audit event
-        self.log_installation_event(
-            "installation_reconnected",
-            params.user,
-            params.org_id,
-            params.installation_id,
-            Some(&details.permissions),
-        )
-        .await;
-
-        Ok(InstallationConnectResult {
-            account_login: user_installation.account.login.clone(),
         })
     }
 
@@ -457,7 +385,6 @@ pub(crate) fn validate_org_admin(user: &User) -> GitHubResult<&str> {
 #[expect(
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -643,199 +570,267 @@ mod tests {
         assert_eq!(logins, vec!["the-org".to_string()]);
     }
 
-    // -----------------------------------------------------------------
-    // End-to-end service-path cross-org concurrent connect_installation.
-    //
-    // Reproduces the bug's exact shape: two orgs race `connect_installation`
-    // for the same `installation_id`. The in-process TLS mock holds both
-    // `get_installation_details` calls at a `Barrier(2)` so both callers are
-    // past the global guard and concurrently between guard and insert. Before
-    // the fix, the `(org_id, installation_id)`-scoped deterministic ID let both
-    // inserts win; after the fix the `installation_id`-only ID collides and
-    // the losing call surfaces `InstallationAlreadyConnected`.
-    // -----------------------------------------------------------------
-
-    /// Self-signed P-256 cert (SAN: localhost) + PKCS#8 key for the in-process
-    /// TLS mock. Throwaway, mirrors `handlers::credentials::tests`.
-    const CROSS_ORG_MOCK_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
-HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
-MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
-ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
-G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
-DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
-HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
-BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
-KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
------END CERTIFICATE-----\n";
-    const CROSS_ORG_MOCK_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
-+palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
-DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
------END PRIVATE KEY-----\n";
-
-    /// `Content-Length` of an HTTP/1.1 request header block, or 0 if absent.
-    fn cross_org_content_length_of(headers: &[u8]) -> usize {
-        let Ok(s) = std::str::from_utf8(headers) else {
-            return 0;
-        };
-        for line in s.split("\r\n") {
-            if let Some((k, v)) = line.split_once(':')
-                && k.eq_ignore_ascii_case("content-length")
-            {
-                return v.trim().parse().unwrap_or(0);
-            }
-        }
-        0
-    }
-
-    /// Accept `n` TLS connections, then spawn `n` handlers that each read the
-    /// request and wait at a shared `Barrier(n)` before writing the canned
-    /// `GET /app/installations/{id}` response. This forces all
-    /// `get_installation_details` callers to be pending concurrently — i.e.
-    /// past the global guard, between guard and insert — deterministically
-    /// opening the TOCTOU window without timers.
-    async fn serve_installation_details_barrier(
-        listener: tokio::net::TcpListener,
-        barrier: std::sync::Arc<tokio::sync::Barrier>,
-        n: usize,
-    ) {
-        use rustls::pki_types::pem::PemObject;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls::pki_types::CertificateDer::pem_slice_iter(CROSS_ORG_MOCK_CERT_PEM.as_bytes())
-                .collect::<Result<Vec<_>, _>>()
-                .expect("parse mock cert");
-        let key =
-            rustls::pki_types::PrivateKeyDer::from_pem_slice(CROSS_ORG_MOCK_KEY_PEM.as_bytes())
-                .expect("parse mock key");
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .expect("mock server config");
-        let acceptor = std::sync::Arc::new(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
-            server_config,
-        )));
-
-        let body = serde_json::json!({
-            "id": 42,
-            "account": { "login": "shared-acct", "id": 1234, "type": "Organization" },
+    /// Installation details as `GET /app/installations/{id}` and
+    /// `GET /user/installations` report them.
+    fn installation_json(id: u64, login: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "account": { "login": login, "id": 1234, "type": "Organization" },
             "repository_selection": "all",
             "permissions": { "contents": "read", "metadata": "read" },
             "created_at": "2025-01-01T00:00:00Z",
             "suspended_at": null,
-        });
-        let body_bytes =
-            std::sync::Arc::new(serde_json::to_vec(&body).expect("serialize mock body"));
+        })
+    }
 
-        // Accept all connections first, then spawn per-connection handlers so
-        // all of them can wait at the barrier concurrently.
-        let mut streams = Vec::with_capacity(n);
-        for _ in 0..n {
-            let (stream, _) = listener.accept().await.expect("mock accept");
-            let tls = acceptor.accept(stream).await.expect("mock tls accept");
-            streams.push(tls);
+    /// Answer the three calls a link makes: the user-token refresh, the
+    /// user's installation list (`visible`), and App-JWT installation details
+    /// (any ID, owned by `login`).
+    fn github_route(line: &str, visible: &[u64], login: &str) -> (u16, serde_json::Value) {
+        if line.starts_with("POST /login/oauth/access_token ") {
+            return (
+                200,
+                serde_json::json!({
+                    "access_token": "ghu_test",
+                    "token_type": "bearer",
+                    "refresh_token": "ghr_rotated",
+                }),
+            );
         }
-
-        let mut tasks = Vec::with_capacity(n);
-        for mut tls in streams {
-            let barrier = barrier.clone();
-            let body_bytes = body_bytes.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut buf: Vec<u8> = Vec::with_capacity(8192);
-                let mut tmp = [0u8; 4096];
-                loop {
-                    let nread = tls.read(&mut tmp).await.expect("mock read");
-                    if nread == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&tmp[..nread]);
-                    if let Some(hend) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let body_start = hend.saturating_add(4);
-                        let content_length = cross_org_content_length_of(&buf[..hend]);
-                        if buf.len() >= body_start.saturating_add(content_length) {
-                            break;
-                        }
-                    }
-                    if buf.len() > 64 * 1024 {
-                        break;
-                    }
-                }
-
-                // Hold all callers here until every connection has drained its
-                // request — both `get_installation_details` futures are pending
-                // concurrently, meaning both `connect_installation` callers have
-                // passed the global guard.
-                barrier.wait().await;
-
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body_bytes.len()
-                );
-                tls.write_all(head.as_bytes())
-                    .await
-                    .expect("mock write head");
-                tls.write_all(&body_bytes).await.expect("mock write body");
-                drop(tls.shutdown().await);
-            }));
+        if line.starts_with("GET /user/installations?") {
+            let installations: Vec<_> = visible
+                .iter()
+                .map(|id| installation_json(*id, login))
+                .collect();
+            return (
+                200,
+                serde_json::json!({
+                    "total_count": installations.len(),
+                    "installations": installations,
+                }),
+            );
         }
-        for t in tasks {
-            t.await.expect("mock task join");
+        let details_id = line
+            .strip_prefix("GET /app/installations/")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|id| id.parse::<u64>().ok());
+        match details_id {
+            Some(id) => (200, installation_json(id, login)),
+            None => (404, serde_json::json!({ "message": "Not Found" })),
+        }
+    }
+
+    /// An org admin whose linked GitHub account holds a refresh token.
+    async fn linked_admin(store: &db::store::DocumentStore, domain: &str) -> (String, User) {
+        let org = test_utils::create_test_org(store, domain).await;
+        let user =
+            test_utils::create_test_user_in_org(store, &format!("admin@{domain}"), &org.id, true)
+                .await;
+        db::update_user_github_identity(store, &user.id, 77, "octo-admin", Some("ghr_initial"))
+            .await
+            .expect("link GitHub account");
+        let user = db::get_user_by_id(store, &user.id)
+            .await
+            .expect("read user")
+            .expect("user exists");
+        (org.id, user)
+    }
+
+    fn link_params<'a>(
+        installation_id: u64,
+        org_id: &'a str,
+        user: &'a User,
+    ) -> LinkInstallationParams<'a> {
+        LinkInstallationParams {
+            installation_id,
+            org_id,
+            user,
+            flow: InstallationLinkFlow::Install,
         }
     }
 
     #[tokio::test]
-    async fn cross_org_concurrent_connect_installation_produces_single_owner() {
-        // Two orgs race `connect_installation` for installation_id=42 through
-        // the production service path. The TLS mock barriers both
-        // `get_installation_details` calls so both callers pass the global
-        // guard before either inserts. Before the deterministic-ID fix, the
-        // `(org_id, installation_id)` scoping let both inserts win (two rows,
-        // one orphaned from webhook cleanup). After the fix, the
-        // `installation_id`-only ID collides: one `Ok`, one
-        // `InstallationAlreadyConnected`, exactly one row globally.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    async fn link_installation_refuses_installation_user_cannot_see() {
+        // The installation ID comes from the browser and the App JWT reads
+        // every installation of the App, so only the user's own installation
+        // list shows they may link it.
+        let mock =
+            test_utils::GitHubMock::spawn(
+                |line| async move { github_route(&line, &[1], "victim-org") },
+            )
+            .await;
+        let state = test_utils::test_app_state_with_github_app(mock.client()).await;
+        let config = state.config();
+        let (org_id, admin) = linked_admin(&state.store, "attacker.example").await;
+        let svc = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+
+        let result = svc
+            .link_installation(link_params(999, &org_id, &admin))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitHubError::InstallationAccessDenied)),
+            "expected InstallationAccessDenied, got {:?}",
+            result.map(|r| r.account_login)
+        );
+        assert!(
+            db::get_github_installation_by_installation_id(&state.store, 999)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "no row may be written"
+        );
+        assert!(
+            mock.requests()
+                .iter()
+                .any(|l| l.starts_with("GET /user/installations?")),
+            "the user's installation list must be consulted: {:?}",
+            mock.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn link_installation_links_installation_user_can_see() {
+        let mock =
+            test_utils::GitHubMock::spawn(
+                |line| async move { github_route(&line, &[999], "own-org") },
+            )
+            .await;
+        let state = test_utils::test_app_state_with_github_app(mock.client()).await;
+        let config = state.config();
+        let (org_id, admin) = linked_admin(&state.store, "owner.example").await;
+        let svc = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+
+        let result = svc
+            .link_installation(link_params(999, &org_id, &admin))
             .await
-            .expect("bind mock listener");
-        let mock_addr = listener.local_addr().expect("mock addr");
+            .expect("link succeeds");
+
+        assert_eq!(result.account_login, "own-org");
+        let row = db::get_github_installation_by_installation_id(&state.store, 999)
+            .await
+            .expect("lookup")
+            .expect("row written");
+        assert_eq!(row.org_id, org_id);
+        assert_eq!(row.github_account_login, "own-org");
+    }
+
+    #[tokio::test]
+    async fn link_installation_requires_linked_github_account() {
+        let mock =
+            test_utils::GitHubMock::spawn(
+                |line| async move { github_route(&line, &[999], "own-org") },
+            )
+            .await;
+        let state = test_utils::test_app_state_with_github_app(mock.client()).await;
+        let config = state.config();
+        let org = test_utils::create_test_org(&state.store, "unlinked.example").await;
+        let admin = test_utils::create_test_user_in_org(
+            &state.store,
+            "admin@unlinked.example",
+            &org.id,
+            true,
+        )
+        .await;
+        let svc = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+
+        let result = svc
+            .link_installation(link_params(999, &org.id, &admin))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitHubError::GitHubAccountNotLinked)),
+            "expected GitHubAccountNotLinked, got {:?}",
+            result.map(|r| r.account_login)
+        );
+        assert!(mock.requests().is_empty(), "no GitHub call without a link");
+    }
+
+    #[tokio::test]
+    async fn link_installation_records_flow_as_audit_event() {
+        for (flow, event_type) in [
+            (InstallationLinkFlow::Install, "installation_connected"),
+            (InstallationLinkFlow::Reconnect, "installation_reconnected"),
+        ] {
+            let mock = test_utils::GitHubMock::spawn(|line| async move {
+                github_route(&line, &[5], "own-org")
+            })
+            .await;
+            let state = test_utils::test_app_state_with_github_app(mock.client()).await;
+            let config = state.config();
+            let (org_id, admin) = linked_admin(&state.store, "audit.example").await;
+            let svc = GitHubService::new(
+                &state.store,
+                &state.audit,
+                &config,
+                state.github_app.as_ref(),
+            );
+
+            svc.link_installation(LinkInstallationParams {
+                installation_id: 5,
+                org_id: &org_id,
+                user: &admin,
+                flow,
+            })
+            .await
+            .expect("link succeeds");
+
+            let events = state
+                .audit
+                .query_events(&db::AuditEventFilter {
+                    user_id: Some(admin.id.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("audit events");
+            let subtypes: Vec<String> = events
+                .iter()
+                .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+                .filter_map(|d| d.get("event_type")?.as_str().map(str::to_string))
+                .collect();
+            assert_eq!(subtypes, vec![event_type.to_string()], "{flow:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_org_concurrent_link_installation_produces_single_owner() {
+        // Two orgs race `link_installation` for installation_id=42. The mock
+        // holds both `get_installation_details` calls at a `Barrier(2)`, so
+        // both callers pass the already-linked guard before either inserts.
+        // The `installation_id`-only document ID collides: one `Ok`, one
+        // `InstallationAlreadyConnected`, exactly one row globally.
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-        let barrier_clone = barrier.clone();
-        tokio::spawn(serve_installation_details_barrier(
-            listener,
-            barrier_clone,
-            2,
-        ));
+        let mock = test_utils::GitHubMock::spawn(move |line| {
+            let barrier = barrier.clone();
+            async move {
+                if line.starts_with("GET /app/installations/") {
+                    barrier.wait().await;
+                }
+                github_route(&line, &[42], "shared-acct")
+            }
+        })
+        .await;
 
-        let http_client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .resolve("api.github.com", mock_addr)
-            .build()
-            .expect("build mock http client");
-
-        let state = test_utils::test_app_state_with_github_app(http_client).await;
+        let state = test_utils::test_app_state_with_github_app(mock.client()).await;
         let config = state.config();
 
-        let org_a = test_utils::create_test_org(&state.store, "gh-xorg-a.example").await;
-        let org_b = test_utils::create_test_org(&state.store, "gh-xorg-b.example").await;
-        let user_a = test_utils::create_test_user_in_org(
-            &state.store,
-            "admin-a@gh-xorg-a.example",
-            &org_a.id,
-            true,
-        )
-        .await;
-        let user_b = test_utils::create_test_user_in_org(
-            &state.store,
-            "admin-b@gh-xorg-b.example",
-            &org_b.id,
-            true,
-        )
-        .await;
-
-        // Save the IDs before moving the org/user values into the spawns.
-        let org_a_id = org_a.id.clone();
-        let org_b_id = org_b.id.clone();
+        let (org_a_id, user_a) = linked_admin(&state.store, "gh-xorg-a.example").await;
+        let (org_b_id, user_b) = linked_admin(&state.store, "gh-xorg-b.example").await;
 
         let store_a = state.store.clone();
         let store_b = state.store.clone();
@@ -845,24 +840,18 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         let config_b = (**config).clone();
         let app_a = state.github_app.clone();
         let app_b = state.github_app.clone();
+        let org_a = org_a_id.clone();
+        let org_b = org_b_id.clone();
 
         let h_a = tokio::spawn(async move {
             let svc = GitHubService::new(&store_a, &audit_a, &config_a, app_a.as_ref());
-            svc.connect_installation(ConnectInstallationParams {
-                installation_id: 42,
-                org_id: &org_a.id,
-                user: &user_a,
-            })
-            .await
+            svc.link_installation(link_params(42, &org_a, &user_a))
+                .await
         });
         let h_b = tokio::spawn(async move {
             let svc = GitHubService::new(&store_b, &audit_b, &config_b, app_b.as_ref());
-            svc.connect_installation(ConnectInstallationParams {
-                installation_id: 42,
-                org_id: &org_b.id,
-                user: &user_b,
-            })
-            .await
+            svc.link_installation(link_params(42, &org_b, &user_b))
+                .await
         });
 
         let r_a = h_a.await.expect("join a");
@@ -891,12 +880,9 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         };
         assert!(
             other_err.is_none(),
-            "unexpected error(s) from connect_installation: {other_err:?}"
+            "unexpected error(s) from link_installation: {other_err:?}"
         );
-        assert_eq!(
-            ok_count, 1,
-            "exactly one connect must win, got {ok_count} ok"
-        );
+        assert_eq!(ok_count, 1, "exactly one link must win, got {ok_count} ok");
         assert_eq!(
             already_count, 1,
             "exactly one must be InstallationAlreadyConnected, got {already_count}"
