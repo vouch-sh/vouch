@@ -129,8 +129,10 @@ These variables configure the Vouch GitHub App integration for issuing GitHub to
 | `VOUCH_GITHUB_APP_NAME` | No | _(none)_ | GitHub App name (the slug from `github.com/apps/{name}`). |
 | `VOUCH_GITHUB_APP_KEY` | No | _(none)_ | GitHub App private key (PEM format, RSA). Can use literal `\n` for newlines. |
 | `VOUCH_GITHUB_WEBHOOK_SECRET` | No | _(none)_ | GitHub webhook secret for verifying webhook signatures (HMAC-SHA256). |
-| `VOUCH_GITHUB_APP_CLIENT_ID` | No | _(none)_ | GitHub App Client ID for OAuth user authentication. Found in GitHub App settings (different from the numeric App ID). |
-| `VOUCH_GITHUB_APP_CLIENT_SECRET` | No | _(none)_ | GitHub App Client Secret for OAuth user authentication. |
+| `VOUCH_GITHUB_APP_CLIENT_ID` | No | _(none)_ | GitHub App Client ID for OAuth user authentication. Found in GitHub App settings (different from the numeric App ID). Required to link installations to an organization. |
+| `VOUCH_GITHUB_APP_CLIENT_SECRET` | No | _(none)_ | GitHub App Client Secret for OAuth user authentication. Required to link installations to an organization. |
+
+An org admin links an installation from `/github/connect` only after linking their own GitHub account there. Vouch links an installation only when it appears in that account's `GET /user/installations` list, so an admin cannot link an installation their GitHub account cannot see. Without the client ID and secret, admins cannot link GitHub accounts, so `/github/connect` shows "Not Available" and the server logs a warning at startup.
 
 ## TLS
 

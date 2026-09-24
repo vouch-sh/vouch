@@ -314,6 +314,74 @@ async fn test_rfc7009_cross_client_revocation_blocked() {
     );
 }
 
+/// `Logout` audit events recorded for `user_id`.
+async fn logout_events(state: &crate::AppState, user_id: &str) -> usize {
+    state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec![db::AuditEventKind::Logout.as_str().to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .len()
+}
+
+/// A token whose session row has expired but not been reaped no longer
+/// decodes, so it is revoked by hash. The deleted row names the user, and the
+/// `Logout` audit event is recorded as it is for a live token.
+#[tokio::test]
+async fn test_rfc7009_revoke_expired_row_records_logout() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "revoke-expired@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, token_hash) =
+        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client.client_id))
+            .await;
+
+    assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
+
+    assert!(
+        db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("find")
+            .is_none(),
+        "the expired row is deleted"
+    );
+    assert_eq!(logout_events(&state, &user.id).await, 1);
+}
+
+// RFC 7009 §2.1: "The authorization server first validates the client
+// credentials (in case of a confidential client) and then verifies whether the
+// token was issued to the client making the revocation request." An expired
+// token has no `client_id` claim to check, so the session row's is used.
+#[tokio::test]
+async fn test_rfc7009_revoke_expired_row_of_another_client_is_refused() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "revoke-expired-cross@example.com").await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, token_hash) =
+        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client_a.client_id))
+            .await;
+
+    assert_eq!(
+        revoke(&app, &client_b, &token).await,
+        StatusCode::OK,
+        "RFC 7009: revocation always returns 200"
+    );
+
+    assert!(
+        db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("find")
+            .is_some(),
+        "client B must not delete client A's session row"
+    );
+    assert_eq!(logout_events(&state, &user.id).await, 0);
+}
+
 // ========================================================================
 // RFC 7009 — Token Revocation with private_key_jwt (GH#274)
 // ========================================================================

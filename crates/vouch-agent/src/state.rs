@@ -276,10 +276,15 @@ impl AgentState {
         }
     }
 
-    /// Store a new session.
-    pub async fn store_session(&self, session: Session) {
+    /// Store a new session with the server URL it was issued by.
+    ///
+    /// The two are written together, so a session is never paired with an
+    /// earlier session's server: `None` clears the URL rather than keeping the
+    /// previous one.
+    pub async fn store_session(&self, session: Session, server_url: Option<String>) {
         let mut guard = self.inner.write().await;
         guard.session = Some(session);
+        guard.ssh_server_url = server_url;
     }
 
     /// Clear the current session and every credential it authorized.
@@ -354,12 +359,6 @@ impl AgentState {
     pub async fn has_ssh_credentials(&self) -> bool {
         let guard = self.inner.read().await;
         guard.ssh_credentials.is_some()
-    }
-
-    /// Set the server URL the SSH session is connected to.
-    pub async fn set_ssh_server_url(&self, url: String) {
-        let mut guard = self.inner.write().await;
-        guard.ssh_server_url = Some(url);
     }
 
     /// Get the server URL the SSH session is connected to.
@@ -518,11 +517,14 @@ mod tests {
     /// A live session, so credential stores are accepted.
     async fn with_live_session(state: &Arc<AgentState>) {
         state
-            .store_session(Session::new(
-                SecretString::from("token"),
-                "user@example.com".to_string(),
-                future_timestamp(3600),
-            ))
+            .store_session(
+                Session::new(
+                    SecretString::from("token"),
+                    "user@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                None,
+            )
             .await;
     }
 
@@ -563,11 +565,14 @@ mod tests {
         // Replace the session with an expired one; the certificate is
         // untouched and still within its own validity window.
         state
-            .store_session(Session::new(
-                SecretString::from("token"),
-                "user@example.com".to_string(),
-                past_timestamp(1),
-            ))
+            .store_session(
+                Session::new(
+                    SecretString::from("token"),
+                    "user@example.com".to_string(),
+                    past_timestamp(1),
+                ),
+                None,
+            )
             .await;
 
         assert!(
@@ -599,7 +604,14 @@ mod tests {
         assert!(state.get_ssh_server_url().await.is_none());
 
         state
-            .set_ssh_server_url("https://example.com".to_string())
+            .store_session(
+                Session::new(
+                    SecretString::from("token"),
+                    "user@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://example.com".to_string()),
+            )
             .await;
         assert_eq!(
             state.get_ssh_server_url().await,
@@ -685,7 +697,7 @@ mod tests {
         assert!(state.get_session().await.is_none());
 
         // Store session
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         // Retrieve session
         let retrieved = state.get_session().await;
@@ -703,7 +715,7 @@ mod tests {
             future_timestamp(3600),
         );
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
         assert!(state.get_session().await.is_some());
 
         state.clear_session().await;
@@ -723,7 +735,7 @@ mod tests {
         // No token when no session
         assert!(state.get_token().await.is_none());
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         // Get token
         let retrieved_token = state.get_token().await;
@@ -741,7 +753,7 @@ mod tests {
             past_timestamp(100), // Already expired
         );
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         // Expired session should not be returned
         assert!(state.get_session().await.is_none());
@@ -762,7 +774,7 @@ mod tests {
             "user@example.com".to_string(),
             past_timestamp(100),
         );
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         assert!(
             state.get_session().await.is_none(),
@@ -903,7 +915,7 @@ mod tests {
             "user@example.com".to_string(),
             future_timestamp(3600),
         );
-        state.store_session(session).await;
+        state.store_session(session, None).await;
         state
             .cache_credential(
                 "aws:role".to_string(),

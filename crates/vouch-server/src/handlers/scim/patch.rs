@@ -44,6 +44,7 @@ use axum::{
 };
 
 use super::types::{ScimError, ScimPatchOp, ScimPatchOpType};
+use crate::scim_filter::unqualified;
 
 /// A write an attribute cannot accept, reported as a SCIM 400 with the
 /// RFC 7644 §3.12 Table 9 `scimType` naming why.
@@ -250,30 +251,6 @@ fn get_top_level_attribute<'v>(
         .iter()
         .find(|(key, _)| unqualified(key, schema_urn).eq_ignore_ascii_case(name))
         .map(|(_, value)| value)
-}
-
-/// Strips `prefix` from the start of `s`, comparing ASCII case-insensitively.
-pub(crate) fn strip_prefix_ignore_ascii_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
-    let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| s.get(prefix.len()..))
-        .flatten()
-}
-
-/// The attribute path with the resource's core schema URN prefix removed.
-///
-/// RFC 7644 §3.10: "Clients MAY omit core schema attribute URN prefixes",
-/// so `urn:ietf:params:scim:schemas:core:2.0:User:userName` and `userName`
-/// address the same attribute, and "All facets (URN, attribute, and
-/// sub-attribute name) of the fully encoded attribute name are case
-/// insensitive." Paths under any other URN (schema extensions) are returned
-/// unchanged.
-pub(crate) fn unqualified<'p>(path: &'p str, schema_urn: &str) -> &'p str {
-    path.get(..schema_urn.len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case(schema_urn))
-        .and_then(|_| path.get(schema_urn.len()..))
-        .and_then(|rest| rest.strip_prefix(':'))
-        .unwrap_or(path)
 }
 
 /// Applies one PATCH operation to `state` using `table`, the attributes of

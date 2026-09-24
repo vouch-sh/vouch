@@ -15,8 +15,8 @@ use crate::handlers::session::{
     AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
 };
 use crate::services::integrations::github::{
-    ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
-    ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
+    GitHubError, GitHubService, InstallationLinkFlow, LinkAccountParams, LinkInstallationParams,
+    installations::validate_org_admin, webhooks::WebhookEvent,
 };
 use crate::{AppState, impl_template_response};
 use askama::Template;
@@ -61,8 +61,6 @@ pub(crate) struct GitHubConnectTemplate {
     pub github_login: Option<String>,
     /// Unlinked installations the user can reconnect.
     pub unlinked_installations: Vec<UnlinkedInstallation>,
-    /// Whether GitHub OAuth is configured (client_id + client_secret).
-    pub oauth_configured: bool,
 }
 
 impl_template_response!(GitHubConnectTemplate);
@@ -385,6 +383,12 @@ pub(crate) async fn github_connect_page(
         Err(e) => return error_response(e),
     };
 
+    // Linking an installation checks the admin's own GitHub access, which
+    // needs the OAuth client to exchange and refresh their token.
+    if !service.is_oauth_configured() {
+        return error_response(GitHubError::OAuthNotConfigured);
+    }
+
     // Get existing connected accounts
     let connected_accounts = service
         .get_org_installations(org_id)
@@ -447,7 +451,6 @@ pub(crate) async fn github_connect_page(
         github_linked: user.github_login.is_some(),
         github_login: user.github_login.clone(),
         unlinked_installations,
-        oauth_configured: service.is_oauth_configured(),
     }
     .into_response()
 }
@@ -643,11 +646,12 @@ async fn handle_installation_callback(
         Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
-    // Verify the user is still a member of the org bound to the state token.
-    // Guards against the user changing orgs in the 10-minute state window.
-    match user.org_id.as_deref() {
-        Some(org_id) if org_id == token.org_id => {}
-        _ => {
+    // The connect page required an org admin when it minted the state token.
+    // Re-check the same predicate here: the user may have lost the admin role
+    // or changed orgs in the 10-minute state window.
+    match validate_org_admin(&user) {
+        Ok(org_id) if org_id == token.org_id => {}
+        Ok(_) | Err(GitHubError::OrganizationRequired) => {
             tracing::warn!(
                 user_id = %session.sub,
                 token_org_id = %token.org_id,
@@ -657,17 +661,18 @@ async fn handle_installation_callback(
             );
             return error_response(GitHubError::SessionMismatch);
         }
+        Err(e) => return error_response(e),
     }
 
     let config = state.config();
     let service = github_service(state, &config);
 
-    // Connect the installation
     match service
-        .connect_installation(ConnectInstallationParams {
+        .link_installation(LinkInstallationParams {
             installation_id,
             org_id: &token.org_id,
             user: &user,
+            flow: InstallationLinkFlow::Install,
         })
         .await
     {
@@ -787,12 +792,12 @@ pub(crate) async fn github_reconnect(
         Err(e) => return error_response(e),
     };
 
-    // Reconnect the installation
     match service
-        .reconnect_installation(ReconnectInstallationParams {
+        .link_installation(LinkInstallationParams {
             installation_id: form.installation_id,
             org_id: &org_id,
             user: &user,
+            flow: InstallationLinkFlow::Reconnect,
         })
         .await
     {
@@ -1407,6 +1412,120 @@ mod tests {
         assert!(
             body.contains("User not found"),
             "Expected UserNotFound error page, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_install_rejects_demoted_admin() {
+        // The connect page mints the state token only for an org admin; the
+        // callback re-checks the role, since it can be revoked in the
+        // 10-minute state window.
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "admin@example.com", "example.com").await;
+        let cookie = cookie_header(&session_token);
+        let callback = |encoded: String| {
+            format!(
+                "/github/callback?installation_id=42&state={}",
+                urlencoding::encode(&encoded)
+            )
+        };
+
+        // Control: an admin passes every gate and reaches the service, which
+        // renders "Not Available" because `test_app` has no GitHub App.
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let (_, body) = http_get(&app, &callback(encoded), &[("Cookie", &cookie)]).await;
+        assert!(body.contains("Not Available"), "control failed: {body}");
+
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        assert!(
+            crate::db::update_user_admin_status(&state.store, &user_id, false)
+                .await
+                .expect("demote")
+        );
+        let (status, body) = http_get(&app, &callback(encoded), &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Admin Required") && !body.contains("Not Available"),
+            "Expected NotOrgAdmin for a demoted user, got: {body}"
+        );
+    }
+
+    /// The connect page for an org admin, served by an app whose GitHub App
+    /// and OAuth client are configured. `linked` links the admin's GitHub
+    /// account first.
+    async fn connect_page_body(linked: bool, oauth_configured: bool) -> String {
+        let mock = GitHubMock::spawn(|_| async {
+            (
+                200,
+                serde_json::json!({ "total_count": 0, "installations": [] }),
+            )
+        })
+        .await;
+        let state = test_app_state_with_github_app(mock.client()).await;
+        if !oauth_configured {
+            let mut config = (**state.config()).clone();
+            config.github_app_client_id = None;
+            state.config.store(Arc::new(config));
+        }
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let (user_id, _, session_token, _) =
+            setup_user_with_session(&state, "admin@example.com", "example.com").await;
+        if linked {
+            crate::db::update_user_github_identity(
+                &state.store,
+                &user_id,
+                77,
+                "octo-admin",
+                Some("ghr_initial"),
+            )
+            .await
+            .expect("link GitHub account");
+        }
+        let cookie = cookie_header(&session_token);
+        let (status, body) = http_get(&app, "/github/connect", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn test_connect_page_offers_install_only_after_github_link() {
+        let unlinked = connect_page_body(false, true).await;
+        assert!(
+            unlinked.contains("/github/link") && !unlinked.contains("installations/new"),
+            "an unlinked admin must be sent to link first: {unlinked}"
+        );
+
+        let linked = connect_page_body(true, true).await;
+        assert!(
+            linked.contains("installations/new") && !linked.contains("href=\"/github/link\""),
+            "a linked admin gets the install link: {linked}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_page_requires_oauth_client() {
+        // Linking checks the admin's GitHub access with their OAuth token, so
+        // without the client there is nothing the page can link.
+        let body = connect_page_body(true, false).await;
+        assert!(
+            body.contains("GitHub OAuth is not configured") && !body.contains("installations/new"),
+            "Expected OAuthNotConfigured, got: {body}"
         );
     }
 

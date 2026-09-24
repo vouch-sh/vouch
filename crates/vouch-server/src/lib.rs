@@ -41,6 +41,7 @@ pub(crate) mod geo;
 pub(crate) mod handlers;
 pub(crate) mod http;
 pub mod infra;
+pub(crate) mod scim_filter;
 pub mod services;
 
 #[cfg(any(test, feature = "test-utils"))]

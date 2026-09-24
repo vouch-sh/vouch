@@ -137,18 +137,12 @@ pub async fn get_session_by_token_hash(
 ///
 /// Unlike [`get_session_by_token_hash`], this returns the row even when its
 /// `expires_at` is already in the past, as long as the row has not yet been
-/// reaped by the expired-session cleanup task. It is the lookup the logout
-/// handlers need to capture `user_id`/`user_email` for audit logging: a
-/// `POST /logout` deletes the row by `token_hash` regardless of expiry (see
-/// [`delete_session_by_token_hash`]), so the audit event must be recorded
-/// whenever the row actually existed — but the expiry-filtering lookup returns
-/// `None` for an expired-but-present row, silently dropping the `Logout`
-/// audit event in the window between DB expiry and the next reaper tick.
+/// reaped by the expired-session cleanup task. `/oauth/revoke` reads it to
+/// check which client an expired token was issued to before deleting it.
 ///
 /// This bypasses the [`SessionCache`] on purpose: the cache's miss path
 /// delegates to the expiry-filtering [`get_session_by_token_hash`] and would
-/// also answer `None` for an expired-but-present row, so a cache probe does
-/// not recover the audit context the handler needs.
+/// answer `None` for an expired-but-present row.
 pub async fn find_session_by_token_hash(
     store: &DocumentStore,
     token_hash: &str,
@@ -159,12 +153,28 @@ pub async fn find_session_by_token_hash(
     Ok(doc.map(Session::from))
 }
 
-/// Delete a session by token hash.
-pub async fn delete_session_by_token_hash(store: &DocumentStore, token_hash: &str) -> Result<bool> {
-    let count = store
-        .delete_by_index::<SessionDoc>("token_hash", token_hash)
-        .await?;
-    Ok(count > 0)
+/// Delete the session row for `token_hash`, whatever its expiry, and return
+/// it; `None` when no row exists.
+///
+/// The row is read and deleted in one transaction. Every path that deletes a
+/// session by hash (`POST /logout`, RP-initiated logout, `/oauth/revoke`)
+/// records a `Logout` audit event for the row's user, and the audit event must
+/// be recorded whenever the row actually existed, including an expired row the
+/// cleanup task has not reaped yet. Returning the row gives each caller the
+/// `user_id` and `user_email` for it.
+pub async fn delete_session_by_token_hash(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<Session>> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let docs = tx.find_all::<SessionDoc>("token_hash", token_hash).await?;
+        for doc in &docs {
+            tx.delete(&doc.id).await?;
+        }
+        tx.commit().await?;
+        Ok(docs.into_iter().next().map(Session::from))
+    })
 }
 
 /// Delete expired sessions.
@@ -348,7 +358,11 @@ impl SessionCache {
             ));
         }
         match self.get(token_hash) {
-            CacheLookup::Hit(session) => return Ok(Some(session)),
+            // An entry ages by its insertion time, not the session's expiry,
+            // so a hit is judged against `arrival` as the DB lookup is.
+            CacheLookup::Hit(session) => {
+                return Ok(Some(session).filter(|s| s.expires_at > arrival.timestamp()));
+            }
             CacheLookup::NegativeHit => return Ok(None),
             CacheLookup::Miss => {}
         }

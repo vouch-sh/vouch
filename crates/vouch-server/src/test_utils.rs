@@ -333,6 +333,9 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
     config.github_app_key = Some(SecretString::from(
         TEST_GITHUB_APP_PRIVATE_KEY_PEM.to_string(),
     ));
+    config.github_app_name = Some("vouch-test".to_string());
+    config.github_app_client_id = Some("Iv1.test-client".to_string());
+    config.github_app_client_secret = Some(SecretString::from("test-client-secret".to_string()));
 
     let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
@@ -749,6 +752,120 @@ pub fn make_test_cert_der(cn: &str) -> Vec<u8> {
     let key = random_test_key();
     let name = test_cert_name(cn);
     build_test_cert(leaf_profile(name.clone()), name, &key, &key, &[])
+}
+
+/// An in-process TLS server standing in for `api.github.com` and
+/// `github.com`. Each connection carries one request; `route` maps its request
+/// line (`"GET /user/installations?per_page=100&page=1 HTTP/1.1"`) to a status
+/// and JSON body.
+pub struct GitHubMock {
+    addr: SocketAddr,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl GitHubMock {
+    pub async fn spawn<F, Fut>(route: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = (u16, serde_json::Value)> + Send + 'static,
+    {
+        use p256::pkcs8::EncodePrivateKey as _;
+
+        let key = random_test_key();
+        let name = test_cert_name("localhost");
+        let cert = build_test_cert(leaf_profile(name.clone()), name, &key, &key, &[]);
+        let key_der = key.to_pkcs8_der().expect("PKCS#8 key");
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(cert)],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.as_bytes().to_vec().into()),
+            )
+            .expect("mock server config");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock listener");
+        let addr = listener.local_addr().expect("mock addr");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let route = Arc::new(route);
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let route = route.clone();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let Some(line) = read_mock_request_line(&mut tls).await else {
+                        return;
+                    };
+                    seen.lock().expect("mock request log").push(line.clone());
+                    let (status, body) = route(line).await;
+                    let body = body.to_string();
+                    let head = format!(
+                        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    use tokio::io::AsyncWriteExt as _;
+                    drop(tls.write_all(head.as_bytes()).await);
+                    drop(tls.write_all(body.as_bytes()).await);
+                    drop(tls.shutdown().await);
+                });
+            }
+        });
+        Self { addr, requests }
+    }
+
+    /// An outbound client that sends both GitHub hosts to this mock.
+    pub fn client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .resolve("api.github.com", self.addr)
+            .resolve("github.com", self.addr)
+            .build()
+            .expect("build mock http client")
+    }
+
+    /// Request lines received so far, in arrival order.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("mock request log").clone()
+    }
+}
+
+/// Read one HTTP/1.1 request (headers plus `Content-Length` body) and return
+/// its request line.
+async fn read_mock_request_line(
+    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = tls.read(&mut tmp).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(tmp.get(..n)?);
+        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = std::str::from_utf8(buf.get(..end)?).ok()?;
+        let content_length = head
+            .split("\r\n")
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if buf.len() >= end.saturating_add(4).saturating_add(content_length) {
+            return head.lines().next().map(str::to_string);
+        }
+    }
 }
 
 /// Test CA that issues `tls_client_auth` client certificates. Every test
@@ -1595,7 +1712,8 @@ pub async fn forge_short_lived_access_token(
 /// never decode a JWT, so an opaque cookie is the faithful fixture. The row's
 /// `expires_at` is one second in the past, which is the expired-but-not-yet-
 /// reaped window: the expiry-filtering `get_session_by_token_hash` answers
-/// `None` while the row still exists.
+/// `None` while the row still exists. `client_id` is the OAuth client the row
+/// records it was issued to.
 #[expect(
     clippy::disallowed_methods,
     reason = "test fixtures construct their own instants"
@@ -1604,6 +1722,7 @@ pub async fn create_test_expired_session_row(
     state: &AppState,
     user_id: &str,
     email: &str,
+    client_id: Option<&str>,
 ) -> (String, String) {
     let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
     let token_hash = crate::crypto::hash_token(&token);
@@ -1622,7 +1741,7 @@ pub async fn create_test_expired_session_row(
             authorization_details: Option::None,
             hardware_aaguid: Option::None,
             org_domain: Option::None,
-            client_id: Option::None,
+            client_id,
             source_code_hash: Option::None,
         },
     )

@@ -56,12 +56,22 @@ const MAX_FILTER_LEN: usize = 1024;
 /// is rejected up-front to avoid expensive OFFSET scans.
 const MAX_START_INDEX: usize = 10_001;
 
-/// Validate SCIM list query parameters.
-/// Enforces length bounds on `filter` and range bounds on `startIndex`.
-fn validate_list_params(
+/// Validate SCIM list query parameters and parse `filter` into the
+/// resource's list filter `F`, whose core schema is `schema_urn`.
+///
+/// Enforces length bounds on `filter` and range bounds on `startIndex`. A
+/// filter that does not parse, or names an attribute or operator `F` does not
+/// support, is 400 `invalidFilter` (RFC 7644 §3.12 Table 9) rather than being
+/// dropped: §3.4.2.2 says "When specified, only those resources matching the
+/// filter expression SHALL be returned."
+fn validate_list_params<F>(
     filter: Option<&str>,
     start_index: usize,
-) -> Result<(), (StatusCode, Json<ScimError>)> {
+    schema_urn: &str,
+) -> Result<Option<F>, (StatusCode, Json<ScimError>)>
+where
+    F: for<'f> TryFrom<crate::scim_filter::AttrExp<'f>, Error = crate::scim_filter::FilterError>,
+{
     if let Some(f) = filter
         && f.len() > MAX_FILTER_LEN
     {
@@ -76,7 +86,15 @@ fn validate_list_params(
             Json(ScimError::new(400, "startIndex exceeds maximum value")),
         ));
     }
-    Ok(())
+    filter
+        .map(|f| crate::scim_filter::parse(f, schema_urn).and_then(F::try_from))
+        .transpose()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
+            )
+        })
 }
 
 /// SCIM 400 response for a write the document store rejected because an

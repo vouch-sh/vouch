@@ -46,7 +46,7 @@ mod session_lifecycle {
         let state = AgentState::new();
         let session = make_session("alice@example.com", 3600);
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         let retrieved = state.get_session().await;
         assert!(retrieved.is_some());
@@ -61,7 +61,7 @@ mod session_lifecycle {
         let state = AgentState::new();
         let session = make_session("bob@example.com", 7200);
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         let retrieved = state.get_session().await.unwrap();
         let info = SessionInfo::from(&retrieved);
@@ -79,7 +79,7 @@ mod session_lifecycle {
         let state = AgentState::new();
         let session = make_session("alice@example.com", 3600);
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
         assert!(state.get_session().await.is_some());
 
         state.clear_session().await;
@@ -96,7 +96,7 @@ mod session_lifecycle {
             past_timestamp(100),
         );
 
-        state.store_session(expired_session).await;
+        state.store_session(expired_session, None).await;
 
         // get_session filters expired sessions
         assert!(state.get_session().await.is_none());
@@ -112,7 +112,7 @@ mod session_lifecycle {
             future_timestamp(3600),
         );
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         let token = state.get_token().await;
         assert!(token.is_some());
@@ -136,7 +136,7 @@ mod session_lifecycle {
             past_timestamp(100),
         );
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
         assert!(state.get_token().await.is_none());
     }
 
@@ -146,7 +146,7 @@ mod session_lifecycle {
         let state = AgentState::new();
         let session = make_session("user@example.com", 1800);
 
-        state.store_session(session).await;
+        state.store_session(session, None).await;
 
         let retrieved = state.get_session().await.unwrap();
         let secs = retrieved.expires_in_seconds();
@@ -167,10 +167,10 @@ mod session_lifecycle {
         let state = AgentState::new();
 
         let session1 = make_session("first@example.com", 3600);
-        state.store_session(session1).await;
+        state.store_session(session1, None).await;
 
         let session2 = make_session("second@example.com", 7200);
-        state.store_session(session2).await;
+        state.store_session(session2, None).await;
 
         let retrieved = state.get_session().await.unwrap();
         assert_eq!(retrieved.user_email(), "second@example.com");

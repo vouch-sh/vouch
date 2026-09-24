@@ -54,7 +54,8 @@ pub async fn upsert_jwks_cache(
 /// Returns `Ok(())` whether or not the row existed.
 pub async fn delete_jwks_cache(store: &DocumentStore, parent_id: &str) -> Result<()> {
     let id = cache_id(parent_id);
-    store.delete(&id).await
+    store.delete(&id).await?;
+    Ok(())
 }
 
 /// Delete all expired JWKS cache rows (called by the background cleanup loop).

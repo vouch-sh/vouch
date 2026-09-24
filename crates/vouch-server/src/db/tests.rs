@@ -9,7 +9,7 @@
 //! - [`arrival_anchored_expiry`] — Request-deciding expiry comparisons read the caller's instant, not an ambient clock.
 //! - [`audit_events`] — Auth/key/device audit event logging and expiry.
 //! - [`authenticators`] — Authenticator (security key) CRUD and counting.
-//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows.
+//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows, and the transfer of org-scoped applications when their creator is deleted or deactivated.
 //! - [`challenge_states`] — FIDO2 challenge state single-use enforcement.
 //! - [`concurrency`] — Concurrent-replay and CAS regressions for single-use primitives and state-transition helpers.
 //! - [`device_auth`] — Device authorization grant (RFC 8628): request lifecycle, polling, atomic consumption, single-use semantics.
@@ -22,7 +22,7 @@
 //! - [`occ_modify`] — OCC read-modify-write conversions: every mutation path uses `store.modify`, not blind get+update.
 //! - [`oidc_state`] — Upstream OIDC login state: lifecycle plus atomic consume / concurrent-replay coverage.
 //! - [`org_domain`] — `UserDoc.org_domain`: populated by both production writers, resolved and lazily backfilled by `get_user_org_domain`.
-//! - [`scim_filters`] — SCIM filter parsing and application-side co/sw matching, including multibyte input.
+//! - [`scim_filters`] — SCIM list filter types (which attributes and operators are evaluated) and application-side co/sw matching.
 //! - [`scim_groups`] — SCIM group lifecycle and membership.
 //! - [`scim_provisioning`] — SCIM user creation: duplicate/uniqueness handling, in-transaction domain-ownership validation, deterministic IDs, cross-backend races.
 //! - [`scim_tokens`] — Org API (SCIM) tokens: cap enforcement, expiry, scopes.
@@ -107,6 +107,20 @@ fn add_group_member(
         group.members.insert(user_id.clone());
         Ok(())
     }
+}
+
+/// A Users list filter, parsed the way the SCIM handler parses `filter`.
+fn user_filter(filter: &str) -> crate::db::UserListFilter {
+    crate::scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:User")
+        .and_then(crate::db::UserListFilter::try_from)
+        .expect("valid Users filter")
+}
+
+/// A Groups list filter, parsed the way the SCIM handler parses `filter`.
+fn group_filter(filter: &str) -> crate::db::GroupListFilter {
+    crate::scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:Group")
+        .and_then(crate::db::GroupListFilter::try_from)
+        .expect("valid Groups filter")
 }
 
 const TEST_ORG_ID: &str = "test-org";

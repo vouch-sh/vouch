@@ -6,8 +6,10 @@
 //! `CustomPosturePolicyDoc` documents).
 
 use super::document_type::Document;
+use super::documents::organization::OrganizationDoc;
 use super::documents::posture_policy::{CustomPosturePolicyDoc, PostureConfigDoc};
 use super::store::DocumentStore;
+use crate::error::ServiceError;
 use anyhow::Result;
 use jiff::Timestamp;
 
@@ -239,11 +241,36 @@ pub struct CreateCustomPolicyParams<'a> {
     pub builder_spec: Option<&'a str>,
 }
 
-/// Create a new custom posture policy (defaults to inactive).
+/// Maximum number of custom policies per org (active + inactive).
+pub const MAX_CUSTOM_POLICIES: usize = 20;
+
+/// Why [`create_custom_policy`] created nothing.
+#[derive(Debug)]
+pub enum CreateCustomPolicyError {
+    /// The org already holds [`MAX_CUSTOM_POLICIES`] policies.
+    LimitReached,
+    Other(ServiceError),
+}
+
+/// Create a new custom posture policy (defaults to inactive), enforcing
+/// [`MAX_CUSTOM_POLICIES`] atomically.
+///
+/// Counting and then inserting in separate steps lets concurrent creators all
+/// observe a count under the cap and all insert. As in
+/// [`create_scim_token`](super::scim::create_scim_token), every creator
+/// version-bumps the organization document in the transaction that counts and
+/// inserts, so concurrent creators collide on that row and the loser re-runs
+/// with the winner's policy in its count.
+///
+/// # Errors
+///
+/// - [`CreateCustomPolicyError::LimitReached`] — the cap is reached.
+/// - [`CreateCustomPolicyError::Other`] — the organization does not exist,
+///   the OCC retry budget ran out, or a database operation failed.
 pub async fn create_custom_policy(
     store: &DocumentStore,
     params: CreateCustomPolicyParams<'_>,
-) -> Result<CustomPosturePolicy> {
+) -> std::result::Result<CustomPosturePolicy, CreateCustomPolicyError> {
     let doc = CustomPosturePolicyDoc {
         name: params.name.to_string(),
         description: params.description.map(String::from),
@@ -252,8 +279,53 @@ pub async fn create_custom_policy(
         org_id: params.org_id.to_string(),
         builder_spec: params.builder_spec.map(String::from),
     };
-    let result = store.insert(&doc).await?;
-    Ok(CustomPosturePolicy::from(result))
+    let org_id = params.org_id;
+
+    let created = crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to begin custom policy create")
+        })?;
+
+        let org_doc = tx
+            .get::<OrganizationDoc>(org_id)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to load organization for policy create")
+            })?
+            .ok_or(ServiceError::NotFound("organization"))?;
+
+        let count = tx
+            .find_all::<CustomPosturePolicyDoc>("org_id", org_id)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to count custom policies"))?
+            .len();
+        if count >= MAX_CUSTOM_POLICIES {
+            return Ok(None);
+        }
+
+        let inserted = tx
+            .insert(&doc)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to insert custom policy"))?;
+
+        let won = tx
+            .compare_and_update::<OrganizationDoc>(org_id, org_doc.version, &org_doc.data)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to version-bump org for policy create")
+            })?;
+        if !won {
+            return Err(ServiceError::OccConflict);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit policy create"))?;
+        Ok(Some(CustomPosturePolicy::from(inserted)))
+    })
+    .map_err(CreateCustomPolicyError::Other)?;
+
+    created.ok_or(CreateCustomPolicyError::LimitReached)
 }
 
 /// List all custom posture policies for an org.
@@ -391,18 +463,23 @@ pub async fn update_custom_policy(
 
 /// Delete a custom posture policy.
 ///
-/// Returns `true` if the policy was found and deleted, `false` if not found.
+/// Returns `true` only when this call removed the policy. `false` covers a
+/// policy that does not exist, belongs to another org, or was removed by a
+/// concurrent delete, so exactly one of several concurrent deletes reports
+/// success and gets audited.
 pub async fn delete_custom_policy(store: &DocumentStore, id: &str, org_id: &str) -> Result<bool> {
-    let doc = store.get::<CustomPosturePolicyDoc>(id).await?;
-    let Some(doc) = doc else {
-        return Ok(false);
-    };
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Verify org ownership
-    if doc.data.org_id != org_id {
-        return Ok(false);
-    }
+        let Some(doc) = tx.get::<CustomPosturePolicyDoc>(id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id != org_id {
+            return Ok(false);
+        }
 
-    store.delete(id).await?;
-    Ok(true)
+        let removed = tx.delete(id).await?;
+        tx.commit().await?;
+        Ok(removed)
+    })
 }

@@ -128,14 +128,16 @@ pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, R
 pub use config::{AuthEventParams, AuthEventType, ClientInfo, record_auth_event};
 
 // Re-export SCIM types and functions
-pub(crate) use scim::MAX_SCIM_TOKENS;
 pub use scim::{
     CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimGroupState,
     ScimGroupUpdateError, ScimScope, ScimScopeSet, ScimToken, ScimUpdateError, ScimUserRecord,
     create_scim_group, create_scim_token, create_scim_user, delete_expired_scim_tokens,
     delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
-    get_scim_token_by_hash, get_scim_user, list_scim_groups, list_scim_tokens, list_scim_users,
-    record_scim_audit, update_scim_group, update_scim_token_last_used, update_scim_user,
+    get_scim_token_by_hash, get_scim_user, list_scim_tokens, record_scim_audit, update_scim_group,
+    update_scim_token_last_used, update_scim_user,
+};
+pub(crate) use scim::{
+    GroupListFilter, MAX_SCIM_TOKENS, UserListFilter, list_scim_groups, list_scim_users,
 };
 
 // Re-export audit payload types: the sealed AuditData marker plus the
@@ -156,14 +158,15 @@ pub use oauth::{
     MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient, OAuthClientSecret,
     OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain, RedirectUriError,
     UpdateClientRegistrationParams, UpdateOAuthClientParams, client_keys_to_stored,
-    create_oauth_client, create_oauth_client_secret, delete_expired_jwt_assertion_jtis,
-    delete_oauth_client, delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id,
-    get_oauth_client_by_id, get_oauth_client_secret_by_id, get_oauth_client_secrets,
-    get_oauth_clients_for_user, get_oauth_secret_by_hash, get_oauth_usage_stats,
-    is_loopback_redirect_host, is_valid_post_logout_redirect_uri_str, parse_jwks_set,
-    record_oauth_event, resolve_event_org_domain, revoke_all_oauth_client_secrets,
-    revoke_oauth_client_secret, revoke_registration_access_token, store_jwt_assertion_jti,
-    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
+    consume_registration_access_token, create_oauth_client, create_oauth_client_secret,
+    delete_expired_jwt_assertion_jtis, delete_oauth_client,
+    delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id, get_oauth_client_by_id,
+    get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
+    get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
+    is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
+    resolve_event_org_domain, revoke_all_oauth_client_secrets, revoke_oauth_client_secret,
+    revoke_registration_access_token, store_jwt_assertion_jti, update_oauth_client,
+    update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials, validate_redirect_uri,
 };
 
@@ -244,11 +247,12 @@ pub use enrollment::{EnrollUserError, EnrolledUser, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
-    ActivePreconfiguredConfig, CreateCustomPolicyParams, CustomPosturePolicy, FieldUpdate,
-    UpdateCustomPolicyParams, compare_and_set_preconfigured_active, create_custom_policy,
-    create_preconfigured_active, delete_custom_policy, get_active_custom_policies,
-    get_active_preconfigured_slugs, get_custom_policy, get_preconfigured_active_with_version,
-    list_custom_policies, set_preconfigured_active, update_custom_policy,
+    ActivePreconfiguredConfig, CreateCustomPolicyError, CreateCustomPolicyParams,
+    CustomPosturePolicy, FieldUpdate, MAX_CUSTOM_POLICIES, UpdateCustomPolicyParams,
+    compare_and_set_preconfigured_active, create_custom_policy, create_preconfigured_active,
+    delete_custom_policy, get_active_custom_policies, get_active_preconfigured_slugs,
+    get_custom_policy, get_preconfigured_active_with_version, list_custom_policies,
+    set_preconfigured_active, update_custom_policy,
 };
 
 #[cfg(test)]
