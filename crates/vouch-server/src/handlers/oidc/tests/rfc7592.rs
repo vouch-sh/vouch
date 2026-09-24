@@ -1819,6 +1819,99 @@ async fn test_rfc7592_get_invalid_bearer_token() {
     assert_invalid_token_challenge(&response);
 }
 
+// A client a user registered is managed on that user's behalf, so its
+// registration access token stops working while the owner is deactivated.
+// RFC 6750 §3.1 `invalid_token`: "The access token provided is expired,
+// revoked, malformed, or invalid for other reasons."
+#[tokio::test]
+async fn test_rfc7592_deactivated_owner_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7592-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Owned Client"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+    let uri = format!("/oauth/register/{client_id}");
+    let auth = format!("Bearer {token}");
+
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate")
+    );
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Renamed"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &auth),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{method}: {}",
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_token",
+            "{method}: {}",
+            response.body
+        );
+    }
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client is not deleted while its owner is deactivated"
+    );
+
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, true)
+            .await
+            .expect("reactivate")
+    );
+    let response = http_get_full(&app, &uri, &[("Authorization", &auth)]).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+}
+
 // =========================================================================
 // DELETE /oauth/register/:client_id — Delete Client Configuration
 // =========================================================================
