@@ -466,6 +466,157 @@ fn write_sts_profile(
     Ok(())
 }
 
+/// Where discovery puts the profile for one assignment: an Identity Center
+/// account and permission set, or an entitled IAM role.
+///
+/// Pure over `aws_config`; the caller does the printing and the
+/// `set_profile` for the variant returned.
+#[derive(Debug, PartialEq, Eq)]
+enum ProfilePlan {
+    /// No candidate name holds a profile for this assignment. Write one at
+    /// `profile_name`, the first free candidate.
+    Write { profile_name: String },
+    /// A profile at `profile_name` already vends this assignment: a re-run.
+    /// It is left where it is, never renamed.
+    Existing { profile_name: String },
+    /// Every candidate name is held by a profile vending something else, so
+    /// writing would overwrite a working profile. `profile_name` is the last
+    /// candidate, for the message.
+    NameTaken { profile_name: String },
+}
+
+/// The names discovery tries for one assignment, most preferred first.
+///
+/// The preferred `base` (`{prefix|vouch}-{account-label}-{slug}`) is short
+/// but not unique: AWS does not enforce unique account display names, and
+/// [`sanitize_profile_name`] collapses distinct names (`Admin.Access`,
+/// `Admin_Access`, `Admin+Access`) to one slug. `{base}-{account_id}`
+/// separates accounts. `{base}-{account_id}-{hash}` separates assignments,
+/// where `hash` is the first 8 hex digits of SHA-256 over `unit`, the raw
+/// value the slug came from (the permission-set name, or the role ARN), so
+/// two assignments get the same third name only if their raw values are
+/// equal. Every name is stable across runs; the longer ones are only used
+/// when the shorter ones are taken.
+fn profile_name_candidates(base: &str, account_id: &str, unit: &str) -> [String; 3] {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, unit.as_bytes());
+    let hash: String = digest
+        .as_ref()
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    [
+        base.to_string(),
+        format!("{base}-{account_id}"),
+        format!("{base}-{account_id}-{hash}"),
+    ]
+}
+
+/// Decide where the profile for one assignment goes.
+///
+/// A profile that already vends the assignment (`vends`) at any candidate
+/// name wins, so a re-run neither duplicates nor renames it. Otherwise the
+/// first candidate that is neither in `aws_config` nor in `claimed` (names
+/// this pass has already decided to write, for callers that write after
+/// deciding) is chosen. Only when all three are held by other profiles is
+/// the assignment reported instead of written.
+fn plan_profile(
+    aws_config: &AwsConfig,
+    claimed: &BTreeSet<String>,
+    base: &str,
+    account_id: &str,
+    unit: &str,
+    vends: impl Fn(&AwsProfile) -> bool,
+) -> ProfilePlan {
+    let candidates = profile_name_candidates(base, account_id, unit);
+    for candidate in &candidates {
+        if aws_config
+            .get_profile(candidate)
+            .is_some_and(|existing| vends(&existing))
+        {
+            return ProfilePlan::Existing {
+                profile_name: candidate.clone(),
+            };
+        }
+    }
+    for candidate in &candidates {
+        if !claimed.contains(candidate) && aws_config.get_profile(candidate).is_none() {
+            return ProfilePlan::Write {
+                profile_name: candidate.clone(),
+            };
+        }
+    }
+    let [.., last] = candidates;
+    ProfilePlan::NameTaken { profile_name: last }
+}
+
+/// [`plan_profile`] for one Identity Center assignment written by
+/// [`run_discover`], which writes each profile as soon as it decides, so no
+/// names are claimed ahead of the config.
+///
+/// An existing profile vends the assignment when its `credential_process`
+/// names the same account and permission set under this run's IdC
+/// application (see [`existing_vends_same_idc_assignment`]). Anything else
+/// at a candidate name, including an STS `--role` profile, a profile pinned
+/// to another application, or a hand-written one, is someone else's.
+fn plan_idc_write(
+    aws_config: &AwsConfig,
+    base_name: &str,
+    account_id: &str,
+    permission_set: &str,
+    idc_application_arn: &str,
+) -> ProfilePlan {
+    plan_profile(
+        aws_config,
+        &BTreeSet::new(),
+        base_name,
+        account_id,
+        permission_set,
+        |existing| {
+            existing_vends_same_idc_assignment(
+                existing,
+                idc_application_arn,
+                account_id,
+                permission_set,
+            )
+        },
+    )
+}
+
+/// Whether an existing profile's `credential_process` vends the given
+/// Identity Center assignment under this discovery run's IdC application.
+///
+/// An absent `--idc-application` resolves to the configured org at vend time
+/// (the same policy the existing-profile sweep applies), so a legacy profile
+/// with no pinned application counts as this org's. A profile pinned to a
+/// *different* application does not — it vends a different IAM role, so the
+/// assignment is not covered by it and must get its own profile.
+fn existing_vends_same_idc_assignment(
+    existing: &AwsProfile,
+    idc_application_arn: &str,
+    account_id: &str,
+    permission_set_name: &str,
+) -> bool {
+    use crate::integrations::aws::CredentialProcessLine;
+
+    existing
+        .credential_process
+        .as_deref()
+        .and_then(CredentialProcessLine::parse)
+        .is_some_and(|line| {
+            matches!(
+                line,
+                CredentialProcessLine::IdentityCenter {
+                    application_arn,
+                    account,
+                    permission_set,
+                } if account.as_str() == account_id
+                    && permission_set.as_str() == permission_set_name
+                    && application_arn.as_deref().is_none_or(|p| p == idc_application_arn)
+            )
+        })
+}
+
 /// Enumerate Identity Center access and write profiles.
 ///
 /// Uses the TTI exchange (`CreateTokenWithIAM`) to obtain an IdC access token,
@@ -536,46 +687,70 @@ async fn run_discover(
                 safe_name
             };
             let safe_ps = sanitize_profile_name(&role.role_name);
-            let profile_name = match profile_prefix {
+            let base_name = match profile_prefix {
                 Some(prefix) => format!("{prefix}-{name_part}-{safe_ps}"),
                 None => format!("vouch-{name_part}-{safe_ps}"),
             };
 
-            if aws_config.profile_exists(&profile_name) {
-                // This loop iterates the portal's assignment list, so an
-                // existing profile reached here is verified vendable — the
-                // portal authorizes GetRoleCredentials against the same
-                // assignments (no live probe needed, unlike role chaining).
-                tr_println!(
-                    "setup-aws-idc-existing-verified",
-                    profile = profile_name.as_str(),
-                    account = account.account_id.as_str(),
-                    permission_set = role.role_name.as_str()
-                );
-                skipped_count = skipped_count.saturating_add(1);
-                continue;
+            // The profile name is built from the sanitized account *display
+            // name*, which is not unique per assignment (AWS does not enforce
+            // unique display names, and sanitization collapses distinct
+            // names to one slug). A name-only existence check would silently
+            // drop the second colliding assignment while reporting it
+            // `setup-aws-idc-existing-verified`. `plan_idc_write` parses the
+            // existing profile's `credential_process` and distinguishes a
+            // genuine re-run (same account + permission set) from a foreign
+            // collision, falling back to the account ID and then a hash of the
+            // permission-set name so every assignment the portal returned
+            // gets a vendable profile.
+            match plan_idc_write(
+                &aws_config,
+                &base_name,
+                &account.account_id,
+                &role.role_name,
+                &idc.application_arn,
+            ) {
+                ProfilePlan::Existing { profile_name } => {
+                    tr_println!(
+                        "setup-aws-idc-existing-verified",
+                        profile = profile_name.as_str(),
+                        account = account.account_id.as_str(),
+                        permission_set = role.role_name.as_str()
+                    );
+                    skipped_count = skipped_count.saturating_add(1);
+                }
+                ProfilePlan::NameTaken { profile_name } => {
+                    tr_println!(
+                        "setup-aws-idc-name-taken",
+                        profile = profile_name.as_str(),
+                        account = account.account_id.as_str(),
+                        permission_set = role.role_name.as_str()
+                    );
+                    skipped_count = skipped_count.saturating_add(1);
+                }
+                ProfilePlan::Write { profile_name } => {
+                    aws_config.set_profile(&AwsProfile {
+                        name: profile_name.clone(),
+                        credential_process: Some(
+                            crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+                                application_arn: Some(idc.application_arn.clone()),
+                                account: account.account_id.clone(),
+                                permission_set: role.role_name.clone(),
+                            }
+                            .render(&vouch_path),
+                        ),
+                        region: None,
+                        output: Some("json".to_string()),
+                    });
+
+                    tr_println!(
+                        "setup-aws-discover-added",
+                        profile = profile_name.as_str(),
+                        role_arn = role.role_name.as_str()
+                    );
+                    created_count = created_count.saturating_add(1);
+                }
             }
-
-            aws_config.set_profile(&AwsProfile {
-                name: profile_name.clone(),
-                credential_process: Some(
-                    crate::integrations::aws::CredentialProcessLine::IdentityCenter {
-                        application_arn: Some(idc.application_arn.clone()),
-                        account: account.account_id.clone(),
-                        permission_set: role.role_name.clone(),
-                    }
-                    .render(&vouch_path),
-                ),
-                region: None,
-                output: Some("json".to_string()),
-            });
-
-            tr_println!(
-                "setup-aws-discover-added",
-                profile = profile_name.as_str(),
-                role_arn = role.role_name.as_str()
-            );
-            created_count = created_count.saturating_add(1);
         }
     }
 
@@ -816,45 +991,7 @@ async fn write_entitled_profiles<'a>(
     created: &mut u32,
     skipped: &mut u32,
 ) -> BTreeSet<String> {
-    // Validate names and collisions first, collecting the roles to probe.
-    let mut targets = Vec::new();
-    for role in roles {
-        let Some(profile_name) = entitled_role_profile_name(role, input.profile_prefix) else {
-            tr_println!(
-                "setup-aws-entitlements-invalid-skipped",
-                role_arn = role.role_arn.as_str()
-            );
-            *skipped = skipped.saturating_add(1);
-            continue;
-        };
-        if let Some(existing) = aws_config.get_profile(&profile_name) {
-            match classify_name_collision(&existing, &role.role_arn) {
-                // A prior discovery run already configured this role —
-                // re-validate that the assumption still works.
-                NameCollision::SameRole => targets.push(ProbeTarget {
-                    role_arn: role.role_arn.clone(),
-                    profile_name,
-                    disposition: Disposition::Existing,
-                }),
-                // Cross-mechanism collision: the existing profile vends
-                // something else, and the entitlement was NOT configured.
-                NameCollision::Foreign => {
-                    tr_println!(
-                        "setup-aws-entitlements-name-taken",
-                        profile = profile_name.as_str(),
-                        role_arn = role.role_arn.as_str()
-                    );
-                    *skipped = skipped.saturating_add(1);
-                }
-            }
-            continue;
-        }
-        targets.push(ProbeTarget {
-            role_arn: role.role_arn.clone(),
-            profile_name,
-            disposition: Disposition::Added,
-        });
-    }
+    let targets = plan_entitled_profiles(roles, input.profile_prefix, aws_config, skipped);
 
     // Probe concurrently, then report and write in input order. A confirmed
     // denial gates the write of a new profile.
@@ -882,6 +1019,71 @@ async fn write_entitled_profiles<'a>(
         probed.insert(target.role_arn);
     }
     probed
+}
+
+/// Choose the profile name for each entitled role, reporting and counting
+/// in `skipped` the roles that cannot be configured.
+///
+/// Returns the roles to probe: each one already configured at one of its
+/// candidate names ([`Disposition::Existing`]), or planned for a free one
+/// ([`Disposition::Added`]). Profiles are written only after probing, so a
+/// name chosen for an earlier role in this pass is claimed to keep a later
+/// role whose name slugifies the same off it.
+fn plan_entitled_profiles<'a>(
+    roles: impl Iterator<Item = &'a crate::integrations::aws::account_access::EntitledRole>,
+    profile_prefix: Option<&str>,
+    aws_config: &AwsConfig,
+    skipped: &mut u32,
+) -> Vec<ProbeTarget> {
+    let mut targets = Vec::new();
+    let mut claimed = BTreeSet::new();
+    for role in roles {
+        let Some(base_name) = entitled_role_profile_name(role, profile_prefix) else {
+            tr_println!(
+                "setup-aws-entitlements-invalid-skipped",
+                role_arn = role.role_arn.as_str()
+            );
+            *skipped = skipped.saturating_add(1);
+            continue;
+        };
+        let plan = plan_profile(
+            aws_config,
+            &claimed,
+            &base_name,
+            &role.account,
+            &role.role_arn,
+            |existing| classify_name_collision(existing, &role.role_arn) == NameCollision::SameRole,
+        );
+        match plan {
+            // A prior discovery run already configured this role —
+            // re-validate that the assumption still works.
+            ProfilePlan::Existing { profile_name } => targets.push(ProbeTarget {
+                role_arn: role.role_arn.clone(),
+                profile_name,
+                disposition: Disposition::Existing,
+            }),
+            ProfilePlan::Write { profile_name } => {
+                claimed.insert(profile_name.clone());
+                targets.push(ProbeTarget {
+                    role_arn: role.role_arn.clone(),
+                    profile_name,
+                    disposition: Disposition::Added,
+                });
+            }
+            // Every candidate name vends something else; the entitlement
+            // was NOT configured.
+            ProfilePlan::NameTaken { profile_name } => {
+                tr_println!(
+                    "setup-aws-entitlements-name-taken",
+                    profile = profile_name.as_str(),
+                    role_arn = role.role_arn.as_str()
+                );
+                *skipped = skipped.saturating_add(1);
+            }
+        }
+    }
+
+    targets
 }
 
 /// Whether the profile being reported was written this pass or already
@@ -1341,6 +1543,7 @@ async fn validate_existing_profiles(
             issues = issues.saturating_add(1);
         }
     }
+
     if checked > 0 {
         tr_println!(
             "setup-aws-sweep-summary",
@@ -1421,7 +1624,8 @@ fn resolve_identity_store(
     matched.map(|instance| instance.identity_store_id.clone())
 }
 
-/// Validate an entitled role and derive its profile name.
+/// Validate an entitled role and derive its preferred profile name, the
+/// first of the candidates [`plan_profile`] tries.
 ///
 /// AWS-returned values are interpolated into `credential_process` lines, so
 /// the role ARN must parse as an IAM role, the account must be 12 ASCII
@@ -2248,5 +2452,740 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/aws-alt/config");
         let config = super::AwsConfig::empty(path.clone());
         assert_eq!(config.path(), path);
+    }
+
+    // -- plan_profile / plan_idc_write / plan_entitled_profiles --------------------
+    //
+    // Discovery's name-collision handling. The preferred profile name is
+    // built from sanitized display names, which are not unique per
+    // assignment, so a name-only existence check silently dropped the second
+    // colliding assignment while reporting it "verified". These tests cover
+    // the shared planner, its Identity Center and entitlement callers, and the
+    // IdC write loop driven against an in-memory config.
+
+    use crate::integrations::aws::CredentialProcessLine;
+
+    const IDC_APP_ARN: &str = "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz";
+    const OTHER_IDC_APP_ARN: &str = "arn:aws:sso::123456789012:application/ssoins-abc/apl-other";
+    const VOUCH_BIN: &str = "/usr/local/bin/vouch";
+
+    /// Render an Identity Center `credential_process` line, mirroring what
+    /// `run_discover` writes.
+    fn idc_credential_process(
+        application_arn: Option<&str>,
+        account: &str,
+        permission_set: &str,
+    ) -> String {
+        CredentialProcessLine::IdentityCenter {
+            application_arn: application_arn.map(str::to_string),
+            account: account.to_string(),
+            permission_set: permission_set.to_string(),
+        }
+        .render(std::path::Path::new(VOUCH_BIN))
+    }
+
+    /// Pre-populate `config` with a profile named `name` vending the given
+    /// Identity Center assignment.
+    fn seed_idc_profile(
+        config: &mut AwsConfig,
+        name: &str,
+        application_arn: Option<&str>,
+        account: &str,
+        permission_set: &str,
+    ) {
+        config.set_profile(&AwsProfile {
+            name: name.to_string(),
+            credential_process: Some(idc_credential_process(
+                application_arn,
+                account,
+                permission_set,
+            )),
+            region: None,
+            output: Some("json".to_string()),
+        });
+    }
+
+    /// Mirror of the IdC write loop in `run_discover`, driven against an
+    /// in-memory config — the same `plan_idc_write` → `set_profile` →
+    /// counter dance, parameterized by the account/permission-set list, so
+    /// the collision scenario is testable without a live Identity Center
+    /// portal.
+    fn drive_idc_loop(
+        config: &mut AwsConfig,
+        profile_prefix: Option<&str>,
+        accounts: &[(&str, &str, &str)],
+    ) -> (u32, u32) {
+        let mut created: u32 = 0;
+        let mut skipped: u32 = 0;
+        for &(account_id, account_name, permission_set) in accounts {
+            let safe_name = sanitize_profile_name(account_name);
+            let name_part = if safe_name.is_empty() {
+                account_id.to_string()
+            } else {
+                safe_name
+            };
+            let safe_ps = sanitize_profile_name(permission_set);
+            let base_name = match profile_prefix {
+                Some(prefix) => format!("{prefix}-{name_part}-{safe_ps}"),
+                None => format!("vouch-{name_part}-{safe_ps}"),
+            };
+            match plan_idc_write(config, &base_name, account_id, permission_set, IDC_APP_ARN) {
+                ProfilePlan::Existing { .. } | ProfilePlan::NameTaken { .. } => {
+                    skipped = skipped.saturating_add(1);
+                }
+                ProfilePlan::Write { profile_name } => {
+                    config.set_profile(&AwsProfile {
+                        name: profile_name.clone(),
+                        credential_process: Some(idc_credential_process(
+                            Some(IDC_APP_ARN),
+                            account_id,
+                            permission_set,
+                        )),
+                        region: None,
+                        output: Some("json".to_string()),
+                    });
+                    created = created.saturating_add(1);
+                }
+            }
+        }
+        (created, skipped)
+    }
+
+    /// Parse an existing profile's `credential_process` as an IdC line and
+    /// return the account it vends. Returns `Err` (not a panic) so callers in
+    /// `Result`-returning tests can surface fixture misconfiguration through
+    /// the workspace's `?` + `panic_in_result_fn` convention.
+    fn vended_idc_account(config: &AwsConfig, profile_name: &str) -> anyhow::Result<String> {
+        let profile = config
+            .get_profile(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("profile {profile_name} should exist"))?;
+        let cp = profile.credential_process.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("profile {profile_name} should have a credential_process")
+        })?;
+        match CredentialProcessLine::parse(cp) {
+            Some(CredentialProcessLine::IdentityCenter { account, .. }) => Ok(account),
+            other => anyhow::bail!("profile {profile_name} should be IdC, got {other:?}"),
+        }
+    }
+
+    // -- plan_idc_write: pure collision resolution ---------------------------------
+
+    #[test]
+    fn plan_idc_write_empty_config_writes_base_name() {
+        let config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "111111111111",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly".to_string()
+            }
+        );
+    }
+
+    /// The same assignment at the preferred name is a genuine re-run, not a
+    /// collision — the existing profile really vends this account. Pre-fix
+    /// this path *also* matched a different account sharing only the name.
+    #[test]
+    fn plan_idc_write_same_assignment_at_base_is_verified() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "111111111111",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Existing {
+                profile_name: "vouch-sandbox-readonly".to_string()
+            }
+        );
+    }
+
+    /// The headline bug: two accounts whose display names slugify to the
+    /// same value. The second assignment must be disambiguated by its
+    /// account ID and written, NOT silently dropped as "verified".
+    #[test]
+    fn plan_idc_write_foreign_collision_writes_disambiguated() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        // A different account ID sharing the name → foreign → disambiguate.
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly-222222222222".to_string()
+            }
+        );
+    }
+
+    /// An STS `--role` profile occupying the name is a foreign collision
+    /// (different mechanism) → disambiguate, never overwrite the role profile.
+    #[test]
+    fn plan_idc_write_foreign_collision_with_sts_role_writes_disambiguated() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        config.set_profile(&AwsProfile {
+            name: "vouch-sandbox-readonly".to_string(),
+            credential_process: Some(format!(
+                "\"{VOUCH_BIN}\" credential aws --role arn:aws:iam::111111111111:role/Other"
+            )),
+            region: None,
+            output: None,
+        });
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly-222222222222".to_string()
+            }
+        );
+    }
+
+    /// A hand-written profile with no `credential_process` is a foreign
+    /// collision → disambiguate, never overwrite the operator's profile.
+    #[test]
+    fn plan_idc_write_foreign_collision_with_unmanaged_profile_writes_disambiguated() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        config.set_profile(&AwsProfile {
+            name: "vouch-sandbox-readonly".to_string(),
+            credential_process: None,
+            region: Some("us-east-1".to_string()),
+            output: None,
+        });
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly-222222222222".to_string()
+            }
+        );
+    }
+
+    /// A different permission set on the same account is a distinct
+    /// assignment → disambiguate, not "verified". (Two permission sets on
+    /// one account must each get their own profile.)
+    #[test]
+    fn plan_idc_write_different_permission_set_is_foreign() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "111111111111",
+                "AdministratorAccess",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly-111111111111".to_string()
+            }
+        );
+    }
+
+    /// Re-running discovery over a config where the colliding account was
+    /// *already* disambiguated by a prior run must re-detect it at the
+    /// suffixed name as a verified re-run, not a fresh write or a taken name.
+    /// This is the idempotent re-run guarantee for the previously-colliding
+    /// account: a second `--discover` does not duplicate or drop it.
+    #[test]
+    fn plan_idc_write_same_assignment_at_disambiguated_is_verified() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        // Base name held by a different account (foreign collision)…
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        // …and this account's profile already written at the suffixed name.
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly-222222222222",
+            Some(IDC_APP_ARN),
+            "222222222222",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Existing {
+                profile_name: "vouch-sandbox-readonly-222222222222".to_string()
+            }
+        );
+    }
+
+    /// A profile pinned to a *different* IdC application vends a different
+    /// IAM role even when the account and permission-set name match, so it
+    /// is a foreign collision and must not be treated as this run's re-run.
+    #[test]
+    fn plan_idc_write_foreign_application_arn_is_foreign() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            Some(OTHER_IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "111111111111",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: "vouch-sandbox-readonly-111111111111".to_string()
+            }
+        );
+    }
+
+    /// A legacy IdC profile with no `--idc-application` resolves to the
+    /// configured org at vend time, so a matching account + permission set
+    /// is a genuine re-run (Verified), not a foreign collision.
+    #[test]
+    fn plan_idc_write_legacy_profile_without_app_is_verified_when_assignment_matches() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            None,
+            "111111111111",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "111111111111",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Existing {
+                profile_name: "vouch-sandbox-readonly".to_string()
+            }
+        );
+    }
+
+    /// An STS `--role` profile at `name` targeting `role_arn`.
+    fn seed_role_profile(config: &mut AwsConfig, name: &str, role_arn: &str) {
+        config.set_profile(&AwsProfile {
+            name: name.to_string(),
+            credential_process: Some(format!("\"{VOUCH_BIN}\" credential aws --role {role_arn}")),
+            region: None,
+            output: None,
+        });
+    }
+
+    /// When the preferred and account-suffixed names are both held by
+    /// foreign profiles, the permission-set-hash name is used.
+    #[test]
+    fn plan_idc_write_two_candidates_foreign_writes_third() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_role_profile(
+            &mut config,
+            "vouch-sandbox-readonly",
+            "arn:aws:iam::111111111111:role/Other",
+        );
+        seed_role_profile(
+            &mut config,
+            "vouch-sandbox-readonly-222222222222",
+            "arn:aws:iam::333333333333:role/YetAnother",
+        );
+        let [.., third] =
+            profile_name_candidates("vouch-sandbox-readonly", "222222222222", "ReadOnly");
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Write {
+                profile_name: third
+            }
+        );
+    }
+
+    /// All three candidates held by foreign profiles (possible only in a
+    /// hand-edited config): nothing is overwritten, and the assignment is
+    /// reported as `NameTaken`.
+    #[test]
+    fn plan_idc_write_all_candidates_foreign_is_name_taken() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        let candidates =
+            profile_name_candidates("vouch-sandbox-readonly", "222222222222", "ReadOnly");
+        for name in &candidates {
+            seed_role_profile(&mut config, name, "arn:aws:iam::111111111111:role/Other");
+        }
+        let [.., third] = candidates;
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::NameTaken {
+                profile_name: third
+            }
+        );
+    }
+
+    /// A profile that already vends the assignment is found at a later
+    /// candidate even when an earlier one is free again (the preferred-name
+    /// profile was deleted), so a re-run does not write a second copy.
+    #[test]
+    fn plan_idc_write_existing_at_later_candidate_wins_over_free_earlier_one() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-readonly-222222222222",
+            Some(IDC_APP_ARN),
+            "222222222222",
+            "ReadOnly",
+        );
+        assert_eq!(
+            plan_idc_write(
+                &config,
+                "vouch-sandbox-readonly",
+                "222222222222",
+                "ReadOnly",
+                IDC_APP_ARN
+            ),
+            ProfilePlan::Existing {
+                profile_name: "vouch-sandbox-readonly-222222222222".to_string()
+            }
+        );
+    }
+
+    /// Candidate names are stable: the hash suffix depends only on the raw
+    /// value, so re-runs and other machines pick the same names.
+    #[test]
+    fn profile_name_candidates_are_stable_and_distinct_per_raw_value() {
+        let a =
+            profile_name_candidates("vouch-sandbox-admin-access", "111111111111", "Admin.Access");
+        let b =
+            profile_name_candidates("vouch-sandbox-admin-access", "111111111111", "Admin_Access");
+        assert_eq!(
+            a,
+            profile_name_candidates("vouch-sandbox-admin-access", "111111111111", "Admin.Access")
+        );
+        assert_eq!(a.get(..2), b.get(..2));
+        assert_ne!(a.get(2), b.get(2));
+        let [_, _, third] = a;
+        let suffix = third
+            .strip_prefix("vouch-sandbox-admin-access-111111111111-")
+            .unwrap_or_default();
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // -- end-to-end write loop -----------------------------------------------------
+
+    /// The bug report's scenario, flipped to assert the FIXED behavior: two
+    /// accounts whose display names collapse to the same slug (`Sandbox (Dev)`
+    /// and `Sandbox-Dev` both → `sandbox-dev`) sharing `ReadOnly` each get
+    /// their own profile; the colliding account is disambiguated by its
+    /// account ID. Both `created == 2` and the surviving profiles vend their
+    /// own account IDs — no assignment is dropped or misreported as verified.
+    #[test]
+    fn idc_name_collision_writes_both_accounts() -> anyhow::Result<()> {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        let accounts = [
+            ("111111111111", "Sandbox (Dev)", "ReadOnly"),
+            ("222222222222", "Sandbox-Dev", "ReadOnly"),
+        ];
+
+        let (created, skipped) = drive_idc_loop(&mut config, None, &accounts);
+
+        // Both slugify to `vouch-sandbox-dev-readonly`, so without the fix the
+        // second account would be dropped. The fix writes both.
+        assert_eq!(created, 2);
+        assert_eq!(skipped, 0);
+
+        // First account keeps the preferred name; the second is disambiguated.
+        assert_eq!(
+            vended_idc_account(&config, "vouch-sandbox-dev-readonly")?,
+            "111111111111"
+        );
+        assert_eq!(
+            vended_idc_account(&config, "vouch-sandbox-dev-readonly-222222222222")?,
+            "222222222222"
+        );
+        Ok(())
+    }
+
+    /// Idempotent re-run: after the first pass writes both profiles (one
+    /// preferred, one disambiguated), a second discovery pass over the same
+    /// assignments reports both as `Verified` and writes nothing. This proves
+    /// the fix does not duplicate profiles or churn the config on re-runs, and
+    /// that the previously-colliding account is correctly re-detected at its
+    /// suffixed name.
+    #[test]
+    fn idc_collision_rerun_marks_both_verified() -> anyhow::Result<()> {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        let accounts = [
+            ("111111111111", "Sandbox (Dev)", "ReadOnly"),
+            ("222222222222", "Sandbox-Dev", "ReadOnly"),
+        ];
+
+        let (created1, skipped1) = drive_idc_loop(&mut config, None, &accounts);
+        assert_eq!((created1, skipped1), (2, 0));
+
+        let (created2, skipped2) = drive_idc_loop(&mut config, None, &accounts);
+        assert_eq!((created2, skipped2), (0, 2));
+
+        // Profiles are unchanged after the second pass.
+        assert_eq!(
+            vended_idc_account(&config, "vouch-sandbox-dev-readonly")?,
+            "111111111111"
+        );
+        assert_eq!(
+            vended_idc_account(&config, "vouch-sandbox-dev-readonly-222222222222")?,
+            "222222222222"
+        );
+        Ok(())
+    }
+
+    /// A custom `--profile-prefix` flows through the same collision fix:
+    /// `work-sandbox-readonly` and `work-sandbox-readonly-222222222222`.
+    #[test]
+    fn idc_collision_with_custom_prefix_writes_both() -> anyhow::Result<()> {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        let accounts = [
+            ("111111111111", "Sandbox", "ReadOnly"),
+            ("222222222222", "Sandbox", "ReadOnly"),
+        ];
+
+        let (created, skipped) = drive_idc_loop(&mut config, Some("work"), &accounts);
+
+        assert_eq!(created, 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            vended_idc_account(&config, "work-sandbox-readonly")?,
+            "111111111111"
+        );
+        assert_eq!(
+            vended_idc_account(&config, "work-sandbox-readonly-222222222222")?,
+            "222222222222"
+        );
+        Ok(())
+    }
+
+    /// A re-run over an already-populated config where the colliding account
+    /// was previously disambiguated is the genuinely-silent case the report
+    /// calls out: both assignments report `Verified` and nothing is written,
+    /// proving the previously-colliding account is never silently dropped or
+    /// misreported on a re-run over an existing config.
+    #[test]
+    fn idc_rerun_over_populated_config_marks_both_verified() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        // Simulate a prior run's result: the first account at the preferred
+        // name, the colliding account already at the suffixed name.
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-dev-readonly",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "ReadOnly",
+        );
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-dev-readonly-222222222222",
+            Some(IDC_APP_ARN),
+            "222222222222",
+            "ReadOnly",
+        );
+        let accounts = [
+            ("111111111111", "Sandbox (Dev)", "ReadOnly"),
+            ("222222222222", "Sandbox-Dev", "ReadOnly"),
+        ];
+
+        let (created, skipped) = drive_idc_loop(&mut config, None, &accounts);
+
+        assert_eq!(created, 0);
+        assert_eq!(skipped, 2);
+    }
+
+    /// N assignments whose preferred names collide across accounts AND
+    /// across permission sets get N distinct profiles, each vending its own
+    /// assignment, and an existing profile at the preferred name is never
+    /// renamed. `Admin.Access`, `Admin_Access` and `Admin+Access` all slugify
+    /// to `admin-access`, and both accounts are named `Sandbox`.
+    #[test]
+    fn idc_slug_collisions_across_accounts_and_permission_sets_write_all() -> anyhow::Result<()> {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        // A prior run's profile at the preferred name.
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-admin-access",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "Admin.Access",
+        );
+        let accounts = [
+            ("111111111111", "Sandbox", "Admin.Access"),
+            ("111111111111", "Sandbox", "Admin_Access"),
+            ("111111111111", "Sandbox", "Admin+Access"),
+            ("222222222222", "Sandbox", "Admin.Access"),
+            ("222222222222", "Sandbox", "Admin_Access"),
+        ];
+
+        let (created, skipped) = drive_idc_loop(&mut config, None, &accounts);
+        assert_eq!((created, skipped), (4, 1), "one existing, four written");
+
+        let mut vended = BTreeSet::new();
+        for profile in config.find_all_vouch_profiles() {
+            if let Some(CredentialProcessLine::IdentityCenter {
+                account,
+                permission_set,
+                ..
+            }) = profile
+                .credential_process
+                .as_deref()
+                .and_then(CredentialProcessLine::parse)
+            {
+                assert!(
+                    vended.insert((account, permission_set)),
+                    "each assignment is vended by exactly one profile"
+                );
+            }
+        }
+        assert_eq!(vended.len(), accounts.len());
+        assert_eq!(
+            vended_idc_account(&config, "vouch-sandbox-admin-access")?,
+            "111111111111",
+            "the existing profile keeps the preferred name"
+        );
+
+        // A re-run writes nothing and reports every assignment as existing.
+        assert_eq!(drive_idc_loop(&mut config, None, &accounts), (0, 5));
+        Ok(())
+    }
+
+    // -- plan_entitled_profiles ---------------------------------------------------
+
+    /// Entitled roles whose preferred names collide (same account label and
+    /// role slug) each get a distinct planned profile instead of the later
+    /// ones being dropped as name-taken; a role already configured at its
+    /// preferred name stays there; an IdC profile holding a role's preferred
+    /// name is not overwritten.
+    #[test]
+    fn plan_entitled_profiles_gives_colliding_roles_distinct_names() {
+        let mut config = AwsConfig::empty(std::path::PathBuf::from("/tmp/x"));
+        seed_role_profile(
+            &mut config,
+            "vouch-sandbox-deploy-role",
+            "arn:aws:iam::111111111111:role/Deploy.Role",
+        );
+        seed_idc_profile(
+            &mut config,
+            "vouch-sandbox-audit",
+            Some(IDC_APP_ARN),
+            "111111111111",
+            "Audit",
+        );
+        let roles = [
+            entitled(
+                "arn:aws:iam::111111111111:role/Deploy.Role",
+                "111111111111",
+                Some("Sandbox"),
+            ),
+            entitled(
+                "arn:aws:iam::111111111111:role/Deploy_Role",
+                "111111111111",
+                Some("Sandbox"),
+            ),
+            entitled(
+                "arn:aws:iam::111111111111:role/Deploy+Role",
+                "111111111111",
+                Some("Sandbox"),
+            ),
+            entitled(
+                "arn:aws:iam::222222222222:role/Deploy.Role",
+                "222222222222",
+                Some("Sandbox"),
+            ),
+            entitled(
+                "arn:aws:iam::111111111111:role/Audit",
+                "111111111111",
+                Some("Sandbox"),
+            ),
+        ];
+
+        let mut skipped = 0;
+        let targets = plan_entitled_profiles(roles.iter(), None, &config, &mut skipped);
+
+        assert_eq!(skipped, 0, "no role is dropped");
+        assert_eq!(targets.len(), roles.len());
+        let names: BTreeSet<&str> = targets.iter().map(|t| t.profile_name.as_str()).collect();
+        assert_eq!(names.len(), roles.len(), "every planned name is distinct");
+        let first = targets
+            .first()
+            .map(|t| (t.profile_name.as_str(), t.disposition));
+        assert!(matches!(
+            first,
+            Some(("vouch-sandbox-deploy-role", Disposition::Existing))
+        ));
+        assert!(
+            targets
+                .iter()
+                .skip(1)
+                .all(|t| matches!(t.disposition, Disposition::Added)),
+            "the others are new profiles"
+        );
+        assert!(
+            !names.contains("vouch-sandbox-audit"),
+            "the IdC profile's name is not reused"
+        );
     }
 }
