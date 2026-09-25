@@ -678,6 +678,15 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500, as for a storage
+            // fault during the credential lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("Browser WebAuthn login: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
             // A counter regression is reported only once the signature
             // verified, so it counts against the credential's owner. For every
             // other failure the `user_handle` and credential ID are still only
@@ -685,7 +694,7 @@ pub(crate) async fn browser_login_complete(
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
-                e.principal(&user.id),
+                principal,
                 Some(&user.email),
                 Some(&authenticator.id),
                 &e.to_string(),

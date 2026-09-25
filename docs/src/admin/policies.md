@@ -112,8 +112,8 @@ of an identity the upstream IdP verified. The following still appear as `login_f
   signature that fails to verify. The request-supplied id is kept as `data.asserted_user_id`.
 - A server fault after a successful browser login. The id is kept as `data.fault_user_id`.
 
-A storage fault during the credential lookup is a server error, not a failed login, and writes no
-`login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
+A storage fault during the credential lookup, or a signature verification that fails to run to
+completion, is a server error, not a failed login, and writes no `login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
 the unattributed ones are still visible to org-scoped queries when they carry the owner's email
 domain (deactivated-account and signature failures).
 

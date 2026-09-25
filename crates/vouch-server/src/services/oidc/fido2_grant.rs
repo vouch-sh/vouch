@@ -376,6 +376,15 @@ pub(crate) async fn exchange_fido2_assertion(
     {
         Ok(result) => result,
         Err(e) => {
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500 rather than
+            // `invalid_grant`, as for a storage fault during the lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("FIDO2 assertion grant: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
             tracing::warn!(
                 "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
                 user_id
@@ -387,7 +396,7 @@ pub(crate) async fn exchange_fido2_assertion(
             // counts against the credential's owner; every other failure leaves
             // the `user_handle` request-supplied and the row unattributed.
             let failure_event = AuthEventParams {
-                user_id: e.principal(&user.id),
+                user_id: principal,
                 event_type: AuthEventType::LoginFailed,
                 authenticator_id: Some(authenticator.id.clone()),
                 success: false,

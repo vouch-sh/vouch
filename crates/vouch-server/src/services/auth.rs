@@ -230,7 +230,8 @@ pub(crate) enum AssertionFailure {
 
 impl AssertionFailure {
     /// The principal a `login_failed` row for this failure names, given the
-    /// owner of the credential the assertion claimed to come from.
+    /// owner of the credential the assertion claimed to come from — or
+    /// `None` when the failure is not a failed login and writes no row.
     ///
     /// A counter regression is reported only after the signature verified
     /// against that credential's public key (WebAuthn Level 2 §7.2 steps 20
@@ -238,15 +239,23 @@ impl AssertionFailure {
     /// signal about that owner and is attributed to them. Every other
     /// rejection happened before or at the signature, so the credential ID
     /// and `user_handle` are still only request-supplied.
+    ///
+    /// A verification task that did not complete is a server fault that
+    /// decided nothing about the assertion. It is handled like a storage
+    /// fault during the credential lookup ([`LookupError::Service`]): no
+    /// `login_failed` row, and the caller answers with a server error.
+    /// `Principal::ServerFault` would not fit — it records a user the server
+    /// *verified*, and here nothing was verified.
     #[must_use]
-    pub(crate) fn principal(&self, owner_user_id: &str) -> db::Principal {
+    pub(crate) fn principal(&self, owner_user_id: &str) -> Option<db::Principal> {
         match self {
             Self::Rejected(webauthn_verify::VerifyError::CounterNotIncreasing) => {
-                db::Principal::Verified(owner_user_id.to_string())
+                Some(db::Principal::Verified(owner_user_id.to_string()))
             }
-            Self::Rejected(_) | Self::TaskFailed => db::Principal::Unverified {
+            Self::Rejected(_) => Some(db::Principal::Unverified {
                 asserted: Some(owner_user_id.to_string()),
-            },
+            }),
+            Self::TaskFailed => None,
         }
     }
 }
@@ -1225,13 +1234,21 @@ mod tests {
     // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
     // signature verified (step 20), so a counter regression — and only a
     // counter regression — is attributable to the credential's owner.
+    // A verification task that never finished decided nothing: like a
+    // storage fault during the credential lookup, it writes no login_failed
+    // row.
+    #[test]
+    fn assertion_task_failure_writes_no_login_failed_row() {
+        assert!(AssertionFailure::TaskFailed.principal("user-1").is_none());
+    }
+
     #[test]
     fn assertion_failure_attributes_only_counter_regression() {
         use webauthn_verify::VerifyError;
         let owner = "user-1";
         assert!(matches!(
             AssertionFailure::Rejected(VerifyError::CounterNotIncreasing).principal(owner),
-            db::Principal::Verified(ref id) if id == owner
+            Some(db::Principal::Verified(ref id)) if id == owner
         ));
         for failure in [
             AssertionFailure::Rejected(VerifyError::SignatureInvalid),
@@ -1241,7 +1258,7 @@ mod tests {
             assert!(
                 matches!(
                     failure.principal(owner),
-                    db::Principal::Unverified { asserted: Some(ref id) } if id == owner
+                    Some(db::Principal::Unverified { asserted: Some(ref id) }) if id == owner
                 ),
                 "{failure} must stay unattributed"
             );
