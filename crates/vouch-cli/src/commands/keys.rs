@@ -43,7 +43,7 @@ pub(crate) enum KeysCommands {
 }
 
 /// Interactive key management.
-pub(crate) async fn interactive(server: &str) -> Result<()> {
+pub(crate) async fn interactive(server: &crate::server_url::ServerUrl) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     loop {
@@ -112,7 +112,11 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
 
 /// Handle action on a selected key.
 /// Returns false if we should exit the interactive loop.
-async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<bool> {
+async fn handle_key_action(
+    server: &crate::server_url::ServerUrl,
+    client: &VouchClient,
+    key: &KeyInfo,
+) -> Result<bool> {
     let current_marker = if key.is_current_session {
         tr!("keys-marker-current")
     } else {
@@ -155,7 +159,11 @@ async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) ->
 }
 
 /// Delete a key with confirmation.
-async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<()> {
+async fn delete_key_interactive(
+    server: &crate::server_url::ServerUrl,
+    client: &VouchClient,
+    key: &KeyInfo,
+) -> Result<()> {
     let warning = if key.is_current_session {
         format!("\n{}", tr!("keys-warn-current-session"))
     } else {
@@ -208,7 +216,7 @@ async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInf
 /// If the server returns a step-up challenge (RFC 9470), prompts the user to
 /// re-authenticate via FIDO2, then retries the delete with a fresh session.
 async fn delete_with_step_up(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     client: &VouchClient,
     key_id: &str,
 ) -> Result<DeleteKeyResponse> {
@@ -252,7 +260,7 @@ fn format_key_for_display(key: &KeyInfo) -> String {
 }
 
 /// List all registered keys (non-interactive).
-pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
+pub(crate) async fn list(server: &crate::server_url::ServerUrl, json: bool) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -301,7 +309,11 @@ pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
 }
 
 /// Remove a registered key (non-interactive).
-pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
+pub(crate) async fn remove(
+    server: &crate::server_url::ServerUrl,
+    key_id: &str,
+    force: bool,
+) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // First, get key info to show the name
@@ -354,7 +366,11 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
 }
 
 /// Rename a registered key (non-interactive).
-pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
+pub(crate) async fn rename(
+    server: &crate::server_url::ServerUrl,
+    key_id: &str,
+    new_name: &str,
+) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Validate the name client-side before the round-trip; the server applies

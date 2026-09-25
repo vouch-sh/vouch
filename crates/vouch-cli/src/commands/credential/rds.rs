@@ -36,7 +36,7 @@ const RDS_CACHE_VALIDITY_MINUTES: i64 = 14;
 /// Prints an RDS IAM auth token to stdout, compatible with
 /// `aws rds generate-db-auth-token` output.
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,
@@ -55,7 +55,7 @@ pub(crate) async fn run(
 /// If `region` is `None`, attempts to extract it from the RDS hostname
 /// before falling back to AWS profile/env detection.
 pub(crate) async fn fetch_rds_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,
@@ -106,7 +106,7 @@ pub(crate) async fn fetch_rds_token(
 
 /// Generate an RDS IAM auth token.
 async fn generate_rds_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,

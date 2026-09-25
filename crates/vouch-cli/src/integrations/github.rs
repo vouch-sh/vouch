@@ -10,15 +10,15 @@ use crate::style;
 
 /// GitHub integration checker.
 pub(crate) struct GitHubIntegration {
-    server: String,
+    server: crate::server_url::ServerUrl,
 }
 
 impl GitHubIntegration {
     /// Create a new GitHub integration checker.
     #[must_use]
-    pub(crate) fn new(server: &str) -> Self {
+    pub(crate) fn new(server: &crate::server_url::ServerUrl) -> Self {
         Self {
-            server: server.to_string(),
+            server: server.clone(),
         }
     }
 }
@@ -55,12 +55,12 @@ impl GitHubIntegration {
     /// GitHub needs custom printing due to its complex account list format.
     pub(crate) async fn check_and_print(&self) {
         let status = check_github_status(&self.server).await;
-        print_github_status(&status, &self.server);
+        print_github_status(&status, self.server.as_str());
     }
 }
 
 /// Check GitHub integration status.
-async fn check_github_status(server: &str) -> GitHubStatus {
+async fn check_github_status(server: &crate::server_url::ServerUrl) -> GitHubStatus {
     let (local_configured, host) = check_git_credential_helper();
 
     // Try to get server status
@@ -162,7 +162,9 @@ fn check_git_credential_helper() -> (bool, Option<String>) {
 }
 
 /// Get GitHub status from server.
-async fn get_github_server_status(server: &str) -> Result<GitHubStatusResponse> {
+async fn get_github_server_status(
+    server: &crate::server_url::ServerUrl,
+) -> Result<GitHubStatusResponse> {
     let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")

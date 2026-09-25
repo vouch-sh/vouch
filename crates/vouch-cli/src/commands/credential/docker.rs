@@ -182,7 +182,7 @@ async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<
             vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
         }
     })?;
-    let server = session.server_url.as_str();
+    let server = &session.server_url;
 
     // Get credentials based on registry type
     let credential = match registry_type {
@@ -237,7 +237,7 @@ async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<
 
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
@@ -359,7 +359,10 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
 }
 
 /// Get credentials for GitHub Container Registry.
-async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<DockerCredential> {
+async fn get_ghcr_credential(
+    server: &crate::server_url::ServerUrl,
+    token: &SecretString,
+) -> Result<DockerCredential> {
     let client = VouchClient::with_token(server, token.clone())?;
 
     // Request token from server (no specific owner/repo for GHCR)

@@ -85,7 +85,7 @@ enum ExchangeOutcome {
 /// `None`, the server defaults to its own issuer URL. Returns the issued ID
 /// token paired with its `expires_in` (seconds), when the server reports one.
 pub(crate) async fn fetch_assertion(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     audience: Option<&str>,
 ) -> Result<(SecretString, Option<u64>)> {
     let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
@@ -108,7 +108,7 @@ pub(crate) async fn fetch_assertion(
         &http,
         &endpoint,
         ExchangeRequest {
-            server,
+            server: server.as_str(),
             client_id,
             key: &key,
             subject_token: &subject_token,
@@ -126,7 +126,7 @@ pub(crate) async fn fetch_assertion(
         &http,
         &endpoint,
         ExchangeRequest {
-            server,
+            server: server.as_str(),
             client_id,
             key: &key,
             subject_token: &subject_token,

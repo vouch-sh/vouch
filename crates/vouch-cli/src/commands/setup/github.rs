@@ -8,7 +8,6 @@ use vouch_cli::{tr, tr_println};
 use vouch_common::GitHubStatusResponse;
 
 use crate::commands::credential::github::check_status;
-use crate::config::Config;
 use crate::install_path::resolve_install_path;
 
 /// Run the GitHub setup command.
@@ -20,13 +19,11 @@ use crate::install_path::resolve_install_path;
 /// # Arguments
 /// * `host` - The GitHub host to configure (default: "github.com")
 /// * `configure` - If true, automatically configure git; if false, just show instructions
-pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
-    // Load config to get server URL
-    let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
-    let server = config
-        .server_url()
-        .with_context(|| tr!("setup-err-not-configured"))?;
-
+pub(crate) async fn run(
+    server: &crate::server_url::ServerUrl,
+    host: &str,
+    configure: bool,
+) -> Result<()> {
     tr_println!("setup-github-header");
     println!();
 
@@ -43,7 +40,10 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
 
             if !status.connected {
                 println!();
-                tr_println!("setup-github-org-not-connected-block", server = server);
+                tr_println!(
+                    "setup-github-org-not-connected-block",
+                    server = server.as_str()
+                );
                 return Ok(());
             }
 

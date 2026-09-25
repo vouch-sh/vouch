@@ -42,7 +42,7 @@ use vouch_cli::{tr, tr_args, tr_println};
 /// 1. Contact the server first (async) — fail fast if unreachable.
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate).
 /// 3. Complete authentication with the server (async).
-pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run(server: &crate::server_url::ServerUrl, timeout_secs: u64) -> Result<()> {
     tr_println!("login-starting");
     println!();
 
@@ -132,11 +132,14 @@ struct Fapi2TokenResponse {
 )]
 async fn run_fapi_login(
     client: &VouchClient,
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     timeout_secs: u64,
     fapi_key: &ClientKey,
 ) -> Result<()> {
-    print!("{} ", tr_args!("login-contacting-server", server = server));
+    print!(
+        "{} ",
+        tr_args!("login-contacting-server", server = server.as_str())
+    );
 
     // Step 1: Ensure the client is registered.
     let client_id = ensure_client_registered(client, fapi_key).await?;
@@ -150,7 +153,7 @@ async fn run_fapi_login(
     // client (and reject a state+assertion replayed under a different
     // client at the token endpoint). FAPI 2.0 §5.3.2.1-8: the assertion
     // audience is the issuer URL, the same value the token request uses.
-    let challenge_client_assertion = ClientAssertionBuilder::new(&client_id, server)
+    let challenge_client_assertion = ClientAssertionBuilder::new(&client_id, server.as_str())
         .build(fapi_key)
         .context(tr!("err-failed-build-client-assertion-challenge-request"))?;
 
@@ -273,7 +276,8 @@ async fn run_fapi_login(
 
     // Step 7: Build client_assertion (private_key_jwt) and DPoP proof.
     // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
-    let client_assertion = ClientAssertionBuilder::new(&client_id, server).build(fapi_key)?;
+    let client_assertion =
+        ClientAssertionBuilder::new(&client_id, server.as_str()).build(fapi_key)?;
 
     let mut dpop_builder = DpopProofBuilder::new("POST", &token_endpoint_url);
     if let Some(ref nonce) = challenge_dpop_nonce {
@@ -378,7 +382,7 @@ async fn run_fapi_login(
 /// Retry the token request with a server-provided DPoP nonce (RFC 9449).
 async fn run_fapi_login_with_nonce(
     client: &VouchClient,
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     fapi_key: &ClientKey,
     client_id: &str,
     request: &Fido2AssertionTokenRequest,
@@ -388,7 +392,8 @@ async fn run_fapi_login_with_nonce(
 
     // Rebuild client_assertion and DPoP proof with the nonce.
     // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
-    let client_assertion = ClientAssertionBuilder::new(client_id, server).build(fapi_key)?;
+    let client_assertion =
+        ClientAssertionBuilder::new(client_id, server.as_str()).build(fapi_key)?;
 
     let dpop_proof = DpopProofBuilder::new("POST", &token_endpoint_url)
         .nonce(nonce)

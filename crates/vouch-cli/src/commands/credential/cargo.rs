@@ -319,7 +319,7 @@ async fn handle_get_codeartifact(
         registry.domain_owner.clone(),
         registry.region.clone(),
     );
-    let result = match super::codeartifact::get_token(server.as_str(), &target).await {
+    let result = match super::codeartifact::get_token(&server, &target).await {
         Ok(r) => r,
         Err(e) => {
             return send_error(

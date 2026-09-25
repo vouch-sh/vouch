@@ -118,7 +118,9 @@ async fn get_credential(opt_in: InsecureOptIn) -> Result<()> {
 }
 
 /// Check GitHub integration status.
-pub(crate) async fn check_status(server: &str) -> Result<GitHubStatusResponse> {
+pub(crate) async fn check_status(
+    server: &crate::server_url::ServerUrl,
+) -> Result<GitHubStatusResponse> {
     let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")

@@ -39,7 +39,7 @@ pub(crate) enum RedshiftTarget<'a> {
 ///
 /// Outputs JSON with `DbUser`, `DbPassword`, and `Expiration` to stdout.
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     target: RedshiftTarget<'_>,
     db_name: Option<&str>,
     region: Option<&str>,
@@ -112,7 +112,7 @@ pub(crate) async fn run(
 ///
 /// Routes to the provisioned cluster or serverless API based on `target`.
 pub(crate) async fn fetch_redshift_credentials(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     target: &RedshiftTarget<'_>,
     db_name: Option<&str>,
     region: &str,

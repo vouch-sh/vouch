@@ -17,7 +17,7 @@ use crate::config::Config;
 const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/oauth/token";
 
 /// Run `vouch credential anthropic`.
-pub(crate) async fn run(server: &str) -> Result<()> {
+pub(crate) async fn run(server: &crate::server_url::ServerUrl) -> Result<()> {
     let token = get_token(server).await?;
     // Bare token, no trailing newline — matches `vouch credential token`
     // and is what credential-helper consumers expect.
@@ -26,7 +26,7 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 }
 
 /// Fetch (or return from cache) a short-lived Anthropic access token.
-pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
+pub(crate) async fn get_token(server: &crate::server_url::ServerUrl) -> Result<SecretString> {
     let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
     let fed = config
         .ai()
@@ -43,7 +43,7 @@ pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
     let agent = super::aws::detect_agent_source();
     let cache_key =
         super::wif::build_cache_key("anthropic", &fed.federation_rule_id, agent.as_deref());
-    let server = server.to_string();
+    let server = server.clone();
 
     let data = super::cache::get_or_fetch(&cache_key, "Anthropic token", || async move {
         // The Vouch assertion's expires_in is discarded: we cache the provider

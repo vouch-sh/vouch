@@ -66,7 +66,7 @@ fn default_key_path() -> Result<PathBuf> {
 /// 3. Optionally updates ~/.ssh/known_hosts to trust the CA for host verification
 /// 4. Optionally updates ~/.ssh/config to use the Vouch SSH agent
 /// 5. Shows instructions for SSH config
-pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
+pub(crate) async fn run(server: &crate::server_url::ServerUrl, hosts: Option<&str>) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Download CA public key
@@ -77,7 +77,7 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         .with_context(|| tr!("setup-ssh-err-get-ca"))?;
 
     // Save CA public key
-    let ca_path = ca_key_path(server)?;
+    let ca_path = ca_key_path(server.as_str())?;
     let ca_content = format!("{} {}\n", ca_response.public_key, ca_response.comment);
 
     // Ensure .ssh directory exists with secure permissions

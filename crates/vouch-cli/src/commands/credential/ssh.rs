@@ -230,7 +230,7 @@ fn check_existing_certificate(
 /// proof generation instead of reloading from the keychain. This avoids
 /// a storage round-trip that can fail on some platforms.
 pub(crate) async fn provision_ssh_certificate(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     session_email: Option<&str>,
     key_path: Option<&str>,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
@@ -245,7 +245,7 @@ pub(crate) async fn provision_ssh_certificate(
     // Check if existing certificate is still valid (skip server call)
     if !force
         && let Some(email) = session_email
-        && let Some(cached) = check_existing_certificate(&key_path, email, server)
+        && let Some(cached) = check_existing_certificate(&key_path, email, server.as_str())
     {
         return Ok(cached);
     }
@@ -299,7 +299,7 @@ pub(crate) async fn provision_ssh_certificate(
 /// are generated without reloading from the keychain.
 /// Returns `true` if provisioning succeeded.
 pub(crate) async fn auto_provision(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     email: &str,
     #[cfg_attr(
         not(unix),
@@ -319,7 +319,7 @@ pub(crate) async fn auto_provision(
                         &result.key_path.to_string_lossy(),
                         &result.cert_path.to_string_lossy(),
                         Some(expires_at),
-                        Some(server),
+                        Some(server.as_str()),
                     )
                     .await;
             }
@@ -393,8 +393,12 @@ async fn agent_session_email(
 /// 1. Generates an SSH keypair if it doesn't exist
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
-pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Result<()> {
-    let session_email = agent_session_email(server).await;
+pub(crate) async fn run(
+    server: &crate::server_url::ServerUrl,
+    key_path: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    let session_email = agent_session_email(server.as_str()).await;
     let result =
         provision_ssh_certificate(server, session_email.as_deref(), key_path, None, force).await?;
 
