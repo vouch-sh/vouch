@@ -29,7 +29,8 @@ async fn main() -> Result<()> {
     // configured; a conformance run sends a burst the general limiter would
     // refuse. The token affects the certification routes, not SCIM.
     let mut config = state.config().as_ref().clone();
-    config.certification_test_token = Some("scim-conformance".to_string().into());
+    config.certification_test_token =
+        vouch_server::config::NonEmptySecret::new("scim-conformance".to_string().into());
     state.config.store(Arc::new(config));
     let harness = TestHarness::from_state(state);
 

@@ -494,30 +494,13 @@ pub async fn test_app_without_client_ca() -> (Router, Arc<AppState>) {
 ///
 /// The certification token is set to a fixed value for testing.
 pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
+    use crate::config::NonEmptySecret;
     use secrecy::SecretString;
     let state = test_app_state().await;
     // Override config with certification token set
     let mut config = (**state.config()).clone();
-    config.certification_test_token = Some(SecretString::from("test-cert-token-32bytes-padding!!"));
-    state.config.store(Arc::new(config.clone()));
-    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
-    (router, state)
-}
-
-/// Create test app with the certification test-mode token set to the empty
-/// string.
-///
-/// This deliberately constructs `Some(SecretString::from(""))` — the
-/// construction-site `non_empty` guard in `from_args` would never produce it,
-/// but S3 config or programmatic construction could. The router still
-/// registers the bypass routes (the `if let Some` gate at `infra/router.rs`
-/// only checks presence), so this exercises the handler-level
-/// defense-in-depth guard that must treat an empty secret as disabled.
-pub async fn test_app_with_empty_certification() -> (Router, Arc<AppState>) {
-    use secrecy::SecretString;
-    let state = test_app_state().await;
-    let mut config = (**state.config()).clone();
-    config.certification_test_token = Some(SecretString::from(""));
+    config.certification_test_token =
+        NonEmptySecret::new(SecretString::from("test-cert-token-32bytes-padding!!"));
     state.config.store(Arc::new(config.clone()));
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)

@@ -7,6 +7,7 @@
 //! - Repository change events (added, removed)
 
 use aws_lc_rs::hmac;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
@@ -147,7 +148,7 @@ impl GitHubService<'_> {
     ) -> GitHubResult<()> {
         let secret = self.webhook_secret()?;
 
-        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.expose_secret().as_bytes());
         let computed = hmac::sign(&key, body);
         let computed_hex = hex::encode(computed.as_ref());
 
