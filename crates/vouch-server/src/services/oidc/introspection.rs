@@ -373,10 +373,71 @@ pub async fn revoke_token(
         }
     };
 
+    // M2M (`client_credentials`) revocation is an OAuth-family event, not a
+    // human `Logout`. Detection from the decoded JWT covers a live token; an
+    // expired token no longer decodes, so the detection above is false, but
+    // the session row it just deleted carries the `M2MAccessToken` purpose,
+    // which extends detection to that path.
+    let is_m2m = is_m2m
+        || deleted_row
+            .as_ref()
+            .is_some_and(|r| r.session_type == db::SessionPurpose::M2MAccessToken);
+
     if revoked {
-        // The decoded token names the user. A token that no longer decodes is
-        // attributed to the session row it deleted, so the `Logout` audit
-        // event is recorded whenever a row was deleted.
+        if is_m2m {
+            // M2M revocation records an OAuth-family `OauthTokenRevoked`
+            // event, not an auth-family `Logout`. The JWT `sub` (and, for an
+            // expired row, the session's `user_id`) is the OAuth `client_id`,
+            // not a user, and there is no human email — mirroring M2M
+            // issuance, which records `OauthTokenIssued` with `user_id =
+            // None`. `user_id = None` keeps the `client_id` out of the
+            // `user_id` column (the admin "revoke all tokens" path and
+            // `get_oauth_usage_stats` expect `user_id = None` for client
+            // events), and resolving the client's own org domain for
+            // `email_domain` keeps the row in the org-scoped audit feed —
+            // the `Logout` row this replaces had a NULL `email_domain` and
+            // was filtered out of every org-scoped consumer (SIEM API +
+            // admin UI). The audit identifier is the application's document
+            // id (the same value issuance and the admin revocation path
+            // stamp), so per-application usage stats — which filter by
+            // `oauth_client_id == app_id` — count per-token revocations.
+            let (oauth_client_id, audit_org_domain): (String, Option<String>) =
+                match db::get_oauth_client_by_client_id(&state.store, caller_client_id).await {
+                    Ok(Some(client)) => {
+                        let domain = db::resolve_event_org_domain(
+                            &state.store,
+                            None,
+                            client.org_id.as_deref(),
+                        )
+                        .await;
+                        (client.id, domain)
+                    }
+                    // Best-effort fallback (should not occur post-
+                    // authentication): still record the correct event type
+                    // with `user_id = None` so retention and OCSF/doc-group
+                    // classification are right, even if the per-app stats key
+                    // and org domain are not.
+                    _ => (caller_client_id.to_string(), None),
+                };
+            let params = db::RecordOAuthEventParams {
+                oauth_client_id: &oauth_client_id,
+                event_type: db::OAuthEventType::TokenRevoked,
+                user_id: None,
+                ip_address: client_info.client_ip,
+                user_agent: client_info.user_agent.as_deref(),
+                details: None,
+                org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+            };
+            db::record_oauth_event(&state.audit, &state.store, &params).await;
+            return RevocationResult {
+                revoked: true,
+                user_email: None,
+            };
+        }
+
+        // Human revocation: the decoded token names the user. A token that
+        // no longer decodes is attributed to the session row it deleted, so
+        // the `Logout` audit event is recorded whenever a row was deleted.
         let principal = match (sub, deleted_row) {
             (Some(user_id), _) => Some((user_id, email)),
             (None, Some(row)) => Some((row.user_id, Some(row.user_email))),
@@ -390,9 +451,9 @@ pub async fn revoke_token(
         };
         // A token minted without the `email` scope carries no email claim.
         // The user record supplies it so the event stays in the org-scoped
-        // audit feed. An M2M token names a client, not a user.
+        // audit feed.
         let email = match email {
-            None if !is_m2m => match db::get_user_by_id(&state.store, &user_id).await {
+            None => match db::get_user_by_id(&state.store, &user_id).await {
                 Ok(user) => user.map(|u| u.email),
                 Err(e) => {
                     tracing::warn!("Failed to load user for revocation audit: {e}");

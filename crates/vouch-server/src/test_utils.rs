@@ -1754,6 +1754,51 @@ pub async fn create_test_expired_session_row(
     (token, token_hash)
 }
 
+/// Seed an already-expired `client_credentials` (M2M) session row keyed to an
+/// opaque cookie value, and return `(cookie, token_hash)`.
+///
+/// Mirrors [`create_test_expired_session_row`] for the M2M shape: per RFC 9068
+/// §2.2 a `client_credentials` access token is persisted with `user_id ==
+/// client_id` and an empty `user_email`, under the `M2MAccessToken` purpose
+/// (see `client_credentials.rs`). The row's `expires_at` is one second in the
+/// past — the expired-but-not-yet-reaped window: `decode_token` answers
+/// `None` while the row still exists, so a revocation takes the
+/// `delete_session_by_token_hash` fallback whose `deleted_row.session_type ==
+/// M2MAccessToken` is what `revoke_token`'s extended M2M detection keys off.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+pub async fn create_test_expired_m2m_session_row(
+    state: &AppState,
+    client_id: &str,
+) -> (String, String) {
+    let token = format!("expired-m2m-{}", uuid::Uuid::now_v7());
+    let token_hash = crate::crypto::hash_token(&token);
+    let expires_at = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().seconds(1))
+        .expect("backdate M2M session row by 1s");
+    crate::db::create_session(
+        &state.store,
+        &crate::db::CreateSessionParams {
+            user_id: client_id,
+            user_email: "",
+            token_hash: &token_hash,
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: crate::db::SessionPurpose::M2MAccessToken,
+            authorization_details: Option::None,
+            hardware_aaguid: Option::None,
+            org_domain: Option::None,
+            client_id: Option::Some(client_id),
+            source_code_hash: Option::None,
+        },
+    )
+    .await
+    .expect("create expired M2M session row");
+    (token, token_hash)
+}
+
 /// Create an org with an admin user, a FIDO2-verified session, and return
 /// the admin plus the session's raw access token.
 pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {
