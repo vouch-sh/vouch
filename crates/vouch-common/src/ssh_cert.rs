@@ -17,9 +17,11 @@ pub fn ssh_cert_key_id(email: &str, rp_id: &str) -> String {
 ///
 /// The email must match exactly. The relying-party ID after it must be
 /// non-empty and, when `server_url` is known and names a DNS host, must be
-/// that host or a parent domain of it: a WebAuthn RP ID is always the
-/// origin's host or a registrable suffix of it, so a certificate minted by a
-/// server on another domain does not match. An IP-literal host carries no
+/// that host or a parent domain of it. WebAuthn Level 2 §4, the note under
+/// "Relying Party Identifier" (non-normative): "The RP ID must be equal to the
+/// origin's effective domain, or a registrable domain suffix of the origin's
+/// effective domain." So a certificate minted by a server on another domain
+/// does not match. An IP-literal host carries no
 /// domain to compare, so only the email is checked for it, as it is when
 /// `server_url` is `None`.
 pub fn ssh_cert_issued_to(key_id: &str, email: &str, server_url: Option<&str>) -> bool {
@@ -99,9 +101,8 @@ mod tests {
         ));
     }
 
-    // WebAuthn Level 2 §4, the note under "Relying Party Identifier": "The RP
-    // ID must be equal to the origin's effective domain, or a registrable
-    // domain suffix of the origin's effective domain." So a server on a
+    // An RP ID may be a parent domain of the server's host (see the
+    // WebAuthn note quoted on `ssh_cert_issued_to`), so a server on a
     // subdomain of its RP ID matches.
     #[test]
     fn a_server_on_a_subdomain_of_the_rp_id_matches() {
