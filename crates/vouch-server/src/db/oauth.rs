@@ -1147,15 +1147,7 @@ impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked/expired).
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        if self.revoked_at.is_some() {
-            return false;
-        }
-        if let Some(expires) = self.expires_at
-            && expires <= *now
-        {
-            return false;
-        }
-        true
+        crate::db::documents::oauth::is_secret_active(self.revoked_at, self.expires_at, now)
     }
 }
 
@@ -1242,22 +1234,7 @@ pub async fn create_oauth_client_secret(
                 ServiceError::from_db_contention(e, "Failed to list secrets for secret create")
             })?;
 
-        // Filter directly on the doc fields to avoid a needless From conversion.
-        // Mirrors the `is_valid` predicate: not revoked, not expired.
-        let active_count = all_secrets
-            .iter()
-            .filter(|s| {
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
-            .count();
+        let active_count = all_secrets.iter().filter(|s| s.data.is_valid(&now)).count();
 
         if active_count >= MAX_ACTIVE_SECRETS {
             // Terminal business error — do not retry.
@@ -1384,10 +1361,11 @@ pub async fn get_oauth_client_secret_by_id(
 ///    for all secret-set mutations on this client).
 /// 4. Counts the *other* active secrets — those that would remain after this
 ///    revoke, excluding the target row itself (filter, not SQL COUNT — soft-deleted
-///    rows are retained).  If none remain and the client's secrets are
-///    credentials, returns a terminal 409 `last_secret`.
-///    Excluding the target matters when it is expired-but-unrevoked: revoking it
-///    must still be allowed while a different valid secret exists.
+///    rows are retained).  If none remain, the client's secrets are credentials,
+///    *and* the target itself is still active, returns a terminal 409 `last_secret`.
+///    Excluding the target avoids double-counting it in `other_active_count`; the
+///    `target_active` term — not the exclude — is what keeps a dead (expired but
+///    unrevoked) target revocable even when it is the client's only secret.
 /// 5. Soft-deletes the secret (`revoked_at`) inside the transaction.
 /// 6. Bumps the client version via `compare_and_update`.  If another concurrent
 ///    revoke committed between our read and our commit, the version won't match
@@ -1403,7 +1381,11 @@ pub async fn get_oauth_client_secret_by_id(
 /// - `ServiceError::NotFound("Secret")` — secret does not exist, does not belong
 ///   to the given client, or is already revoked.
 /// - `ServiceError::NotFound("OAuth client")` — the owning client does not exist.
-/// - `ServiceError::Api(409 "last_secret")` — would leave zero active secrets (terminal).
+/// - `ServiceError::Api(409 "last_secret")` — would reduce the active secret count
+///   to zero: no *other* active secret remains, the client's secrets are
+///   credentials, and the target itself is still active.  Revoking a dead
+///   (expired-but-unrevoked) row when the client is already at zero active secrets
+///   does not reduce the count and is allowed (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 /// - `ServiceError::Internal` — unexpected database or serialization error.
 #[expect(clippy::disallowed_methods, reason = "stamps the revocation time")]
@@ -1458,34 +1440,27 @@ pub async fn revoke_oauth_client_secret(
                 ServiceError::from_db_contention(e, "Failed to list secrets for revoke")
             })?;
 
-        // Count the *other* active secrets — exclude the target row itself, so a
-        // revoke that leaves a valid secret behind is allowed even when the target
-        // is expired-but-unrevoked.  Mirrors the handler's pre-flight check.
+        // Count the *other* active secrets — exclude the target row itself so it
+        // is not double-counted by the floor guard below (`target_active` carries
+        // the dead-row exemption, not the exclude).  Mirrors the handler's
+        // pre-flight check.
         let other_active_count = all_secrets
             .iter()
-            .filter(|s| {
-                if s.id == secret_id {
-                    return false;
-                }
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
+            .filter(|s| s.id != secret_id && s.data.is_valid(&now))
             .count();
 
         // Floor guard: at least one *other* active secret must remain, unless
-        // the client's secrets are not credentials at all.
+        // the client's secrets are not credentials at all.  The floor fires only
+        // when revoking the target would actually *reduce* the active count to
+        // zero — i.e. when the target itself is still an active credential.  A
+        // dead (expired-but-unrevoked) target leaves the active count unchanged,
+        // so it stays deletable even when it is the client's only secret.
+        let target_active = secret_doc.data.is_valid(&now);
         let secret_is_credential = client_doc
             .data
             .token_endpoint_auth_method
             .secret_is_credential(client_doc.data.fapi_profile);
-        if other_active_count == 0 && secret_is_credential {
+        if other_active_count == 0 && secret_is_credential && target_active {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",

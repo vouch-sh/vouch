@@ -724,12 +724,16 @@ pub(crate) async fn delete_secret_api(
         .count();
 
     // The floor protects a usable credential; a dead secret stays deletable.
-    // The authoritative check is the same one inside
+    // The floor fires only when revoking the target would actually reduce the
+    // active count to zero — i.e. when the target itself is still an active
+    // credential.  The authoritative check is the same one inside
     // `revoke_oauth_client_secret`'s transaction.
+    let target_active = secret.is_valid(&now);
     if other_active == 0
         && client
             .token_endpoint_auth_method
             .secret_is_credential(client.fapi_profile)
+        && target_active
     {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
