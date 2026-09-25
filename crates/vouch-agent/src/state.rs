@@ -281,9 +281,37 @@ impl AgentState {
     /// The two are written together, so a session is never paired with an
     /// earlier session's server: `None` clears the URL rather than keeping the
     /// previous one.
+    ///
+    /// When the new session belongs to a different identity than the one it
+    /// replaces, every credential the previous session authorized is dropped in
+    /// the same critical section. The credential-cache key is not user-specific
+    /// (it is built from role/provider parameters, never the Vouch user's
+    /// email), so without this drop a cross-identity `store_session` — a second
+    /// Vouch identity logging in on the same OS account — would let the previous
+    /// user's cached AWS/GitHub/… and SSH credentials be served under the new
+    /// session, authenticating the new user as the previous user's principal
+    /// until the cached entries' TTL elapsed. This mirrors the invariant
+    /// [`clear_session`](Self::clear_session) already enforces on logout: a
+    /// credential must not outlive the session that authorized it.
+    ///
+    /// A same-identity re-login (token refresh) keeps the cache and SSH
+    /// credentials, so a refresh does not pay an extra round-trip per previously
+    /// cached role; those entries were authorized by the same user's prior token
+    /// and remain TTL-bounded. The `store_session` path is also where a live
+    /// session can be replaced by an expired one of the same identity, so SSH
+    /// certificates stay held and are instead revoked by the session-gate in
+    /// [`get_valid_ssh_credentials`](Self::get_valid_ssh_credentials).
     pub async fn store_session(&self, session: Session, server_url: Option<String>) {
         let mut guard = self.inner.write().await;
+        let identity_changed = guard
+            .session
+            .as_ref()
+            .is_none_or(|s| s.user_email() != session.user_email());
         guard.session = Some(session);
+        if identity_changed {
+            guard.credential_cache.clear();
+            guard.ssh_credentials = None;
+        }
         guard.ssh_server_url = server_url;
     }
 
@@ -930,6 +958,203 @@ mod tests {
         state.clear_session().await;
         assert!(state.get_session().await.is_none());
         assert!(state.get_cached_credential("aws:role").await.is_none());
+    }
+
+    /// Replacing the session with a *different identity* drops every credential
+    /// the previous session authorized in the same critical section — the
+    /// symmetric guarantee `clear_session` already provides on logout. The
+    /// credential-cache key is not user-specific, so without this drop a second
+    /// Vouch identity logging in on the same OS account would inherit the first
+    /// user's still-valid cached credentials.
+    #[tokio::test]
+    async fn test_store_session_replacement_clears_credential_cache_on_identity_change() {
+        let state = AgentState::new();
+
+        // User A logs in and caches AWS role credentials.
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenA"),
+                    "user-A@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-A.com".to_string()),
+            )
+            .await;
+        let aws_role = "aws:arn:aws:iam::123456789012:role/Example".to_string();
+        state
+            .cache_credential(
+                aws_role.clone(),
+                CachedCredential::new(
+                    serde_json::json!({
+                        "AccessKeyId": "AKIA_A",
+                        "SecretAccessKey": "secretA",
+                    }),
+                    future_timestamp(3600),
+                ),
+            )
+            .await;
+        assert!(state.get_cached_credential(&aws_role).await.is_some());
+
+        // User B logs in, replacing session A with a different identity.
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenB"),
+                    "user-B@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-B.com".to_string()),
+            )
+            .await;
+
+        // The new session is B's, and A's cached credential must not survive
+        // into it.
+        assert_eq!(
+            state.get_session().await.unwrap().user_email(),
+            "user-B@example.com"
+        );
+        assert!(
+            state.get_cached_credential(&aws_role).await.is_none(),
+            "cross-identity replacement must not leak the prior session's cached credential"
+        );
+        assert_eq!(
+            state.get_ssh_server_url().await.as_deref(),
+            Some("https://server-B.com"),
+            "the new session's server URL replaces the old one"
+        );
+    }
+
+    /// A cross-identity replacement also drops SSH credentials: the previous
+    /// user's certificate must not be served (even briefly) under the new
+    /// identity's session. The login flow's auto-provision step repopulates the
+    /// new user's certificate afterward.
+    #[tokio::test]
+    async fn test_store_session_replacement_clears_ssh_credentials_on_identity_change() {
+        let state = AgentState::new();
+
+        // User A logs in and provisions an SSH certificate.
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenA"),
+                    "user-A@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-A.com".to_string()),
+            )
+            .await;
+        assert!(
+            state
+                .store_ssh_credentials(test_ssh_credentials(), Some("https://server-A.com".into()))
+                .await
+        );
+        assert!(state.get_valid_ssh_credentials().await.is_some());
+
+        // User B logs in, replacing the identity.
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenB"),
+                    "user-B@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-B.com".to_string()),
+            )
+            .await;
+
+        assert!(
+            !state.has_ssh_credentials().await,
+            "cross-identity replacement must drop the prior user's SSH certificate"
+        );
+        assert!(state.get_valid_ssh_credentials().await.is_none());
+    }
+
+    /// A same-identity re-login (token refresh) keeps the cache and SSH
+    /// credentials: those entries were authorized by the same user's prior
+    /// token and remain TTL-bounded, and dropping them would cost an extra
+    /// round-trip per previously cached role on every refresh.
+    #[tokio::test]
+    async fn test_store_session_same_identity_keeps_credential_cache() {
+        let state = AgentState::new();
+
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenA1"),
+                    "user-A@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-A.com".to_string()),
+            )
+            .await;
+        let aws_role = "aws:arn:aws:iam::123456789012:role/Example".to_string();
+        state
+            .cache_credential(
+                aws_role.clone(),
+                CachedCredential::new(
+                    serde_json::json!({"AccessKeyId": "AKIA_A"}),
+                    future_timestamp(3600),
+                ),
+            )
+            .await;
+        assert!(
+            state
+                .store_ssh_credentials(test_ssh_credentials(), None)
+                .await
+        );
+
+        // Same identity re-logs in (token refresh).
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("tokenA2"),
+                    "user-A@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://server-A.com".to_string()),
+            )
+            .await;
+
+        assert_eq!(
+            state.get_session().await.unwrap().user_email(),
+            "user-A@example.com"
+        );
+        assert!(
+            state.get_cached_credential(&aws_role).await.is_some(),
+            "same-identity refresh must keep the cached credential"
+        );
+        assert!(
+            state.has_ssh_credentials().await,
+            "same-identity refresh must keep SSH credentials"
+        );
+    }
+
+    /// A first login (no prior session) clears nothing but also leaks nothing:
+    /// the cache is already empty, and the identity is treated as "changed"
+    /// only because there was no prior session to compare against.
+    #[tokio::test]
+    async fn test_store_session_first_login_clears_nothing() {
+        let state = AgentState::new();
+        assert!(state.get_cached_credential("aws:role").await.is_none());
+
+        state
+            .store_session(
+                Session::new(
+                    SecretString::from("token"),
+                    "user@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://example.com".to_string()),
+            )
+            .await;
+
+        assert!(state.get_session().await.is_some());
+        assert!(state.get_cached_credential("aws:role").await.is_none());
+        assert_eq!(
+            state.get_ssh_server_url().await.as_deref(),
+            Some("https://example.com")
+        );
     }
 
     /// Oversized cache keys are rejected at the state layer: `cache_credential`
