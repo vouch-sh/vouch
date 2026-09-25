@@ -72,6 +72,21 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     if is_docker_credential_argv0(argv0) {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
+        // Only "get" contacts the Vouch server (store/erase/list and unknown
+        // operations are no-ops that never read the session), so the
+        // per-invocation HTTPS gate is re-asserted only for "get" — mirroring
+        // `resolve_server_url` on the regular subcommand path. `docker::run`
+        // resolves the session again internally; the gate's job is to refuse an
+        // insecure `http://` server URL before any credential network I/O.
+        if operation == "get" {
+            let session = crate::session::resolve_session().await.map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
+            })?;
+            parse_helper_server_url(&session.server_url).map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
+            })?;
+        }
+
         // The symlink carries no arguments; the profile comes from the anchor
         // `vouch setup docker` recorded for the registry.
         commands::credential::docker::run(&operation, None)
@@ -114,6 +129,21 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
             .into());
         }
 
+        // The remote helper always mints STS credentials (it resolves the
+        // session eagerly in `get_sts_credentials`), so re-assert the
+        // per-invocation HTTPS gate that the regular subcommand applies via
+        // `resolve_server_url`. Helper dispatch runs before `Cli::parse`, so
+        // the only opt-in surface is the helper's own `VOUCH_ALLOW_INSECURE`
+        // environment. `run_remote_helper` resolves the session again
+        // internally; the gate's job is to refuse an insecure `http://` server
+        // URL before any credential network I/O.
+        let session = crate::session::resolve_session().await.map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
+        })?;
+        parse_helper_server_url(&session.server_url).map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
+        })?;
+
         commands::credential::codecommit::run_remote_helper(&remote_name, &url)
             .await
             .map_err(|e| {
@@ -135,6 +165,19 @@ async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
         let operation = std::env::args().nth(1).unwrap_or_default();
         let service_url = std::env::args().nth(2);
         let username = std::env::args().nth(3);
+
+        // Only "get" contacts the Vouch server (set/del and unknown operations
+        // are no-ops), so the per-invocation HTTPS gate is re-asserted only for
+        // "get". `pip::run` resolves the session again internally; the gate's
+        // job is to refuse an insecure `http://` server URL before any token is
+        // minted and sent over plaintext.
+        if operation == "get" {
+            let session = crate::session::resolve_session()
+                .await
+                .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+            parse_helper_server_url(&session.server_url)
+                .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+        }
 
         commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
             .await
@@ -165,13 +208,19 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let domain_profile = flag("--domain-profile");
         let profile = flag("--profile");
 
-        // Resolve session to get server URL
+        // Resolve session to get server URL and re-assert the per-invocation
+        // HTTPS gate the regular subcommand applies via `resolve_server_url`.
+        // Helper dispatch runs before `Cli::parse`, so the only opt-in surface
+        // is the helper's own `VOUCH_ALLOW_INSECURE` environment.
         let session = crate::session::resolve_session().await.map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
+        })?;
+        let server = parse_helper_server_url(&session.server_url).map_err(|e| {
             anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
         })?;
 
         commands::credential::codeartifact::run(
-            &session.server_url,
+            server.as_str(),
             domain.map(String::as_str),
             domain_owner.map(String::as_str),
             region.map(String::as_str),
@@ -563,6 +612,36 @@ fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::
         &server_raw,
         cli.allow_insecure || !cli.command.uses_server(),
     )?)
+}
+
+/// Re-assert the per-invocation HTTPS gate for a helper-binary server URL.
+///
+/// Helper-binary dispatch (`init_and_dispatch_helper_binaries`) runs before
+/// `Cli::parse` and thus before `resolve_server_url`, so the four helper
+/// binaries (`docker-credential-vouch`, `git-remote-codecommit`, `keyring`,
+/// `vouch-pnpm-tokenhelper`) would otherwise feed `resolve_session().server_url`
+/// straight into the credential commands without any per-invocation scheme
+/// validation. When the stored server URL is `http://` — opted into at
+/// `login`/`enroll` time via `--allow-insecure` or `VOUCH_ALLOW_INSECURE` — and
+/// the current helper invocation lacks the opt-in, the regular subcommand
+/// refuses via `resolve_server_url` while the helper proceeds to send the
+/// Vouch session bearer token and the returned AWS OIDC web-identity token
+/// over plaintext HTTP.
+///
+/// This restores parity with the regular subcommand's per-invocation
+/// default-reject contract: the stored URL is re-run through
+/// `server_url::ServerUrl::parse` using the helper's *own*
+/// `VOUCH_ALLOW_INSECURE` environment (read via
+/// `vouch_common::allow_insecure_from_env`), refusing on
+/// `ServerUrlError::InsecureHttp`.
+///
+/// `--allow-insecure` is unavailable here because helper dispatch precedes
+/// `Cli::parse`, and external tools (docker/git/pnpm) reach the binary through
+/// argument-less symlinks that cannot forward an arbitrary flag — the
+/// environment variable is the only opt-in surface for helpers.
+fn parse_helper_server_url(server_url: &str) -> Result<server_url::ServerUrl> {
+    let allow_insecure = vouch_common::allow_insecure_from_env().map_err(anyhow::Error::msg)?;
+    Ok(server_url::ServerUrl::parse(server_url, allow_insecure)?)
 }
 
 /// Inner entry point that returns `anyhow::Result`.
@@ -1010,6 +1089,115 @@ mod tests {
             .map(|cli| cli.allow_insecure)
             .ok();
         assert_eq!(parsed, Some(true));
+    }
+
+    // -- helper-binary HTTPS gate (parse_helper_server_url) --
+
+    /// `parse_helper_server_url` must re-assert the per-invocation HTTPS gate
+    /// that `resolve_server_url` applies on the regular subcommand path, so
+    /// that a stored non-loopback `http://` URL is refused for a helper
+    /// invocation that has not opted into insecure HTTP for *this* call.
+    ///
+    /// Collects outcomes under `ENV_LOCK`, restoring `VOUCH_ALLOW_INSECURE`
+    /// before asserting (same pattern as `test_allow_insecure_env_values`).
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn parse_helper_server_url_re_asserts_https_gate() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        let prior = std::env::var_os("VOUCH_ALLOW_INSECURE");
+
+        // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+        unsafe { std::env::remove_var("VOUCH_ALLOW_INSECURE") };
+
+        // HTTPS and loopback HTTP are secure with no opt-in.
+        let https = parse_helper_server_url("https://example.com");
+        let https_ok = https.is_ok();
+        let https_value = https.ok().map(|u| u.as_str().to_string());
+        let loopback_ok = parse_helper_server_url("http://127.0.0.1:3000").is_ok();
+
+        // Non-loopback HTTP is refused without the opt-in, and the message
+        // names the helper's opt-in surface (`VOUCH_ALLOW_INSECURE=1`).
+        let http_result = parse_helper_server_url("http://example.com");
+        let http_refused = http_result.is_err();
+        let (http_msg_names_scheme, http_msg_names_opt_in) = match http_result {
+            Err(e) => {
+                let m = format!("{e:#}");
+                (
+                    m.contains("plain HTTP"),
+                    m.contains("VOUCH_ALLOW_INSECURE=1"),
+                )
+            }
+            Ok(_) => (false, false),
+        };
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("VOUCH_ALLOW_INSECURE", "1") };
+        let http_allowed = parse_helper_server_url("http://example.com")
+            .ok()
+            .map(|u| u.as_str().to_string());
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("VOUCH_ALLOW_INSECURE", "maybe") };
+        // An invalid opt-in value is a parse error, never silently accepted.
+        let invalid_rejected = parse_helper_server_url("https://example.com").is_err();
+
+        // SAFETY: restores the prior value before any assertion below.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_ALLOW_INSECURE", value),
+                None => std::env::remove_var("VOUCH_ALLOW_INSECURE"),
+            }
+        }
+
+        assert!(https_ok, "https server URL accepted without the opt-in");
+        assert_eq!(
+            https_value.as_deref(),
+            Some("https://example.com"),
+            "validated URL preserved and normalized"
+        );
+        assert!(
+            loopback_ok,
+            "loopback http server URL treated as secure without the opt-in"
+        );
+        assert!(
+            http_refused,
+            "non-loopback http server URL refused without the opt-in"
+        );
+        assert!(
+            http_msg_names_scheme,
+            "refusal should explain the insecure scheme"
+        );
+        assert!(
+            http_msg_names_opt_in,
+            "refusal should name the helper opt-in (VOUCH_ALLOW_INSECURE=1)"
+        );
+        assert_eq!(
+            http_allowed.as_deref(),
+            Some("http://example.com"),
+            "non-loopback http server URL accepted with VOUCH_ALLOW_INSECURE=1"
+        );
+        assert!(
+            invalid_rejected,
+            "invalid VOUCH_ALLOW_INSECURE value rejected, not treated as either answer"
+        );
+    }
+
+    /// `parse_helper_server_url` rejects an empty server URL (parity with
+    /// `ServerUrl::parse`, which `resolve_server_url` runs for the regular
+    /// subcommand). Does not mutate the env when `VOUCH_ALLOW_INSECURE` is
+    /// unset; still holds `ENV_LOCK` for consistency with the other gate tests.
+    #[tokio::test]
+    async fn parse_helper_server_url_rejects_empty_url() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        let err = parse_helper_server_url("");
+        assert!(err.is_err(), "empty server URL rejected for helpers");
     }
 
     // -- uses_server --
