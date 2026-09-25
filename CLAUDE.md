@@ -160,26 +160,6 @@ The workspace enforces panic-free code via clippy lints in `Cargo.toml`. Key cat
 
 See `Cargo.toml` for the complete list. The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
 
-### Rust Style
-
-```rust
-// Use explicit error types, not String
-pub fn authenticate(cred: &Credential) -> Result<Session, AuthError>
-
-// Prefer builders for complex construction
-let session = SessionBuilder::new()
-    .user_id(user.id)
-    .expires_in(Duration::hours(8))
-    .build()?;
-
-// Document public APIs with examples
-/// Authenticates using FIDO2 assertion.
-///
-/// # Errors
-/// Returns `AuthError::InvalidCredential` if assertion is invalid.
-pub fn authenticate(...) -> Result<...>
-```
-
 ### Dependencies
 
 All dependencies are declared at workspace level in the root `Cargo.toml` under `[workspace.dependencies]` with exact versions and minimal features. Crates reference them with `dep.workspace = true`. Add sparingly. Prefer:
@@ -232,24 +212,9 @@ let key: Zeroizing<Vec<u8>> = derive_key()?;
 
 1. Create file in `crates/vouch-cli/src/commands/`
 2. Add to command enum in `crates/vouch-cli/src/commands/mod.rs`
-3. Implement `run()` function
+3. Implement a `pub(crate) async fn run(...) -> Result<()>`; mirror an existing
+   command such as `commands/logout.rs` or `commands/status.rs`
 4. Add tests
-
-```rust
-// crates/vouch-cli/src/commands/status.rs
-use clap::Args;
-
-#[derive(Args)]
-pub struct StatusArgs {
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-pub async fn run(args: StatusArgs) -> Result<()> {
-    let session = agent::get_session().await?;
-    // ...
-}
-```
 
 ### Adding a Credential Type
 
@@ -271,17 +236,15 @@ The request locale is negotiated from `Accept-Language` automatically; no handle
 
 ### Working with FIDO2
 
+The CLI's FIDO2 layer is `crates/vouch-cli/src/fido2/` (`unix.rs`, `windows.rs`).
+
 ```rust
 use crate::fido2::{YubiKey, ensure_pin_configured};
 
-// Wait for YubiKey to be inserted
-let key = YubiKey::wait_for_device()?;
-
-// Check if PIN is set and prompt for setup if not (requires 8+ chars)
+let key = YubiKey::wait_for_device(timeout_secs)?;
+// Prompts for PIN setup when none is set (8+ chars); returns the PIN as SecretString
 let pin = ensure_pin_configured(&key)?;
-
-// Authenticate using discoverable credential
-let result = key.authenticate(&rp_id, &challenge, &pin)?;
+let result = key.authenticate(&rp_id, &challenge)?;
 ```
 
 **PIN Handling:**
@@ -356,6 +319,8 @@ two. It is a ratchet: the existing backlog in `specs/coverage-baseline.tsv` is
 tolerated, but a statement that loses its citing test fails the build, and one
 that gains a citation fails until the baseline is pruned. See
 `specs/README.md` for the regeneration order.
+
+## What NOT to Do
 
 1. **Don't add dependencies without justification** — Each dep is attack surface
 2. **Don't store secrets in plain types** — Use `SecretString`, `Zeroizing`

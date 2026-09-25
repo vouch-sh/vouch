@@ -1,6 +1,5 @@
 # Development Discipline
 
-Hard-won rules from the #626 key-rotation session (2026-07-06, PR #633).
 Read by the team lead, `rust-architect`, `rust-developer`, `rust-code-reviewer`,
 and `/rust-agents:solve-issue` before design, implementation, or review work.
 
