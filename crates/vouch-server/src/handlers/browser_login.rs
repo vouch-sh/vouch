@@ -678,15 +678,14 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            // The signature did not verify, so the `user_handle` and
-            // credential ID are still only request-supplied: the row must not
-            // count against the credential's owner.
+            // A counter regression is reported only once the signature
+            // verified, so it counts against the credential's owner. For every
+            // other failure the `user_handle` and credential ID are still only
+            // request-supplied: the row must not count against the owner.
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
-                db::Principal::Unverified {
-                    asserted: Some(user.id.clone()),
-                },
+                e.principal(&user.id),
                 Some(&user.email),
                 Some(&authenticator.id),
                 &e.to_string(),

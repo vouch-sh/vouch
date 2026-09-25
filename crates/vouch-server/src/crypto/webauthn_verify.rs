@@ -441,7 +441,54 @@ fn verify_assertion_inner<V: CoseVerifier>(
         .map_err(|_| VerifyError::InvalidAuthDataLength)?;
     let counter = u32::from_be_bytes(counter_bytes);
 
-    // 5. Verify counter is increasing.
+    // 5. Parse and verify client data
+    let client_data: ClientData = serde_json::from_slice(client_data_json)
+        .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
+
+    // Verify type
+    if client_data.type_ != protocol::CLIENT_DATA_TYPE_GET {
+        return Err(VerifyError::InvalidClientData(format!(
+            "Expected type '{}', got '{}'",
+            protocol::CLIENT_DATA_TYPE_GET,
+            client_data.type_
+        )));
+    }
+
+    // Verify challenge
+    if client_data.challenge != expected_challenge {
+        return Err(VerifyError::ChallengeMismatch);
+    }
+
+    // Verify origin
+    verify_origin(
+        &client_data.origin,
+        expected_origin,
+        origin_policy,
+        "assertion",
+    )?;
+
+    // 6. Build signed data: authenticator_data || SHA-256(client_data_json)
+    let client_data_hash = digest::digest(&SHA256, client_data_json);
+    let mut signed_data = Vec::with_capacity(authenticator_data.len().saturating_add(32));
+    signed_data.extend_from_slice(authenticator_data);
+    signed_data.extend_from_slice(client_data_hash.as_ref());
+
+    // 7. Verify signature using the provided verifier
+    verifier.verify(public_key_cose, &signed_data, signature)?;
+
+    // 8. Verify counter is increasing — only after the signature verified.
+    //
+    // WebAuthn Level 2 §7.2 orders the two: step 20, "Using
+    // credentialPublicKey, verify that sig is a valid signature over the
+    // binary concatenation of authData and hash.", then step 21, "Let
+    // storedSignCount be the stored signature counter value associated with
+    // credential.id." (https://www.w3.org/TR/webauthn-2/, cached as
+    // specs/w3c/webauthn-2.txt). The order matters beyond the step list:
+    // `authData.signCount` is attacker-controlled bytes until the signature
+    // covers it, so a counter regression reported before the signature
+    // verified proves nothing about the key. Only a signed regression is
+    // evidence that a registered key produced it, which is what lets callers
+    // attribute a `CounterNotIncreasing` failure to the key's owner.
     //
     // WebAuthn Level 2 Section 6.1.1: "In subsequent authenticatorGetAssertion
     // operations, the Relying Party compares the stored signature counter
@@ -470,41 +517,6 @@ fn verify_assertion_inner<V: CoseVerifier>(
     if stored_counter != 0 && counter <= stored_counter {
         return Err(VerifyError::CounterNotIncreasing);
     }
-
-    // 6. Parse and verify client data
-    let client_data: ClientData = serde_json::from_slice(client_data_json)
-        .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
-
-    // Verify type
-    if client_data.type_ != protocol::CLIENT_DATA_TYPE_GET {
-        return Err(VerifyError::InvalidClientData(format!(
-            "Expected type '{}', got '{}'",
-            protocol::CLIENT_DATA_TYPE_GET,
-            client_data.type_
-        )));
-    }
-
-    // Verify challenge
-    if client_data.challenge != expected_challenge {
-        return Err(VerifyError::ChallengeMismatch);
-    }
-
-    // Verify origin
-    verify_origin(
-        &client_data.origin,
-        expected_origin,
-        origin_policy,
-        "assertion",
-    )?;
-
-    // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
-    let client_data_hash = digest::digest(&SHA256, client_data_json);
-    let mut signed_data = Vec::with_capacity(authenticator_data.len().saturating_add(32));
-    signed_data.extend_from_slice(authenticator_data);
-    signed_data.extend_from_slice(client_data_hash.as_ref());
-
-    // 8. Verify signature using the provided verifier
-    verifier.verify(public_key_cose, &signed_data, signature)?;
 
     Ok(VerificationResult {
         counter,

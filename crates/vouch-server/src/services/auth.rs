@@ -216,6 +216,41 @@ pub(crate) struct LoginAssertionResult {
     pub verified_at: AuthTime,
 }
 
+/// Why a WebAuthn login assertion was not accepted.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AssertionFailure {
+    /// The verifier rejected the assertion.
+    #[error("WebAuthn verification failed: {0}")]
+    Rejected(#[from] webauthn_verify::VerifyError),
+    /// The blocking verification task failed to complete (panicked or was
+    /// cancelled). Nothing was decided about the assertion.
+    #[error("WebAuthn verification task failed")]
+    TaskFailed,
+}
+
+impl AssertionFailure {
+    /// The principal a `login_failed` row for this failure names, given the
+    /// owner of the credential the assertion claimed to come from.
+    ///
+    /// A counter regression is reported only after the signature verified
+    /// against that credential's public key (WebAuthn Level 2 §7.2 steps 20
+    /// then 21), so a registered key signed it: clone detection is a real
+    /// signal about that owner and is attributed to them. Every other
+    /// rejection happened before or at the signature, so the credential ID
+    /// and `user_handle` are still only request-supplied.
+    #[must_use]
+    pub(crate) fn principal(&self, owner_user_id: &str) -> db::Principal {
+        match self {
+            Self::Rejected(webauthn_verify::VerifyError::CounterNotIncreasing) => {
+                db::Principal::Verified(owner_user_id.to_string())
+            }
+            Self::Rejected(_) | Self::TaskFailed => db::Principal::Unverified {
+                asserted: Some(owner_user_id.to_string()),
+            },
+        }
+    }
+}
+
 /// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
 ///
 /// Runs signature verification on a blocking thread as a fairness
@@ -227,10 +262,12 @@ pub(crate) struct LoginAssertionResult {
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::OAuth` with `InvalidGrant` if verification fails.
+/// Returns [`AssertionFailure::Rejected`] if verification fails, and
+/// [`AssertionFailure::TaskFailed`] if the verification task did not run to
+/// completion.
 pub(crate) async fn verify_login_assertion(
     params: LoginAssertionParams,
-) -> ServiceResult<LoginAssertionResult> {
+) -> Result<LoginAssertionResult, AssertionFailure> {
     tokio::task::spawn_blocking(move || {
         let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
@@ -245,12 +282,6 @@ pub(crate) async fn verify_login_assertion(
             stored_counter: params.stored_counter,
             require_user_verification: true,
             origin_policy: params.origin_policy,
-        })
-        .map_err(|e| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                format!("WebAuthn verification failed: {e}"),
-            )
         })?;
 
         Ok(LoginAssertionResult {
@@ -262,7 +293,7 @@ pub(crate) async fn verify_login_assertion(
     .await
     .map_err(|e| {
         tracing::error!("WebAuthn verification task failed: {e}");
-        ServiceError::Internal("WebAuthn verification failed".to_string())
+        AssertionFailure::TaskFailed
     })?
 }
 
@@ -1190,6 +1221,32 @@ where
 )]
 mod tests {
     use super::*;
+
+    // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
+    // signature verified (step 20), so a counter regression — and only a
+    // counter regression — is attributable to the credential's owner.
+    #[test]
+    fn assertion_failure_attributes_only_counter_regression() {
+        use webauthn_verify::VerifyError;
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::Rejected(VerifyError::CounterNotIncreasing).principal(owner),
+            db::Principal::Verified(ref id) if id == owner
+        ));
+        for failure in [
+            AssertionFailure::Rejected(VerifyError::SignatureInvalid),
+            AssertionFailure::Rejected(VerifyError::ChallengeMismatch),
+            AssertionFailure::Rejected(VerifyError::UserNotVerified),
+        ] {
+            assert!(
+                matches!(
+                    failure.principal(owner),
+                    db::Principal::Unverified { asserted: Some(ref id) } if id == owner
+                ),
+                "{failure} must stay unattributed"
+            );
+        }
+    }
     use crate::test_utils::{
         TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key, test_app,
     };
@@ -1475,7 +1532,7 @@ mod tests {
             .err()
             .expect("expected error — signature is bogus");
         let description = match &err {
-            ServiceError::OAuth { description, .. } => description.clone(),
+            AssertionFailure::Rejected(e) => e.to_string(),
             other => format!("unexpected error variant: {other}"),
         };
         assert!(

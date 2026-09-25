@@ -382,13 +382,12 @@ pub(crate) async fn exchange_fido2_assertion(
             );
             // A failed assertion — including clone detection (counter regression)
             // — is a high-signal security event. Record it in the audit trail with
-            // the credential and user IDs and the failure reason. No signature
-            // verified, so the `user_handle` is still request-supplied: the row
-            // must not count against the credential's owner.
+            // the credential and user IDs and the failure reason. A counter
+            // regression is reported only once the signature verified, so it
+            // counts against the credential's owner; every other failure leaves
+            // the `user_handle` request-supplied and the row unattributed.
             let failure_event = AuthEventParams {
-                user_id: Principal::Unverified {
-                    asserted: Some(user.id.clone()),
-                },
+                user_id: e.principal(&user.id),
                 event_type: AuthEventType::LoginFailed,
                 authenticator_id: Some(authenticator.id.clone()),
                 success: false,
