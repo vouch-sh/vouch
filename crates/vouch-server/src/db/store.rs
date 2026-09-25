@@ -1393,6 +1393,33 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T) -> std::result::Result<A, R>,
     {
+        Ok(match self.transition_versioned(id, decide).await? {
+            Transition::Applied((applied, _version)) => Transition::Applied(applied),
+            Transition::Rejected(rejected) => Transition::Rejected(rejected),
+            Transition::NotFound => Transition::NotFound,
+        })
+    }
+
+    /// [`Self::transition`], also returning the version the applied write
+    /// committed.
+    ///
+    /// For a caller that may need to undo its own write later: a
+    /// compare-and-set against this version succeeds only if nothing else
+    /// has written the document since, so the undo cannot overwrite a
+    /// concurrent writer's decision.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transition`].
+    pub async fn transition_versioned<T, A, R, F>(
+        &self,
+        id: &str,
+        decide: F,
+    ) -> Result<Transition<(A, i32), R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
         for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
             let Some(doc) = self.get::<T>(id).await? else {
                 return Ok(Transition::NotFound);
@@ -1408,7 +1435,8 @@ impl DocumentStore {
                 Err(rejected) => return Ok(Transition::Rejected(rejected)),
             };
             if self.compare_and_update(id, version, &data).await? {
-                return Ok(Transition::Applied(applied));
+                // `compare_and_update` writes `expected_version + 1`.
+                return Ok(Transition::Applied((applied, version.saturating_add(1))));
             }
             if attempt < super::pool::MAX_DSQL_RETRIES {
                 tracing::debug!(

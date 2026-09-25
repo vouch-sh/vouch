@@ -1726,13 +1726,13 @@ pub async fn delete_client_configuration(
         tracing::error!("Failed to consume registration token for {client_id}: {e}");
         ServiceError::Internal("Failed to delete client".to_string())
     })?;
-    if !consumed {
+    let Some(consumed) = consumed else {
         tracing::debug!(
             "RFC 7592 DELETE for client_id {client_id} lost its registration access token \
              to a concurrent request"
         );
         return Err(invalid_registration_token());
-    }
+    };
 
     // Delete the client and revoke every session it minted (M2M and
     // user-issued). RFC 7592 §2.3: "the authorization server SHOULD ...
@@ -1740,17 +1740,37 @@ pub async fn delete_client_configuration(
     // access tokens ... associated with this client" — without the session
     // delete, tokens issued to the deleted dynamically registered client
     // keep validating at resource endpoints until `exp`.
-    db::delete_oauth_client_and_revoke_sessions(
+    //
+    // The consume above committed in its own write, and the delete's steps
+    // commit separately. If one fails before the row is removed, the client
+    // survives with no registration access token, and without the undo below
+    // the owner could never retry. The undo is a compare-and-set on the
+    // version the consume committed, so it cannot reinstate a token that an
+    // owner deletion, deactivation or transfer revoked in the meantime.
+    if let Err(e) = db::delete_oauth_client_and_revoke_sessions(
         &state.store,
         &state.session_cache,
         &client.id,
         &client.client_id,
     )
     .await
-    .map_err(|e| {
+    {
         tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
-        ServiceError::Internal("Failed to delete client".to_string())
-    })?;
+        match db::restore_registration_access_token(&state.store, consumed).await {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                "Did not restore the registration access token of client {client_id} after a \
+                 failed delete: the client changed after the token was consumed"
+            ),
+            Err(restore_err) => tracing::error!(
+                "Failed to restore the registration access token of client {client_id} after a \
+                 failed delete: {restore_err}"
+            ),
+        }
+        return Err(ServiceError::Internal(
+            "Failed to delete client".to_string(),
+        ));
+    }
 
     // The client doc is already deleted above, so `Unresolved`'s client-org
     // fallback (a lookup by `client.id`) would always miss. `client.org_id`
@@ -2158,6 +2178,26 @@ async fn lookup_and_verify_registration_token(
         tracing::debug!(
             "RFC 7592 token verification failed: bearer token does not match the stored \
              hash for client_id {client_id}"
+        );
+        return Err(invalid_registration_token());
+    }
+
+    // A client with no owner is open registration only if it is `Public`,
+    // which is the scope `register_client` gives an unauthenticated
+    // registration. A `Personal` or `Organization` client with no owner was
+    // unlinked from a deleted user; its token died with them. Offboarding
+    // clears the hash on that write, so this refuses whatever a future writer
+    // forgets to clear, and the rows that deletions before that fix left
+    // holding a hash.
+    //
+    // Registrations made before open registration was stored as `Public`
+    // (February to March 2026) are also `Personal` with no owner, and are
+    // refused too. The CLI treats the 401 as "no longer registered" and
+    // registers again at the next `vouch login` that re-checks it (daily).
+    if client.user_id.is_none() && client.access_scope != db::AccessScope::Public {
+        tracing::debug!(
+            "RFC 7592 token verification failed: client_id {client_id} has no owner but is \
+             not an open-registration client"
         );
         return Err(invalid_registration_token());
     }

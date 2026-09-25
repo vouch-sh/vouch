@@ -320,8 +320,85 @@ pub(super) async fn transfer_org_clients(
         if client.data.access_scope != AccessScope::Organization {
             continue;
         }
+        // The departing owner's RFC 7592 registration access token is revoked
+        // on the same write that hands the client to the successor, who never
+        // received it; see [`reassign_client_owner`].
+        if !reassign_client_owner(tx, client, Some(&successor)).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Change which user owns an OAuth client, revoking its RFC 7592
+/// registration access token on the same write.
+///
+/// The only function that should write `OAuthClientDoc.user_id` after the
+/// client is created. A registration access token is stored on the client
+/// document, not on the owner, so it survives any change of owner unless the
+/// write that changes the owner also clears it: a transfer would leave the
+/// previous owner managing a client now attributed to someone else, and an
+/// unlink (`None`) would leave a client with no owner whose token the RFC 7592
+/// endpoints used to accept as if it were open registration. Routing both through here means neither can forget.
+///
+/// The new owner obtains a fresh token by registering again; nothing restores
+/// the old one.
+///
+/// Returns `false` when the client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn reassign_client_owner(
+    tx: &mut super::store::StoreTransaction<'_>,
+    client: Document<super::documents::oauth::OAuthClientDoc>,
+    new_owner: Option<&str>,
+) -> Result<bool> {
+    let mut data = client.data;
+    data.user_id = new_owner.map(String::from);
+    data.registration_access_token_hash = None;
+    tx.compare_and_update(&client.id, client.version, &data)
+        .await
+}
+
+/// Revoke the RFC 7592 registration access token of every OAuth client
+/// `user_id` owns, whatever its access scope, inside the offboarding
+/// transaction.
+///
+/// Called by every write that ends a user's authority over their clients —
+/// [`delete_user`], [`demote_or_deactivate_member`] with
+/// [`MemberDowngrade::Deactivate`], and SCIM `active=false`
+/// (`update_scim_user`) — before any transfer or unlink.
+///
+/// Every scope, including `Organization`: a client registered dynamically is
+/// `Personal`, but its owner can switch it to `Organization` through the
+/// application API and it keeps its token.
+///
+/// Every owned client is written, not only those that currently hold a hash.
+/// The write bumps each client's version, and that is what closes two races:
+///
+/// - an RFC 7592 PUT or DELETE that verified the owner as active before this
+///   transaction commits writes through `store.transition` on the client
+///   document; the bumped version forces it to re-read, find no hash, and
+///   reject;
+/// - an RFC 7592 DELETE that already consumed the token (hash `None`) and then
+///   fails restores it only by compare-and-set on the version its consume
+///   committed ([`super::oauth::restore_registration_access_token`]); the
+///   bump makes that restore a no-op, so a failed delete cannot hand a
+///   deactivated or deleted owner their token back.
+///
+/// Reactivating the user does not restore any token; the owner registers
+/// again.
+///
+/// Returns `false` when a client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn revoke_owner_registration_tokens(
+    tx: &mut super::store::StoreTransaction<'_>,
+    user_id: &str,
+) -> Result<bool> {
+    use super::documents::oauth::OAuthClientDoc;
+
+    let clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+    for client in clients {
         let mut data = client.data;
-        data.user_id = Some(successor.clone());
+        data.registration_access_token_hash = None;
         if !tx
             .compare_and_update(&client.id, client.version, &data)
             .await?
@@ -491,10 +568,13 @@ pub async fn demote_or_deactivate_member(
             MemberDowngrade::Demote => updated.is_org_admin = false,
             MemberDowngrade::Deactivate => {
                 updated.active = false;
-                if user_doc.data.active
-                    && !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await?
-                {
-                    return Err(MemberDowngradeError::OccConflict);
+                if user_doc.data.active {
+                    if !revoke_owner_registration_tokens(&mut tx, user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
+                    if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
                 }
             }
         }
@@ -534,7 +614,9 @@ pub async fn demote_or_deactivate_member(
 /// 3. Delete authenticators (and their related device_auth refs)
 /// 4. Delete SSH issued certificate records
 /// 5. Delete token exchanges
-/// 6. Transfer org-scoped OAuth clients to an org admin; unlink the rest
+/// 6. Revoke the RFC 7592 registration access token of every OAuth client the
+///    user owns, then transfer org-scoped clients to an org admin and unlink
+///    the rest
 /// 7. Delete the user
 ///
 /// Note: SSH revocation records (`SshRevokedCertDoc`) are intentionally
@@ -661,14 +743,24 @@ pub async fn delete_user(
             return Err(DeleteUserError::LastAdmin);
         }
 
+        // Revoke the deleted owner's RFC 7592 registration access tokens on
+        // every client they own before any of them moves.
+        if !revoke_owner_registration_tokens(&mut tx, user_id).await? {
+            return Err(DeleteUserError::OccConflict);
+        }
         if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
             return Err(DeleteUserError::OccConflict);
         }
         // Whatever the user still owns (personal and public clients, and
         // org-scoped ones when no other admin exists) has no other legitimate
-        // owner and is unlinked.
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| d.user_id = None)
-            .await?;
+        // owner and is unlinked. `reassign_client_owner` clears the
+        // registration access token hash on the same write, so an unlinked
+        // client can never be managed with the deleted owner's token.
+        for client in tx.find_all::<OAuthClientDoc>("user_id", user_id).await? {
+            if !reassign_client_owner(&mut tx, client, None).await? {
+                return Err(DeleteUserError::OccConflict);
+            }
+        }
 
         // Serialize deletions within an organization on the org row.
         //
