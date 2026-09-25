@@ -40,13 +40,15 @@ Any handler or service that issues or accepts credentials without reading `user.
 
 ### 4. Revocation scope is too broad (missing ownership check)
 
-`/oauth/revoke` (RFC 7009) must refuse cross-client and cross-user revocation. The ownership check is:
+`/oauth/revoke` (RFC 7009) must refuse cross-client and cross-user revocation. For a token that decodes, the ownership check is:
 
 ```rust
 if caller_client_id != claims.client_id {
     return RevocationResult { revoked: false, .. };
 }
 ```
+
+A token that no longer decodes (expired, or not a JWT) has no `client_id` claim, so the session row's `client_id` is checked against `caller_client_id` instead before the hash-based delete — otherwise any authenticated client can delete another client's session row.
 
 Any call to `delete_sessions_for_user` that proceeds without first verifying the token belongs to `caller_client_id` violates RFC 7009 §2.1.
 
@@ -227,6 +229,16 @@ if let Some(DecodedToken::AccessToken(ref claims)) = decoded
     && caller_client_id != claims.client_id
 {
     return RevocationResult { revoked: false, user_email: None };
+}
+// A non-decoding token (expired, or not a JWT) has no client_id claim, so
+// the session row's is checked before the hash-based delete.
+if decoded.is_none() {
+    match db::find_session_by_token_hash(&state.store, &token_hash).await {
+        Ok(Some(row)) if row.client_id.as_deref().is_some_and(|c| c != caller_client_id) => {
+            return RevocationResult { revoked: false, user_email: None };
+        }
+        _ => {}
+    }
 }
 ```
 
