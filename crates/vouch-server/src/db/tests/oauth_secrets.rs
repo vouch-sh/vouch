@@ -397,3 +397,58 @@ async fn test_revoke_expired_secret_allowed_when_valid_remains() {
         "the valid secret must remain active; got {active}"
     );
 }
+
+/// Revoking the *sole* expired-but-unrevoked secret of a credential client must
+/// succeed: the target is already dead, so the revoke does not reduce the active
+/// count (it stays at zero) and the floor guard must not fire.  The client is
+/// left with zero usable credentials — bookkeeping hygiene, not an auth change
+/// (an expired secret is already non-authenticatable whether or not it is
+/// revoked).  Regression for the missing `target_active` condition in the floor
+/// guard of `revoke_oauth_client_secret`.
+#[tokio::test]
+async fn test_revoke_sole_expired_secret_allowed() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    // The client's only secret, already expired (but not revoked).
+    let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let expired =
+        create_oauth_client_secret(&store, &app_id, "hash_sole_expired", None, Some(past))
+            .await
+            .expect("create sole expired secret");
+
+    // Before the fix this returned `Api(409 "last_secret")`; it must now succeed
+    // because revoking a dead row leaves the active count unchanged at zero.
+    revoke_oauth_client_secret(&store, &expired.id, &app_id)
+        .await
+        .expect("revoking the sole expired secret must succeed (it is already dead)");
+
+    // The row is soft-deleted (revoked_at stamped) and the client has zero
+    // active secrets — the same count it started with.
+    let now = jiff::Timestamp::now();
+    let secrets = get_oauth_client_secrets(&store, &app_id)
+        .await
+        .expect("list secrets");
+    let revoked = secrets
+        .iter()
+        .find(|s| s.id == expired.id)
+        .expect("the revoked row must still be present (soft-delete retains it)");
+    assert!(
+        revoked.revoked_at.is_some(),
+        "the target secret must be marked revoked; got {revoked:?}"
+    );
+    let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    assert_eq!(
+        active, 0,
+        "the client must remain at zero active secrets; got {active}"
+    );
+}

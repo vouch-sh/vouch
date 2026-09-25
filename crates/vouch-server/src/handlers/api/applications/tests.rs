@@ -754,6 +754,86 @@ async fn test_cannot_delete_sole_active_when_other_revoked() {
     assert_eq!(json["code"], "last_secret");
 }
 
+/// Revoking the *sole* expired-but-unrevoked secret of a credential client must
+/// succeed at the API layer: the target is already dead, so the revoke does not
+/// reduce the active count (it stays at zero) and the floor guard must not fire.
+/// Before the fix, `DELETE /api/v1/applications/:id/secrets/:secret_id` returned
+/// `409 "last_secret" / "Cannot delete the last active secret"` for this case.
+/// Regression for the missing `target_active` condition in the `delete_secret_api`
+/// pre-flight check.
+#[tokio::test]
+async fn test_delete_sole_expired_secret_allowed() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "sole-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            with_secret: false, // start with no secrets; we seed a sole expired one below
+            ..Default::default()
+        },
+    )
+    .await;
+    let app_id = client.app_id;
+    let auth = bearer(&token);
+
+    // The client's only secret, already expired (but not revoked).
+    let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let expired = crate::db::create_oauth_client_secret(
+        &state.store,
+        &app_id,
+        "hash_sole_expired_api",
+        None,
+        Some(past),
+    )
+    .await
+    .expect("create sole expired secret");
+    let secret_id = expired.id.to_string();
+
+    // Before the fix this returned 409 `last_secret`; it must now succeed because
+    // revoking a dead row leaves the active count unchanged at zero.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "revoking the sole expired secret must succeed; got body: {body}"
+    );
+
+    // The row is soft-deleted and the client remains at zero active secrets.
+    let now = jiff::Timestamp::now();
+    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .expect("db query ok");
+    let revoked = secrets
+        .iter()
+        .find(|s| s.id == secret_id)
+        .expect("the revoked row must still be present (soft-delete retains it)");
+    assert!(
+        revoked.revoked_at.is_some(),
+        "the target secret must be marked revoked; got {revoked:?}"
+    );
+    assert!(
+        secrets.iter().all(|s| !s.is_valid(&now)),
+        "the client must remain at zero active secrets; got {secrets:?}"
+    );
+}
+
 // ========================================================================
 // Validation-before-auth tests (Phase 1C defense-in-depth)
 // ========================================================================
