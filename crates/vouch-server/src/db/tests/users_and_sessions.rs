@@ -154,6 +154,7 @@ async fn test_session_lifecycle() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -215,6 +216,7 @@ async fn test_session_expiry_boundary() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -272,6 +274,7 @@ async fn test_session_cache_hit_expiry_boundary() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -329,6 +332,7 @@ async fn create_oauth_session(
             org_domain: None,
             client_id: None,
             source_code_hash,
+            authenticated_at: None,
         },
     )
     .await
@@ -698,6 +702,7 @@ async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
                 org_domain: None,
                 client_id,
                 source_code_hash: None,
+                authenticated_at: None,
             },
         )
         .await
@@ -920,6 +925,7 @@ async fn test_find_session_by_token_hash_returns_expired_row() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -991,6 +997,7 @@ async fn test_find_session_by_token_hash_returns_live_row() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -1051,6 +1058,7 @@ async fn test_logout_audit_duplicated_when_revocation_loses_race() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await

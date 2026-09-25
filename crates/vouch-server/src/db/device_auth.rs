@@ -35,7 +35,7 @@ impl From<DeviceApproval> for HardwareVerification {
     fn from(approval: DeviceApproval) -> Self {
         match approval {
             DeviceApproval::Observed(at) => Self::Verified {
-                auth_time: Some(at.as_second()),
+                auth_time: Some(at.instant()),
             },
             DeviceApproval::NotVerified => Self::NotVerified,
         }
@@ -97,7 +97,7 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
                         authenticator_id: authenticator_id.clone(),
                         verification: if data.hardware_verified {
                             HardwareVerification::Verified {
-                                auth_time: data.auth_time,
+                                auth_time: data.authenticated_at,
                             }
                         } else {
                             HardwareVerification::NotVerified
@@ -209,7 +209,7 @@ pub async fn create_device_auth_request(
         user_email: None,
         authenticator_id: None,
         hardware_verified: false,
-        auth_time: None,
+        authenticated_at: None,
         expires_at,
         interval_seconds,
         last_poll_at: None,
@@ -309,7 +309,7 @@ pub async fn authorize_device_auth(
             data.user_email = Some(user_email.to_string());
             data.authenticator_id = Some(authenticator_id.to_string());
             data.hardware_verified = hw.hardware_verified();
-            data.auth_time = hw.auth_time();
+            data.authenticated_at = hw.authenticated_at();
             Ok(())
         })
         .await
@@ -484,23 +484,32 @@ pub async fn try_consume_device_auth(
 
 /// Update the last poll time for a device auth request.
 /// Returns true if poll was allowed, false if polling too fast.
-#[expect(clippy::disallowed_methods, reason = "stamps the row's last-poll time")]
+///
+/// `now` is the polling request's arrival instant. It both decides the
+/// interval and becomes the row's `last_poll_at`, so consecutive polls are
+/// measured on one clock — the one each request arrived on — at full
+/// precision. RFC 8628 §3.2 defines `interval` as "The minimum amount of
+/// time in seconds that the client SHOULD wait between polling requests to
+/// the token endpoint.", so a poll that waited exactly `interval` is
+/// allowed and one that waited any less is told to slow down.
 pub async fn update_device_auth_poll_time(
     store: &DocumentStore,
     id: &str,
     interval_seconds: i32,
+    now: Timestamp,
 ) -> Result<bool> {
-    let now = jiff::Timestamp::now();
-
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         return Ok(false);
     };
 
-    // Check if polling too fast
+    // Check if polling too fast. Whole seconds would floor both instants
+    // and misjudge a poll by up to a second either way: one sent 0.2s after
+    // its predecessor could straddle a second boundary and pass a 1s
+    // interval, while one that waited the full interval could be refused.
     if let Some(last_poll) = doc.data.last_poll_at {
-        let elapsed = now.as_second().saturating_sub(last_poll.as_second());
-        if elapsed < i64::from(interval_seconds) {
+        let elapsed = now.duration_since(last_poll);
+        if elapsed < jiff::SignedDuration::from_secs(i64::from(interval_seconds)) {
             return Ok(false);
         }
     }

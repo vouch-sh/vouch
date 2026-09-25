@@ -443,6 +443,7 @@ mod tests {
                 hardware_aaguid: None,
                 org_domain: None,
                 source_code_hash: None,
+                authenticated_at: None,
                 client_id: None,
             },
         )

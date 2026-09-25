@@ -920,6 +920,7 @@ async fn test_delete_oauth_client_revokes_secrets_before_sweeps_closes_concurren
             org_domain: None,
             client_id: Some(&client_id),
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await

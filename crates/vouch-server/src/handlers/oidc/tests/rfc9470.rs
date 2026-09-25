@@ -283,7 +283,7 @@ async fn test_rfc9470_session_within_max_age_is_not_reauthenticated() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(auth_time),
+                auth_time: jiff::Timestamp::from_second(auth_time).ok(),
             },
             ..Default::default()
         },
@@ -959,7 +959,7 @@ async fn test_rfc9470_key_delete_requires_step_up() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(stale_iat),
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
             },
             ..Default::default()
         },
@@ -1263,7 +1263,8 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second() - 5),
+                auth_time: jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() - 5)
+                    .ok(),
             },
             ..Default::default()
         },
@@ -1429,7 +1430,7 @@ async fn test_rfc9470_max_age_completion_rejects_session_just_over_max_age() {
                 email: &user.email,
                 auth_id: Some(&auth_id),
                 verification: TestVerification::Verified {
-                    auth_time: Some(auth_time),
+                    auth_time: jiff::Timestamp::from_second(auth_time).ok(),
                 },
                 ..Default::default()
             },
@@ -1546,6 +1547,65 @@ async fn resume_pending(app: &axum::Router, pending_id: &str, cookie: &str) -> S
         .to_string()
 }
 
+/// `second_start + offset_ms`.
+fn at_ms(second_start: jiff::Timestamp, offset_ms: i64) -> jiff::Timestamp {
+    second_start
+        .checked_add(jiff::SignedDuration::from_millis(offset_ms))
+        .expect("in range")
+}
+
+/// Obtain an authorization code with `cookie` (no `max_age`) and exchange
+/// it, returning the access token the authorization_code grant minted — a
+/// new session row carrying the original ceremony.
+async fn mint_code_grant_token(
+    app: &axum::Router,
+    client: &TestOAuthClient,
+    cookie: &str,
+) -> String {
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let response = http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256&state=mint",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", cookie)],
+    )
+    .await;
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Location")
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    let code = url::Url::parse(&location)
+        .expect("absolute redirect")
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("a session with no max_age must be issued a code");
+    let (status, body) = http_post_form(
+        app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback&code_verifier={verifier}"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string()
+}
+
 #[tokio::test]
 async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_second() {
     // OIDC Core 3.1.2.1: "Note that "max_age=0" is equivalent to
@@ -1553,17 +1613,17 @@ async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_secon
     // satisfy max_age=0 for this one, even when it lands in the same integer
     // second as the pending record (so `auth_time` floors equal to it).
     //
-    // The instants are placed, not waited for: ceremony second T, session row
-    // at T + 100ms, pending at T + 200ms. The session row precedes the
-    // pending, so the session is not fresh for this request.
+    // The instants are placed, not waited for: ceremony at T + 100ms, pending
+    // at T + 200ms. The ceremony precedes the pending, so the session is not
+    // fresh for this request.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "maxage-same-second@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let arrival = test_arrival();
-    let ceremony_second = arrival.as_second() - 10;
+    let second_start =
+        jiff::Timestamp::from_second(test_arrival().as_second() - 10).expect("valid second");
     let session = create_test_session_with(
         &state,
         TestSessionSpec {
@@ -1571,20 +1631,12 @@ async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_secon
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(ceremony_second),
+                auth_time: Some(at_ms(second_start, 100)),
             },
             ..Default::default()
         },
     )
     .await;
-    let session_row = crate::db::get_session_by_token_hash(
-        &state.store,
-        &crate::crypto::hash_token(&session),
-        arrival.timestamp(),
-    )
-    .await
-    .expect("session lookup")
-    .expect("session row exists");
 
     let state_param = "maxage-same-second";
     let pending_id = create_test_pending_auth(
@@ -1597,18 +1649,11 @@ async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_secon
         },
     )
     .await;
-
-    let second_start = jiff::Timestamp::from_second(ceremony_second).expect("valid second");
-    for (id, offset_ms) in [(&session_row.id, 100), (&pending_id, 200)] {
-        let at = second_start
-            .checked_add(jiff::SignedDuration::from_millis(offset_ms))
-            .expect("in range");
-        state
-            .store
-            .set_created_at_for_test(id, at)
-            .await
-            .expect("place row");
-    }
+    state
+        .store
+        .set_created_at_for_test(&pending_id, at_ms(second_start, 200))
+        .await
+        .expect("place pending");
 
     let location = resume_pending(
         &app,
@@ -1618,8 +1663,8 @@ async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_secon
     .await;
     assert!(
         location.contains("error=login_required"),
-        "a session whose ceremony and row preceded the max_age=0 request must be rejected on \
-         the pending-resume path even when both floor to the same second: {location}"
+        "a session whose ceremony preceded the max_age=0 request must be rejected on the \
+         pending-resume path even when both floor to the same second: {location}"
     );
     assert!(
         !location.contains("code="),
@@ -1628,6 +1673,211 @@ async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_secon
     assert!(
         location.contains(&format!("state={state_param}")),
         "error redirect must echo state parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_from_same_second_ceremony() {
+    // OIDC Core 3.1.2.1: "Note that "max_age=0" is equivalent to
+    // "prompt=login"." and OIDC Core 3.1.2.3: with prompt=login "the
+    // Authorization Server MUST reauthenticate the End-User even if the
+    // End-User is already authenticated."
+    //
+    // Ceremony at T + 100ms, pending at T + 200ms, then the
+    // authorization_code grant mints a new session row (created now, long
+    // after the pending) carrying that ceremony. Neither the row's creation
+    // instant nor the whole-second `auth_time` (which floors equal to the
+    // pending's second) can tell this apart from a fresh login; the
+    // ceremony instant the code grant copies can.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "maxage-same-second-code@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let second_start =
+        jiff::Timestamp::from_second(test_arrival().as_second() - 10).expect("valid second");
+    let ceremony = at_ms(second_start, 100);
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(ceremony),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            max_age: Some(0),
+            state: Some("same-second-code"),
+            ..Default::default()
+        },
+    )
+    .await;
+    state
+        .store
+        .set_created_at_for_test(&pending_id, at_ms(second_start, 200))
+        .await
+        .expect("place pending");
+
+    let access_token =
+        mint_code_grant_token(&app, &client, &format!("__Host-vouch_session={session}")).await;
+    assert_eq!(
+        decode_jwt_payload(&access_token)["auth_time"].as_i64(),
+        Some(second_start.as_second()),
+        "the auth_time claim stays the ceremony's whole second"
+    );
+    let row = crate::db::get_session_by_token_hash(
+        &state.store,
+        &crate::crypto::hash_token(&access_token),
+        test_arrival().timestamp(),
+    )
+    .await
+    .expect("session lookup")
+    .expect("code-grant row exists");
+    assert_eq!(
+        row.authenticated_at,
+        Some(ceremony),
+        "the code grant must copy the original ceremony instant, not stamp its own"
+    );
+
+    let location = resume_pending(
+        &app,
+        &pending_id,
+        &format!("__Host-vouch_session={access_token}"),
+    )
+    .await;
+    assert!(
+        location.contains("error=login_required"),
+        "a ceremony earlier in the pending's own second must not satisfy max_age=0 through \
+         a later code-grant row: {location}"
+    );
+    assert!(!location.contains("code="), "no code: {location}");
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_zero_resume_accepts_ceremony_after_pending_in_same_second() {
+    // The counterpart: a re-authentication performed after the pending was
+    // stored satisfies max_age=0, even when it lands in the same whole second
+    // — directly and through a code-grant row that copies its instant.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "maxage-same-second-fresh@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let second_start =
+        jiff::Timestamp::from_second(test_arrival().as_second() - 10).expect("valid second");
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(at_ms(second_start, 300)),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let code_grant_token =
+        mint_code_grant_token(&app, &client, &format!("__Host-vouch_session={session}")).await;
+
+    for (label, token) in [("direct", &session), ("code grant", &code_grant_token)] {
+        let pending_id = create_test_pending_auth(
+            &state.store,
+            TestPendingAuthSpec {
+                client_id: &client.client_id,
+                max_age: Some(0),
+                prompt: Some("login"),
+                state: Some("same-second-fresh"),
+                ..Default::default()
+            },
+        )
+        .await;
+        state
+            .store
+            .set_created_at_for_test(&pending_id, at_ms(second_start, 200))
+            .await
+            .expect("place pending");
+
+        let location =
+            resume_pending(&app, &pending_id, &format!("__Host-vouch_session={token}")).await;
+        assert!(
+            location.contains("code=") && !location.contains("error="),
+            "{label}: a ceremony after the pending must satisfy max_age=0: {location}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9470_prompt_login_resume_rejects_session_predating_pending() {
+    // OIDC Core 3.1.2.3: with prompt=login "the Authorization Server MUST
+    // reauthenticate the End-User even if the End-User is already
+    // authenticated." The login page forces the assertion form for such a
+    // pending, but the browser can return to the resume link with the old
+    // cookie; the resume path must refuse it. No max_age is involved.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "prompt-login-resume@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let second_start =
+        jiff::Timestamp::from_second(test_arrival().as_second() - 10).expect("valid second");
+    let make_session = |offset_ms| {
+        create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::Verified {
+                    auth_time: Some(at_ms(second_start, offset_ms)),
+                },
+                ..Default::default()
+            },
+        )
+    };
+    let stale = make_session(100).await;
+    let fresh = make_session(300).await;
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            prompt: Some("login"),
+            state: Some("prompt-login-resume"),
+            ..Default::default()
+        },
+    )
+    .await;
+    state
+        .store
+        .set_created_at_for_test(&pending_id, at_ms(second_start, 200))
+        .await
+        .expect("place pending");
+
+    let location =
+        resume_pending(&app, &pending_id, &format!("__Host-vouch_session={stale}")).await;
+    assert!(
+        location.contains("error=login_required") && !location.contains("code="),
+        "prompt=login must not complete with a session that predates the request: {location}"
+    );
+
+    // The rejection left the pending unspent; a real re-authentication
+    // completes it.
+    let location =
+        resume_pending(&app, &pending_id, &format!("__Host-vouch_session={fresh}")).await;
+    assert!(
+        location.contains("code=") && !location.contains("error="),
+        "prompt=login must complete after a ceremony that follows the request: {location}"
     );
 }
 
@@ -1655,7 +1905,7 @@ async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_with_old_auth_t
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(old),
+                auth_time: jiff::Timestamp::from_second(old).ok(),
             },
             ..Default::default()
         },
@@ -1766,7 +2016,8 @@ async fn test_rfc9470_pending_resume_retry_re_renders_login_required_not_session
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second() - 5),
+                auth_time: jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() - 5)
+                    .ok(),
             },
             ..Default::default()
         },

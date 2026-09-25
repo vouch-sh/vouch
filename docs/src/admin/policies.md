@@ -103,16 +103,17 @@ see (the server warns at startup), and audit writes on the login path are best-e
 write can under-count a rate limit by one event.
 
 `failed_login_burst` counts only failures by a user the server verified: a refusal after the
-user's hardware-key signature checked out (such as a posture denial), or a refusal of an identity
-the upstream IdP verified. The following still appear as `login_failed` audit events but have no
+user's hardware-key signature checked out (such as a posture denial, or a signature counter that
+did not increase — a possible cloned key, checked only after the signature verified), or a refusal
+of an identity the upstream IdP verified. The following still appear as `login_failed` audit events but have no
 `user_id`, so they never count toward the burst:
 
 - An unknown credential, a `user_handle` that does not own the presented credential, or a
   signature that fails to verify. The request-supplied id is kept as `data.asserted_user_id`.
 - A server fault after a successful browser login. The id is kept as `data.fault_user_id`.
 
-A storage fault during the credential lookup is a server error, not a failed login, and writes no
-`login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
+A storage fault during the credential lookup, or a signature verification that fails to run to
+completion, is a server error, not a failed login, and writes no `login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
 the unattributed ones are still visible to org-scoped queries when they carry the owner's email
 domain (deactivated-account and signature failures).
 

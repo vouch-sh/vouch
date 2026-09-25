@@ -172,6 +172,67 @@ async fn test_token_exchange_successful() {
     );
 }
 
+/// The exchange's audit row records the request's client address, and the
+/// policy history built from that row carries it as `input.ip`, so a
+/// temporal policy over exchange events can compare addresses. The row used
+/// to carry none, which projected every exchange as `ip: ""`.
+#[tokio::test]
+async fn test_token_exchange_policy_history_carries_client_ip() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-ip@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // `http_post_form` connects from 127.0.0.1 (injected `ConnectInfo`).
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("User-Agent", "exchange-test-agent"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["token_exchange".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "one exchange -> one audit event");
+    let row = events.first().expect("one audit event");
+    let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+    assert_eq!(data["client_ip"], "127.0.0.1", "{data}");
+    assert_eq!(data["user_agent"], "exchange-test-agent", "{data}");
+
+    let event = crate::services::policy::events::history_event(row, "org-1", 0)
+        .expect("an exchange row maps to a history event");
+    assert_eq!(
+        event.field("input", "ip"),
+        Some(&dogwood_language::Value::String("127.0.0.1".to_string())),
+        "the exchange's policy input must carry the request's client IP"
+    );
+}
+
 #[tokio::test]
 async fn test_token_exchange_scope_downgrade() {
     // RFC 8693 Section 2.2: Can reduce scope, not expand

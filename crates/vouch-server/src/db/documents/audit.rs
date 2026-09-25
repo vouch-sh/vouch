@@ -327,8 +327,7 @@ pub struct CredentialAuditEnvelope {
 impl CredentialAuditEnvelope {
     /// Record the caller's transport metadata: IP, user agent, and the
     /// geo fields derived from the IP. Events written without this carry
-    /// null transport fields (e.g. token exchange, which runs in the
-    /// services layer without request context).
+    /// null transport fields.
     #[must_use]
     pub fn with_client(mut self, ip: Option<std::net::IpAddr>, user_agent: Option<String>) -> Self {
         self.client_ip = ip.map(|a| a.to_string());

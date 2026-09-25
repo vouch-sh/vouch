@@ -654,6 +654,40 @@ fn test_counter_decrease_rejected() {
     assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
 }
 
+// WebAuthn L2 §7.2 orders signature verification (step 20) before the
+// signCount check (step 21). A counter regression reported before the
+// signature verified would be unsigned bytes, so an assertion with both a
+// bad signature and a low counter must fail as a signature failure.
+#[test]
+fn test_bad_signature_with_low_counter_fails_as_signature_invalid() {
+    let verifier = TestCoseVerifier::always_fail();
+    let rp_id = "example.com";
+    let auth_data = make_auth_data(rp_id, 0x05, 3); // counter = 3
+    let client_data =
+        make_client_data_json("webauthn.get", "test-challenge", "https://example.com");
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+    let result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &auth_data,
+            client_data_json: &client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: "test-challenge",
+            expected_origin: "https://example.com",
+            stored_counter: 5, // would be a regression if the signature held
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &verifier,
+    );
+    assert!(
+        matches!(result, Err(VerifyError::SignatureInvalid)),
+        "the signature is checked before the counter: {result:?}"
+    );
+}
+
 // WebAuthn L2 §6.1.1: an authenticator that implements no counter reports zero throughout.
 #[test]
 fn test_counter_zero_special_case() {

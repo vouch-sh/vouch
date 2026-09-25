@@ -231,9 +231,11 @@ pub struct TokenExchangeParams<'a> {
     /// witness travels instead of its thumbprint so an exchanged token cannot
     /// be sender-constrained to a key that was never proven.
     pub binding: TokenBinding<'a>,
-    /// Client IP from the TCP peer socket, for temporal policy correlation
-    /// (e.g. the exchange-IP-consistency policy).
-    pub client_ip: Option<std::net::IpAddr>,
+    /// The request's transport metadata, from the `ClientInfo` extractor:
+    /// the client IP feeds the exchange policies (e.g. IP consistency), and
+    /// the IP and User-Agent are recorded on the token-exchange audit row,
+    /// whose `client_ip` later becomes the history event's `input.ip`.
+    pub client_info: &'a db::ClientInfo,
     /// RFC 9396 Section 6: Authorization details for narrowing.
     pub authorization_details: Option<&'a str>,
 }
@@ -366,7 +368,7 @@ pub(crate) async fn exchange_token(
             org_id,
             &subject_user.id,
             &subject_user.email,
-            params.client_ip,
+            params.client_info.client_ip(),
             &params.client.client_id,
             params.audience,
             arrival,
@@ -565,6 +567,7 @@ pub(crate) async fn exchange_token(
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
                 client_id: &params.client.client_id,
+                client_info: params.client_info,
             },
             arrival,
         )
@@ -684,7 +687,11 @@ pub(crate) async fn exchange_token(
                 event_type: "token_issued".to_string(),
                 success: true,
                 ..Default::default()
-            },
+            }
+            .with_client(
+                params.client_info.client_ip(),
+                params.client_info.user_agent().map(String::from),
+            ),
             &db::TokenExchangeDetails {
                 client_id: params.client.client_id.clone(),
                 audience: params.audience.map(String::from),
@@ -729,6 +736,8 @@ struct IdTokenContext<'a> {
     org_domain: Option<&'a str>,
     /// OAuth client performing the exchange, for the audit event.
     client_id: &'a str,
+    /// The request's transport metadata, for the audit event.
+    client_info: &'a db::ClientInfo,
 }
 
 /// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
@@ -844,7 +853,11 @@ async fn issue_id_token(
                 event_type: "token_issued".to_string(),
                 success: true,
                 ..Default::default()
-            },
+            }
+            .with_client(
+                ctx.client_info.client_ip(),
+                ctx.client_info.user_agent().map(String::from),
+            ),
             &db::TokenExchangeDetails {
                 client_id: ctx.client_id.to_string(),
                 audience: ctx.audience.map(String::from),
@@ -1345,6 +1358,7 @@ mod tests {
                 hardware_aaguid: None,
                 org_domain: None,
                 client_id: "token-exchange-client-id",
+                client_info: &crate::db::ClientInfo::default(),
             },
             arrival,
         )

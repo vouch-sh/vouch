@@ -53,6 +53,7 @@ async fn test_user_cascade_delete() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -1020,6 +1021,7 @@ async fn create_client_session(
             org_domain: None,
             client_id,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await

@@ -67,6 +67,19 @@ pub struct SessionDoc {
     /// replayed code instead of every session for the user.
     #[serde(default)]
     pub source_code_hash: Option<String>,
+    /// The instant the FIDO2 ceremony behind this session verified, at full
+    /// precision. The token's `auth_time` claim is this instant's whole
+    /// second; the row keeps the rest so the `max_age=0` / `prompt=login`
+    /// freshness decision can order a ceremony against a pending
+    /// authorization stored in the same second.
+    ///
+    /// A grant that mints a new row from an older ceremony (authorization
+    /// code, device code) copies the original instant; it never stamps its
+    /// own. `None` when no ceremony was observed — M2M, enrollment
+    /// bootstrap, RFC 8693 exchange — and on rows written before the field
+    /// existed. A session with `None` is never fresh.
+    #[serde(default)]
+    pub authenticated_at: Option<Timestamp>,
 }
 
 impl DocumentType for SessionDoc {
@@ -135,6 +148,9 @@ mod tests {
         assert!(doc.org_domain.is_none());
         assert!(doc.authorization_details.is_none());
         assert!(doc.client_id.is_none());
+        // No recorded ceremony instant: the session is never fresh for a
+        // max_age / prompt=login resume.
+        assert!(doc.authenticated_at.is_none());
     }
 
     /// The denormalized fields survive a serde roundtrip on new sessions.
@@ -152,6 +168,7 @@ mod tests {
             org_domain: Some("example.com".to_string()),
             client_id: Some("client-abc".to_string()),
             source_code_hash: Some("code-hash-abc".to_string()),
+            authenticated_at: None,
         };
         let json = serde_json::to_string(&doc).expect("serialize");
         let back: SessionDoc = serde_json::from_str(&json).expect("deserialize");
@@ -181,6 +198,7 @@ mod tests {
             hardware_aaguid: None,
             org_domain: None,
             source_code_hash: None,
+            authenticated_at: None,
             client_id,
         };
         let with_client = mk(Some("client-abc".to_string()));
@@ -224,6 +242,7 @@ mod tests {
             org_domain: None,
             client_id: None,
             source_code_hash: code_hash,
+            authenticated_at: None,
         };
         let with_code = mk(Some("code-hash-abc".to_string()));
         let without_code = mk(None);

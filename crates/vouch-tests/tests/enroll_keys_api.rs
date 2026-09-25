@@ -326,7 +326,7 @@ async fn delete_rejects_stale_session() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: test_utils::TestVerification::Verified {
-                auth_time: Some(stale_iat),
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
             },
             ..Default::default()
         },
@@ -380,7 +380,7 @@ async fn delete_rejects_future_dated_session() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: test_utils::TestVerification::Verified {
-                auth_time: Some(future_iat),
+                auth_time: jiff::Timestamp::from_second(future_iat).ok(),
             },
             ..Default::default()
         },

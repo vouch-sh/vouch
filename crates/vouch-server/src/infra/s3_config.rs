@@ -892,8 +892,10 @@ impl ServerConfig {
             if let Some(v) = &github.client_id {
                 self.github_app_client_id = Some(v.clone());
             }
-            if let Some(v) = &github.client_secret {
-                self.github_app_client_secret = Some(v.clone());
+            // Empty is absent here too: the client secret switches GitHub
+            // OAuth on by being present.
+            if let Some(v) = github.client_secret.clone().and_then(NonEmptySecret::new) {
+                self.github_app_client_secret = Some(v);
             }
         }
 
@@ -1157,6 +1159,32 @@ mod tests {
                 .github_webhook_secret
                 .as_ref()
                 .map(ExposeSecret::expose_secret),
+            Some("env-secret")
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_empty_github_client_secret_is_absent() {
+        // An empty S3 client secret is treated like an unset one: it must not
+        // switch GitHub OAuth on, and must not clobber a secret already set.
+        let empty = S3Config {
+            github: Some(S3GithubConfig {
+                client_id: Some("client-id".to_string()),
+                client_secret: Some("".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut config = crate::test_utils::test_config();
+        config.merge_s3_config(&empty, false).unwrap();
+        assert!(config.github_app_client_secret.is_none());
+        assert!(!config.github_oauth_configured());
+
+        config.github_app_client_secret = NonEmptySecret::new("env-secret".into());
+        config.merge_s3_config(&empty, false).unwrap();
+        assert_eq!(
+            config.github_app_client_secret_exposed(),
             Some("env-secret")
         );
     }

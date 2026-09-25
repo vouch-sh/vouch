@@ -158,9 +158,52 @@ async fn exchange_fido2_assertion(
     client: &vouch_server::test_utils::TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
+    exchange_fido2_assertion_with(
+        harness,
+        device,
+        challenge,
+        state_jwt,
+        user_id,
+        client,
+        pkcs8,
+        Signature::AsSigned,
+    )
+    .await
+}
+
+/// Whether the assertion carries the device's signature or a corrupted one.
+#[derive(Clone, Copy)]
+enum Signature {
+    AsSigned,
+    Corrupted,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper mirrors the token request's inputs"
+)]
+async fn exchange_fido2_assertion_with(
+    harness: &TestHarness,
+    device: &IntegrationMockDevice,
+    challenge: &[u8],
+    state_jwt: &str,
+    user_id: &str,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+    signature: Signature,
+) -> (u16, serde_json::Value) {
     let auth_result = device
         .authenticate("test.example.com", challenge)
         .expect("Mock device authentication failed");
+    let mut signature_bytes = URL_SAFE_NO_PAD
+        .decode(URL_SAFE_NO_PAD.encode(&auth_result.signature))
+        .expect("round-trip signature bytes");
+    if matches!(signature, Signature::Corrupted) {
+        let last = signature_bytes
+            .last_mut()
+            .expect("a signature has at least one byte");
+        *last ^= 0x01;
+    }
 
     let user_handle = uuid::Uuid::parse_str(user_id)
         .expect("user_id must be a UUID")
@@ -171,7 +214,7 @@ async fn exchange_fido2_assertion(
         "state": state_jwt,
         "credential_id": URL_SAFE_NO_PAD.encode(&auth_result.credential_id),
         "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_result.authenticator_data),
-        "signature": URL_SAFE_NO_PAD.encode(&auth_result.signature),
+        "signature": URL_SAFE_NO_PAD.encode(&signature_bytes),
         "client_data_json": URL_SAFE_NO_PAD.encode(&auth_result.client_data_json),
         "user_handle": URL_SAFE_NO_PAD.encode(&user_handle),
     });
@@ -201,17 +244,42 @@ async fn exchange_fido2_assertion(
     (status, json)
 }
 
-/// Fetch the `login_failed` audit events for `user_id`.
-/// `login_failed` rows recorded for an assertion that claimed `user_id`.
+/// `login_failed` rows attributed to `user_id`.
 ///
-/// The counter check runs before the signature check, so a counter-regression
-/// rejection proves nothing about who sent the assertion: anyone holding the
-/// credential ID can trigger it. The row therefore names no principal (NULL
-/// `user_id`, so it never feeds per-user policies such as
-/// `failed_login_burst`) and carries the claimed user as `asserted_user_id` in
-/// its payload. This asserts both halves.
+/// The verifier checks the counter only after the signature verified
+/// (WebAuthn Level 2 §7.2 steps 20 then 21), so a counter-regression
+/// rejection proves a registered key signed the assertion: clone detection is
+/// a real signal about the credential's owner, and the row names them in its
+/// `user_id` column.
 async fn login_failed_audit_events(harness: &TestHarness, user_id: &str) -> Vec<db::AuditEvent> {
-    let rows: Vec<db::AuditEvent> = harness
+    all_login_failed_events(harness)
+        .await
+        .into_iter()
+        .filter(|ev| ev.user_id.as_deref() == Some(user_id))
+        .collect()
+}
+
+/// `login_failed` rows that name `user_id` only as the request-supplied
+/// `asserted_user_id`, with no attributed principal.
+async fn unattributed_login_failed_events(
+    harness: &TestHarness,
+    user_id: &str,
+) -> Vec<db::AuditEvent> {
+    all_login_failed_events(harness)
+        .await
+        .into_iter()
+        .filter(|ev| {
+            ev.user_id.is_none()
+                && serde_json::from_str::<serde_json::Value>(&ev.data)
+                    .ok()
+                    .and_then(|data| data.get("asserted_user_id").cloned())
+                    .is_some_and(|asserted| asserted == user_id)
+        })
+        .collect()
+}
+
+async fn all_login_failed_events(harness: &TestHarness) -> Vec<db::AuditEvent> {
+    harness
         .state
         .audit
         .query_events(&db::AuditEventFilter {
@@ -220,22 +288,6 @@ async fn login_failed_audit_events(harness: &TestHarness, user_id: &str) -> Vec<
         })
         .await
         .expect("query audit events")
-        .into_iter()
-        .filter(|ev| {
-            serde_json::from_str::<serde_json::Value>(&ev.data)
-                .ok()
-                .and_then(|data| data.get("asserted_user_id").cloned())
-                .is_some_and(|asserted| asserted == user_id)
-        })
-        .collect();
-    for ev in &rows {
-        assert_eq!(
-            ev.user_id, None,
-            "an assertion rejected before its signature verified must not be \
-             attributed to the claimed user: {ev:?}"
-        );
-    }
-    rows
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -297,16 +349,9 @@ async fn test_nonzero_stored_registration_counter_rejects_clone_assertion() {
     );
 
     // A `login_failed` audit row must exist — the early, automatic
-    // detection signal the fix restores. The handler records `e.to_string()`
-    // where `e` is the `ServiceError` returned by `verify_login_assertion`
-    // (which wraps the `VerifyError::CounterNotIncreasing` in a
-    // `ServiceError::OAuth { code: InvalidGrant, .. }`). The `ServiceError`
-    // Display is `"oauth error: {code}"` (see `error.rs:37`), so the
-    // `failure_reason` on the row is `"oauth error: invalid_grant"` — the
-    // generic OAuth code, not the inner clone-detection string. The
-    // rejection itself (and the audit row's existence + the authenticator_id
-    // attribution) is the security signal; the specific clone string lives
-    // in tracing logs and is not surfaced on the audit row for this flow.
+    // detection signal the fix restores — attributed to the credential's
+    // owner (the signature verified before the counter was checked) and
+    // carrying the clone-detection reason.
     let failed_events = login_failed_audit_events(&harness, &user.id).await;
     assert!(
         !failed_events.is_empty(),
@@ -321,11 +366,68 @@ async fn test_nonzero_stored_registration_counter_rejects_clone_assertion() {
             .expect("db lookup")
             .expect("authenticator exists")
             .id;
-    let attributed = failed_events.iter().find(|ev| ev.data.contains(&auth_id));
+    let attributed = failed_events
+        .iter()
+        .find(|ev| ev.data.contains(&auth_id))
+        .expect("a login_failed row attributed to the user must name the authenticator");
     assert!(
-        attributed.is_some(),
-        "at least one login_failed audit row must attribute the rejection \
-         to the authenticator ({auth_id}); got rows: {failed_events:?}"
+        attributed.data.contains("Counter not increasing"),
+        "the row must carry the clone-detection reason: {attributed:?}"
+    );
+}
+
+/// An assertion with a corrupted signature *and* a regressed counter is
+/// rejected as a signature failure, and the row stays unattributed: no key
+/// signed it, so the counter bytes are request-supplied and say nothing
+/// about the credential's owner (WebAuthn Level 2 §7.2 checks the signature
+/// at step 20, before the signCount at step 21).
+#[tokio::test]
+async fn test_bad_signature_with_low_counter_is_unattributed_signature_failure() {
+    let harness = TestHarness::new().await;
+
+    let user = harness
+        .create_user("bad-sig-low-counter-e2e@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let auth_id = register_mock_device_in_db_with_counter(&harness, &user.id, &device, 42).await;
+
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion_with(
+        &harness,
+        &device,
+        &challenge,
+        &state,
+        &user.id,
+        &client,
+        &pkcs8,
+        Signature::Corrupted,
+    )
+    .await;
+    assert_ne!(
+        status, 200,
+        "a corrupted signature must be rejected: {json}"
+    );
+    assert_eq!(json["error"], "invalid_grant", "{json}");
+
+    assert!(
+        login_failed_audit_events(&harness, &user.id)
+            .await
+            .is_empty(),
+        "an assertion whose signature did not verify must not be attributed to the user"
+    );
+    let unattributed = unattributed_login_failed_events(&harness, &user.id).await;
+    let row = unattributed
+        .iter()
+        .find(|ev| ev.data.contains(&auth_id))
+        .expect("an unattributed login_failed row naming the authenticator");
+    assert!(
+        row.data.contains("Signature verification failed")
+            && !row.data.contains("Counter not increasing"),
+        "the rejection is a signature failure, not a counter regression: {row:?}"
     );
 }
 

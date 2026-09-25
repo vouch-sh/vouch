@@ -678,15 +678,23 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            // The signature did not verify, so the `user_handle` and
-            // credential ID are still only request-supplied: the row must not
-            // count against the credential's owner.
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500, as for a storage
+            // fault during the credential lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("Browser WebAuthn login: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
+            // A counter regression is reported only once the signature
+            // verified, so it counts against the credential's owner. For every
+            // other failure the `user_handle` and credential ID are still only
+            // request-supplied: the row must not count against the owner.
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
-                db::Principal::Unverified {
-                    asserted: Some(user.id.clone()),
-                },
+                principal,
                 Some(&user.email),
                 Some(&authenticator.id),
                 &e.to_string(),
@@ -898,7 +906,7 @@ async fn finalize_login_session_inner(
             audience: None,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(auth_now.as_second()),
+                auth_time: Some(auth_now.instant()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,

@@ -907,7 +907,7 @@ async fn test_rfc9728_www_authenticate_preserves_step_up() {
             email: &user.email,
             auth_id: Some(&auth_id),
             verification: TestVerification::Verified {
-                auth_time: Some(stale_iat),
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
             },
             ..Default::default()
         },

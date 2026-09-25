@@ -111,13 +111,13 @@ pub(super) struct TestCodeSpec<'a> {
     /// Use the 60s FAPI 2.0 code lifetime instead of the 300s standard one.
     /// Default: `false`.
     pub fapi_lifetime: bool,
-    /// Unix seconds of the FIDO2 ceremony behind the session this code was
-    /// issued from — the code's `auth_time` (OIDC Core §2). Defaults to the
+    /// The FIDO2 ceremony instant behind the session this code was issued
+    /// from — the code's `auth_time` (OIDC Core §2) is its whole second. Defaults to the
     /// present, matching the only sessions that can reach code issuance:
     /// `check_session_for_authorization` turns away anything not
     /// hardware-verified. Set `None` for a session whose verification was
     /// inherited rather than observed (RFC 8693 exchange).
-    pub auth_time: Option<i64>,
+    pub auth_time: Option<jiff::Timestamp>,
 }
 
 impl Default for TestCodeSpec<'_> {
@@ -131,7 +131,7 @@ impl Default for TestCodeSpec<'_> {
             dpop_jkt: Option::None,
             authorization_details: Option::None,
             fapi_lifetime: false,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
+            auth_time: Some(jiff::Timestamp::now()),
         }
     }
 }
@@ -170,7 +170,7 @@ pub(super) async fn issue_code(
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS
             },
             authorization_details: spec.authorization_details,
-            auth_time: spec.auth_time,
+            authenticated_at: spec.auth_time,
             par: crate::db::ParConsumptionProof::not_pushed(),
         },
     )

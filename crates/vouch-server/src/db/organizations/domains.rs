@@ -1994,6 +1994,7 @@ mod tests {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         };
         store
             .insert(&mk_session(

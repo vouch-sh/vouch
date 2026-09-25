@@ -263,7 +263,7 @@ async fn test_device_grant_preserves_absent_auth_time_on_legacy_approval() {
         authenticator_id: Some(auth),
         hardware_verified: true,
         // The legacy shape: verified, but no ceremony instant recorded.
-        auth_time: None,
+        authenticated_at: None,
         expires_at: jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(1))
             .expect("device code expiry"),

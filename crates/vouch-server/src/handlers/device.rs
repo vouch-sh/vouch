@@ -375,7 +375,7 @@ pub(crate) async fn device_token(
 
     // Check polling rate
     let allowed =
-        db::update_device_auth_poll_time(&state.store, &request.id, request.interval_seconds)
+        db::update_device_auth_poll_time(&state.store, &request.id, request.interval_seconds, now)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to update device authorization poll time: {e}");
@@ -1711,6 +1711,7 @@ mod tests {
                 org_domain: None,
                 client_id: None,
                 source_code_hash: Some(&setup.device_code_hash),
+                authenticated_at: None,
             },
         )
         .await

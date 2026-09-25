@@ -720,7 +720,8 @@ impl serde::Serialize for BaseUrl {
 ///
 /// Some config secrets switch a feature on by being present and then serve as
 /// the key that authenticates callers of that feature: the GitHub webhook HMAC
-/// key, the `/metrics` bearer token, the certification test-mode HMAC key. An
+/// key, the `/metrics` bearer token, the certification test-mode HMAC key, the
+/// GitHub App OAuth client secret. An
 /// empty value set through the environment or the S3 overlay would enable the
 /// feature under a key everyone knows. The only constructors map `""` to
 /// `None`, so holding a `NonEmptySecret` is evidence the key is not empty and
@@ -868,8 +869,10 @@ pub struct ServerConfig {
     /// GitHub App Client ID (for OAuth user authentication).
     /// This is found in the GitHub App settings, different from App ID.
     pub github_app_client_id: Option<String>,
-    /// GitHub App Client Secret (for OAuth user authentication).
-    pub github_app_client_secret: Option<SecretString>,
+    /// GitHub App Client Secret (for OAuth user authentication). Its presence
+    /// switches GitHub OAuth on ([`Self::github_oauth_configured`]), so an
+    /// empty value loads as unset.
+    pub github_app_client_secret: Option<NonEmptySecret>,
     /// TLS certificate (base64-encoded PEM format).
     pub tls_cert: Option<String>,
     /// TLS private key (base64-encoded PEM format).
@@ -1092,7 +1095,7 @@ impl ServerConfig {
             github_app_key: args.github_app_key.map(SecretString::from),
             github_webhook_secret: NonEmptySecret::from_arg(args.github_webhook_secret),
             github_app_client_id: args.github_app_client_id,
-            github_app_client_secret: args.github_app_client_secret.map(SecretString::from),
+            github_app_client_secret: NonEmptySecret::from_arg(args.github_app_client_secret),
             tls_cert: args.tls_cert,
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
@@ -1964,6 +1967,8 @@ mod tests {
             "--certification-test-token=",
             "--metrics-bearer-token=",
             "--github-webhook-secret=",
+            "--github-app-client-id=client-id",
+            "--github-app-client-secret=",
         ])
         .expect("parse with empty shared secrets");
         let config = ServerConfig::from_args(args, None).expect("config builds");
@@ -1978,6 +1983,14 @@ mod tests {
         assert!(
             config.github_webhook_secret.is_none(),
             "an empty webhook secret must leave webhook verification unconfigured"
+        );
+        assert!(
+            config.github_app_client_secret.is_none(),
+            "an empty GitHub App client secret must load as unset"
+        );
+        assert!(
+            !config.github_oauth_configured(),
+            "a client ID with an empty client secret must not switch GitHub OAuth on"
         );
     }
 

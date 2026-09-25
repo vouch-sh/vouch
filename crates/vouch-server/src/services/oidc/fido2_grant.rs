@@ -376,19 +376,27 @@ pub(crate) async fn exchange_fido2_assertion(
     {
         Ok(result) => result,
         Err(e) => {
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500 rather than
+            // `invalid_grant`, as for a storage fault during the lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("FIDO2 assertion grant: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
             tracing::warn!(
                 "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
                 user_id
             );
             // A failed assertion — including clone detection (counter regression)
             // — is a high-signal security event. Record it in the audit trail with
-            // the credential and user IDs and the failure reason. No signature
-            // verified, so the `user_handle` is still request-supplied: the row
-            // must not count against the credential's owner.
+            // the credential and user IDs and the failure reason. A counter
+            // regression is reported only once the signature verified, so it
+            // counts against the credential's owner; every other failure leaves
+            // the `user_handle` request-supplied and the row unattributed.
             let failure_event = AuthEventParams {
-                user_id: Principal::Unverified {
-                    asserted: Some(user.id.clone()),
-                },
+                user_id: principal,
                 event_type: AuthEventType::LoginFailed,
                 authenticator_id: Some(authenticator.id.clone()),
                 success: false,
@@ -530,7 +538,7 @@ pub(crate) async fn exchange_fido2_assertion(
             // processing delay, and diverge from the browser-login and
             // device-code flows, which both carry the ceremony instant.
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(assertion_result.verified_at.as_second()),
+                auth_time: Some(assertion_result.verified_at.instant()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),

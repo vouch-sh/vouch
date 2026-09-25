@@ -286,7 +286,8 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("client-xyz".to_string());
-        config.github_app_client_secret = Some(SecretString::from("secret-xyz".to_string()));
+        config.github_app_client_secret =
+            crate::config::NonEmptySecret::new(SecretString::from("secret-xyz"));
 
         let service = GitHubService::new(
             &state.store,
