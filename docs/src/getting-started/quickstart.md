@@ -139,6 +139,16 @@ vouch --server http://localhost:3000 login
 vouch --server http://localhost:3000 credential ssh
 ```
 
+`http://` is accepted here only because the server is on a loopback address (`localhost`,
+`127.0.0.0/8`, `::1`). For a test server reached over plain HTTP on any other host, every CLI
+invocation that sends a token needs the opt-in, not just `login`: pass `--allow-insecure` or set
+`VOUCH_ALLOW_INSECURE=1`. The credential helpers that other tools run — `docker-credential-vouch`,
+`git-remote-codecommit`, the pip/uv `keyring` shim, `vouch-pnpm-tokenhelper`, and the helpers
+`vouch setup` writes into git, Cargo, and Docker config — take no flags, so
+`VOUCH_ALLOW_INSECURE=1` has to be exported in the environment of docker, git, pip, uv, pnpm, or
+cargo. Without it they refuse the stored server URL instead of sending the session token over
+plain HTTP. The agent reads the same variable from its own environment.
+
 ## 7. Confirm it was recorded
 
 Open `http://localhost:3000/admin` in a browser, signed in as the user you just enrolled.

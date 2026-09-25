@@ -18,6 +18,7 @@ use secrecy::ExposeSecret;
 use vouch_cli::tr;
 
 use crate::integrations::aws::codeartifact::parse_codeartifact_url;
+use crate::server_url::{InsecureOptIn, ServerUrlError};
 
 /// Run the pip keyring credential helper.
 ///
@@ -27,6 +28,7 @@ pub(crate) async fn run(
     operation: &str,
     service_url: Option<&str>,
     _username: Option<&str>,
+    opt_in: InsecureOptIn,
 ) -> Result<()> {
     match operation {
         "get" => {
@@ -34,7 +36,7 @@ pub(crate) async fn run(
                 "keyring get requires a service URL. \
                  Usage: vouch credential pip get <url> [username]",
             )?;
-            handle_get(url).await
+            handle_get(url, opt_in).await
         }
         // pip calls `set` after a successful auth to cache the password.
         // We don't need to store anything since we fetch dynamically.
@@ -47,7 +49,7 @@ pub(crate) async fn run(
 }
 
 /// Handle `keyring get <url> <username>` — return a fresh CodeArtifact token.
-async fn handle_get(url: &str) -> Result<()> {
+async fn handle_get(url: &str, opt_in: InsecureOptIn) -> Result<()> {
     let registry = parse_codeartifact_url(url).ok_or_else(|| {
         anyhow::anyhow!(
             "URL does not appear to be a CodeArtifact registry: {url}\n\
@@ -55,9 +57,15 @@ async fn handle_get(url: &str) -> Result<()> {
         )
     })?;
 
-    let session = crate::session::resolve_session().await.context(tr!(
-        "err-vouch-is-not-enrolled-run-vouch-enroll-set-up-authen"
-    ))?;
+    let session = crate::session::resolve_session(opt_in).await.map_err(|e| {
+        if ServerUrlError::is_in(&e) {
+            e
+        } else {
+            e.context(tr!(
+                "err-vouch-is-not-enrolled-run-vouch-enroll-set-up-authen"
+            ))
+        }
+    })?;
 
     // The keyring shim carries no arguments, so the AWS account backing this
     // domain is recovered from the saved CodeArtifact profile.
@@ -66,7 +74,7 @@ async fn handle_get(url: &str) -> Result<()> {
         registry.domain_owner,
         registry.region,
     );
-    let token = super::codeartifact::get_token(&session.server_url, &target)
+    let token = super::codeartifact::get_token(session.server_url.as_str(), &target)
         .await
         .context(tr!("err-failed-get-codeartifact-token"))?;
 
@@ -105,29 +113,39 @@ mod tests {
     #[tokio::test]
     async fn test_set_operation_succeeds_silently() {
         assert!(
-            run("set", Some("https://example.com"), Some("user"))
-                .await
-                .is_ok()
+            run(
+                "set",
+                Some("https://example.com"),
+                Some("user"),
+                InsecureOptIn::Env
+            )
+            .await
+            .is_ok()
         );
     }
 
     #[tokio::test]
     async fn test_del_operation_succeeds_silently() {
         assert!(
-            run("del", Some("https://example.com"), Some("user"))
-                .await
-                .is_ok()
+            run(
+                "del",
+                Some("https://example.com"),
+                Some("user"),
+                InsecureOptIn::Env
+            )
+            .await
+            .is_ok()
         );
     }
 
     #[tokio::test]
     async fn test_unknown_operation_succeeds_silently() {
-        assert!(run("unknown", None, None).await.is_ok());
+        assert!(run("unknown", None, None, InsecureOptIn::Env).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_get_without_url_returns_error() {
-        let result = run("get", None, None).await;
+        let result = run("get", None, None, InsecureOptIn::Env).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("keyring get requires a service URL"));
@@ -135,7 +153,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_non_codeartifact_url_returns_error() {
-        let result = run("get", Some("https://pypi.org/simple/"), Some("user")).await;
+        let result = run(
+            "get",
+            Some("https://pypi.org/simple/"),
+            Some("user"),
+            InsecureOptIn::Env,
+        )
+        .await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("does not appear to be a CodeArtifact registry"));

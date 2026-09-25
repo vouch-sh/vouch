@@ -76,6 +76,39 @@ impl AsRef<str> for ServerUrl {
     }
 }
 
+/// Where this invocation's opt-in to a plain-HTTP server URL comes from.
+///
+/// Every server URL a token is sent to is judged per invocation, never on
+/// the strength of an opt-in given when the URL was stored at login.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InsecureOptIn {
+    /// A subcommand: clap has already merged `--allow-insecure` and
+    /// `VOUCH_ALLOW_INSECURE` into this value.
+    Cli(bool),
+    /// A helper binary (`docker-credential-vouch`, `git-remote-codecommit`,
+    /// `keyring`, `vouch-pnpm-tokenhelper`). These are dispatched on argv0
+    /// before clap parses and are run by other tools through argument-less
+    /// symlinks, so `VOUCH_ALLOW_INSECURE` in the calling tool's environment
+    /// is the only opt-in. It is read when a URL is judged, so a helper
+    /// operation that never contacts the server does not fail on it.
+    Env,
+}
+
+impl InsecureOptIn {
+    /// Whether a plain-HTTP URL to a non-loopback host is allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerUrlError::OptIn`] when `VOUCH_ALLOW_INSECURE` holds a
+    /// value that is neither on nor off; it is never read as either.
+    pub(crate) fn allowed(self) -> Result<bool, ServerUrlError> {
+        match self {
+            Self::Cli(allowed) => Ok(allowed),
+            Self::Env => vouch_common::allow_insecure_from_env().map_err(ServerUrlError::OptIn),
+        }
+    }
+}
+
 /// Errors from [`ServerUrl::parse`].
 #[derive(Debug)]
 pub(crate) enum ServerUrlError {
@@ -87,6 +120,20 @@ pub(crate) enum ServerUrlError {
 
     /// The URL uses HTTP for a non-loopback host.
     InsecureHttp(String),
+
+    /// `VOUCH_ALLOW_INSECURE` could not be read as on or off. The message is
+    /// the environment parser's own, shown verbatim like other environment
+    /// errors.
+    OptIn(String),
+}
+
+impl ServerUrlError {
+    /// Whether `e` is a server URL judged unusable for this invocation, as
+    /// opposed to there being no stored session at all. Credential helpers
+    /// use it to show the URL's own message instead of "not configured".
+    pub(crate) fn is_in(e: &anyhow::Error) -> bool {
+        e.downcast_ref::<Self>().is_some()
+    }
 }
 
 impl std::fmt::Display for ServerUrlError {
@@ -107,6 +154,7 @@ impl std::fmt::Display for ServerUrlError {
                     crate::tr_args!("server-url-err-insecure-http", url = url.as_str())
                 )
             }
+            Self::OptIn(detail) => f.write_str(detail),
         }
     }
 }

@@ -74,7 +74,7 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
 
         // The symlink carries no arguments; the profile comes from the anchor
         // `vouch setup docker` recorded for the registry.
-        commands::credential::docker::run(&operation, None)
+        commands::credential::docker::run(&operation, None, InsecureOptIn::Env)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
@@ -114,7 +114,7 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
             .into());
         }
 
-        commands::credential::codecommit::run_remote_helper(&remote_name, &url)
+        commands::credential::codecommit::run_remote_helper(&remote_name, &url, InsecureOptIn::Env)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
@@ -136,9 +136,14 @@ async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
         let service_url = std::env::args().nth(2);
         let username = std::env::args().nth(3);
 
-        commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
-            .await
-            .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+        commands::credential::pip::run(
+            &operation,
+            service_url.as_deref(),
+            username.as_deref(),
+            InsecureOptIn::Env,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
 
         return Ok(true);
     }
@@ -166,12 +171,14 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let profile = flag("--profile");
 
         // Resolve session to get server URL
-        let session = crate::session::resolve_session().await.map_err(|e| {
-            anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
-        })?;
+        let session = crate::session::resolve_session(InsecureOptIn::Env)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
+            })?;
 
         commands::credential::codeartifact::run(
-            &session.server_url,
+            session.server_url.as_str(),
             domain.map(String::as_str),
             domain_owner.map(String::as_str),
             region.map(String::as_str),
@@ -480,6 +487,7 @@ use commands::aws::AwsCommands;
 use commands::credential::CredentialCommands;
 use commands::keys::KeysCommands;
 use commands::setup::SetupCommands;
+use server_url::InsecureOptIn;
 
 /// Stack reserve for the thread that runs the CLI. Building the clap command
 /// tree in an unoptimized build needs more than the 1 MiB Windows reserves
@@ -614,6 +622,7 @@ async fn run() -> Result<()> {
     let config = config?;
     let server = resolve_server_url(&cli, &config)?;
     let server = server.as_str();
+    let opt_in = InsecureOptIn::Cli(cli.allow_insecure);
 
     match cli.command {
         Commands::Enroll => commands::enroll::run(server).await,
@@ -696,14 +705,14 @@ async fn run() -> Result<()> {
                 commands::credential::ssh::run(server, key.as_deref(), force).await
             }
             CredentialCommands::Github { operation } => {
-                commands::credential::github::run(&operation).await
+                commands::credential::github::run(&operation, opt_in).await
             }
             CredentialCommands::Docker { operation, profile } => {
-                commands::credential::docker::run(&operation, profile.as_deref()).await
+                commands::credential::docker::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
+            CredentialCommands::Cargo { .. } => commands::credential::cargo::run(opt_in).await,
             CredentialCommands::Codecommit { operation, profile } => {
-                commands::credential::codecommit::run(&operation, profile.as_deref()).await
+                commands::credential::codecommit::run(&operation, profile.as_deref(), opt_in).await
             }
             CredentialCommands::Pip {
                 operation,
@@ -714,6 +723,7 @@ async fn run() -> Result<()> {
                     &operation,
                     service_url.as_deref(),
                     username.as_deref(),
+                    opt_in,
                 )
                 .await
             }

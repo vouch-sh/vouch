@@ -25,15 +25,20 @@ use crate::integrations::aws::codecommit::{
 };
 use crate::integrations::aws::sts::StsCredentials;
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile, select_vouch_profile};
+use crate::server_url::{InsecureOptIn, ServerUrlError};
 
 /// Run the git credential helper for CodeCommit.
 ///
 /// # Arguments
 /// * `operation` - The git credential operation ("get", "store", or "erase")
 /// * `profile` - AWS profile in `~/.aws/config` that mints the credentials
-pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
+pub(crate) async fn run(
+    operation: &str,
+    profile: Option<&str>,
+    opt_in: InsecureOptIn,
+) -> Result<()> {
     match operation {
-        "get" => get_credential(profile).await,
+        "get" => get_credential(profile, opt_in).await,
         "store" | "erase" => {
             // No-ops for Vouch — we don't store credentials
             Ok(())
@@ -46,7 +51,7 @@ pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
 ///
 /// Git supplies only `protocol`, `host` and `path`, so `profile` can only reach
 /// here from the helper line `vouch setup codecommit` writes into git config.
-async fn get_credential(profile: Option<&str>) -> Result<()> {
+async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<()> {
     let input = read_credential_input()?;
 
     let protocol = input.protocol.as_deref().unwrap_or("");
@@ -99,7 +104,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         );
         return Ok(());
     }
-    let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
+    let creds = get_sts_credentials(&vouch_profile.role_arn, opt_in).await?;
     let signed = sign_request(&creds, &signing_host, &canonical_path, region);
 
     let stdout = std::io::stdout();
@@ -125,7 +130,11 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
 /// # Arguments
 /// * `remote_name` - The git remote name (e.g., "origin")
 /// * `url` - The `codecommit://` URL
-pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
+pub(crate) async fn run_remote_helper(
+    remote_name: &str,
+    url: &str,
+    opt_in: InsecureOptIn,
+) -> Result<()> {
     let parsed = parse_codecommit_url(url).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid CodeCommit URL: {url}\n\
@@ -149,7 +158,7 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
     // the role's partition; a cross-partition pair is guaranteed an opaque
     // 403 from CodeCommit at git time, so fail now with a clear message.
     crate::integrations::aws::validate_region_for_role(&region, &vouch_profile.role_arn)?;
-    let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
+    let creds = get_sts_credentials(&vouch_profile.role_arn, opt_in).await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
@@ -168,14 +177,16 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
 /// duplicating the OIDC → STS logic, and wraps it with the agent credential
 /// cache. The role is resolved by the caller so both CodeCommit flows can
 /// validate the target region's partition against it before signing anything.
-async fn get_sts_credentials(role_arn: &str) -> Result<StsCredentials> {
-    let session = crate::session::resolve_session()
-        .await
-        .context(tr!("err-not-configured-run-vouch-enroll-first"))?;
+async fn get_sts_credentials(role_arn: &str, opt_in: InsecureOptIn) -> Result<StsCredentials> {
+    let session = crate::session::resolve_session(opt_in).await.map_err(|e| {
+        if ServerUrlError::is_in(&e) {
+            e
+        } else {
+            e.context(tr!("err-not-configured-run-vouch-enroll-first"))
+        }
+    })?;
 
-    let server = session.server_url;
-
-    let data = super::aws::get_aws_credentials(&server, role_arn).await?;
+    let data = super::aws::get_aws_credentials(session.server_url.as_str(), role_arn).await?;
 
     // Extract STS credentials from the cached JSON
     let access_key_id = data
