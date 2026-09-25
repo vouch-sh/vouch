@@ -1719,9 +1719,10 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
                 return;
             }
             counted.fetch_add(1, Ordering::SeqCst);
-            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
-                .await
-                .expect("hook poll must not error");
+            let allowed =
+                update_device_auth_poll_time(&writer, &poll_id, 5, jiff::Timestamp::now())
+                    .await
+                    .expect("hook poll must not error");
             assert!(allowed, "hook poll must clear the rate-limit gate");
         })
     }));
@@ -1947,9 +1948,10 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
                 return;
             }
             counted.fetch_add(1, Ordering::SeqCst);
-            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
-                .await
-                .expect("hook poll must not error");
+            let allowed =
+                update_device_auth_poll_time(&writer, &poll_id, 5, jiff::Timestamp::now())
+                    .await
+                    .expect("hook poll must not error");
             assert!(allowed, "hook poll must clear the rate-limit gate");
         })
     }));
@@ -2076,9 +2078,10 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
                 return;
             }
             counted.fetch_add(1, Ordering::SeqCst);
-            let allowed = update_device_auth_poll_time(&writer, &poll_id, 5)
-                .await
-                .expect("hook poll must not error");
+            let allowed =
+                update_device_auth_poll_time(&writer, &poll_id, 5, jiff::Timestamp::now())
+                    .await
+                    .expect("hook poll must not error");
             assert!(allowed, "hook poll must clear the rate-limit gate");
             // Expire the code at this instant: after the consume's
             // entry-time clock read, before its retry re-reads the clock.

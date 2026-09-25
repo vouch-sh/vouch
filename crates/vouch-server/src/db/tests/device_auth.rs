@@ -207,17 +207,108 @@ async fn test_device_auth_polling_rate_limit() {
     .await
     .expect("Failed to create device auth request");
 
+    let t0 = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()).timestamp();
+
     // First poll should succeed
-    let allowed = update_device_auth_poll_time(&store, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval, t0)
         .await
         .expect("Failed to update poll time");
     assert!(allowed, "First poll should be allowed");
 
     // Immediate second poll should be rate limited
-    let allowed = update_device_auth_poll_time(&store, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval, t0)
         .await
         .expect("Failed to update poll time");
     assert!(!allowed, "Immediate second poll should be rate limited");
+}
+
+/// Offset `at` by `nanos` nanoseconds.
+fn plus_nanos(at: jiff::Timestamp, nanos: i64) -> jiff::Timestamp {
+    at.checked_add(jiff::SignedDuration::from_nanos(nanos))
+        .expect("in range")
+}
+
+// RFC 8628 §3.2: `interval` is "The minimum amount of time in seconds that
+// the client SHOULD wait between polling requests to the token endpoint."
+// A poll that waited exactly `interval` is allowed; one nanosecond less is
+// told to slow down (§3.5 `slow_down`).
+#[tokio::test]
+async fn test_device_auth_poll_interval_boundary_at_full_precision() {
+    let (store, _audit) = test_db().await;
+    let interval = 5;
+    let id = create_device_auth_request(
+        &store,
+        "poll_boundary_hash",
+        "POLL-BNDY",
+        "test-client",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        interval,
+    )
+    .await
+    .unwrap();
+
+    // Mid-second, so whole-second flooring would move both ends.
+    let t0 = crate::arrival::ArrivalTime::for_test(
+        jiff::Timestamp::from_second(1_900_000_000)
+            .unwrap()
+            .checked_add(jiff::SignedDuration::from_millis(700))
+            .unwrap(),
+    )
+    .timestamp();
+    let interval_nanos = i64::from(interval) * 1_000_000_000;
+
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, t0)
+            .await
+            .unwrap()
+    );
+    let just_under = crate::arrival::ArrivalTime::for_test(plus_nanos(t0, interval_nanos - 1));
+    assert!(
+        !update_device_auth_poll_time(&store, &id, interval, just_under.timestamp())
+            .await
+            .unwrap(),
+        "a poll one nanosecond short of the interval must be told to slow down"
+    );
+    let exactly = crate::arrival::ArrivalTime::for_test(plus_nanos(t0, interval_nanos));
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, exactly.timestamp())
+            .await
+            .unwrap(),
+        "a poll that waited exactly the interval must be allowed"
+    );
+}
+
+// Whole-second arithmetic let a poll 0.2s after its predecessor through a
+// 1-second interval whenever the two straddled a second boundary.
+#[tokio::test]
+async fn test_device_auth_poll_straddling_a_second_boundary_is_slowed() {
+    let (store, _audit) = test_db().await;
+    let interval = 1;
+    let id = create_device_auth_request(
+        &store,
+        "poll_straddle_hash",
+        "POLL-STRD",
+        "test-client",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        interval,
+    )
+    .await
+    .unwrap();
+
+    let second = jiff::Timestamp::from_second(1_900_000_000).unwrap();
+    let first = crate::arrival::ArrivalTime::for_test(plus_nanos(second, 900_000_000));
+    let next = crate::arrival::ArrivalTime::for_test(plus_nanos(second, 1_100_000_000));
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, first.timestamp())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !update_device_auth_poll_time(&store, &id, interval, next.timestamp())
+            .await
+            .unwrap(),
+        "0.2s between polls is under a 1s interval even across a second boundary"
+    );
 }
 
 #[tokio::test]
