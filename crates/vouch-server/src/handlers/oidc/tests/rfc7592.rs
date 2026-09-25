@@ -3566,6 +3566,292 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
 }
 
 // =========================================================================
+// RFC 7592 §2.2/§2.3 — end-to-end (full axum router) regression for the
+// deactivation vs. in-flight PUT/DELETE race (#1511 closure).
+//
+// `lookup_and_verify_registration_token` reads `owner.active` *outside* the
+// subsequent PUT/DELETE `store.transition`. A deactivation that commits in
+// that window flips only `UserDoc.active`, so an in-flight transition that
+// read the owner as active commits on an unchanged `OAuthClientDoc`. The fix
+// clears `registration_access_token_hash` on the deactivated owner's
+// Personal/Public clients inside the deactivation transaction,
+// version-bumping each client so the in-flight transition OCC-retries
+// against the now-empty hash, fails `registration_token_is`, and 401s.
+//
+// These tests drive the race through the real HTTP handler path
+// (`PUT/DELETE /oauth/register/:client_id` → `lookup_and_verify_registration_token`
+// → `update_oauth_client_registration`/`consume_registration_access_token`
+// → `store.transition`), using `test_app_with_modify_hook` to deactivate the
+// owner inside the write's OCC window deterministically. They are the
+// HTTP-layer analogues of
+// `db::tests::occ_modify::test_rfc7592_put_racing_demote_or_deactivate_is_rejected`
+// and `test_rfc7592_delete_racing_demote_or_deactivate_is_rejected`.
+// =========================================================================
+
+/// Register an owned (Personal) dynamic client via POST /oauth/register
+/// authenticated as `bearer`'s user, returning `(client_id, registration_access_token)`.
+async fn register_owned_dynamic_client(app: &axum::Router, bearer: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Owned Race Client"
+    });
+    let (status, body) = http_post_json(
+        app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "owned registration failed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_racing_owner_deactivation_is_rejected_e2e() {
+    use std::sync::{Arc, Mutex};
+
+    // (victim_doc_id, owner_id): set after registration so the hook only fires
+    // for the victim doc, and only once the owner is known.
+    let slot: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let slot_for_hook = Arc::clone(&slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        // Hookless writer for the in-hook deactivation — must not re-enter the
+        // hook. `demote_or_deactivate_member` writes through `StoreTransaction`,
+        // never `DocumentStore::transition`/`modify`, so the hook does not fire
+        // recursively.
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let slot = Arc::clone(&slot_for_hook);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                // Only fire for the victim doc, once the slot is armed.
+                let Some((victim, owner_id)) = slot.lock().expect("slot lock").clone() else {
+                    return;
+                };
+                if victim != doc_id {
+                    return;
+                }
+                // Deactivate the owner inside the PUT's first OCC attempt —
+                // after `lookup_and_verify_registration_token` read the owner
+                // as active but before the transition's compare-and-update.
+                db::demote_or_deactivate_member(
+                    &writer,
+                    &owner_id,
+                    db::MemberDowngrade::Deactivate,
+                )
+                .await
+                .expect("deactivate owner");
+            })
+        }));
+    })
+    .await;
+
+    // Owner authenticates and registers a Personal dynamic client.
+    let user = create_test_user(&state.store, "put-race-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (client_id, t_old) = register_owned_dynamic_client(&app, &bearer).await;
+
+    // Resolve the victim's internal doc id and arm the hook slot.
+    let victim = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    let original_redirect_uris = victim.redirect_uris.clone();
+    *slot.lock().expect("slot lock") = Some((victim.id.clone(), user.id.clone()));
+
+    // The attacker PUTs attacker redirect_uris with the leaked T_old while the
+    // owner is being deactivated. The 401 is uniform regardless.
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://attacker.example.com/cb"],
+        "client_name": "Attacker Renamed"
+    })
+    .to_string();
+    let put = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(put_body),
+        &[
+            ("Authorization", &format!("Bearer {t_old}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "PUT racing owner deactivation (e2e)",
+        put.status,
+        &put.body,
+        www_authenticate(&put),
+    );
+
+    // The owner is deactivated.
+    let owner = db::get_user_by_id(&state.store, &user.id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "the owner must be deactivated");
+
+    // The attacker's PUT did not commit: the client keeps its original
+    // redirect_uris and is not deleted (deactivation is not deletion).
+    let after = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup after")
+        .expect("client must still exist");
+    assert_eq!(
+        after.redirect_uris, original_redirect_uris,
+        "the attacker's PUT did not commit, so the original redirect_uris survive"
+    );
+    assert!(
+        after.active,
+        "the client stays active for end users; only management access is cut off"
+    );
+    assert_eq!(
+        after.registration_access_token_hash.as_deref(),
+        None,
+        "deactivation clears the registration access token hash so the \
+         in-flight transition retries against an empty hash and rejects"
+    );
+
+    // A subsequent GET with the original token 401s too: the deactivation
+    // cleared the stored hash (and the owner is inactive), so the read-time
+    // gate and the empty-hash check both refuse.
+    let get_after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "GET after racing deactivation (e2e)",
+        get_after.status,
+        &get_after.body,
+        www_authenticate(&get_after),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_delete_racing_owner_deactivation_is_rejected_e2e() {
+    use std::sync::{Arc, Mutex};
+
+    let slot: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let slot_for_hook = Arc::clone(&slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let slot = Arc::clone(&slot_for_hook);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                let Some((victim, owner_id)) = slot.lock().expect("slot lock").clone() else {
+                    return;
+                };
+                if victim != doc_id {
+                    return;
+                }
+                // Deactivate the owner inside the DELETE's `consume` first OCC
+                // attempt — after `lookup_and_verify_registration_token` read
+                // the owner as active but before the consume's compare-and-update.
+                db::demote_or_deactivate_member(
+                    &writer,
+                    &owner_id,
+                    db::MemberDowngrade::Deactivate,
+                )
+                .await
+                .expect("deactivate owner");
+            })
+        }));
+    })
+    .await;
+
+    let user = create_test_user(&state.store, "delete-race-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (client_id, t_old) = register_owned_dynamic_client(&app, &bearer).await;
+
+    let victim = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    *slot.lock().expect("slot lock") = Some((victim.id.clone(), user.id.clone()));
+
+    // The attacker DELETEs with the leaked T_old while the owner is being
+    // deactivated. The consume's transition OCC-retries against the now-empty
+    // hash and rejects, so the DELETE 401s and the client is not deleted.
+    let delete = http_request_full(
+        &app,
+        "DELETE",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "DELETE racing owner deactivation (e2e)",
+        delete.status,
+        &delete.body,
+        www_authenticate(&delete),
+    );
+
+    let owner = db::get_user_by_id(&state.store, &user.id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "the owner must be deactivated");
+
+    // The client must NOT be deleted by the racing DELETE.
+    let after = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup after")
+        .expect("client must NOT be deleted by the racing DELETE");
+    assert!(
+        after.active,
+        "the client stays active for end users; only management access is cut off"
+    );
+    assert_eq!(
+        after.registration_access_token_hash.as_deref(),
+        None,
+        "deactivation clears the registration access token hash"
+    );
+}
+
+// =========================================================================
 // RFC 7592 §2.2 PUT — a faithful restatement of stored metadata
 //
 // RFC 7592 §2.2: the update request "MUST include all client metadata fields

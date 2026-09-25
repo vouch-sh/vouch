@@ -871,6 +871,20 @@ pub async fn update_scim_user(
             return Err(ScimUpdateError::OccConflict);
         }
 
+        // Mirror `demote_or_deactivate_member`: an in-flight RFC 7592
+        // PUT/DELETE that read the owner as active before this commit must
+        // not land on an unchanged Personal/Public `OAuthClientDoc`. Clearing
+        // the stored registration access token hash inside this transaction
+        // forces that write's `store.transition` to OCC-retry against the
+        // now-empty hash and 401. See
+        // [`super::users::clear_registration_tokens`].
+        if !active
+            && user_doc.data.active
+            && !super::users::clear_registration_tokens(&mut tx, user_id).await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
         let mut updated = user_doc.data.clone();
         updated.name = name.map(String::from);
         updated.external_id = external_id.map(String::from);

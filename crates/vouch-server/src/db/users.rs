@@ -332,6 +332,63 @@ pub(super) async fn transfer_org_clients(
     Ok(true)
 }
 
+/// Clear the RFC 7592 registration access token on every Personal/Public
+/// client `user_id` owns and currently has one.
+///
+/// Deactivation "reaches" already-issued registration access tokens (#1511):
+/// once the owner is inactive, RFC 7592 management of these clients must
+/// stop. The read-time owner-active gate #1511 added blocks every request
+/// that *starts* after the deactivation commits, but a PUT/DELETE already in
+/// flight when the deactivation commits read `owner.active == true` and then
+/// writes through `store.transition` on the client doc — whose version the
+/// deactivation did not bump — so the transition's `data.active` and
+/// `registration_token_is` preconditions re-pass against an unchanged row and
+/// the write commits. Clearing the stored hash here, inside the deactivation
+/// transaction, version-bumps each affected client, forcing that in-flight
+/// transition to OCC-retry and re-read the now-empty hash, which fails
+/// `registration_token_is` and 401s. The bounded slip becomes impossible.
+///
+/// Bounded by the owner's dynamically-registered clients: every other owned
+/// client has `registration_access_token_hash = None` by construction
+/// (admin-created and legacy clients set it `None`; only dynamic POST
+/// creation and PUT rotation ever set it), so there is no work for users with
+/// no dynamic clients and no per-deactivation cost on issued/static clients.
+/// Organization-scoped clients are reassigned by `transfer_org_clients` and
+/// never hold a registration token, so they are skipped here.
+///
+/// Returns `false` when a client changed after it was read; the caller maps
+/// that to its retryable conflict, exactly as `transfer_org_clients` does.
+pub(super) async fn clear_registration_tokens(
+    tx: &mut super::store::StoreTransaction<'_>,
+    user_id: &str,
+) -> Result<bool> {
+    use super::documents::oauth::{AccessScope, OAuthClientDoc};
+
+    let clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+    for client in clients {
+        // Organization-scoped clients are reassigned by `transfer_org_clients`
+        // and never hold a registration token (only dynamic Personal/Public
+        // clients do), so skip them.
+        if client.data.access_scope == AccessScope::Organization {
+            continue;
+        }
+        // Only a client that currently holds a registration access token can
+        // be the target of an in-flight RFC 7592 PUT/DELETE; skip the rest.
+        if client.data.registration_access_token_hash.is_none() {
+            continue;
+        }
+        let mut data = client.data;
+        data.registration_access_token_hash = None;
+        if !tx
+            .compare_and_update(&client.id, client.version, &data)
+            .await?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Whether `member` counts toward "at least one active admin per
 /// organization", ignoring the member the caller is about to change.
 ///
@@ -491,10 +548,24 @@ pub async fn demote_or_deactivate_member(
             MemberDowngrade::Demote => updated.is_org_admin = false,
             MemberDowngrade::Deactivate => {
                 updated.active = false;
-                if user_doc.data.active
-                    && !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await?
-                {
-                    return Err(MemberDowngradeError::OccConflict);
+                if user_doc.data.active {
+                    if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
+                    // A deactivation must also "reach" already-issued RFC 7592
+                    // registration access tokens (#1511): an in-flight
+                    // PUT/DELETE that read `owner.active == true` before this
+                    // commit would otherwise land its `store.transition` on an
+                    // unchanged `OAuthClientDoc` and commit. Clearing the
+                    // stored hash on every Personal/Public client the owner
+                    // manages bumps each client's version inside this
+                    // transaction, forcing that transition to OCC-retry and
+                    // re-read the now-empty hash, which fails
+                    // `registration_token_is` and 401s. See
+                    // [`clear_registration_tokens`].
+                    if !clear_registration_tokens(&mut tx, user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
                 }
             }
         }

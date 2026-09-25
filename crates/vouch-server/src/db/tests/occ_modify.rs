@@ -1306,3 +1306,551 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
         "client_id lookup must observe the rotated token"
     );
 }
+
+// ===========================================================================
+// RFC 7592 vs. concurrent owner deactivation (#1511 race closure).
+//
+// `lookup_and_verify_registration_token` reads `owner.active` *outside* the
+// subsequent PUT/DELETE `store.transition`. Deactivation flips only
+// `UserDoc.active`, so an in-flight transition that read the owner as active
+// commits on an unchanged `OAuthClientDoc`. The fix clears
+// `registration_access_token_hash` on every Personal/Public client the
+// deactivated owner manages, inside the deactivation transaction —
+// version-bumping each client so the in-flight transition OCC-retries and
+// re-reads the now-empty hash, which fails `registration_token_is` and 401s.
+//
+// These tests drive the race deterministically with `set_modify_test_hook`:
+// the RFC 7592 write runs on the hooked store, and on its `transition`'s first
+// attempt the hook deactivates the owner through a hookless writer clone —
+// the `lookup_and_verify_registration_token` → deactivation → `transition`
+// commit ordering of the bug.
+// ===========================================================================
+
+/// A minimal dynamically-registered web client owned by `user_id`, holding
+/// `reg_token_hash`, at `AccessScope::Personal` — the scope `register_client`
+/// assigns to a user-owned dynamic registration. Mirrors
+/// `seed_dynamic_client_with_reg_token` but with an owner, so the
+/// deactivation paths have someone to deactivate and the owner-active read
+/// gate applies.
+async fn seed_owned_dynamic_client_with_reg_token(
+    store: &DocumentStore,
+    user_id: &str,
+    reg_token_hash: &str,
+) -> (OAuthClient, String) {
+    use crate::crypto::alg::JwsAlgorithm;
+
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+    create_oauth_client(
+        store,
+        &CreateOAuthClientParams {
+            user_id: Some(user_id),
+            name: "Owned Dynamic Reg Test",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::Personal,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
+            keys: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Dynamic,
+            registration_access_token_hash: Some(reg_token_hash),
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("create owned dynamic client")
+}
+
+/// `demote_or_deactivate_member(Deactivate)` racing an in-flight RFC 7592 PUT:
+/// the PUT read `owner.active == true`, the deactivation commits inside the
+/// PUT's OCC window, and the PUT's `transition` must OCC-retry against the
+/// now-empty registration access token hash and reject. Before the fix the
+/// deactivation left the `OAuthClientDoc` unchanged, so the PUT committed the
+/// attacker's `redirect_uris` and rotated the token.
+#[tokio::test]
+async fn test_rfc7592_put_racing_demote_or_deactivate_is_rejected() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let (owner_id, _) = upsert_user(&store, "race-owner@example.com", None)
+        .await
+        .expect("create owner");
+    let reg_token = "vouch_reg_PUT_RACE_TOKEN".to_string();
+    let reg_hash = hash_token(&reg_token);
+    let original_redirect_uris = vec!["https://example.com/callback".to_string()];
+    let (client, _client_id) =
+        seed_owned_dynamic_client_with_reg_token(&store, &owner_id, &reg_hash).await;
+    let victim_id = client.id.clone();
+
+    // Hookless writer for the in-hook deactivation — must not re-enter the
+    // hook. `demote_or_deactivate_member` writes through `StoreTransaction`
+    // (`tx.compare_and_update`), never `DocumentStore::transition`/`modify`,
+    // so the hook does not fire recursively.
+    let writer = store.clone();
+    let owner_for_hook = owner_id.clone();
+    let victim_for_hook = victim_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let owner_id = owner_for_hook.clone();
+        let victim_id = victim_for_hook.clone();
+        let doc_id = doc_id.to_string();
+        Box::pin(async move {
+            // Fire once, on the victim's first transition attempt, after the
+            // transition read the client but before its compare-and-update.
+            if attempt != 0 || doc_id != victim_id {
+                return;
+            }
+            demote_or_deactivate_member(&writer, &owner_id, MemberDowngrade::Deactivate)
+                .await
+                .expect("deactivate owner");
+        })
+    }));
+
+    let attacker_uris = vec!["https://attacker.example.com/cb".to_string()];
+    let outcome = update_oauth_client_registration(
+        &hooked,
+        &victim_id,
+        &reg_hash,
+        &UpdateClientRegistrationParams {
+            redirect_uris: &attacker_uris,
+            grant_types: None,
+            response_types: None,
+            keys: None,
+            registration_access_token_hash: &hash_token("vouch_reg_ROTATED_must_not_land"),
+            registration_metadata: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+            client_name: None,
+            software_id: None,
+            software_version: None,
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+        },
+    )
+    .await
+    .expect("PUT must not error");
+
+    // The PUT's precondition rejected on the OCC retry: no commit.
+    assert!(
+        outcome.is_none(),
+        "a PUT racing the owner's deactivation must not commit; got {outcome:?}"
+    );
+
+    let owner = get_user_by_id(&store, &owner_id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "the owner must be deactivated");
+
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get client")
+        .expect("client still exists");
+    // Deactivation is not deletion: the client stays live for end users, but
+    // the attacker's PUT did not commit and the registration token the
+    // deactivation cleared is gone.
+    assert_eq!(
+        after.data.redirect_uris, original_redirect_uris,
+        "the attacker's PUT did not commit, so the original redirect_uris survive"
+    );
+    assert_eq!(
+        after.data.registration_access_token_hash.as_deref(),
+        None,
+        "deactivation clears the registration access token hash so the \
+         in-flight transition retries against an empty hash and rejects"
+    );
+}
+
+/// `demote_or_deactivate_member(Deactivate)` racing an in-flight RFC 7592
+/// DELETE: the DELETE's `consume_registration_access_token` must OCC-retry
+/// against the now-empty hash and return `false` (did not consume), so the
+/// caller 401s and the client is not deleted. Before the fix the DELETE
+/// consumed the token and deleted the client + revoked its sessions.
+#[tokio::test]
+async fn test_rfc7592_delete_racing_demote_or_deactivate_is_rejected() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let (owner_id, _) = upsert_user(&store, "race-owner-delete@example.com", None)
+        .await
+        .expect("create owner");
+    let reg_token = "vouch_reg_DELETE_RACE_TOKEN".to_string();
+    let reg_hash = hash_token(&reg_token);
+    let (client, _client_id) =
+        seed_owned_dynamic_client_with_reg_token(&store, &owner_id, &reg_hash).await;
+    let victim_id = client.id.clone();
+
+    let writer = store.clone();
+    let owner_for_hook = owner_id.clone();
+    let victim_for_hook = victim_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let owner_id = owner_for_hook.clone();
+        let victim_id = victim_for_hook.clone();
+        let doc_id = doc_id.to_string();
+        Box::pin(async move {
+            if attempt != 0 || doc_id != victim_id {
+                return;
+            }
+            demote_or_deactivate_member(&writer, &owner_id, MemberDowngrade::Deactivate)
+                .await
+                .expect("deactivate owner");
+        })
+    }));
+
+    let consumed = consume_registration_access_token(&hooked, &victim_id, &reg_hash)
+        .await
+        .expect("DELETE consume must not error");
+
+    // The DELETE lost its token to the deactivation: it did not consume, so
+    // the caller 401s and never reaches the client delete.
+    assert!(
+        !consumed,
+        "a DELETE racing the owner's deactivation must not consume the token; \
+         got consumed={consumed}"
+    );
+
+    let owner = get_user_by_id(&store, &owner_id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "the owner must be deactivated");
+
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get client")
+        .expect("client must NOT be deleted by the racing DELETE");
+    assert_eq!(
+        after.data.registration_access_token_hash.as_deref(),
+        None,
+        "deactivation clears the registration access token hash"
+    );
+    assert!(
+        after.data.active,
+        "the client stays active for end users; only the owner's management \
+         access is cut off"
+    );
+}
+
+/// SCIM `active=false` (`update_scim_user`) racing an in-flight RFC 7592 PUT:
+/// same closure as the `demote_or_deactivate_member` case, through the SCIM
+/// transactional deactivation path. The PUT must OCC-retry against the
+/// now-empty hash and reject.
+#[tokio::test]
+async fn test_rfc7592_put_racing_scim_deactivation_is_rejected() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    // A non-admin member owns the dynamic client; an active admin keeps the
+    // org off the last-admin floor so the SCIM deactivation is not refused.
+    let (owner_id, _) = upsert_user_with_org(
+        &store,
+        "scim-race-owner@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create owner");
+    let (_admin_id, _) = upsert_user_with_org(
+        &store,
+        "scim-race-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let reg_token = "vouch_reg_SCIM_RACE_TOKEN".to_string();
+    let reg_hash = hash_token(&reg_token);
+    let original_redirect_uris = vec!["https://example.com/callback".to_string()];
+    let (client, _client_id) =
+        seed_owned_dynamic_client_with_reg_token(&store, &owner_id, &reg_hash).await;
+    let victim_id = client.id.clone();
+
+    let writer = store.clone();
+    let owner_for_hook = owner_id.clone();
+    let victim_for_hook = victim_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let owner_id = owner_for_hook.clone();
+        let victim_id = victim_for_hook.clone();
+        let doc_id = doc_id.to_string();
+        Box::pin(async move {
+            if attempt != 0 || doc_id != victim_id {
+                return;
+            }
+            update_scim_user(&writer, &owner_id, TEST_ORG_ID, None, None, false)
+                .await
+                .expect("scim deactivate owner");
+        })
+    }));
+
+    let attacker_uris = vec!["https://attacker.example.com/scim".to_string()];
+    let outcome = update_oauth_client_registration(
+        &hooked,
+        &victim_id,
+        &reg_hash,
+        &UpdateClientRegistrationParams {
+            redirect_uris: &attacker_uris,
+            grant_types: None,
+            response_types: None,
+            keys: None,
+            registration_access_token_hash: &hash_token("vouch_reg_SCIM_ROTATED_must_not_land"),
+            registration_metadata: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+            client_name: None,
+            software_id: None,
+            software_version: None,
+            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+        },
+    )
+    .await
+    .expect("PUT must not error");
+
+    assert!(
+        outcome.is_none(),
+        "a PUT racing the SCIM deactivation must not commit; got {outcome:?}"
+    );
+
+    let owner = get_user_by_id(&store, &owner_id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "the owner must be deactivated by SCIM");
+
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get client")
+        .expect("client still exists");
+    assert_eq!(
+        after.data.redirect_uris, original_redirect_uris,
+        "the attacker's PUT did not commit"
+    );
+    assert_eq!(
+        after.data.registration_access_token_hash.as_deref(),
+        None,
+        "SCIM deactivation clears the registration access token hash"
+    );
+}
+
+/// `demote_or_deactivate_member(Deactivate)` clears the registration access
+/// token on a Personal/Public dynamic client the deactivated owner manages,
+/// transfers org-scoped clients to an active admin (existing behavior), and
+/// leaves the personal client owned by the (now-inactive) owner. The personal
+/// client stays `active` for end users — only management access is cut off.
+#[tokio::test]
+async fn test_demote_or_deactivate_member_clears_owned_registration_access_token() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (owner_id, _) = upsert_user_with_org(
+        &store,
+        "deact-owner@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create owner");
+    let (admin_id, _) = upsert_user_with_org(
+        &store,
+        "deact-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let reg_hash = hash_token("vouch_reg_DEACT_DIRECT_TOKEN");
+    let (personal, _) =
+        seed_owned_dynamic_client_with_reg_token(&store, &owner_id, &reg_hash).await;
+    let personal_id = personal.id.clone();
+    let org_client = create_test_client(
+        &store,
+        &owner_id,
+        TestClientSpec {
+            name: "Org App".to_string(),
+            access_scope: AccessScope::Organization,
+            org_id: Some(TEST_ORG_ID.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let org_client_internal = org_client.app_id.clone();
+
+    assert!(
+        demote_or_deactivate_member(&store, &owner_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivate")
+    );
+
+    // Owner inactive.
+    let owner = get_user_by_id(&store, &owner_id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "owner deactivated");
+
+    // Personal dynamic client: hash cleared, still owned by the deactivated
+    // owner, still active for end users.
+    let personal_after = store
+        .get::<OAuthClientDoc>(&personal_id)
+        .await
+        .expect("get personal")
+        .expect("personal client exists");
+    assert_eq!(
+        personal_after
+            .data
+            .registration_access_token_hash
+            .as_deref(),
+        None,
+        "deactivation clears the personal client's registration access token"
+    );
+    assert_eq!(
+        personal_after.data.user_id.as_deref(),
+        Some(owner_id.as_str()),
+        "a personal client is not transferred; it stays with its owner"
+    );
+    assert!(
+        personal_after.data.active,
+        "the client stays active for end users"
+    );
+
+    // Org-scoped client: transferred to the active admin (unchanged behavior).
+    let org_after = store
+        .get::<OAuthClientDoc>(&org_client_internal)
+        .await
+        .expect("get org client")
+        .expect("org client exists");
+    assert_eq!(
+        org_after.data.user_id.as_deref(),
+        Some(admin_id.as_str()),
+        "org-scoped client transfers to the active admin"
+    );
+}
+
+/// SCIM `active=false` (`update_scim_user`) clears the registration access
+/// token on the deactivated owner's Personal dynamic client — the SCIM
+/// transactional path's analogue of the admin-deactivate path above.
+#[tokio::test]
+async fn test_scim_deactivation_clears_owned_registration_access_token() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (owner_id, _) = upsert_user_with_org(
+        &store,
+        "scim-deact-owner@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create owner");
+    let (_admin_id, _) = upsert_user_with_org(
+        &store,
+        "scim-deact-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let reg_hash = hash_token("vouch_reg_SCIM_DIRECT_TOKEN");
+    let (personal, _) =
+        seed_owned_dynamic_client_with_reg_token(&store, &owner_id, &reg_hash).await;
+    let personal_id = personal.id.clone();
+
+    assert!(
+        update_scim_user(&store, &owner_id, TEST_ORG_ID, None, None, false)
+            .await
+            .expect("scim deactivate")
+    );
+
+    let owner = get_user_by_id(&store, &owner_id)
+        .await
+        .expect("lookup owner")
+        .expect("owner exists");
+    assert!(!owner.active, "owner deactivated by SCIM");
+
+    let personal_after = store
+        .get::<OAuthClientDoc>(&personal_id)
+        .await
+        .expect("get personal")
+        .expect("personal client exists");
+    assert_eq!(
+        personal_after
+            .data
+            .registration_access_token_hash
+            .as_deref(),
+        None,
+        "SCIM deactivation clears the personal client's registration access token"
+    );
+    assert!(
+        personal_after.data.active,
+        "the client stays active for end users"
+    );
+}
