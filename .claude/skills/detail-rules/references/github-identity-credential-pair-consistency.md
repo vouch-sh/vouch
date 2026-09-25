@@ -8,13 +8,13 @@ Two directions can break the invariant that `github_id`, `github_login`, and `gi
 
 **Direction 1 — Credential rotation path (`update_user_github_refresh_token`):**
 
-The rotation path reads a refresh token, performs a network round-trip (`refresh_oauth_token`), and then writes the rotated token back. A concurrent re-link can commit during that window, so:
+The rotation path reads a refresh token, performs a network round-trip (`refresh_oauth_token`), and then writes the rotated token back. A concurrent re-link, revocation, or another rotation can commit during that window, so:
 
 1. `github_id` and `github_refresh_token` must be read from a **single doc snapshot** (one `store.get` call returning a `GitHubLink`). Reading them in separate queries — e.g., one call to `get_user_github_refresh_token` and a separate call or field access to get `github_id` — lets a re-link land between the reads, defeating the identity guard.
 
-2. The write-back inside `store.transition` (or `store.modify`) must **condition the write on `data.github_id == expected_github_id`**. An unconditional `data.github_refresh_token = Some(...)` clobbers the new account's token whenever a re-link committed during the network round-trip.
+2. The write-back inside `store.transition` (or `store.modify`) must **condition the write on the stored link still matching the snapshot — same `github_id` *and* same `github_refresh_token`**. Conditioning only on `github_id` lets a revocation that cleared the token (or a concurrent refresh that rotated it) commit during the round-trip and then have the stale write restore the cleared token or overwrite the newer rotation; an unconditional `data.github_refresh_token = Some(...)` clobbers the new account's token on a re-link.
 
-3. When the identity check fails, the path must return `RefreshOutcome::SkippedIdentityChanged` (not an error) and the caller must **not** surface the rotated token.
+3. When the precondition check fails, the path must return `RefreshOutcome::SkippedLinkChanged` (not an error) and the caller must **not** surface the rotated token.
 
 **Direction 2 — Identity update path (`update_user_github_identity`):**
 
@@ -99,18 +99,23 @@ store.modify::<UserDoc, _>(user_id, |data| {
 **Rotation — single-snapshot read + conditional write:**
 
 ```rust
-// Correct: read id + token together, condition write on stored id
+// Correct: read id + token together, condition write on the stored link
 let linked = db::get_user_github_link(store, user_id).await?;
 // linked: Option<GitHubLink { github_id, github_refresh_token }>
-let expected_github_id = linked.github_id;
 // ... network call ...
 let outcome = store
     .transition::<UserDoc, RefreshOutcome, RefreshOutcome, _>(user_id, |data| {
-        if data.github_id == expected_github_id {
+        // Condition on `data.github_id` AND the stored refresh token still
+        // matching `linked` (constant-time compare of the secret bytes): a
+        // re-link changes both, a revocation clears the token, a concurrent
+        // refresh rotates it.
+        if data.github_id == linked.github_id
+            && tokens_match(&data.github_refresh_token, &linked.github_refresh_token)
+        {
             data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
             Ok(RefreshOutcome::Written)
         } else {
-            Err(RefreshOutcome::SkippedIdentityChanged)
+            Err(RefreshOutcome::SkippedLinkChanged)
         }
     })
     .await?;
