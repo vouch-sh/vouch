@@ -1740,7 +1740,7 @@ pub(crate) async fn browser_register_complete(
             audience: None,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(auth_now.as_second()),
+                auth_time: Some(auth_now.instant()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,

@@ -501,7 +501,7 @@ async fn test_stale_session_cannot_delete_key() {
             email: &user.email,
             auth_id: Some(&auth_a),
             verification: TestVerification::Verified {
-                auth_time: Some(stale_iat),
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
             },
             ..Default::default()
         },
@@ -591,7 +591,7 @@ async fn test_boundary_exactly_at_max_age() {
             email: &user.email,
             auth_id: Some(&auth_a),
             verification: TestVerification::Verified {
-                auth_time: Some(boundary_iat),
+                auth_time: jiff::Timestamp::from_second(boundary_iat).ok(),
             },
             ..Default::default()
         },
@@ -628,7 +628,7 @@ async fn test_one_second_over_max_age() {
             email: &user.email,
             auth_id: Some(&auth_a),
             verification: TestVerification::Verified {
-                auth_time: Some(over_iat),
+                auth_time: jiff::Timestamp::from_second(over_iat).ok(),
             },
             ..Default::default()
         },
@@ -1172,7 +1172,7 @@ async fn test_step_up_recovery() {
             email: &user.email,
             auth_id: Some(&auth_a),
             verification: TestVerification::Verified {
-                auth_time: Some(stale_iat),
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
             },
             ..Default::default()
         },

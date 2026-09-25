@@ -2251,7 +2251,7 @@ mod tests {
                 email: &user.email,
                 auth_id: Some(&key_a),
                 verification: TestVerification::Verified {
-                    auth_time: Some(stale),
+                    auth_time: jiff::Timestamp::from_second(stale).ok(),
                 },
                 ..Default::default()
             },
@@ -2292,7 +2292,7 @@ mod tests {
                 email: &user.email,
                 auth_id: Some(&key_a),
                 verification: TestVerification::Verified {
-                    auth_time: Some(future_iat),
+                    auth_time: jiff::Timestamp::from_second(future_iat).ok(),
                 },
                 ..Default::default()
             },

@@ -530,7 +530,7 @@ pub(crate) async fn exchange_fido2_assertion(
             // processing delay, and diverge from the browser-login and
             // device-code flows, which both carry the ceremony instant.
             hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(assertion_result.verified_at.as_second()),
+                auth_time: Some(assertion_result.verified_at.instant()),
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),

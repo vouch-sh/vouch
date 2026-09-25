@@ -929,6 +929,7 @@ pub(crate) async fn create_oauth_access_token(
             org_domain: params.org_domain,
             client_id: Some(params.client_id),
             source_code_hash: params.source_code_hash,
+            authenticated_at: params.hardware_verification.authenticated_at(),
         },
     )
     .await

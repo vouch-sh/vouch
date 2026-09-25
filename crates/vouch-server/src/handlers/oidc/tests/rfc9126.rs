@@ -1597,11 +1597,23 @@ async fn test_rfc9126_par_consumed_when_code_issued_after_login() {
         .expect("login redirect carries the pending auth id")
         .to_string();
 
-    // Return trip from login: the code is issued here.
+    // Return trip from login: the code is issued here. The login leaves a
+    // session whose ceremony follows the pending record; the resume path
+    // refuses the pre-login cookie for a re-authentication it forced.
+    let fresh_session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let completed = http_get_full(
         &app,
         &format!("/oauth/authorize?pending_auth={pending_id}"),
-        &[("Cookie", &cookie)],
+        &[("Cookie", &format!("__Host-vouch_session={fresh_session}"))],
     )
     .await;
     let completed_location = completed

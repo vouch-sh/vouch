@@ -1711,6 +1711,7 @@ mod tests {
                 org_domain: None,
                 client_id: None,
                 source_code_hash: Some(&setup.device_code_hash),
+                authenticated_at: None,
             },
         )
         .await

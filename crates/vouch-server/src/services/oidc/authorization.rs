@@ -330,12 +330,13 @@ pub struct AuthorizationCodeParams<'a> {
     pub auth_code_lifetime_seconds: i64,
     /// RFC 9396: Rich authorization details (JSON value for server-side storage).
     pub authorization_details: Option<&'a serde_json::Value>,
-    /// OIDC Core Section 2: Time when the End-User authentication occurred.
-    ///
-    /// This should be the session's `created_at` timestamp so that `auth_time`
-    /// in the id_token reflects the actual authentication event, not code issuance.
-    /// When `None`, falls back to the code's `iat`.
-    pub auth_time: Option<i64>,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred,
+    /// at full precision — the session's ceremony instant, never the row's
+    /// creation or code issuance. The token endpoint copies it verbatim onto
+    /// the session row it mints and reports its whole second as `auth_time`.
+    /// `None` when the session cannot say when it authenticated; the issued
+    /// tokens then carry no `auth_time`.
+    pub authenticated_at: Option<Timestamp>,
     /// RFC 9126: proof that the pushed authorization request backing this
     /// authorization was consumed, or that the request was never pushed.
     ///
@@ -519,24 +520,18 @@ pub enum AuthorizationSessionState {
         user: Box<User>,
         /// The authenticator used.
         authenticator: Box<Authenticator>,
-        /// When the session's FIDO2 ceremony happened, from the access
-        /// token's `auth_time` claim — the value the issued code reports as
-        /// `auth_time` and the `max_age` decision measures from.
+        /// When the session's FIDO2 ceremony happened, at full precision,
+        /// from the session row. Its whole second is the `auth_time` the
+        /// issued code reports; the `max_age` decision measures from it; and
+        /// the pending-auth resume path treats the session as fresh for a
+        /// `max_age` / `prompt=login` request only when it is strictly after
+        /// the pending record's creation.
         ///
         /// `None` for a session whose verification was inherited rather than
-        /// observed (RFC 8693 token exchange) or issued before the instant
+        /// observed (RFC 8693 token exchange) or written before the instant
         /// was recorded. It stays `None` all the way to the claim: row
         /// creation and code issuance are not authentication.
-        auth_time: Option<i64>,
-        /// When the server-side session row was created, at full sub-second
-        /// precision.
-        ///
-        /// The pending-auth resume path treats a session as fresh for that
-        /// request only when this is after the pending record *and*
-        /// `auth_time` is no earlier than the pending's second. Row creation
-        /// alone is not authentication: the authorization_code grant writes a
-        /// new row carrying an older ceremony's `auth_time`.
-        session_created_at: Timestamp,
+        authenticated_at: Option<Timestamp>,
     },
     /// User needs to authenticate.
     NeedsAuth,
@@ -579,9 +574,11 @@ pub struct AuthorizationCode {
     pub dpop_jkt: Option<String>,
     pub iat: i64,
     pub exp: i64,
-    /// OIDC Core Section 2: Time when the End-User authentication occurred.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_time: Option<i64>,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred,
+    /// at full precision. The token endpoint copies this original ceremony
+    /// instant onto the session row it mints — it never stamps its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_at: Option<Timestamp>,
 }
 
 impl AuthorizationCode {
@@ -902,8 +899,7 @@ pub async fn check_session_for_authorization(
             Ok(AuthorizationSessionState::Authenticated {
                 user: Box::new(validated.user),
                 authenticator: Box::new(authenticator),
-                auth_time: validated.auth_time,
-                session_created_at: validated.session_created_at,
+                authenticated_at: validated.authenticated_at,
             })
         }
         None => Ok(AuthorizationSessionState::NeedsAuth),
@@ -968,7 +964,7 @@ pub async fn issue_authorization_code(
         dpop_jkt: params.dpop_jkt.map(String::from),
         iat: now.as_second(),
         exp,
-        auth_time: params.auth_time,
+        authenticated_at: params.authenticated_at,
     };
 
     let code = auth_code.encode(&state.state_signer).await.map_err(|e| {
@@ -1294,7 +1290,7 @@ mod tests {
             dpop_jkt: None,
             iat: 1_000_000_000,
             exp: 9_999_999_999,
-            auth_time: None,
+            authenticated_at: None,
         }
     }
 

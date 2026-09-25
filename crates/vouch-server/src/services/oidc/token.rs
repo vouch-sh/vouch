@@ -385,7 +385,7 @@ pub(crate) async fn exchange_authorization_code(
             audience: grants.audience.as_deref(),
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::Verified {
-                auth_time: auth_code.auth_time,
+                auth_time: auth_code.authenticated_at,
             },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
@@ -457,7 +457,7 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             scope: &auth_code.scope,
             hardware_verification: HardwareVerification::Verified {
-                auth_time: auth_code.auth_time,
+                auth_time: auth_code.authenticated_at,
             },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
@@ -1339,24 +1339,17 @@ pub struct OidcValidatedSession {
     /// Whether a FIDO2 assertion backs this session, from the access token's
     /// `hardware_verified` claim.
     pub hardware_verified: bool,
-    /// When that assertion happened, from the access token's `auth_time`
-    /// claim (OIDC Core §2).
+    /// When that assertion happened, at full precision, read from the
+    /// server-side session row (the access token's `auth_time` claim is its
+    /// whole second, OIDC Core §2).
     ///
     /// Independent of [`Self::hardware_verified`]: a token exchanged under
     /// RFC 8693 inherits the subject's verification but not its instant, and
-    /// tokens issued before the instant was recorded carry none. `None`
+    /// rows written before the instant was recorded carry none. `None`
     /// means "cannot say when", and nothing may substitute a nearby
-    /// timestamp for it.
-    pub auth_time: Option<i64>,
-    /// When the server-side session row backing this token was created, read
-    /// from the stored session record at full (sub-second) precision.
-    ///
-    /// Distinct from [`Self::auth_time`]: `auth_time` is the integer-second
-    /// ceremony instant the issued code reports, while this is the row's
-    /// creation instant. A new row does not imply a new ceremony — the
-    /// authorization_code grant mints one carrying an older `auth_time` — so
-    /// callers must never read this as an authentication time on its own.
-    pub session_created_at: jiff::Timestamp,
+    /// timestamp for it — in particular not the row's creation instant: the
+    /// authorization_code grant mints a new row carrying an older ceremony.
+    pub authenticated_at: Option<jiff::Timestamp>,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1434,9 +1427,9 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let (client_id, hardware_verified, auth_time) = match &decoded {
+    let (client_id, hardware_verified) = match &decoded {
         crate::services::auth::DecodedToken::AccessToken(c) => {
-            (Some(c.client_id.clone()), c.hardware_verified, c.auth_time)
+            (Some(c.client_id.clone()), c.hardware_verified)
         }
     };
 
@@ -1446,8 +1439,9 @@ pub async fn validate_session_token(
         scope: decoded.scope().cloned(),
         client_id,
         hardware_verified,
-        auth_time,
-        session_created_at: session.created_at,
+        // Only a verified session can carry a ceremony instant; an unverified
+        // token never reports one, whatever its row holds.
+        authenticated_at: session.authenticated_at.filter(|_| hardware_verified),
     }))
 }
 
@@ -1496,7 +1490,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         }
     }
 
@@ -1672,7 +1666,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(Some(code_verifier));
@@ -1700,7 +1694,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(Some("wrong_verifier"));
@@ -1728,7 +1722,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(None);
@@ -1759,7 +1753,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(None);

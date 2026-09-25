@@ -71,6 +71,7 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -89,6 +90,7 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await

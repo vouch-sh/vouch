@@ -412,6 +412,7 @@ async fn remove_additional_domain_invalidates_session_cache_for_matching_users()
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -430,6 +431,7 @@ async fn remove_additional_domain_invalidates_session_cache_for_matching_users()
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await

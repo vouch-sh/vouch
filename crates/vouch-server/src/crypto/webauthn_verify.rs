@@ -203,8 +203,14 @@ pub enum VerifyError {
 /// that a ceremony happened at that instant, which is what stops a later
 /// request — a device-code poll, say — from passing off its own clock
 /// reading as an authentication time (issue #1166).
+///
+/// The instant is kept at full precision. The `auth_time` claim is whole
+/// seconds ([`Self::as_second`]), but the session row records
+/// [`Self::instant`] so the `max_age=0` / `prompt=login` freshness decision
+/// can order a ceremony against a pending authorization stored in the same
+/// second.
 #[derive(Debug, Clone, Copy)]
-pub struct AuthTime(i64);
+pub struct AuthTime(jiff::Timestamp);
 
 impl AuthTime {
     /// Stamp the current instant. Private: every public path to an
@@ -214,7 +220,7 @@ impl AuthTime {
         reason = "stamps the instant a ceremony completed, not a comparison"
     )]
     fn stamp() -> Self {
-        Self(jiff::Timestamp::now().as_second())
+        Self(jiff::Timestamp::now())
     }
 
     /// The instant a `webauthn-rs` registration ceremony completed.
@@ -227,18 +233,32 @@ impl AuthTime {
         Self::stamp()
     }
 
-    /// Unix seconds, for the `auth_time` claim and for storage.
+    /// Unix seconds, for the `auth_time` claim.
     #[must_use]
     pub fn as_second(self) -> i64 {
+        self.0.as_second()
+    }
+
+    /// The ceremony instant at full precision, for storage and for the
+    /// freshness decision.
+    #[must_use]
+    pub fn instant(self) -> jiff::Timestamp {
         self.0
     }
 
-    /// Build an `AuthTime` for a specific instant in tests, standing in for
+    /// Build an `AuthTime` for a specific second in tests, standing in for
     /// a ceremony that cannot be run without hardware.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
     pub fn for_test(unix_seconds: i64) -> Self {
-        Self(unix_seconds)
+        Self(jiff::Timestamp::from_second(unix_seconds).unwrap_or_default())
+    }
+
+    /// Build an `AuthTime` for a specific sub-second instant in tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn for_test_instant(at: jiff::Timestamp) -> Self {
+        Self(at)
     }
 }
 

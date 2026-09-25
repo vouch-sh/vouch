@@ -439,17 +439,14 @@ async fn check_session_and_authorize(
         Ok(AuthorizationSessionState::Authenticated {
             user,
             authenticator,
-            auth_time: session_auth_time,
-            // The direct path enforces max_age unconditionally (no freshness
-            // guard), so the session row's creation instant is not needed here.
-            session_created_at: _,
+            authenticated_at: session_authenticated_at,
         }) => {
             authorize_authenticated_user(
                 state,
                 validated,
                 &resolved.client,
                 &user,
-                session_auth_time,
+                session_authenticated_at,
                 &authenticator,
                 reauth_policy,
                 par_to_consume,
@@ -1275,8 +1272,7 @@ async fn handle_pending_auth(
         Ok(AuthorizationSessionState::Authenticated {
             user,
             authenticator,
-            auth_time: session_auth_time,
-            session_created_at,
+            authenticated_at: session_authenticated_at,
         }) => {
             // The single-use pending claim is spent inside
             // `complete_pending_auth`, after the post-login validations
@@ -1290,8 +1286,7 @@ async fn handle_pending_auth(
                 &resolved,
                 &pending,
                 &user,
-                session_auth_time,
-                session_created_at,
+                session_authenticated_at,
                 &authenticator,
                 auth_code_lifetime,
                 arrival,
@@ -1328,9 +1323,83 @@ async fn handle_pending_auth(
 // Pending auth completion (extracted to keep handle_pending_auth under 100 lines)
 // ---------------------------------------------------------------------------
 
-/// Complete the pending auth flow: check access, check max_age, validate
-/// ACR/resource, consume the PAR, spend the single-use pending claim, and
-/// issue the code.
+/// Decide whether resuming `pending` with a session authenticated at
+/// `session_authenticated_at` must be refused with `login_required`, and if
+/// so, why (the `error_description`).
+fn pending_reauth_violation(
+    pending: &db::PendingOAuthAuthorization,
+    session_authenticated_at: Option<jiff::Timestamp>,
+    arrival: ArrivalTime,
+) -> Option<&'static str> {
+    // Freshness for this request. A session is *fresh* only when its FIDO2
+    // ceremony instant, recorded on the session row at full precision, is
+    // strictly after the pending record was stored: the user authenticated
+    // for *this* request.
+    //
+    // Neither the row's creation instant nor the whole-second `auth_time`
+    // claim can answer that. The authorization_code grant mints a new row
+    // carrying the *old* ceremony, so a row newer than the pending proves
+    // nothing; and a ceremony for an earlier request in the same second as
+    // the pending floors equal to it. The ceremony instant is copied — never
+    // restamped — by every grant that mints a row from an older ceremony, so
+    // comparing it directly closes both.
+    //
+    // A session with no recorded instant (RFC 8693 exchange, or a row
+    // written before the field existed) is never fresh.
+    let fresh = session_authenticated_at.is_some_and(|at| at > pending.created_at);
+
+    // OIDC Core 3.1.2.3: when the request carries prompt=login "the
+    // Authorization Server MUST reauthenticate the End-User even if the
+    // End-User is already authenticated." The login page forces the
+    // assertion form for such a pending, but nothing stops the browser
+    // returning here with the old cookie, so the resume path asks the same
+    // question. A pending stored because max_age forced re-authentication
+    // also carries prompt=login.
+    let prompt_requests_login = pending
+        .prompt
+        .as_deref()
+        .and_then(|raw| PromptSet::parse(raw).ok())
+        .is_some_and(|set| set.contains(Prompt::Login));
+    if prompt_requests_login && !fresh {
+        return Some("Re-authentication was requested but the session predates the request");
+    }
+
+    // OIDC Core 3.1.2.1 (max_age): "If the elapsed time is greater than this
+    // value, the OP MUST attempt to actively re-authenticate the End-User."
+    // and "Note that "max_age=0" is equivalent to "prompt=login"."
+    //
+    // A fresh session satisfies any max_age (including 0) by definition, and
+    // skipping the elapsed check for it keeps max_age=0 completable however
+    // long the post-login navigation took. Every other session is checked by
+    // elapsed time from the ceremony, since max_age bounds an authentication
+    // age, not a row's lifetime.
+    //
+    // A session with no recorded ceremony instant cannot answer "how long
+    // ago", so a request that asks the question gets re-authentication
+    // rather than a substituted value.
+    if let Some(max_age) = pending.max_age
+        && !fresh
+    {
+        let Some(authenticated_at) = session_authenticated_at else {
+            return Some("Session records no authentication time for max_age");
+        };
+        // Reject only when the session age *exceeds* max_age (strict `>`).
+        // A session exactly at the threshold (age == max_age) is "not older
+        // than" it and satisfies the requirement. The elapsed time is
+        // compared at full precision, matching the direct
+        // `authorize_authenticated_user` path.
+        let elapsed = arrival.timestamp().duration_since(authenticated_at);
+        let limit = jiff::SignedDuration::from_secs(max_age);
+        if elapsed > limit {
+            return Some("Session exceeds requested max_age");
+        }
+    }
+    None
+}
+
+/// Complete the pending auth flow: check access, check prompt=login /
+/// max_age freshness, validate ACR/resource, consume the PAR, spend the
+/// single-use pending claim, and issue the code.
 ///
 /// The pending claim is spent as the *last* action before code issuance so a
 /// rejection at any of the preceding gates does not burn it, and a retry of
@@ -1346,8 +1415,7 @@ async fn complete_pending_auth(
     resolved: &AuthorizeResponseTarget,
     pending: &db::PendingOAuthAuthorization,
     user: &User,
-    session_auth_time: Option<i64>,
-    session_created_at: jiff::Timestamp,
+    session_authenticated_at: Option<jiff::Timestamp>,
     authenticator: &Authenticator,
     auth_code_lifetime: i64,
     arrival: ArrivalTime,
@@ -1362,82 +1430,16 @@ async fn complete_pending_auth(
         .into_response();
     }
 
-    // Validate max_age. OIDC Core 3.1.2.1: "If the elapsed time is greater
-    // than this value, the OP MUST attempt to actively re-authenticate the
-    // End-User." and "Note that "max_age=0" is equivalent to "prompt=login"."
-    //
-    // A session is *fresh for this request* only when both hold:
-    //
-    // - its row was created after the pending record, and
-    // - its ceremony (`auth_time`) is no earlier than the pending's second.
-    //
-    // Neither alone is enough. The row alone is not: the authorization_code
-    // grant mints a new row that carries the *old* ceremony's `auth_time`, so
-    // a code obtained with an hour-old session and exchanged after the
-    // pending was stored yields a row newer than the pending. `auth_time`
-    // alone is not: it is an integer second, so a ceremony for an earlier
-    // request in the same second as the pending would floor equal to it. A
-    // fresh session satisfies any max_age (including 0) by definition, and
-    // skipping the elapsed check for it keeps max_age=0 completable however
-    // long the post-login navigation took.
-    //
-    // Every other session is checked by elapsed time from `auth_time`, which
-    // is an authentication age and so measures from the ceremony, not from
-    // row creation.
-    //
-    // Known gap: a ceremony in the same second as the pending but before it,
-    // followed by a code-grant mint after it, still reads as fresh. Closing
-    // it needs a sub-second ceremony instant, which the session does not
-    // record.
-    //
-    // A session with no recorded ceremony instant — written before the field
-    // existed, or one whose verification was inherited through RFC 8693
-    // exchange — cannot answer "how long ago", so a request that asks the
-    // question gets re-authentication rather than a substituted value.
-    if pending.max_age.is_some() && session_auth_time.is_none() {
+    if let Some(description) = pending_reauth_violation(pending, session_authenticated_at, arrival)
+    {
         return resolved
             .error_redirect(
                 state,
                 OAuthErrorCode::LoginRequired,
-                "Session records no authentication time for max_age",
+                description,
                 pending.state.as_deref(),
             )
             .await;
-    }
-    if let Some(max_age) = pending.max_age
-        && let Some(session_auth_time) = session_auth_time
-        && !(session_created_at > pending.created_at
-            && session_auth_time >= pending.created_at.as_second())
-    {
-        // Reject only when the session age *exceeds* max_age (strict `>`).
-        // A session exactly at the threshold (age == max_age) is "not older
-        // than" it and satisfies the requirement; using `>=` would reject the
-        // boundary. This is consistent with the established pattern in
-        // keys.rs and dpop.rs.
-        //
-        // The elapsed time is compared at full precision, matching the
-        // direct `authorize_authenticated_user` path. Truncating "now" to
-        // whole seconds first floors the age by up to 1 second and lets a
-        // session whose true age is in (max_age, max_age + 1) through,
-        // diverging from the direct path that would have forced
-        // re-authentication for the same session (OIDC Core 3.1.2.1).
-        // `pending.max_age` is stored as `i64`, so the limit is built
-        // directly; the direct path's `i64::try_from`/`unwrap_or` is its
-        // `u64`-to-`i64` saturation and is not needed here.
-        let elapsed = arrival
-            .timestamp()
-            .duration_since(jiff::Timestamp::from_second(session_auth_time).unwrap_or_default());
-        let limit = jiff::SignedDuration::from_secs(max_age);
-        if elapsed > limit {
-            return resolved
-                .error_redirect(
-                    state,
-                    OAuthErrorCode::LoginRequired,
-                    "Session exceeds requested max_age",
-                    pending.state.as_deref(),
-                )
-                .await;
-        }
     }
 
     // Steps 5 & 6: Validate requested ACR (RFC 9470) and `resource` against the
@@ -1518,7 +1520,7 @@ async fn complete_pending_auth(
         dpop_jkt: pending.dpop_jkt.as_deref(),
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: pending.authorization_details.as_ref(),
-        auth_time: session_auth_time,
+        authenticated_at: session_authenticated_at,
         par: par_proof,
     };
 
@@ -1785,7 +1787,7 @@ async fn authorize_authenticated_user(
     validated: ValidatedAuthRequest,
     oauth_client: &OAuthClient,
     user: &User,
-    session_auth_time: Option<i64>,
+    session_authenticated_at: Option<jiff::Timestamp>,
     authenticator: &Authenticator,
     reauth_policy: ReauthPolicy,
     par_to_consume: Option<db::ParRef<'_>>,
@@ -1833,12 +1835,10 @@ async fn authorize_authenticated_user(
                     // whose verification was inherited through RFC 8693
                     // exchange — re-authenticates rather than having a
                     // substitute instant stand in for the answer.
-                    let Some(auth_time) = session_auth_time else {
+                    let Some(authenticated_at) = session_authenticated_at else {
                         return true;
                     };
-                    let elapsed = arrival.timestamp().duration_since(
-                        jiff::Timestamp::from_second(auth_time).unwrap_or_default(),
-                    );
+                    let elapsed = arrival.timestamp().duration_since(authenticated_at);
                     let limit =
                         jiff::SignedDuration::from_secs(i64::try_from(max_age).unwrap_or(i64::MAX));
                     elapsed > limit
@@ -1881,7 +1881,7 @@ async fn authorize_authenticated_user(
         validated,
         oauth_client,
         user,
-        session_auth_time,
+        session_authenticated_at,
         authenticator,
         par_to_consume,
         response_mode,
@@ -1964,7 +1964,7 @@ async fn issue_code_after_reauth_check(
     validated: ValidatedAuthRequest,
     oauth_client: &OAuthClient,
     user: &User,
-    session_auth_time: Option<i64>,
+    session_authenticated_at: Option<jiff::Timestamp>,
     authenticator: &Authenticator,
     par_to_consume: Option<db::ParRef<'_>>,
     response_mode: ResponseMode,
@@ -2043,7 +2043,7 @@ async fn issue_code_after_reauth_check(
         dpop_jkt: validated.dpop_jkt(),
         auth_code_lifetime_seconds: auth_code_lifetime,
         authorization_details: ad_value.as_ref(),
-        auth_time: session_auth_time,
+        authenticated_at: session_authenticated_at,
         par: par_proof,
     };
 

@@ -99,12 +99,14 @@ pub enum HardwareVerification {
     /// Sets `hardware_verified: true`, `amr: [hwk, pin, user]`,
     /// `acr: urn:nist:...:aal3`.
     Verified {
-        /// When the assertion happened (Unix seconds), for the `auth_time`
-        /// claim. `None` when verification is inherited rather than observed
-        /// — RFC 8693 token exchange runs no ceremony of its own, and device
-        /// approvals written before the ceremony instant was recorded lost
-        /// it. Freshness gates read `None` as epoch and challenge.
-        auth_time: Option<i64>,
+        /// When the assertion happened, at full precision. The `auth_time`
+        /// claim is its whole second; the session row keeps the full instant
+        /// for the `max_age=0` / `prompt=login` freshness decision. `None`
+        /// when verification is inherited rather than observed — RFC 8693
+        /// token exchange runs no ceremony of its own, and device approvals
+        /// written before the ceremony instant was recorded lost it.
+        /// Freshness gates read `None` as epoch and challenge.
+        auth_time: Option<jiff::Timestamp>,
     },
     /// No hardware verification performed (M2M, JWT bearer, etc.).
     /// Sets `hardware_verified: false`, `auth_time: None`, `amr: None`,
@@ -123,6 +125,13 @@ impl HardwareVerification {
     /// authentication occurred. Absent unless FIDO2 ran.
     #[must_use]
     pub(crate) fn auth_time(&self) -> Option<i64> {
+        self.authenticated_at().map(jiff::Timestamp::as_second)
+    }
+
+    /// The ceremony instant at full precision, recorded on the session row.
+    /// Absent unless FIDO2 ran and the instant was observed.
+    #[must_use]
+    pub(crate) fn authenticated_at(&self) -> Option<jiff::Timestamp> {
         match self {
             Self::Verified { auth_time } => *auth_time,
             Self::NotVerified => None,
@@ -205,7 +214,7 @@ mod tests {
     #[test]
     fn test_verified_hardware_sets_amr_acr_and_flag() {
         let verified = HardwareVerification::Verified {
-            auth_time: Some(42),
+            auth_time: jiff::Timestamp::from_second(42).ok(),
         };
         assert!(verified.hardware_verified());
         assert_eq!(verified.acr().as_deref(), Some(ACR_AAL3));

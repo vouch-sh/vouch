@@ -41,13 +41,14 @@ pub(crate) struct DeviceAuthRequestDoc {
     /// deploy; the default treats those as unverified.
     #[serde(default)]
     pub hardware_verified: bool,
-    /// Unix seconds of the WebAuthn ceremony that approved this request —
-    /// the `auth_time` the device-code grant stamps on the issued token.
+    /// Full-precision instant of the WebAuthn ceremony that approved this
+    /// request. The device-code grant stamps its whole second as the issued
+    /// token's `auth_time` and copies the full instant onto the session row.
     /// `Some` whenever `hardware_verified` and this version wrote the row;
-    /// `None` on rows predating the field, which the freshness gate on key
-    /// deletion reads as epoch (step-up required).
+    /// `None` on rows predating the field, which freshness gates read as
+    /// epoch (step-up or re-authentication required).
     #[serde(default)]
-    pub auth_time: Option<i64>,
+    pub authenticated_at: Option<Timestamp>,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,

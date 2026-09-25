@@ -35,7 +35,7 @@ impl From<DeviceApproval> for HardwareVerification {
     fn from(approval: DeviceApproval) -> Self {
         match approval {
             DeviceApproval::Observed(at) => Self::Verified {
-                auth_time: Some(at.as_second()),
+                auth_time: Some(at.instant()),
             },
             DeviceApproval::NotVerified => Self::NotVerified,
         }
@@ -97,7 +97,7 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
                         authenticator_id: authenticator_id.clone(),
                         verification: if data.hardware_verified {
                             HardwareVerification::Verified {
-                                auth_time: data.auth_time,
+                                auth_time: data.authenticated_at,
                             }
                         } else {
                             HardwareVerification::NotVerified
@@ -209,7 +209,7 @@ pub async fn create_device_auth_request(
         user_email: None,
         authenticator_id: None,
         hardware_verified: false,
-        auth_time: None,
+        authenticated_at: None,
         expires_at,
         interval_seconds,
         last_poll_at: None,
@@ -309,7 +309,7 @@ pub async fn authorize_device_auth(
             data.user_email = Some(user_email.to_string());
             data.authenticator_id = Some(authenticator_id.to_string());
             data.hardware_verified = hw.hardware_verified();
-            data.auth_time = hw.auth_time();
+            data.authenticated_at = hw.authenticated_at();
             Ok(())
         })
         .await

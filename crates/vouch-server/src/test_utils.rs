@@ -1385,8 +1385,10 @@ pub enum TestVerification {
     /// verification inherited from another token (RFC 8693 token exchange runs
     /// no ceremony of its own).
     Verified {
-        /// When the assertion happened, in Unix seconds.
-        auth_time: Option<i64>,
+        /// When the assertion happened, at full precision. The token's
+        /// `auth_time` claim is its whole second; the session row records
+        /// the full instant.
+        auth_time: Option<jiff::Timestamp>,
     },
     /// No FIDO2 assertion: `hardware_verified: false`, no `auth_time`, no
     /// `amr`/`acr`. The enrollment-bootstrap shape in `handlers/enroll.rs` —
@@ -1471,7 +1473,7 @@ impl Default for TestSessionSpec<'_> {
             audience: Option::None,
             binding: TestBinding::Bearer,
             verification: TestVerification::Verified {
-                auth_time: Some(jiff::Timestamp::now().as_second()),
+                auth_time: Some(jiff::Timestamp::now()),
             },
             scope: Option::None,
         }
@@ -1616,6 +1618,7 @@ async fn forge_auth_time(
             org_domain: org_domain.as_deref(),
             client_id: Some(&claims.client_id),
             source_code_hash: Option::None,
+            authenticated_at: None,
         },
     )
     .await
@@ -1702,6 +1705,7 @@ pub async fn forge_short_lived_access_token(
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
             source_code_hash: Option::None,
+            authenticated_at: None,
             client_id: Some(&claims.client_id),
         },
     )
@@ -1758,6 +1762,7 @@ pub async fn create_test_expired_session_row(
             org_domain: Option::None,
             client_id,
             source_code_hash: Option::None,
+            authenticated_at: None,
         },
     )
     .await

@@ -42,6 +42,9 @@ pub struct Session {
     /// code. Used by replay detection (RFC 6749 §10.5) to revoke only the
     /// tokens issued from the replayed code.
     pub source_code_hash: Option<String>,
+    /// Full-precision instant of the FIDO2 ceremony behind this session
+    /// (see [`SessionDoc::authenticated_at`]).
+    pub authenticated_at: Option<Timestamp>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -60,6 +63,7 @@ impl From<Document<SessionDoc>> for Session {
             org_domain: doc.data.org_domain,
             client_id: doc.data.client_id,
             source_code_hash: doc.data.source_code_hash,
+            authenticated_at: doc.data.authenticated_at,
         }
     }
 }
@@ -90,6 +94,9 @@ pub struct CreateSessionParams<'a> {
     /// for grants with no single-use code; `Some` for the authorization-code
     /// and device-code grants so replay detection can target this session.
     pub source_code_hash: Option<&'a str>,
+    /// Full-precision instant of the FIDO2 ceremony behind this session.
+    /// `None` when no ceremony was observed.
+    pub authenticated_at: Option<Timestamp>,
 }
 
 /// Create a new session.
@@ -109,6 +116,7 @@ pub async fn create_session(
         org_domain: params.org_domain.map(String::from),
         client_id: params.client_id.map(String::from),
         source_code_hash: params.source_code_hash.map(String::from),
+        authenticated_at: params.authenticated_at,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -532,6 +540,7 @@ mod tests {
             org_domain: None,
             client_id: None,
             source_code_hash: None,
+            authenticated_at: None,
         })
     }
 
@@ -684,6 +693,7 @@ mod tests {
                 org_domain: None,
                 client_id: client_id.map(str::to_string),
                 source_code_hash: None,
+                authenticated_at: None,
             })
         }
         let cache = SessionCache::new(100, 30);
@@ -742,6 +752,7 @@ mod tests {
                 org_domain: None,
                 client_id: Some(client_id.to_string()),
                 source_code_hash: None,
+                authenticated_at: None,
             })
         }
         let cache = SessionCache::new(100, 30);
