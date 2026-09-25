@@ -25,7 +25,7 @@ Follow the [Conventional Commits 1.0.0 specification](https://www.conventionalco
 5. `fix` → **PATCH**, `feat` → **MINOR**, `BREAKING CHANGE` → **MAJOR**.
 6. End Claude-authored commit messages with a co-author trailer naming the
    model that actually did the work — never a hardcoded older model. Example:
-   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
+   `Co-Authored-By: Claude <model name> <noreply@anthropic.com>`
 
 ### Allowed Types
 

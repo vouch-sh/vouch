@@ -77,9 +77,8 @@ For each changed file, list the functions whose bodies changed. Those are the
 **seeds**. Skip tests, generated files, `specs/`, and the Detail-managed
 `.claude/skills/detail-rules/` directory.
 
-Recent diffs are where Detail's recent batches were found: from 2026-09-12 to
-09-17, every finding was in a PR merged in the three days before (see
-`.claude/skills/detail-triage/references/volume-log.md`).
+Detail's findings cluster in PRs merged in the few days before a scan (the
+series is in `.claude/skills/detail-triage/references/volume-log.md`).
 
 ## Step 2: Expand each seed (parallel, read-only)
 
@@ -293,12 +292,11 @@ failure. Every issue uses the repository's template,
 evidence.
 
 **Keep each issue on topic and short.** A reader should know what is broken,
-where, and how bad it is within the first screen. The first bug-hunt run
-filed issues of 300 to 1000 lines, which is too long.
+where, and how bad it is within the first screen.
 
 - One issue covers one defect, or one class. A second defect found on the
   same path gets its own issue (cross-linked), not a section in this one.
-- The Summary is at most five bullets of one or two sentences each. Say a
+- The Summary is a few short bullets a reader can scan in one pass. Say a
   fact once and do not repeat it in Expected, Actual and Logs.
 - Keep only what the reader needs to reproduce and fix the bug: the failing
   test, the smallest code excerpt, the one spec sentence that decides the
@@ -310,8 +308,8 @@ filed issues of 300 to 1000 lines, which is too long.
   if there is one. The full blame trail stays in the run record.
 - Leave an optional template section out, or write one line, when it adds
   nothing.
-- Aim for under about 150 lines, not counting the test code. A class issue
-  may be longer only because it lists more sites.
+- A class issue is longer than an isolated one only because it lists more
+  sites.
 
 ### Decide the grouping
 

@@ -152,10 +152,8 @@ removals the compiler cannot see:
 
 ## Step 3: Decide instance versus class
 
-**A Detail fix PR is a reviewed draft, never a merge candidate.** That is the
-standing policy (set 2026-09-12), and it replaces the earlier "bot PRs merge
-mostly as-is". Green CI, a detailed PR body, and a full test suite make a PR
-look finished; step 6 exists because two of the 22 in the 2026-09-11 batch were
+**A Detail fix PR is a reviewed draft, never a merge candidate.** Green CI, a
+detailed PR body, and a full test suite make a PR look finished; step 6 exists because two of the 22 in the 2026-09-11 batch were
 actively wrong under exactly that appearance.
 
 The policy is not a claim that Detail writes bad fixes — measured over 811
@@ -410,9 +408,8 @@ showing `Some("ictim-user-id")` does not.
 ### Merge mechanics
 
 Read CI status fresh with `gh pr checks <n>` at the moment you decide. Do not
-reuse a run ID captured earlier in the session — runs get superseded, and on
-this batch an earlier failing run for #1312 had already been replaced by a
-passing one, which I initially reported as a failure.
+reuse a run ID captured earlier in the session — runs get superseded, and a
+stale failing run can hide a passing one.
 
 Before enqueueing, check that every commit is signed. Detail's follow-up
 commits — a rustfmt or baseline fix pushed after its CI fails — have arrived
@@ -443,9 +440,7 @@ touching disjoint files can still break each other (#1131 removed a helper
 Write the batch record to `.local/detail-triage-<YYYY-MM-DD>.md`: the
 classification table, the review findings, and the decisions. `.local/` is
 gitignored working memory and already holds prior records — **read the most
-recent one before starting**. Doing so on 2026-09-11 surfaced a SAML
-XML-comment truncation issue found outside Detail in August, which a check
-against the tree confirmed was since fixed.
+recent one before starting**.
 
 Give the record a **Residue** section listing everything the review accepted and
 did not fix, each with the finding it would become. The next pass matches new

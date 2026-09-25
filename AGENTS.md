@@ -35,11 +35,16 @@ VOUCH_RP_NAME=Vouch \
 VOUCH_JWT_SECRET=dev-secret-at-least-32-characters-long \
 VOUCH_DATABASE_URL="sqlite:vouch-dev.db?mode=rwc" \
 VOUCH_LISTEN_ADDR="[::]:3000" \
+VOUCH_IDPS=dev \
+VOUCH_IDP_DEV_TYPE=oidc \
+VOUCH_IDP_DEV_ISSUER=<issuer URL serving OIDC discovery> \
+VOUCH_IDP_DEV_CLIENT_ID=<client id> \
+VOUCH_IDP_DEV_CLIENT_SECRET=<client secret> \
 RUST_LOG=debug \
 cargo run --bin vouch-server
 ```
 
-The server will listen on port 3000 and create a SQLite database file at `vouch-dev.db`. At least one upstream IdP must be configured via `VOUCH_IDPS` (the server refuses to start without one). See the [Environment Variables reference](docs/src/reference/environment-variables.md) for the `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` variables.
+The server will listen on port 3000 and create a SQLite database file at `vouch-dev.db`. It refuses to start without at least one upstream IdP. See the [Environment Variables reference](docs/src/reference/environment-variables.md) for the `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` variables.
 
 ### Key commands
 

@@ -101,7 +101,8 @@ settled precedent.
 
 ## Record what you verify
 
-Verified quotes go in the knowledge base under `references/` so the next
-lookup is cheap and the corpus grows. A quote already recorded there,
+Write verified quotes to `.local/`; the knowledge-base refresh loop
+promotes them into `references/` so the next lookup is cheap and the
+corpus grows. A quote already recorded there,
 with its section and URL, may be relied on without re-fetching — that is
 the whole point of recording it.
