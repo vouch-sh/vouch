@@ -130,7 +130,7 @@ pub(crate) struct AuthorizeQuery {
 }
 
 mod error_response;
-pub(crate) use error_response::oauth_error_response;
+pub(crate) use error_response::{oauth_error_response, oauth_error_response_unsigned};
 
 // ---------------------------------------------------------------------------
 // Security gate types
@@ -2270,6 +2270,155 @@ mod tests {
         assert!(
             !body.contains("opaque-state") && !body.contains("access_denied"),
             "must not leak the response parameters outside a signed JWT: {body}"
+        );
+    }
+
+    /// `oauth_error_response_unsigned` builds a Query-mode `access_denied`
+    /// redirect from `redirect_uri` + issuer config alone — the contract a
+    /// caller without a client record (certification `deny_login` after the
+    /// client was hard-deleted) relies on. RFC 6749 §4.1.2.1 parameters +
+    /// `iss` (RFC 9207).
+    #[tokio::test]
+    async fn oauth_error_response_unsigned_query_redirects_with_iss_and_state() {
+        let state = crate::test_utils::test_app_state().await;
+        let response = oauth_error_response_unsigned(
+            &state,
+            "https://example.com/callback",
+            OAuthErrorCode::AccessDenied,
+            "User rejected authentication",
+            Some("opaque-state"),
+            ResponseMode::Query,
+        );
+        assert!(
+            response.status().is_redirection(),
+            "Query unsigned error must redirect, got {}",
+            response.status()
+        );
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .expect("Query unsigned error must redirect")
+            .to_str()
+            .expect("ascii Location")
+            .to_string();
+        let parsed = url::Url::parse(&location).expect("Location must be a valid URL");
+        let pairs: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(parsed.host_str(), Some("example.com"));
+        assert_eq!(parsed.path(), "/callback");
+        assert!(
+            pairs.contains(&("error".to_string(), "access_denied".to_string())),
+            "must carry error=access_denied: {location}"
+        );
+        assert!(
+            pairs.contains(&(
+                "error_description".to_string(),
+                "User rejected authentication".to_string()
+            )),
+            "must carry error_description: {location}"
+        );
+        assert!(
+            pairs.contains(&("state".to_string(), "opaque-state".to_string())),
+            "must echo state: {location}"
+        );
+        assert!(
+            pairs.contains(&("iss".to_string(), "https://test.example.com".to_string())),
+            "must include iss (RFC 9207): {location}"
+        );
+    }
+
+    /// `oauth_error_response_unsigned` builds a FormPost-mode `access_denied`
+    /// HTML auto-submitting form from `redirect_uri` + issuer config alone —
+    /// no client record consulted.
+    #[tokio::test]
+    async fn oauth_error_response_unsigned_form_post_builds_html_form() {
+        let state = crate::test_utils::test_app_state().await;
+        let response = oauth_error_response_unsigned(
+            &state,
+            "https://example.com/callback",
+            OAuthErrorCode::AccessDenied,
+            "User rejected authentication",
+            Some("fp-state"),
+            ResponseMode::FormPost,
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "FormPost unsigned error must be HTTP 200, not a redirect"
+        );
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .is_none(),
+            "FormPost unsigned error must not redirect"
+        );
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            content_type.starts_with("text/html"),
+            "FormPost unsigned error must be text/html, got: {content_type}"
+        );
+        assert!(
+            body.contains(r#"method="post""#),
+            "must contain a POST form: {body}"
+        );
+        assert!(
+            body.contains("https://example.com/callback"),
+            "form must target the redirect_uri: {body}"
+        );
+        assert!(
+            body.contains(r#"name="error""#) && body.contains("access_denied"),
+            "must carry error=access_denied: {body}"
+        );
+        assert!(
+            body.contains(r#"name="error_description""#)
+                && body.contains("User rejected authentication"),
+            "must carry error_description: {body}"
+        );
+        assert!(
+            body.contains(r#"name="iss""#),
+            "must include iss (RFC 9207): {body}"
+        );
+        assert!(body.contains("fp-state"), "must echo state: {body}");
+    }
+
+    /// `oauth_error_response_unsigned` fail-closes on `ResponseMode::Jwt`: a
+    /// `Jwt` call returns `500` and never redirects. The signed JARM path is
+    /// `oauth_error_response`'s job (and its fail-closed contract is covered by
+    /// `jarm_signing_failure_does_not_fall_back_to_unsigned_parameters` above);
+    /// no current caller reaches this branch. The test locks the guardrail so
+    /// a future caller cannot get an unsigned response a JARM client would be
+    /// obliged to discard.
+    #[tokio::test]
+    async fn oauth_error_response_unsigned_jwt_fails_closed() {
+        let state = crate::test_utils::test_app_state().await;
+        let response = oauth_error_response_unsigned(
+            &state,
+            "https://example.com/callback",
+            OAuthErrorCode::AccessDenied,
+            "User rejected authentication",
+            Some("opaque-state"),
+            ResponseMode::Jwt,
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Jwt unsigned error must fail closed with 500"
+        );
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .is_none(),
+            "Jwt fail-closed must not redirect"
         );
     }
 }
