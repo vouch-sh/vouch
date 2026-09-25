@@ -373,23 +373,36 @@ pub(crate) async fn device_token(
         ));
     }
 
-    // Check polling rate
-    let allowed =
-        db::update_device_auth_poll_time(&state.store, &request.id, request.interval_seconds, now)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to update device authorization poll time: {e}");
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::server_error(),
-                )
-            })?;
+    // Polling rate applies only while the request is pending. RFC 8628 §3.5
+    // defines `slow_down` as pending-only: "A variant of
+    // "authorization_pending", the authorization request is still pending
+    // and polling should continue". An approved, consumed, or denied code
+    // must reach its own response: answering `slow_down` there would let a
+    // replay of a consumed code inside the interval skip the RFC 6749 §10.5
+    // revocation below, and would hand a concurrent poll that lost the
+    // consume race `slow_down` instead of `invalid_grant`.
+    if matches!(request.state, DeviceAuthState::Pending) {
+        let allowed = db::update_device_auth_poll_time(
+            &state.store,
+            &request.id,
+            request.interval_seconds,
+            now,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update device authorization poll time: {e}");
+            oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                OAuthError::server_error(),
+            )
+        })?;
 
-    if !allowed {
-        return Err(oauth_error(
-            StatusCode::BAD_REQUEST,
-            OAuthError::slow_down(),
-        ));
+        if !allowed {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                OAuthError::slow_down(),
+            ));
+        }
     }
 
     match request.state {
@@ -1563,6 +1576,7 @@ mod tests {
     /// pre-existing OAuth session for that user. Returns everything the
     /// race tests need.
     struct RaceSetup {
+        id: String,
         device_code_hash: String,
         body: String,
         token_hash: String,
@@ -1636,6 +1650,7 @@ mod tests {
             app,
             state,
             RaceSetup {
+                id,
                 device_code_hash,
                 body,
                 token_hash,
@@ -1772,6 +1787,89 @@ mod tests {
             pre_existing.is_some(),
             "race-loser must NOT revoke sessions unrelated to the replayed device code"
         );
+    }
+
+    // RFC 8628 §3.5 defines `slow_down` as "A variant of
+    // "authorization_pending", the authorization request is still pending".
+    // A replay of a consumed device code sent inside the polling interval must
+    // still get `invalid_grant` and revoke the tokens issued from that code
+    // (RFC 6749 §10.5), not `slow_down`. The last poll is stamped a minute in
+    // the future so every poll counts as too fast, whatever the clock does.
+    #[tokio::test]
+    async fn test_device_code_replay_inside_poll_interval_revokes_not_slow_down() {
+        let (app, state, setup) = setup_race("replay_in_interval").await;
+
+        let (status, body) = http_post_form(&app, "/oauth/token", &setup.body, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "first poll redeems the code: {body}"
+        );
+        let issued: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let issued_hash = {
+            use aws_lc_rs::digest::{self, SHA256};
+            let token = issued["access_token"].as_str().expect("access_token");
+            URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
+        };
+
+        let future = Timestamp::now()
+            .checked_add(Span::new().minutes(1))
+            .expect("in range");
+        crate::db::update_device_auth_poll_time(&state.store, &setup.id, 0, future)
+            .await
+            .expect("stamp last poll");
+
+        let (status, body) = http_post_form(&app, "/oauth/token", &setup.body, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "a replay inside the poll interval must not be answered with slow_down"
+        );
+        let revoked =
+            crate::db::get_session_by_token_hash(&state.store, &issued_hash, Timestamp::now())
+                .await
+                .expect("issued-session lookup");
+        assert!(
+            revoked.is_none(),
+            "the replay must revoke the token issued from the device code"
+        );
+    }
+
+    // The rate limit still applies while the request is pending.
+    #[tokio::test]
+    async fn test_device_pending_poll_inside_interval_gets_slow_down() {
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
+        let device_code = "test_pending_slow_down_code";
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().hours(1))
+            .expect("in range");
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &hash_device_code(device_code),
+            "PEND-SLOW",
+            &client_id,
+            expires_at,
+            5,
+        )
+        .await
+        .expect("create device auth");
+        let future = Timestamp::now()
+            .checked_add(Span::new().minutes(1))
+            .expect("in range");
+        crate::db::update_device_auth_poll_time(&state.store, &id, 0, future)
+            .await
+            .expect("stamp last poll");
+
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
+        );
+        let (status, body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error"], "slow_down");
     }
 
     #[tokio::test]
