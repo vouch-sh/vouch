@@ -58,6 +58,13 @@ impl ServerUrl {
         Ok(Self { url: normalized })
     }
 
+    /// A validated URL for tests; panics on an invalid or insecure literal.
+    #[cfg(test)]
+    #[expect(clippy::expect_used, reason = "test-only constructor for URL literals")]
+    pub(crate) fn for_test(url: &str) -> Self {
+        Self::parse(url, false).expect("test server URL literal is valid HTTPS")
+    }
+
     /// Get the URL as a string slice.
     pub(crate) fn as_str(&self) -> &str {
         &self.url

@@ -192,7 +192,7 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
 ///
 /// Returns whether the agent stored the session successfully.
 pub(crate) async fn store_and_finalize(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     token: &str,
     email: &str,
     expires_at_str: &str,
@@ -201,7 +201,7 @@ pub(crate) async fn store_and_finalize(
 ) -> Result<bool> {
     // 1. Config save — fast local I/O, do first
     let mut config = Config::load()?;
-    config.set_server_url(server);
+    config.set_server_url(server.as_str());
     config.set_token(token);
     config.save()?;
 
@@ -209,7 +209,7 @@ pub(crate) async fn store_and_finalize(
     let agent_future = async {
         #[cfg(unix)]
         {
-            store_session_in_agent(token, email, expires_at_str, server).await
+            store_session_in_agent(token, email, expires_at_str, server.as_str()).await
         }
         #[cfg(not(unix))]
         {
@@ -218,7 +218,7 @@ pub(crate) async fn store_and_finalize(
     };
 
     let cookie_future = async {
-        write_session_cookie_file(server, token, expires_at_ts);
+        write_session_cookie_file(server.as_str(), token, expires_at_ts);
     };
 
     let (agent_stored, ()) = tokio::join!(agent_future, cookie_future);

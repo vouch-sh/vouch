@@ -58,7 +58,11 @@ impl CheckResult {
 /// Returns an error if any checks fail, so the CLI exits with a non-zero code.
 /// When `quiet` is true, all output is suppressed (exit code only).
 /// When `json` is true, results are printed as JSON to stdout.
-pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
+pub(crate) async fn run(
+    server: &crate::server_url::ServerUrl,
+    quiet: bool,
+    json: bool,
+) -> Result<()> {
     let suppress = quiet || json;
 
     if !suppress {
@@ -106,7 +110,7 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
 
 /// Run every diagnostic check in order, printing progress as each one
 /// completes (unless `suppress` is set), and collect the results.
-async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
+async fn run_checks(server: &crate::server_url::ServerUrl, suppress: bool) -> Vec<CheckResult> {
     let mut checks: Vec<CheckResult> = Vec::new();
 
     // Check 1: YubiKey connectivity
@@ -154,7 +158,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
         if !suppress {
             print!("{} ", tr!("doctor-check-doh-label"));
         }
-        let doh_result = check_doh(&resolver, server).await;
+        let doh_result = check_doh(&resolver, server.as_str()).await;
         if !suppress {
             print_result(&doh_result);
         }
@@ -212,7 +216,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
     if !suppress {
         print!("{} ", tr!("doctor-check-server-url-label"));
     }
-    let security_result = check_server_url_security(server);
+    let security_result = check_server_url_security(server.as_str());
     if !suppress {
         print_result(&security_result);
     }
@@ -319,7 +323,7 @@ async fn check_agent() -> CheckResult {
 /// Returns `(reachability_result, Some(clock_skew_result))` when the request
 /// completes (skew can be computed from the `Date` header), or
 /// `(reachability_result, None)` when the request never produced a response.
-async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
+async fn check_server(server: &crate::server_url::ServerUrl) -> (CheckResult, Option<CheckResult>) {
     let client = match VouchClient::unauthenticated(server) {
         Ok(c) => c,
         Err(e) => {
@@ -352,7 +356,7 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
     let server_result = if response.status().is_success() {
         CheckResult::pass(
             "server",
-            tr_args!("doctor-server-reachable", server = server),
+            tr_args!("doctor-server-reachable", server = server.as_str()),
         )
     } else {
         CheckResult::fail(

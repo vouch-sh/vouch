@@ -34,7 +34,7 @@ impl std::fmt::Debug for DeviceTokenResponse {
 }
 
 /// Run the enroll command.
-pub(crate) async fn run(server: &str) -> Result<()> {
+pub(crate) async fn run(server: &crate::server_url::ServerUrl) -> Result<()> {
     let client = VouchClient::unauthenticated(server)?;
 
     tr_println!("enroll-starting");
@@ -56,12 +56,12 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     // `/v1/keys/register/*` calls are signed and the server can only verify
     // them against the JWKS we register here.
     let pre_registered_client_id =
-        register_fapi_client_open(client.raw_client(), server, &fapi_key).await?;
+        register_fapi_client_open(client.raw_client(), server.as_str(), &fapi_key).await?;
 
     // Step 3: Request device code (RFC 8628 Section 3.1).
     let (device_response, client_id) = request_device_code(
         &client,
-        server,
+        server.as_str(),
         Some(&fapi_key),
         Some(pre_registered_client_id),
     )
@@ -521,7 +521,10 @@ async fn poll_once(
 /// (credential ID is in the exclude list), this is a no-op. If no YubiKey
 /// is inserted, or registration fails, the error is returned but should
 /// not block the enrollment flow.
-async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
+async fn register_current_key(
+    server: &crate::server_url::ServerUrl,
+    token: SecretString,
+) -> Result<()> {
     let client = VouchClient::with_token(server, token)?;
 
     let start_resp: RegisterStartResponse = client

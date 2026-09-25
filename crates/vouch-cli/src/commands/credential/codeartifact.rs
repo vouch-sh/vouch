@@ -193,7 +193,7 @@ pub(crate) fn resolve_codeartifact_params(
 /// 3. Calls CodeArtifact `GetAuthorizationToken` with SigV4 signing
 /// 4. Outputs the bearer token to stdout
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
@@ -214,7 +214,7 @@ pub(crate) async fn run(
 /// This is the shared core used by both the standalone command and the
 /// Cargo credential provider when it detects a CodeArtifact index URL.
 pub(crate) async fn get_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     target: &CodeArtifactTarget,
 ) -> Result<CodeArtifactToken> {
     // Resolve the role BEFORE the cache lookup: `target.profile` is only the
@@ -283,7 +283,7 @@ fn build_cache_key(target: &CodeArtifactTarget, role_arn: &str, agent: Option<&s
 
 /// Fetch a fresh CodeArtifact token (no caching).
 async fn fetch_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     target: &CodeArtifactTarget,
     role_arn: &str,
     agent_source: Option<&str>,

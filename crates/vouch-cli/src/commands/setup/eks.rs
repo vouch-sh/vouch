@@ -46,7 +46,7 @@ struct CertificateAuthority {
 
 /// Fetch EKS cluster endpoint and CA data via native SigV4-signed REST API.
 async fn describe_cluster(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     cluster_name: &str,
     region: &str,
     role_arn: &str,
@@ -108,7 +108,7 @@ async fn describe_cluster(
 /// Configures kubeconfig so kubectl uses `vouch credential eks` for
 /// native EKS token generation (no AWS CLI required).
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     cluster_name: &str,
     region: Option<&str>,
     profile: Option<&str>,

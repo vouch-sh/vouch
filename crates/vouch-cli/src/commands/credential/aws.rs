@@ -145,7 +145,7 @@ pub(crate) struct StsExchangeResult {
 /// `vouch:Agent=<name>` principal tags). Contains no secrets.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StsRequest<'a> {
-    pub(crate) server: &'a str,
+    pub(crate) server: &'a crate::server_url::ServerUrl,
     pub(crate) role_arn: &'a str,
     pub(crate) region: &'a str,
     pub(crate) management_role: Option<&'a str>,
@@ -381,7 +381,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
 /// `AssumeRoleWithWebIdentity` call will use. Returns the HTTP client used
 /// for the subsequent STS calls, the ID token, and the session name.
 async fn fetch_aws_oidc_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     agent_source: Option<&str>,
     pin_role: Option<&str>,
 ) -> Result<(reqwest::Client, SecretString, String)> {
@@ -799,7 +799,7 @@ pub(crate) struct ManagementRoleSession {
 /// through it — or admin-plane discovery; neither should run under an agent.
 pub(crate) async fn assume_management_role(
     http_client: &reqwest::Client,
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     management_role: &str,
 ) -> Result<ManagementRoleSession> {
     use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
@@ -890,7 +890,7 @@ pub(crate) async fn exchange_idc_access_token(
 /// are always full (no `ReadOnlyAccess` policy, no DPoP source tag).
 pub(crate) async fn obtain_identity_center_token(
     http_client: &reqwest::Client,
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     management_role: &str,
     idc: &crate::config::AwsIdentityCenter,
 ) -> Result<secrecy::SecretString> {
@@ -900,7 +900,7 @@ pub(crate) async fn obtain_identity_center_token(
 
 /// Get cached Identity Center credentials, fetching fresh ones if needed.
 pub(crate) async fn get_idc_credentials(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     account_id: &str,
     permission_set: &str,
     idc_application_arn: Option<&str>,
@@ -985,7 +985,10 @@ pub(crate) async fn get_idc_credentials(
 /// Shared entry point for `vouch credential aws --role`, `vouch credential
 /// codecommit`, and `vouch exec`. Resolves the management role once
 /// and uses it for both the cache key and credential exchange.
-pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
+pub(crate) async fn get_aws_credentials(
+    server: &crate::server_url::ServerUrl,
+    role_arn: &str,
+) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
     let management_role = resolve_management_role_for(&vouch_config, role_arn, None)?;
 
@@ -1015,7 +1018,7 @@ pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<
 /// Dispatches to the STS path (`--role`) or the Identity Center path
 /// (`--account` + `--permission-set`) and outputs credential_process JSON.
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     role: Option<&str>,
     account: Option<&str>,
     permission_set: Option<&str>,
@@ -1062,7 +1065,7 @@ pub(crate) async fn run(
 /// Resolves the AWS region, then calls `exchange_for_sts_credentials`
 /// with the pre-resolved management role.
 async fn fetch_and_assume(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     role_arn: &str,
     mgmt_role: Option<&str>,
     agent_source: Option<&str>,
@@ -1778,8 +1781,14 @@ mod tests {
         unsafe {
             std::env::set_var("CLAUDECODE", "1");
         }
-        let result =
-            get_idc_credentials("https://example.com", "111111111111", "Admin", None, None).await;
+        let result = get_idc_credentials(
+            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            "111111111111",
+            "Admin",
+            None,
+            None,
+        )
+        .await;
         // SAFETY: env var restored regardless of assertion outcome.
         unsafe {
             std::env::remove_var("CLAUDECODE");
@@ -1812,8 +1821,13 @@ mod tests {
             application_arn: APP1.to_string(),
             region: "us-east-1".to_string(),
         };
-        let result =
-            obtain_identity_center_token(&http_client, "https://example.com", MGMT1, &idc).await;
+        let result = obtain_identity_center_token(
+            &http_client,
+            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            MGMT1,
+            &idc,
+        )
+        .await;
         // SAFETY: env var restored regardless of assertion outcome.
         unsafe {
             std::env::remove_var("CLAUDECODE");

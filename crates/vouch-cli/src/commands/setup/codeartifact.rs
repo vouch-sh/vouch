@@ -46,7 +46,7 @@ pub(crate) enum Tool {
 /// * `repository` - CodeArtifact repository name
 /// * `domain_profile` - Named domain profile to save the resolved domain under
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     tool: Tool,
     resolved: &CodeArtifactTarget,
     repository: &str,
@@ -468,7 +468,7 @@ fn uv_config_path() -> Result<std::path::PathBuf> {
 /// Gets a fresh token and writes `~/.npmrc` with the CodeArtifact
 /// npm registry URL and bearer token.
 async fn setup_npm(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     target: &CodeArtifactTarget,
     ca_host: &str,
     repository: &str,
@@ -685,7 +685,7 @@ fn parse_npmrc_codeartifact_entries(content: &str) -> Vec<(String, CodeArtifactR
 /// fetches a fresh token for each unique domain, and rewrites the tokens
 /// in place. Best-effort: logs errors via `tracing` but never fails the
 /// login flow.
-pub(crate) async fn auto_refresh_npmrc(server: &str) {
+pub(crate) async fn auto_refresh_npmrc(server: &crate::server_url::ServerUrl) {
     if let Err(e) = try_refresh_npmrc(server).await {
         tracing::debug!("CodeArtifact npmrc refresh skipped: {e}");
     }
@@ -693,7 +693,7 @@ pub(crate) async fn auto_refresh_npmrc(server: &str) {
 
 /// Inner implementation for `auto_refresh_npmrc` that returns `Result`
 /// for ergonomic error handling.
-async fn try_refresh_npmrc(server: &str) -> Result<()> {
+async fn try_refresh_npmrc(server: &crate::server_url::ServerUrl) -> Result<()> {
     let home =
         vouch_common::paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");

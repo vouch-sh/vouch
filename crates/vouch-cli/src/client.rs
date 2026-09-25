@@ -5,6 +5,7 @@
 //! defaulting to [`ReqwestClient`](vouch_cli::http::ReqwestClient) for production use.
 //! Tests can inject [`TestHttpClient`](vouch_cli::http::TestHttpClient) for in-process testing.
 
+use crate::server_url::ServerUrl;
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
@@ -64,7 +65,7 @@ impl VouchClient<ReqwestClient> {
     /// for DPoP proof generation on resource requests.
     ///
     /// This is the standard constructor for most commands.
-    pub(crate) async fn new(base_url: &str) -> Result<Self> {
+    pub(crate) async fn new(base_url: &ServerUrl) -> Result<Self> {
         let mut client = Self::unauthenticated(base_url)?;
         let token = crate::session::resolve_token().await?;
         client.token = Some(token);
@@ -77,11 +78,11 @@ impl VouchClient<ReqwestClient> {
     ///
     /// Used when a token is already available (e.g. after enrollment)
     /// without resolving from the agent or config file.
-    pub(crate) fn with_token(base_url: &str, token: SecretString) -> Result<Self> {
+    pub(crate) fn with_token(base_url: &ServerUrl, token: SecretString) -> Result<Self> {
         let http = ReqwestClient::new()?;
         let mut client = Self {
             http,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.as_str().to_string(),
             token: Some(token),
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
@@ -95,11 +96,16 @@ impl VouchClient<ReqwestClient> {
     ///
     /// Used only during login/enroll flows where the user doesn't have a
     /// token yet, and for health checks that don't require auth.
-    pub(crate) fn unauthenticated(base_url: &str) -> Result<Self> {
+    ///
+    /// Every constructor takes a [`ServerUrl`], not a string: a URL reaches
+    /// the HTTP client only after [`ServerUrl::parse`] has applied this
+    /// invocation's HTTPS rule, so a token cannot be sent to a plain-HTTP
+    /// server the user did not opt in to (vouch#1525).
+    pub(crate) fn unauthenticated(base_url: &ServerUrl) -> Result<Self> {
         let http = ReqwestClient::new()?;
         Ok(Self {
             http,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.as_str().to_string(),
             token: None,
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
@@ -112,7 +118,7 @@ impl VouchClient<ReqwestClient> {
     /// This is the standard pattern for credential commands that have already
     /// called `resolve_session()`.
     pub(crate) fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
-        let mut client = Self::unauthenticated(session.server_url.as_str())?;
+        let mut client = Self::unauthenticated(&session.server_url)?;
         client.token = Some(session.token.clone());
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
         client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
@@ -736,38 +742,56 @@ mod tests {
 
     #[test]
     fn test_unauthenticated_trims_trailing_slash() {
-        let client = VouchClient::unauthenticated("https://example.com/").unwrap();
+        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com/",
+        ))
+        .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_unauthenticated_trims_multiple_trailing_slashes() {
-        let client = VouchClient::unauthenticated("https://example.com///").unwrap();
+        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com///",
+        ))
+        .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_unauthenticated_no_trailing_slash() {
-        let client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_token_returns_error_when_not_set() {
-        let client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         assert!(client.token().is_err());
     }
 
     #[test]
     fn test_set_token_makes_token_available() {
-        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         client.token = Some(SecretString::from("test-token".to_string()));
         assert!(client.token().is_ok());
     }
 
     #[test]
     fn test_base_url_returns_stored_url() {
-        let client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
@@ -953,7 +977,10 @@ mod tests {
 
     #[test]
     fn test_build_auth_without_fapi_key_returns_bearer() {
-        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         client.token = Some(SecretString::from("my-token".to_string()));
         // No fapi_key set → always Bearer
         let (auth, proof) = client
@@ -967,7 +994,10 @@ mod tests {
     fn test_build_auth_with_fapi_key_returns_dpop() {
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         client.token = Some(SecretString::from("my-dpop-token".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 
@@ -993,7 +1023,10 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
+            "https://example.com",
+        ))
+        .unwrap();
         client.token = Some(SecretString::from("access-token-abc".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 

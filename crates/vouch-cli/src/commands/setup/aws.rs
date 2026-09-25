@@ -91,7 +91,7 @@ pub(crate) struct SetupAwsArgs<'a> {
     pub identity_center_application: Option<&'a str>,
     pub region: Option<&'a str>,
     pub discover: bool,
-    pub server: &'a str,
+    pub server: &'a crate::server_url::ServerUrl,
 }
 
 /// Run the AWS setup command.
@@ -156,7 +156,7 @@ pub(crate) async fn run(args: SetupAwsArgs<'_>) -> Result<()> {
 ///
 /// Establishes one organization per run, reusing the same helpers as the
 /// flag-based paths (`store_org` / `write_sts_profile` / `run_discover`).
-async fn run_wizard(server: &str) -> Result<()> {
+async fn run_wizard(server: &crate::server_url::ServerUrl) -> Result<()> {
     tr_println!("setup-aws-wizard-intro");
 
     let single = tr!("setup-aws-wizard-mode-single");
@@ -221,7 +221,7 @@ fn wizard_management_chain() -> Result<()> {
 
 /// Identity Center: store the org + IdC anchor, show the audience reminder for
 /// the current issuer, and optionally run discovery.
-async fn wizard_identity_center(server: &str) -> Result<()> {
+async fn wizard_identity_center(server: &crate::server_url::ServerUrl) -> Result<()> {
     let orgs = configured_orgs();
     let mgmt_default = orgs.first().map(|o| o.management_role.as_str());
     let Some(mgmt) = prompt_role_arn(&tr!("setup-aws-wizard-mgmt-role-prompt"), mgmt_default)?
@@ -232,7 +232,10 @@ async fn wizard_identity_center(server: &str) -> Result<()> {
 
     // The customer's Identity Center application must set its audience claim to
     // this Vouch issuer, or CreateTokenWithIAM rejects the assertion.
-    tr_println!("setup-aws-wizard-idc-aud-reminder", issuer = server);
+    tr_println!(
+        "setup-aws-wizard-idc-aud-reminder",
+        issuer = server.as_str()
+    );
 
     // If the org for this management role already has Identity Center configured,
     // offer its application ARN and region as defaults.
@@ -630,7 +633,7 @@ fn existing_vends_same_idc_assignment(
 async fn run_discover(
     profile_prefix: Option<&str>,
     idc_application_arn: Option<&str>,
-    server: &str,
+    server: &crate::server_url::ServerUrl,
 ) -> Result<()> {
     use crate::commands::credential::aws::{
         assume_management_role, exchange_idc_access_token, resolve_identity_center,

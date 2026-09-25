@@ -62,7 +62,10 @@ struct SigninTokenResponse {
 }
 
 /// Obtain console credentials via the Identity Center path.
-async fn get_idc_console_creds(server: &str, args: &ConsoleArgs) -> Result<ConsoleCreds> {
+async fn get_idc_console_creds(
+    server: &crate::server_url::ServerUrl,
+    args: &ConsoleArgs,
+) -> Result<ConsoleCreds> {
     use crate::commands::credential::aws::{detect_agent_source, obtain_identity_center_token};
     use crate::integrations::aws::sso_portal::get_role_credentials;
     use vouch_common::http::credential_client;
@@ -138,7 +141,10 @@ async fn get_idc_console_creds(server: &str, args: &ConsoleArgs) -> Result<Conso
 }
 
 /// Obtain console credentials via the STS role path.
-async fn get_sts_console_creds(server: &str, args: ConsoleArgs) -> Result<ConsoleCreds> {
+async fn get_sts_console_creds(
+    server: &crate::server_url::ServerUrl,
+    args: ConsoleArgs,
+) -> Result<ConsoleCreds> {
     // Resolve role ARN from explicit arg or from ~/.aws/config
     let role_arn = match args.role {
         Some(r) => r,
@@ -189,7 +195,7 @@ async fn get_sts_console_creds(server: &str, args: ConsoleArgs) -> Result<Consol
 }
 
 /// Run `vouch aws console`.
-pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
+pub(crate) async fn run(server: &crate::server_url::ServerUrl, args: ConsoleArgs) -> Result<()> {
     let console_creds = if args.account.is_some() {
         get_idc_console_creds(server, &args).await?
     } else {
@@ -238,7 +244,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     login_url
         .query_pairs_mut()
         .append_pair("Action", "login")
-        .append_pair("Issuer", server)
+        .append_pair("Issuer", server.as_str())
         .append_pair("Destination", console_url)
         .append_pair("SigninToken", token_resp.signin_token.expose_secret());
 
@@ -293,7 +299,11 @@ mod tests {
             via: None,
             idc_application: None,
         };
-        let result = get_idc_console_creds("https://example.com", &args).await;
+        let result = get_idc_console_creds(
+            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            &args,
+        )
+        .await;
         // SAFETY: env var restored regardless of assertion outcome.
         unsafe {
             std::env::remove_var("CLAUDECODE");

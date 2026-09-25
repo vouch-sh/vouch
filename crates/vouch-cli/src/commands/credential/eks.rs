@@ -38,7 +38,7 @@ const EKS_EXPIRY_MARGIN_SECONDS: i64 = 15;
 /// Outputs a Kubernetes `ExecCredential` JSON to stdout for use as a
 /// kubeconfig exec-based credential plugin.
 pub(crate) async fn run(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     cluster_name: &str,
     region: Option<&str>,
     role: Option<&str>,
@@ -81,7 +81,7 @@ pub(crate) async fn run(
 
 /// Generate a `k8s-aws-v1.` bearer token for EKS.
 async fn generate_eks_token(
-    server: &str,
+    server: &crate::server_url::ServerUrl,
     cluster_name: &str,
     region: &str,
     role_arn: &str,

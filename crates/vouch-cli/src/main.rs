@@ -178,7 +178,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
             })?;
 
         commands::credential::codeartifact::run(
-            session.server_url.as_str(),
+            &session.server_url,
             domain.map(String::as_str),
             domain_owner.map(String::as_str),
             region.map(String::as_str),
@@ -621,7 +621,7 @@ async fn run() -> Result<()> {
 
     let config = config?;
     let server = resolve_server_url(&cli, &config)?;
-    let server = server.as_str();
+    let server = &server;
     let opt_in = InsecureOptIn::Cli(cli.allow_insecure);
 
     match cli.command {
@@ -631,7 +631,7 @@ async fn run() -> Result<()> {
         }
         Commands::Login { timeout } => commands::login::run(server, timeout).await,
         Commands::Status { format } => {
-            commands::status::run(server, format.unwrap_or_default()).await
+            commands::status::run(server, opt_in, format.unwrap_or_default()).await
         }
         Commands::Logout => commands::logout::run(server).await,
         Commands::Env {
@@ -827,7 +827,7 @@ async fn run() -> Result<()> {
                 commands::setup::ssh::run(server, hosts.as_deref()).await
             }
             SetupCommands::Github { host, configure } => {
-                commands::setup::github::run(&host, configure).await
+                commands::setup::github::run(server, &host, configure).await
             }
             SetupCommands::Eks {
                 cluster,
@@ -852,7 +852,7 @@ async fn run() -> Result<()> {
                 kubeconfig,
             } => {
                 commands::setup::kubernetes::run(
-                    server,
+                    server.as_str(),
                     &cluster,
                     &k8s_server,
                     certificate_authority.as_deref(),

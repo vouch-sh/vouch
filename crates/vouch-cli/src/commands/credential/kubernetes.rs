@@ -23,7 +23,11 @@ const DEFAULT_EXEC_TTL_SECS: u64 = 600;
 ///
 /// Outputs a Kubernetes `ExecCredential` JSON to stdout for use as a
 /// kubeconfig exec-based credential plugin.
-pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> Result<()> {
+pub(crate) async fn run(
+    server: &crate::server_url::ServerUrl,
+    cluster: &str,
+    audience: Option<&str>,
+) -> Result<()> {
     let aud = audience.unwrap_or("kubernetes");
     let cache_key = format!("k8s:{cluster}:{aud}");
 

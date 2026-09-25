@@ -74,7 +74,7 @@ async fn handle_get(url: &str, opt_in: InsecureOptIn) -> Result<()> {
         registry.domain_owner,
         registry.region,
     );
-    let token = super::codeartifact::get_token(session.server_url.as_str(), &target)
+    let token = super::codeartifact::get_token(&session.server_url, &target)
         .await
         .context(tr!("err-failed-get-codeartifact-token"))?;
 

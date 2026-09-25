@@ -186,7 +186,7 @@ async fn get_sts_credentials(role_arn: &str, opt_in: InsecureOptIn) -> Result<St
         }
     })?;
 
-    let data = super::aws::get_aws_credentials(session.server_url.as_str(), role_arn).await?;
+    let data = super::aws::get_aws_credentials(&session.server_url, role_arn).await?;
 
     // Extract STS credentials from the cached JSON
     let access_key_id = data
