@@ -1147,15 +1147,7 @@ impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked/expired).
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        if self.revoked_at.is_some() {
-            return false;
-        }
-        if let Some(expires) = self.expires_at
-            && expires <= *now
-        {
-            return false;
-        }
-        true
+        crate::db::documents::oauth::is_secret_active(self.revoked_at, self.expires_at, now)
     }
 }
 
@@ -1242,22 +1234,7 @@ pub async fn create_oauth_client_secret(
                 ServiceError::from_db_contention(e, "Failed to list secrets for secret create")
             })?;
 
-        // Filter directly on the doc fields to avoid a needless From conversion.
-        // Mirrors the `is_valid` predicate: not revoked, not expired.
-        let active_count = all_secrets
-            .iter()
-            .filter(|s| {
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
-            .count();
+        let active_count = all_secrets.iter().filter(|s| s.data.is_valid(&now)).count();
 
         if active_count >= MAX_ACTIVE_SECRETS {
             // Terminal business error — do not retry.
@@ -1469,20 +1446,7 @@ pub async fn revoke_oauth_client_secret(
         // pre-flight check.
         let other_active_count = all_secrets
             .iter()
-            .filter(|s| {
-                if s.id == secret_id {
-                    return false;
-                }
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
+            .filter(|s| s.id != secret_id && s.data.is_valid(&now))
             .count();
 
         // Floor guard: at least one *other* active secret must remain, unless
@@ -1491,8 +1455,7 @@ pub async fn revoke_oauth_client_secret(
         // zero — i.e. when the target itself is still an active credential.  A
         // dead (expired-but-unrevoked) target leaves the active count unchanged,
         // so it stays deletable even when it is the client's only secret.
-        let target_active = secret_doc.data.revoked_at.is_none()
-            && secret_doc.data.expires_at.is_none_or(|exp| exp > now);
+        let target_active = secret_doc.data.is_valid(&now);
         let secret_is_credential = client_doc
             .data
             .token_endpoint_auth_method
