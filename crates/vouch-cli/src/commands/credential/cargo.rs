@@ -22,6 +22,7 @@ use std::io::{BufRead, Write};
 use vouch_cli::{tr, tr_eprintln};
 
 use crate::integrations::aws::codeartifact;
+use crate::server_url::{InsecureOptIn, ServerUrlError};
 use crate::session;
 
 /// Protocol version supported by this credential provider.
@@ -217,7 +218,7 @@ struct CredentialError {
 /// 1. Send Hello message with supported versions
 /// 2. Read CredentialRequest from stdin
 /// 3. Handle the request and send response to stdout
-pub(crate) async fn run() -> Result<()> {
+pub(crate) async fn run(opt_in: InsecureOptIn) -> Result<()> {
     // Send Hello message
     let hello = CredentialHello {
         v: vec![PROTOCOL_VERSION],
@@ -242,7 +243,7 @@ pub(crate) async fn run() -> Result<()> {
 
     // Handle the action
     match request.action {
-        Action::Get(_operation) => handle_get(&request.registry).await,
+        Action::Get(_operation) => handle_get(&request.registry, opt_in).await,
         Action::Login(options) => handle_login(&request.registry, options),
         Action::Logout => handle_logout(&request.registry),
         Action::Unknown => send_error("operation-not-supported", None),
@@ -250,10 +251,10 @@ pub(crate) async fn run() -> Result<()> {
 }
 
 /// Handle "get" action - return authentication token.
-async fn handle_get(registry: &RegistryInfo) -> Result<()> {
+async fn handle_get(registry: &RegistryInfo, opt_in: InsecureOptIn) -> Result<()> {
     // Check if this is a CodeArtifact registry URL
     if let Some(ca_registry) = codeartifact::parse_codeartifact_url(&registry.index_url) {
-        return handle_get_codeartifact(&ca_registry).await;
+        return handle_get_codeartifact(&ca_registry, opt_in).await;
     }
 
     // Standard Vouch token flow for non-CodeArtifact registries
@@ -291,10 +292,18 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
 ///
 /// Uses the Vouch → STS → CodeArtifact flow to obtain a bearer token
 /// that Cargo can use for the CodeArtifact Cargo registry.
-async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) -> Result<()> {
+async fn handle_get_codeartifact(
+    registry: &codeartifact::CodeArtifactRegistry,
+    opt_in: InsecureOptIn,
+) -> Result<()> {
     // Resolve session to get server URL (tries agent first, then config)
-    let resolved = match session::resolve_session().await {
+    let resolved = match session::resolve_session(opt_in).await {
         Ok(s) => s,
+        // A refused server URL is configured, just not allowed for this
+        // invocation; pass its own message on rather than "not configured".
+        Err(e) if ServerUrlError::is_in(&e) => {
+            return send_error("not-found", Some(e.to_string()));
+        }
         Err(_) => {
             return send_error(
                 "not-found",
@@ -310,7 +319,7 @@ async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) 
         registry.domain_owner.clone(),
         registry.region.clone(),
     );
-    let result = match super::codeartifact::get_token(&server, &target).await {
+    let result = match super::codeartifact::get_token(server.as_str(), &target).await {
         Ok(r) => r,
         Err(e) => {
             return send_error(

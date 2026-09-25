@@ -716,6 +716,54 @@ impl serde::Serialize for BaseUrl {
     }
 }
 
+/// A configured shared secret that cannot be empty.
+///
+/// Some config secrets switch a feature on by being present and then serve as
+/// the key that authenticates callers of that feature: the GitHub webhook HMAC
+/// key, the `/metrics` bearer token, the certification test-mode HMAC key. An
+/// empty value set through the environment or the S3 overlay would enable the
+/// feature under a key everyone knows. The only constructors map `""` to
+/// `None`, so holding a `NonEmptySecret` is evidence the key is not empty and
+/// "set but empty" behaves exactly like "unset".
+#[derive(Clone)]
+pub struct NonEmptySecret(SecretString);
+
+impl NonEmptySecret {
+    /// Wrap `secret`, or return `None` when it is empty.
+    #[must_use]
+    pub fn new(secret: SecretString) -> Option<Self> {
+        if secret.expose_secret().is_empty() {
+            None
+        } else {
+            Some(Self(secret))
+        }
+    }
+
+    /// Build from an optional CLI/env value; unset and empty both yield `None`.
+    #[must_use]
+    pub fn from_arg(value: Option<String>) -> Option<Self> {
+        value.map(SecretString::from).and_then(Self::new)
+    }
+
+    /// The wrapped secret, for APIs that take a plain `SecretString`.
+    #[must_use]
+    pub fn as_secret(&self) -> &SecretString {
+        &self.0
+    }
+}
+
+impl ExposeSecret<str> for NonEmptySecret {
+    fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for NonEmptySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NonEmptySecret([REDACTED])")
+    }
+}
+
 /// Server configuration loaded from command-line arguments and environment variables.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -816,7 +864,7 @@ pub struct ServerConfig {
     /// GitHub App private key (PEM format, RSA).
     pub github_app_key: Option<SecretString>,
     /// GitHub webhook secret for verifying webhook signatures.
-    pub github_webhook_secret: Option<SecretString>,
+    pub github_webhook_secret: Option<NonEmptySecret>,
     /// GitHub App Client ID (for OAuth user authentication).
     /// This is found in the GitHub App settings, different from App ID.
     pub github_app_client_id: Option<String>,
@@ -853,11 +901,11 @@ pub struct ServerConfig {
     pub trusted_proxies: Vec<IpNet>,
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
-    pub metrics_bearer_token: Option<SecretString>,
+    pub metrics_bearer_token: Option<NonEmptySecret>,
     /// Secret token for the certification test-mode endpoint.
     /// When `Some`, `GET /certification/complete-login` is registered.
     /// MUST NOT be set in production deployments.
-    pub certification_test_token: Option<SecretString>,
+    pub certification_test_token: Option<NonEmptySecret>,
     /// Path to a PEM file containing extra CA certificates to trust for
     /// outbound HTTPS requests (e.g., peers with self-signed certs).
     pub extra_ca_certs: Option<String>,
@@ -1042,7 +1090,7 @@ impl ServerConfig {
             github_app_id: args.github_app_id,
             github_app_name: args.github_app_name,
             github_app_key: args.github_app_key.map(SecretString::from),
-            github_webhook_secret: args.github_webhook_secret.map(SecretString::from),
+            github_webhook_secret: NonEmptySecret::from_arg(args.github_webhook_secret),
             github_app_client_id: args.github_app_client_id,
             github_app_client_secret: args.github_app_client_secret.map(SecretString::from),
             tls_cert: args.tls_cert,
@@ -1059,8 +1107,11 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
-            metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
-            certification_test_token: args.certification_test_token.map(SecretString::from),
+            // `NonEmptySecret` treats `VAR=""` as unset: each of these three
+            // switches a feature on by being present and then keys it, so an
+            // empty value would enable the feature under a publicly-known key.
+            metrics_bearer_token: NonEmptySecret::from_arg(args.metrics_bearer_token),
+            certification_test_token: NonEmptySecret::from_arg(args.certification_test_token),
             extra_ca_certs: args.extra_ca_certs,
             mtls_client_ca_certs: args.mtls_client_ca_certs,
             pool_config: crate::db::pool::PoolConfig {
@@ -1097,14 +1148,6 @@ impl ServerConfig {
     #[must_use]
     pub fn github_app_key_exposed(&self) -> Option<&str> {
         self.github_app_key.as_ref().map(|s| s.expose_secret())
-    }
-
-    /// Get the GitHub webhook secret (exposed) if configured.
-    #[must_use]
-    pub fn github_webhook_secret_exposed(&self) -> Option<&str> {
-        self.github_webhook_secret
-            .as_ref()
-            .map(|s| s.expose_secret())
     }
 
     /// Check if GitHub App OAuth is configured (client ID and secret present).
@@ -1349,12 +1392,12 @@ pub fn resolve_dsql_endpoints(
 )]
 mod tests {
     use crate::config::{
-        Args, IdpConfig, SamlProviderConfig, ServerConfig, bootstrap_overlay_args,
+        Args, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig, bootstrap_overlay_args,
         resolve_dsql_endpoints, validate_provider_slug,
     };
     use crate::test_utils::test_config;
     use clap::{CommandFactory, Parser};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, HashMap};
 
     fn saml_provider_for_tests() -> SamlProviderConfig {
@@ -1593,7 +1636,7 @@ mod tests {
         // the OpenID conformance suite from running.
         let mut config = test_config();
         config.idps = Vec::new();
-        config.certification_test_token = Some(SecretString::from("cert-token"));
+        config.certification_test_token = NonEmptySecret::new(SecretString::from("cert-token"));
         assert!(config.validate().is_ok());
     }
 
@@ -1888,6 +1931,71 @@ mod tests {
             config.aws_use_fips_endpoint.is_none(),
             "empty CLI aws_use_fips_endpoint must be None, got {:?}",
             config.aws_use_fips_endpoint
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — shared-secret keys are NonEmptySecret
+    //
+    // The webhook HMAC key, the /metrics bearer token and the certification
+    // HMAC key each switch a feature on by being present and then key it.
+    // Clap yields `Some("")` for `--flag=` and for `VAR=""` alike (the env
+    // path is not exercised directly: `set_var` is `unsafe` under edition 2024
+    // and `unsafe_code` is denied), and that must load as `None`.
+    // ========================================================================
+
+    #[test]
+    fn non_empty_secret_rejects_empty() {
+        assert!(NonEmptySecret::new(SecretString::from("")).is_none());
+        assert!(NonEmptySecret::from_arg(Some(String::new())).is_none());
+        assert!(NonEmptySecret::from_arg(None).is_none());
+        assert_eq!(
+            NonEmptySecret::from_arg(Some("k".to_string()))
+                .expect("non-empty value is kept")
+                .expose_secret(),
+            "k"
+        );
+    }
+
+    #[test]
+    fn from_args_empty_shared_secrets_yield_none() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--certification-test-token=",
+            "--metrics-bearer-token=",
+            "--github-webhook-secret=",
+        ])
+        .expect("parse with empty shared secrets");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.certification_test_token.is_none(),
+            "an empty certification token must not register the login-bypass routes"
+        );
+        assert!(
+            config.metrics_bearer_token.is_none(),
+            "an empty metrics token must not register /metrics"
+        );
+        assert!(
+            config.github_webhook_secret.is_none(),
+            "an empty webhook secret must leave webhook verification unconfigured"
+        );
+    }
+
+    #[test]
+    fn from_args_non_empty_certification_test_token_is_preserved() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--certification-test-token=test-cert-token-32bytes-padding!!",
+        ])
+        .expect("parse with non-empty --certification-test-token");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config
+                .certification_test_token
+                .as_ref()
+                .expect("token present")
+                .expose_secret(),
+            "test-cert-token-32bytes-padding!!"
         );
     }
 

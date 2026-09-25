@@ -30,6 +30,7 @@ use crate::config::Config;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::StsCredentials;
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::server_url::{InsecureOptIn, ServerUrlError};
 use crate::session::resolve_session;
 
 /// Docker credential helper output format.
@@ -82,9 +83,13 @@ pub(crate) enum RegistryType {
 ///
 /// # Arguments
 /// * `operation` - The Docker credential operation ("get", "store", "erase", or "list")
-pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
+pub(crate) async fn run(
+    operation: &str,
+    profile: Option<&str>,
+    opt_in: InsecureOptIn,
+) -> Result<()> {
     match operation {
-        "get" => get_credential(profile).await,
+        "get" => get_credential(profile, opt_in).await,
         "store" | "erase" => {
             // These operations are no-ops for Vouch since we don't store credentials
             // Just consume stdin to avoid broken pipe
@@ -155,7 +160,7 @@ pub(crate) fn detect_registry_type(server_url: &str) -> RegistryType {
 }
 
 /// Handle the "get" operation - provide credentials to Docker.
-async fn get_credential(profile: Option<&str>) -> Result<()> {
+async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<()> {
     // Read server URL from stdin
     let server_url = read_server_url()?;
 
@@ -169,9 +174,13 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     // Detect registry type
     let registry_type = detect_registry_type(&server_url);
 
-    // Resolve session (tries agent first, then config)
-    let session = resolve_session().await.inspect_err(|_| {
-        vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
+    // Resolve session (tries agent first, then config). A refused server URL
+    // is configured, just not allowed for this invocation, so the
+    // not-configured hint would mislead; its own message says what to do.
+    let session = resolve_session(opt_in).await.inspect_err(|e| {
+        if !ServerUrlError::is_in(e) {
+            vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
+        }
     })?;
     let server = session.server_url.as_str();
 

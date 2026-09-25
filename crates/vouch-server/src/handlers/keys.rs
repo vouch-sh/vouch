@@ -269,19 +269,19 @@ pub(crate) async fn register_complete(
         return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
 
-    // Account must be active. A user deactivated after obtaining the
-    // registration state (valid for five minutes) must not register a new
-    // hardware key (issue #846). Mirrors `browser_register_complete`.
-    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
-    }
+    // Account must be active. A user deactivated — or hard-deleted — in the
+    // window between `register_start` (which issued the state, valid for five
+    // minutes) and this completion must not register a new hardware key
+    // (issue #846, plus the in-flight `delete_user` race that leaves
+    // `db::get_user_by_id` returning `Ok(None)`). Routing through
+    // `load_active_user` rejects both `Ok(None)` (deleted) and `active=false`
+    // (deactivated) and keeps this completion consistent with `register_start`,
+    // `rename_key`, and `delete_key`, all of which enforce the invariant the
+    // same way. The previous inline `if let Some(account) = account` guard only
+    // caught `Some(active=false)` and silently let `Ok(None)` through to the
+    // single-use consume and WebAuthn verification, which (with a valid
+    // attestation) committed an orphan `AuthenticatorDoc` for a deleted user.
+    super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
 
     // Single-use enforcement: consume the state token before any WebAuthn work.
     // A captured state JWT cannot be replayed within the 5-minute validity window.
@@ -407,7 +407,7 @@ pub(crate) async fn register_complete(
     tracing::info!("Registered new authenticator: {}", device_id);
 
     let event = db::AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
+        user_id: db::Principal::Verified(reg_state.user_id.to_string()),
         event_type: db::AuthEventType::KeyRegistered,
         authenticator_id: Some(device_id.clone()),
         success: true,
@@ -480,7 +480,7 @@ pub(crate) async fn rename_key(
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
     let event = db::AuthEventParams {
-        user_id: token.sub.clone(),
+        user_id: db::Principal::Verified(token.sub.clone()),
         event_type: db::AuthEventType::KeyRenamed,
         authenticator_id: Some(key_id.clone()),
         success: true,
@@ -529,7 +529,7 @@ pub(crate) async fn delete_key(
     state.session_cache.invalidate_for_user(&token.sub);
 
     let event = db::AuthEventParams {
-        user_id: token.sub.clone(),
+        user_id: db::Principal::Verified(token.sub.clone()),
         event_type: db::AuthEventType::KeyRemoved,
         authenticator_id: Some(key_id.clone()),
         success: true,
@@ -556,9 +556,12 @@ pub(crate) async fn delete_key(
 mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::db::store::GetUserByIdTestHook;
     use crate::test_utils::TEST_JWT_SECRET;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
     use vouch_common::fido2_types::Challenge;
 
     #[tokio::test]
@@ -1172,14 +1175,18 @@ mod tests {
         )
         .await;
 
+        // After the `load_active_user` fix, a deactivated user is rejected
+        // with the same shape `register_start` returns for the same fixture
+        // (see `test_register_start_rejects_deactivated_user`): 401
+        // "User account is deactivated", not the legacy 403 "user_deactivated".
         assert_eq!(
             status,
-            StatusCode::FORBIDDEN,
+            StatusCode::UNAUTHORIZED,
             "deactivated user must not complete key registration: {resp_body}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
-        assert_eq!(json["code"], "forbidden");
-        assert_eq!(json["message"], "user_deactivated");
+        assert_eq!(json["code"], "unauthorized");
+        assert_eq!(json["message"], "User account is deactivated");
     }
 
     #[tokio::test]
@@ -1236,16 +1243,162 @@ mod tests {
 
         // The active-user check must NOT fire for an active user. Dummy
         // attestation bytes cause WebAuthn verification to fail with a 400
-        // invalid_attestation — never a 403 user_deactivated.
+        // invalid_attestation — never the active-user rejection that
+        // `load_active_user` returns for deactivated users (401 "User
+        // account is deactivated").
         assert_ne!(
             status,
-            StatusCode::FORBIDDEN,
-            "active user must not be rejected as deactivated: {resp_body}"
+            StatusCode::UNAUTHORIZED,
+            "active user must not be rejected by the active-user guard: {resp_body}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
         assert_ne!(
-            json["message"], "user_deactivated",
-            "active user must not receive user_deactivated: {json}"
+            json["message"], "User account is deactivated",
+            "active user must not receive the deactivated rejection: {json}"
+        );
+    }
+
+    // ========================================================================
+    // Register Complete — Deleted User (in-flight `delete_user` race)
+    // ========================================================================
+    //
+    // A user hard-deleted in the window between `register_start` (which
+    // issued the state, valid for five minutes) and this completion must be
+    // rejected — not proceed to the single-use consume and WebAuthn
+    // verification. The `AuthenticatedToken` extractor validates the session
+    // via `session_cache.get_session_by_token_hash` and does NOT call
+    // `get_user_by_id`; the handler's `load_active_user` read is the ONLY
+    // `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
+    // `handlers/applications/web.rs`, fixed via the same
+    // `get_user_by_id_test_hook` seam). Before the `load_active_user` fix the
+    // inline `if let Some(account) = account` guard admitted `Ok(None)` and
+    // the request reached WebAuthn, returning 400 invalid_attestation — the
+    // smoking gun that a deleted user was being treated like an active user.
+
+    /// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the
+    /// "user vanished mid-request" outcome) for `target` once it has been
+    /// set. While `target` is `None` (during test setup) every read runs for
+    /// real, so `create_test_user` / `create_test_session_with` work normally.
+    /// Returns a counter that is bumped on each forced read so the test can
+    /// assert the forced `Ok(None)` landed on the handler's read (the
+    /// extractor makes no `get_user_by_id` call on this path, so the count
+    /// must be exactly one).
+    fn install_user_vanish_hook(
+        target: Arc<Mutex<Option<String>>>,
+    ) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: GetUserByIdTestHook = Arc::new(move |uid: &str| {
+            let active = target.lock().expect("hook target lock poisoned").as_deref() == Some(uid);
+            if !active {
+                return false;
+            }
+            calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            // Every handler-path read for the target user is forced to
+            // `Ok(None)`. The CLI completion path's `load_active_user` makes
+            // exactly one `get_user_by_id` read, so this forces it on the
+            // first (and only) call.
+            true
+        });
+        (calls, hook)
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_refuses_vanished_user() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_user_vanish_hook(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_user_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "vanished-complete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+        // Build a valid RegistrationState JWT the way `register_start` would
+        // have minted while the user was still alive.
+        let signer = &state.state_signer;
+        let challenge = Challenge::from(vec![5u8; 32]);
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: user_uuid,
+            user_name: user.email.clone(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
+            challenge,
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state.encode(signer).await.expect("encode state");
+
+        // Activate the hook only now — every `get_user_by_id` during setup
+        // ran with the target unset and so was a no-op.
+        *target.lock().expect("activate hook") = Some(user.id.clone());
+
+        // The field bounds precede the active-user check, so the binary
+        // fields must be well-formed; the deleted user is rejected before
+        // WebAuthn runs, so dummy attestation bytes suffice.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        // The deleted user must be rejected — reaching WebAuthn (400
+        // invalid_attestation) is the bug, not the fix.
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "deleted user must NOT reach the WebAuthn-verification / \
+             state-consume stage; the active-user guard must reject `Ok(None)` \
+             the way it rejects `active=false`. Got {status} {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_ne!(
+            json["code"], "invalid_attestation",
+            "deleted user must not reach WebAuthn verification: {json}"
+        );
+        // `load_active_user` rejects `Ok(None)` with 401 "User not found".
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deleted user rejected: {resp_body}"
+        );
+        assert_eq!(json["code"], "unauthorized");
+        assert_eq!(json["message"], "User not found");
+
+        // The handler's `load_active_user` read is the ONLY `get_user_by_id`
+        // on this path, so the forced `Ok(None)` must have landed exactly
+        // there — proving the rejection came from the handler's guard, not a
+        // too-early fire that some other layer caught.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "expected exactly one get_user_by_id call (the handler's load_active_user read)"
         );
     }
 

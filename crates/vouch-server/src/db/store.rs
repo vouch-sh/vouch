@@ -864,6 +864,30 @@ impl DocumentStore {
         &self.pool
     }
 
+    /// Test-only: overwrite a document's `created_at` stamp.
+    ///
+    /// Rows are stamped from the ambient clock, so a test that needs two rows
+    /// in a chosen order within one second places them with this rather than
+    /// waiting on the wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(test)]
+    pub(crate) async fn set_created_at_for_test(
+        &self,
+        id: &str,
+        created_at: Timestamp,
+    ) -> Result<u64> {
+        let stmt = Query::update()
+            .table(Documents::Table)
+            .value(Documents::CreatedAt, created_at.to_string())
+            .and_where(Expr::col(Documents::Id).eq(id))
+            .to_owned();
+        let result = crate::db_execute!(&self.pool, stmt)?;
+        Ok(result.rows_affected())
+    }
+
     /// Whether documents are encrypted at rest (vs. the dev plaintext mode).
     ///
     /// Per-org issuer signing keys are only created when this is `true`, so a
@@ -1369,6 +1393,33 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T) -> std::result::Result<A, R>,
     {
+        Ok(match self.transition_versioned(id, decide).await? {
+            Transition::Applied((applied, _version)) => Transition::Applied(applied),
+            Transition::Rejected(rejected) => Transition::Rejected(rejected),
+            Transition::NotFound => Transition::NotFound,
+        })
+    }
+
+    /// [`Self::transition`], also returning the version the applied write
+    /// committed.
+    ///
+    /// For a caller that may need to undo its own write later: a
+    /// compare-and-set against this version succeeds only if nothing else
+    /// has written the document since, so the undo cannot overwrite a
+    /// concurrent writer's decision.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transition`].
+    pub async fn transition_versioned<T, A, R, F>(
+        &self,
+        id: &str,
+        decide: F,
+    ) -> Result<Transition<(A, i32), R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
         for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
             let Some(doc) = self.get::<T>(id).await? else {
                 return Ok(Transition::NotFound);
@@ -1384,7 +1435,8 @@ impl DocumentStore {
                 Err(rejected) => return Ok(Transition::Rejected(rejected)),
             };
             if self.compare_and_update(id, version, &data).await? {
-                return Ok(Transition::Applied(applied));
+                // `compare_and_update` writes `expected_version + 1`.
+                return Ok(Transition::Applied((applied, version.saturating_add(1))));
             }
             if attempt < super::pool::MAX_DSQL_RETRIES {
                 tracing::debug!(

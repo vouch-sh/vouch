@@ -1290,3 +1290,293 @@ async fn test_delete_client_first_delete_failure_changes_nothing() {
         "no invalidation ran, so the user-issued session must stay cached (still valid)"
     );
 }
+
+// ========================================================================
+// RFC 7592 registration access tokens across owner offboarding
+// ========================================================================
+//
+// Deleting or deactivating a user ends their authority over every OAuth
+// client they own, so each offboarding write revokes the registration access
+// token on all of those clients in the same transaction. RFC 7592 §5 only asks
+// for this when a *client* is deprovisioned; tying it to the owner is our
+// decision (a client registered by a user is managed on that user's behalf).
+
+/// The three writes that end a user's authority over their clients.
+#[derive(Clone, Copy, Debug)]
+enum Offboard {
+    Delete,
+    AdminDeactivate,
+    ScimDeactivate,
+}
+
+impl Offboard {
+    const ALL: [Self; 3] = [Self::Delete, Self::AdminDeactivate, Self::ScimDeactivate];
+
+    async fn run(self, store: &DocumentStore, user_id: &str) {
+        let done = match self {
+            Self::Delete => delete_user(store, user_id, LastAdminGuard::Enforce)
+                .await
+                .expect("delete_user"),
+            Self::AdminDeactivate => {
+                demote_or_deactivate_member(store, user_id, MemberDowngrade::Deactivate)
+                    .await
+                    .expect("deactivate")
+            }
+            Self::ScimDeactivate => {
+                update_scim_user(store, user_id, TEST_ORG_ID, None, None, false)
+                    .await
+                    .expect("scim deactivate")
+            }
+        };
+        assert!(done, "{self:?} must apply");
+    }
+}
+
+/// A non-admin member of the test org (plus an active admin, so the org has a
+/// successor) who owns one client of `scope` holding `reg_hash`. Returns
+/// `(owner_id, client_doc_id)`.
+async fn owner_with_registered_client(
+    store: &DocumentStore,
+    scope: AccessScope,
+    reg_hash: &str,
+) -> (String, String) {
+    seed_test_org(store).await;
+    let (owner_id, _) = upsert_user_with_org(
+        store,
+        "rfc7592-owner@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create owner");
+    upsert_user_with_org(
+        store,
+        "rfc7592-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+    let client = create_test_client(
+        store,
+        &owner_id,
+        TestClientSpec {
+            access_scope: scope,
+            org_id: Some(TEST_ORG_ID.to_string()),
+            with_secret: false,
+            registration_access_token_hash: Some(reg_hash.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    (owner_id, client.app_id)
+}
+
+async fn stored_registration_hash(store: &DocumentStore, id: &str) -> Option<String> {
+    get_oauth_client_by_id(store, id)
+        .await
+        .expect("lookup client")
+        .expect("client exists")
+        .registration_access_token_hash
+}
+
+/// Every offboarding path clears the hash on every scope the owner holds,
+/// including `Organization`: a dynamically registered `Personal` client can be
+/// switched to `Organization` through the application API and keeps its token.
+#[tokio::test]
+async fn test_offboarding_revokes_registration_tokens_on_every_scope() {
+    for offboard in Offboard::ALL {
+        for scope in [
+            AccessScope::Personal,
+            AccessScope::Public,
+            AccessScope::Organization,
+        ] {
+            let (store, _audit) = test_db().await;
+            let reg_hash = crate::crypto::hash_token("vouch_reg_offboard");
+            let (owner_id, app) = owner_with_registered_client(&store, scope, &reg_hash).await;
+
+            offboard.run(&store, &owner_id).await;
+
+            assert_eq!(
+                stored_registration_hash(&store, &app).await,
+                None,
+                "{offboard:?} must revoke the registration token of a {scope:?} client"
+            );
+        }
+    }
+}
+
+/// The hook both race tests install: on the client's first `transition`
+/// attempt — after the RFC 7592 write read the row, before it commits —
+/// offboard the owner through a hookless store.
+fn offboard_during_transition(
+    store: &DocumentStore,
+    offboard: Offboard,
+    owner_id: &str,
+    client_doc_id: &str,
+) -> DocumentStore {
+    let writer = store.clone();
+    let owner_id = owner_id.to_string();
+    let client_doc_id = client_doc_id.to_string();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let owner_id = owner_id.clone();
+        let fire = attempt == 0 && doc_id == client_doc_id;
+        Box::pin(async move {
+            if fire {
+                offboard.run(&writer, &owner_id).await;
+            }
+        })
+    }));
+    hooked
+}
+
+/// An RFC 7592 PUT that verified the owner as active before the offboarding
+/// committed must not land: the offboarding bumps the client's version, the
+/// PUT's `transition` re-reads, finds no hash, and rejects.
+#[tokio::test]
+async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crate::crypto::hash_token("vouch_reg_put_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+        let before = get_oauth_client_by_id(&store, &app)
+            .await
+            .expect("lookup")
+            .expect("client exists")
+            .redirect_uris;
+        let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
+
+        let attacker_uris = vec!["https://attacker.example.com/cb".to_string()];
+        let rotated = crate::crypto::hash_token("vouch_reg_rotated_must_not_land");
+        let outcome = update_oauth_client_registration(
+            &hooked,
+            &app,
+            &reg_hash,
+            &UpdateClientRegistrationParams {
+                redirect_uris: &attacker_uris,
+                grant_types: None,
+                response_types: None,
+                keys: None,
+                registration_access_token_hash: &rotated,
+                registration_metadata: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
+                post_logout_redirect_uris: None,
+                client_name: None,
+                software_id: None,
+                software_version: None,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
+                authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
+                request_object_signing_alg: None,
+                require_signed_request_object: None,
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+            },
+        )
+        .await
+        .expect("PUT must not error");
+
+        assert!(
+            outcome.is_none(),
+            "a PUT racing {offboard:?} must not commit; got {outcome:?}"
+        );
+        let after = get_oauth_client_by_id(&store, &app)
+            .await
+            .expect("lookup")
+            .expect("client exists");
+        assert_eq!(
+            after.redirect_uris, before,
+            "{offboard:?}: PUT did not land"
+        );
+        assert_eq!(after.registration_access_token_hash, None, "{offboard:?}");
+    }
+}
+
+/// An RFC 7592 DELETE whose consume raced the offboarding loses: the consume
+/// re-reads after the version bump, finds no hash, and does not consume, so
+/// the client is never deleted.
+#[tokio::test]
+async fn test_rfc7592_delete_racing_owner_offboarding_is_rejected() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crate::crypto::hash_token("vouch_reg_delete_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+        let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
+
+        let consumed = consume_registration_access_token(&hooked, &app, &reg_hash)
+            .await
+            .expect("consume must not error");
+
+        assert!(
+            consumed.is_none(),
+            "a DELETE racing {offboard:?} must not consume the token"
+        );
+        assert_eq!(stored_registration_hash(&store, &app).await, None);
+    }
+}
+
+/// A failed RFC 7592 DELETE puts back the token it consumed when nothing else
+/// has touched the client, so the owner can retry.
+#[tokio::test]
+async fn test_restore_registration_token_after_failed_delete() {
+    let (store, _audit) = test_db().await;
+    let reg_hash = crate::crypto::hash_token("vouch_reg_restore");
+    let (_owner_id, app) =
+        owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+
+    let consumed = consume_registration_access_token(&store, &app, &reg_hash)
+        .await
+        .expect("consume")
+        .expect("token consumed");
+    assert_eq!(stored_registration_hash(&store, &app).await, None);
+
+    assert!(
+        restore_registration_access_token(&store, consumed)
+            .await
+            .expect("restore"),
+        "an untouched client gets its token back"
+    );
+    assert_eq!(stored_registration_hash(&store, &app).await, Some(reg_hash));
+}
+
+/// The restore must not reinstate a token that offboarding revoked between
+/// the consume and the failed delete. "The hash is `None`" is true in both
+/// cases; only the version tells them apart, and every offboarding path
+/// writes the client even though its hash is already `None`.
+#[tokio::test]
+async fn test_restore_does_not_reinstate_token_revoked_by_offboarding() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crate::crypto::hash_token("vouch_reg_restore_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+
+        let consumed = consume_registration_access_token(&store, &app, &reg_hash)
+            .await
+            .expect("consume")
+            .expect("token consumed");
+        offboard.run(&store, &owner_id).await;
+
+        assert!(
+            !restore_registration_access_token(&store, consumed)
+                .await
+                .expect("restore"),
+            "{offboard:?} after the consume must win over the restore"
+        );
+        assert_eq!(
+            stored_registration_hash(&store, &app).await,
+            None,
+            "{offboard:?}: the revoked token stays revoked"
+        );
+    }
+}

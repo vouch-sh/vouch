@@ -1348,6 +1348,15 @@ pub struct OidcValidatedSession {
     /// means "cannot say when", and nothing may substitute a nearby
     /// timestamp for it.
     pub auth_time: Option<i64>,
+    /// When the server-side session row backing this token was created, read
+    /// from the stored session record at full (sub-second) precision.
+    ///
+    /// Distinct from [`Self::auth_time`]: `auth_time` is the integer-second
+    /// ceremony instant the issued code reports, while this is the row's
+    /// creation instant. A new row does not imply a new ceremony — the
+    /// authorization_code grant mints one carrying an older `auth_time` — so
+    /// callers must never read this as an authentication time on its own.
+    pub session_created_at: jiff::Timestamp,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1438,6 +1447,7 @@ pub async fn validate_session_token(
         client_id,
         hardware_verified,
         auth_time,
+        session_created_at: session.created_at,
     }))
 }
 

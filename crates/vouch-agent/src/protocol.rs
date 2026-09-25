@@ -163,7 +163,11 @@ pub struct StoreSshCredentialsParams {
     /// Session expiration timestamp (ISO 8601).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_expires_at: Option<String>,
-    /// Server URL for certificate refresh.
+    /// Server URL the CLI obtained the certificate from.
+    ///
+    /// Accepted for wire compatibility and not used: the agent pairs a
+    /// certificate only with the server URL of the session it was stored
+    /// with, never one supplied beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
 }

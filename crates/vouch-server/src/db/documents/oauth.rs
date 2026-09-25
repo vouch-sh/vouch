@@ -551,6 +551,30 @@ pub struct OAuthClientSecretDoc {
     pub revoked_at: Option<Timestamp>,
 }
 
+impl OAuthClientSecretDoc {
+    /// Whether this secret is active: not revoked and not expired at `now`.
+    ///
+    /// The single definition of "active secret". The cap and floor guards in
+    /// `db::oauth` and `OAuthClientSecret::is_valid` all call it, so the
+    /// counted set and the authenticating set cannot drift apart.
+    #[must_use]
+    pub fn is_valid(&self, now: &Timestamp) -> bool {
+        is_secret_active(self.revoked_at, self.expires_at, now)
+    }
+}
+
+/// Shared "active secret" predicate over the two fields that decide it.
+///
+/// A secret expiring exactly at `now` is already inactive.
+#[must_use]
+pub(crate) fn is_secret_active(
+    revoked_at: Option<Timestamp>,
+    expires_at: Option<Timestamp>,
+    now: &Timestamp,
+) -> bool {
+    revoked_at.is_none() && expires_at.is_none_or(|exp| exp > *now)
+}
+
 impl DocumentType for OAuthClientSecretDoc {
     const DOC_TYPE: &'static str = "oauth_client_secret";
 

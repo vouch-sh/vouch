@@ -494,11 +494,13 @@ pub async fn test_app_without_client_ca() -> (Router, Arc<AppState>) {
 ///
 /// The certification token is set to a fixed value for testing.
 pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
+    use crate::config::NonEmptySecret;
     use secrecy::SecretString;
     let state = test_app_state().await;
     // Override config with certification token set
     let mut config = (**state.config()).clone();
-    config.certification_test_token = Some(SecretString::from("test-cert-token-32bytes-padding!!"));
+    config.certification_test_token =
+        NonEmptySecret::new(SecretString::from("test-cert-token-32bytes-padding!!"));
     state.config.store(Arc::new(config.clone()));
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
@@ -1717,7 +1719,15 @@ pub async fn forge_short_lived_access_token(
 /// `expires_at` is one second in the past, which is the expired-but-not-yet-
 /// reaped window: the expiry-filtering `get_session_by_token_hash` answers
 /// `None` while the row still exists. `client_id` is the OAuth client the row
-/// records it was issued to.
+/// records it was issued to, and `purpose` is the row's session purpose.
+///
+/// For a `client_credentials` (M2M) row pass `SessionPurpose::M2MAccessToken`
+/// with `user_id` set to the client's `client_id` and an empty `email`: that is
+/// the shape `client_credentials.rs` persists, since there is no user. The
+/// equality is Vouch's own storage choice. RFC 9068 §2.2 constrains only the
+/// token's `sub` claim, which "SHOULD correspond to an identifier the
+/// authorization server uses to indicate the client application"; it says
+/// nothing about how the authorization server stores the session.
 #[expect(
     clippy::disallowed_methods,
     reason = "test fixtures construct their own instants"
@@ -1727,6 +1737,7 @@ pub async fn create_test_expired_session_row(
     user_id: &str,
     email: &str,
     client_id: Option<&str>,
+    purpose: crate::db::SessionPurpose,
 ) -> (String, String) {
     let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
     let token_hash = crate::crypto::hash_token(&token);
@@ -1741,7 +1752,7 @@ pub async fn create_test_expired_session_row(
             token_hash: &token_hash,
             authenticator_id: Option::None,
             expires_at,
-            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            session_type: purpose,
             authorization_details: Option::None,
             hardware_aaguid: Option::None,
             org_domain: Option::None,

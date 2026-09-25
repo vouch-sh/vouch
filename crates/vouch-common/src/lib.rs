@@ -18,6 +18,7 @@ pub mod paths;
 pub mod posture;
 pub mod protocol;
 pub mod resource_label;
+pub mod ssh_cert;
 pub(crate) mod url;
 
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub use api::{
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::ApiError;
 pub use resource_label::{ResourceLabel, ResourceLabelError};
+pub use ssh_cert::{ssh_cert_issued_to, ssh_cert_key_id};
 pub use url::{
     ALLOW_INSECURE_ENV, UrlSecurity, allow_insecure_from_env, check_url_security, is_loopback_host,
     normalize_git_host, parse_allow_insecure, strip_default_https_port,

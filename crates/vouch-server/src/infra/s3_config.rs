@@ -32,7 +32,9 @@ use tokio::task::JoinHandle;
 
 use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 
-use crate::config::{IdpConfig, OidcProviderConfig, SamlProviderConfig, ServerConfig};
+use crate::config::{
+    IdpConfig, NonEmptySecret, OidcProviderConfig, SamlProviderConfig, ServerConfig,
+};
 use crate::crypto::document_crypto::{HpkeSuiteId, SUITE_DHKEM_P384_SHA384_AES256};
 use crate::crypto::tpm_decrypt;
 use crate::infra::kms_arn::KmsArnResolver;
@@ -882,8 +884,10 @@ impl ServerConfig {
             if let Some(v) = &github.app_key {
                 self.github_app_key = Some(v.clone());
             }
-            if let Some(v) = &github.webhook_secret {
-                self.github_webhook_secret = Some(v.clone());
+            // An empty S3 value is treated as absent (no override), the same
+            // as an empty env value: it must never install an empty HMAC key.
+            if let Some(v) = github.webhook_secret.clone().and_then(NonEmptySecret::new) {
+                self.github_webhook_secret = Some(v);
             }
             if let Some(v) = &github.client_id {
                 self.github_app_client_id = Some(v.clone());
@@ -1128,6 +1132,33 @@ mod tests {
         assert_eq!(config.github_app_id, Some(12345));
         assert_eq!(config.github_app_name, Some("my-app".to_string()));
         assert!(config.github_app_key.is_some());
+    }
+
+    #[test]
+    fn test_merge_s3_config_empty_webhook_secret_is_absent() {
+        // An empty S3 webhook secret is treated like an unset one: it must not
+        // install an empty HMAC key, and must not clobber a key already set.
+        let empty = S3Config {
+            github: Some(S3GithubConfig {
+                webhook_secret: Some("".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut config = crate::test_utils::test_config();
+        config.merge_s3_config(&empty, false).unwrap();
+        assert!(config.github_webhook_secret.is_none());
+
+        config.github_webhook_secret = NonEmptySecret::new("env-secret".into());
+        config.merge_s3_config(&empty, false).unwrap();
+        assert_eq!(
+            config
+                .github_webhook_secret
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            Some("env-secret")
+        );
     }
 
     #[test]

@@ -1154,8 +1154,12 @@ setup-aws-added-profile-block =
       https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-idc-existing-verified = Profile [{ $profile }] → assumable through AWS IAM Identity Center ({ $account } / { $permission_set })
+# Every candidate name for this assignment (the preferred name, then the
+# account-id and permission-set-hash suffixed fallbacks) is held by a profile
+# vending something else, so discovery did not overwrite it.
+setup-aws-idc-name-taken = Skipped Identity Center assignment ({ $account } / { $permission_set }) — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. Rename or remove a conflicting profile and re-run '{ -cmd } setup aws --discover' to configure this assignment.
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
-setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
+setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. The entitlement was NOT configured; rename or remove a conflicting profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
 setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (assumable)
 setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } exists and is assumable

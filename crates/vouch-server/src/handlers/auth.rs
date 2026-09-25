@@ -170,7 +170,7 @@ pub(crate) async fn logout(
 
                 // Best-effort logout audit event
                 let params = db::AuthEventParams {
-                    user_id: session.user_id.clone(),
+                    user_id: db::Principal::Verified(session.user_id.clone()),
                     event_type: db::AuthEventType::Logout,
                     success: true,
                     client: client_info,
@@ -496,8 +496,14 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "logout-expired@example.com").await;
 
-        let (token, token_hash) =
-            create_test_expired_session_row(&state, &user.id, &user.email, None).await;
+        let (token, token_hash) = create_test_expired_session_row(
+            &state,
+            &user.id,
+            &user.email,
+            None,
+            crate::db::SessionPurpose::OAuthAccessToken,
+        )
+        .await;
 
         // Sanity: the expiry-filtering lookup returns `None` for this row, so
         // a fix that still gated the audit on that lookup would skip the

@@ -862,13 +862,17 @@ pub async fn update_scim_user(
             return Err(ScimUpdateError::LastAdmin);
         }
 
-        // A deactivated user can no longer manage their org-scoped
-        // applications, so they move to an active admin, as on delete.
-        if !active
-            && user_doc.data.active
-            && !super::users::transfer_org_clients(&mut tx, Some(org_id), user_id).await?
-        {
-            return Err(ScimUpdateError::OccConflict);
+        // A deactivated user can no longer manage their applications: their
+        // RFC 7592 registration access tokens are revoked on every client they
+        // own, and org-scoped applications move to an active admin, as on
+        // delete and on admin deactivation.
+        if !active && user_doc.data.active {
+            if !super::users::revoke_owner_registration_tokens(&mut tx, user_id).await? {
+                return Err(ScimUpdateError::OccConflict);
+            }
+            if !super::users::transfer_org_clients(&mut tx, Some(org_id), user_id).await? {
+                return Err(ScimUpdateError::OccConflict);
+            }
         }
 
         let mut updated = user_doc.data.clone();

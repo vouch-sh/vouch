@@ -1011,3 +1011,111 @@ async fn test_find_session_by_token_hash_returns_live_row() {
         "live row must also be returned by the filtering lookup"
     );
 }
+
+// ===========================================================================
+// Concurrent revocation: only the row-deleting transaction returns `Some`
+// (and so only it records a `Logout` audit event). This mirrors the losing-side
+// tests for `delete_custom_policy` / `delete_scim_token` / `delete_scim_group`
+// / `delete_user` in `concurrency.rs`, and additionally wires the real
+// `AuditStore` insert path (no dedup key) to prove the duplicate audit row is
+// suppressed.
+// ===========================================================================
+
+/// Two concurrent revokes of the same `token_hash` must not produce two
+/// `Logout` audit events: the losing revoker — its `DELETE` removed nothing
+/// because a concurrent winner already deleted the row — returns `None`, so
+/// its caller skips the audit. Only the winning revoker records `Logout`.
+///
+/// The `set_delete_vanished_once` seam removes the row inside the loser's
+/// `StoreTransaction::delete`, after its `find_all` read it, deterministically
+/// reproducing a concurrent winner's `DELETE` under `READ COMMITTED`. The
+/// winner's delete is the seam; the winner's `Logout` audit is the explicit
+/// `record_auth_event` below.
+#[tokio::test]
+async fn test_logout_audit_duplicated_when_revocation_loses_race() {
+    let (store, audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "race-audit@example.com", None)
+        .await
+        .expect("create user");
+    let session_id = create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "race-audit@example.com",
+            token_hash: "race-audit-hash",
+            authenticator_id: None,
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    // The winning revoker deleted the row (the seam below stands in for that
+    // deletion) and recorded its own legitimate `Logout` audit.
+    record_auth_event(
+        &audit,
+        AuthEventParams {
+            user_id: Principal::Verified(user_id.clone()),
+            event_type: AuthEventType::Logout,
+            success: true,
+            ..Default::default()
+        },
+        Some("race-audit@example.com".to_string()),
+    )
+    .await;
+
+    // The losing revoker: `find_all` sees the row, its `tx.delete` removes
+    // nothing (the seam removed the row first, as a concurrent winner would).
+    let mut loser_store = store.clone();
+    loser_store.set_delete_vanished_once(vec![session_id]);
+    let loser_deleted = delete_session_by_token_hash(&loser_store, "race-audit-hash")
+        .await
+        .expect("delete must not error");
+    assert!(
+        loser_deleted.is_none(),
+        "the losing revoker (deleted nothing) must report None, got {loser_deleted:?}"
+    );
+
+    // Each caller records a `Logout` audit on `Some`; the loser would record a
+    // duplicate here. Under the bug it does.
+    if let Some(session) = &loser_deleted {
+        record_auth_event(
+            &audit,
+            AuthEventParams {
+                user_id: Principal::Verified(session.user_id.clone()),
+                event_type: AuthEventType::Logout,
+                success: true,
+                ..Default::default()
+            },
+            Some(session.user_email.clone()),
+        )
+        .await;
+    }
+
+    let logout_count = audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
+            user_id: Some(user_id),
+            ..AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .len();
+    assert_eq!(
+        logout_count, 1,
+        "exactly one Logout audit row (the winner's)"
+    );
+
+    assert!(
+        find_session_by_token_hash(&store, "race-audit-hash")
+            .await
+            .expect("find")
+            .is_none()
+    );
+}

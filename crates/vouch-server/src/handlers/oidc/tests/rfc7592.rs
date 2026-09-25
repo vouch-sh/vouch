@@ -1912,6 +1912,702 @@ async fn test_rfc7592_deactivated_owner_token_is_invalid() {
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
 }
 
+// Deleting a client's owner unlinks that client (`user_id = None`) rather than
+// just deactivating them (`user_id` stays `Some`). The owner-active guard is
+// keyed on `client.user_id`, so once it is `None` the guard is skipped and the
+// token would verify against the untouched `registration_access_token_hash`
+// forever. `delete_user` therefore clears the hash on the same write that
+// unlinks the client, so every RFC 7592 operation returns `invalid_token`.
+// Regression for the deletion case the deactivation test above does not reach.
+#[tokio::test]
+async fn test_rfc7592_deleted_owner_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7592-deleted-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Owned Client (delete probe)"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+    let uri = format!("/oauth/register/{client_id}");
+    let auth = format!("Bearer {token}");
+
+    assert!(
+        db::delete_user(&state.store, &user.id, db::LastAdminGuard::Bypass)
+            .await
+            .expect("delete owner"),
+        "owner must be deleted"
+    );
+
+    // Post-delete db state: the client is unlinked AND its registration access
+    // token hash is cleared. The unlink alone is what skipped the owner-active
+    // guard; clearing the hash is what makes the token actually invalid.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client survives owner deletion");
+    assert_eq!(
+        stored.user_id, None,
+        "delete_user unlinks a deleted owner's personal client"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "delete_user must clear the registration_access_token_hash of an unlinked \
+         client so the deleted owner's token stops verifying"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Renamed"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &auth),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "DELETE probe: {method} with deleted owner's registration access token must be \
+             401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_token",
+            "{method}: {}",
+            response.body
+        );
+        assert_invalid_token_challenge(&response);
+    }
+
+    // No operation should have mutated the client: it survives, still unlinked
+    // and unmanageable with the deleted owner's token.
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client must not be deleted by a rejected RFC 7592 DELETE"
+    );
+}
+
+// Deleting an org-scoped client's owner transfers the client to an active org
+// admin successor rather than unlinking it. The owner-active guard then sees
+// the *successor* (active) and would pass, so the prior owner's token must be
+// revoked on the same write that reassigns ownership — otherwise the deleted
+// owner's registration access token keeps authorizing GET/PUT/DELETE against a
+// client now attributed to the successor. This is the transfer path the unlink
+// test above does not reach.
+#[tokio::test]
+async fn test_rfc7592_deleted_owner_transferred_client_revokes_token() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "rfc7592-transfer-owner.example").await;
+    // Non-admin creator: deleting them does not trip the last-admin floor, so
+    // the removal proceeds and `transfer_org_clients` hands the org-scoped
+    // client to the admin successor.
+    let creator =
+        create_test_user_in_org(&state.store, "transfer-creator@example.com", &org.id, false).await;
+    let successor =
+        create_test_user_in_org(&state.store, "transfer-admin@example.com", &org.id, true).await;
+
+    let plaintext_token = "test-rfc7592-transfer-owner-token";
+    let client = create_test_client(
+        &state.store,
+        &creator.id,
+        TestClientSpec {
+            name: "Org App (transfer probe)".to_string(),
+            access_scope: db::AccessScope::Organization,
+            org_id: Some(org.id.clone()),
+            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        db::delete_user(&state.store, &creator.id, db::LastAdminGuard::Enforce)
+            .await
+            .expect("delete creator"),
+        "creator must be deleted"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("client survives owner deletion");
+    assert_eq!(
+        stored.user_id.as_deref(),
+        Some(successor.id.as_str()),
+        "org-scoped client must transfer to the admin successor"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "transfer must clear the prior owner's registration_access_token_hash so the \
+         deleted owner's token stops verifying against the successor-owned client"
+    );
+
+    let uri = format!("/oauth/register/{}", client.client_id);
+    // The deleted creator's token must not authorize any RFC 7592 operation,
+    // even though the client is now attributed to an active admin successor.
+    let response = http_get_full(
+        &app,
+        &uri,
+        &[("Authorization", &format!("Bearer {plaintext_token}"))],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "GET with the deleted creator's token must be 401 after transfer, got {}: {}",
+        response.status.as_u16(),
+        response.body
+    );
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_token", "{}", response.body);
+    assert_invalid_token_challenge(&response);
+}
+
+// =========================================================================
+// E2E: the two production offboarding vectors drive `delete_user` through
+// the real HTTP handlers — admin UI `POST /admin/members/{id}/remove` and
+// SCIM `DELETE /scim/v2/Users/{id}`. Both call `revoke_user_access` then
+// `db::delete_user` (the function the fix above changes); neither touches
+// `registration_access_token_hash` directly. These tests exercise the actual
+// handler, authorization, and audit log at the HTTP boundary (via the same
+// `build_app` router `oneshot` path `vouch-tests` uses for all its E2E) and
+// confirm the deleted member's RFC 7592 token is dead afterward — closing the
+// gap between the db-level tests above and the bug report's exploit scenario.
+// =========================================================================
+
+/// Register a client with `owner`'s bearer session, returning
+/// `(client_id, registration_access_token)`.
+async fn owner_register_client(app: &axum::Router, bearer: &str, name: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": name
+    });
+    let (status, body) = http_post_json(
+        app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    (
+        json["client_id"].as_str().expect("client_id").to_string(),
+        json["registration_access_token"]
+            .as_str()
+            .expect("registration_access_token")
+            .to_string(),
+    )
+}
+
+/// Provision an org, an admin (with cookie-bearing session), and a member
+/// (with a bearer session so the member can self-register an OAuth client).
+async fn org_admin_member(
+    state: &crate::AppState,
+) -> (crate::db::User, String, crate::db::User, String) {
+    let org = create_test_org(&state.store, "rfc7592-e2e.example").await;
+    let admin =
+        create_test_user_in_org(&state.store, "rfc7592-admin@example.com", &org.id, true).await;
+    let admin_auth = create_test_authenticator(&state.store, &admin.id).await;
+    let admin_token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&admin_auth),
+            ..Default::default()
+        },
+    )
+    .await;
+    let member =
+        create_test_user_in_org(&state.store, "rfc7592-member@example.com", &org.id, false).await;
+    let member_auth = create_test_authenticator(&state.store, &member.id).await;
+    let member_token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &member.id,
+            email: &member.email,
+            auth_id: Some(&member_auth),
+            ..Default::default()
+        },
+    )
+    .await;
+    (admin, admin_token, member, member_token)
+}
+
+/// Admin UI offboarding: `POST /admin/members/{id}/remove` runs
+/// `revoke_user_access` then `db::delete_user`, unlinking the deleted
+/// member's personal client. The member's RFC 7592 registration access token
+/// must stop authorizing GET/PUT/DELETE immediately after the removal.
+#[tokio::test]
+async fn test_rfc7592_admin_remove_member_revokes_deleted_owner_registration_token() {
+    let (app, state) = test_app().await;
+    let (admin, admin_token, member, member_token) = org_admin_member(&state).await;
+    let (client_id, reg_token) =
+        owner_register_client(&app, &member_token, "Member-Owned Client (admin remove)").await;
+    let uri = format!("/oauth/register/{client_id}");
+
+    // Sanity: the member can read its client before removal.
+    let (status, _body) = http_request(
+        &app,
+        "GET",
+        &uri,
+        None,
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "setup: member's reg token must work before removal"
+    );
+
+    let cookie = format!("{}={admin_token}", vouch_common::SESSION_COOKIE_NAME);
+    let (status, body) = http_post_form(
+        &app,
+        &format!("/admin/members/{}/remove", member.id),
+        "",
+        &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "admin remove_member must succeed: {body}"
+    );
+    assert!(
+        db::get_user_by_id(&state.store, &member.id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "member must be deleted by admin remove"
+    );
+
+    // The deleted member's registration access token must no longer authorize
+    // any RFC 7592 operation — the unlink cleared the hash.
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &format!("Bearer {reg_token}")),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "admin-removed owner: {method} must be 401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{}", response.body);
+        assert_invalid_token_challenge(&response);
+    }
+    let _ = admin;
+}
+
+/// SCIM offboarding: `DELETE /scim/v2/Users/{id}` runs the same
+/// `revoke_user_access` + `db::delete_user` pair (the primary automated
+/// offboarding vector in the bug report). The deleted member's RFC 7592
+/// registration access token must stop authorizing GET/PUT/DELETE immediately.
+#[tokio::test]
+async fn test_rfc7592_scim_delete_user_revokes_deleted_owner_registration_token() {
+    let (app, state) = test_app().await;
+    let (_admin, _admin_token, member, member_token) = org_admin_member(&state).await;
+    let (client_id, reg_token) =
+        owner_register_client(&app, &member_token, "Member-Owned Client (scim delete)").await;
+    let uri = format!("/oauth/register/{client_id}");
+    let org_id = member.org_id.clone().expect("member has org");
+
+    // An attacker (or automated IdP) holding a `users:write` SCIM token — the
+    // sole scope the DELETE handler authorizes.
+    let scim_token = create_test_org_token_with_scope(
+        &state.store,
+        "scim-delete",
+        &org_id,
+        db::ScimScopeSet::from_scopes(vec![db::ScimScope::UsersWrite]),
+    )
+    .await;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", member.id),
+        &[("Authorization", &format!("Bearer {scim_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "SCIM delete must succeed with 204: {body}"
+    );
+    assert!(
+        db::get_user_by_id(&state.store, &member.id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "member must be deleted by SCIM delete"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &format!("Bearer {reg_token}")),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "scim-deleted owner: {method} must be 401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{}", response.body);
+        assert_invalid_token_challenge(&response);
+    }
+}
+
+// =========================================================================
+// Owner offboarding × client kind: every path that ends a user's authority
+// over their clients (admin remove, admin deactivate, SCIM DELETE, SCIM
+// `active=false`) revokes the RFC 7592 registration access token of every
+// client they own, whether the client stays with them, moves to a successor
+// admin, or is unlinked. RFC 7592 §5 only covers a deprovisioned *client*;
+// revoking on owner offboarding is our decision, because a client a user
+// registered is managed on that user's behalf.
+// =========================================================================
+
+#[derive(Clone, Copy, Debug)]
+enum OwnerOffboarding {
+    AdminRemove,
+    AdminDeactivate,
+    ScimDelete,
+    ScimDeactivate,
+}
+
+impl OwnerOffboarding {
+    fn by_admin(self) -> bool {
+        matches!(self, Self::AdminRemove | Self::AdminDeactivate)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnedClientKind {
+    /// A `Personal` client; it stays with a deactivated owner and is unlinked
+    /// from a deleted one.
+    Personal,
+    /// An `Organization` client holding a token, with an active admin to
+    /// inherit it.
+    OrgWithSuccessor,
+    /// An `Organization` client holding a token in an org with no admin, so
+    /// nothing inherits it.
+    OrgWithoutSuccessor,
+}
+
+async fn offboarding_revokes_registration_token(
+    offboarding: OwnerOffboarding,
+    kind: OwnedClientKind,
+) {
+    let case = format!("{offboarding:?} × {kind:?}");
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "rfc7592-offboard.example").await;
+    let owner =
+        create_test_user_in_org(&state.store, "offboard-owner@example.com", &org.id, false).await;
+
+    // The acting admin is also the successor, so an admin path always has one.
+    let admin_cookie =
+        if offboarding.by_admin() || matches!(kind, OwnedClientKind::OrgWithSuccessor) {
+            let admin =
+                create_test_user_in_org(&state.store, "offboard-admin@example.com", &org.id, true)
+                    .await;
+            let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+            let token = create_test_session_with(
+                &state,
+                TestSessionSpec {
+                    user_id: &admin.id,
+                    email: &admin.email,
+                    auth_id: Some(&auth_id),
+                    ..Default::default()
+                },
+            )
+            .await;
+            Some(format!("{}={token}", vouch_common::SESSION_COOKIE_NAME))
+        } else {
+            None
+        };
+
+    let reg_token = "vouch_reg_offboarding_matrix";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: match kind {
+                OwnedClientKind::Personal => db::AccessScope::Personal,
+                OwnedClientKind::OrgWithSuccessor | OwnedClientKind::OrgWithoutSuccessor => {
+                    db::AccessScope::Organization
+                }
+            },
+            org_id: Some(org.id.clone()),
+            with_secret: false,
+            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let uri = format!("/oauth/register/{}", client.client_id);
+    let bearer = format!("Bearer {reg_token}");
+
+    let (status, body) = http_request(&app, "GET", &uri, None, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::OK, "{case}: setup GET: {body}");
+
+    let scim_bearer = format!(
+        "Bearer {}",
+        create_test_org_token_with_scope(
+            &state.store,
+            "offboarding",
+            &org.id,
+            db::ScimScopeSet::from_scopes(vec![db::ScimScope::UsersWrite]),
+        )
+        .await
+    );
+    match offboarding {
+        OwnerOffboarding::AdminRemove | OwnerOffboarding::AdminDeactivate => {
+            let action = if matches!(offboarding, OwnerOffboarding::AdminRemove) {
+                "remove"
+            } else {
+                "deactivate"
+            };
+            let cookie = admin_cookie.expect("an admin path has an admin session");
+            let (status, body) = http_post_form(
+                &app,
+                &format!("/admin/members/{}/{action}", owner.id),
+                "",
+                &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "{case}: {body}");
+        }
+        OwnerOffboarding::ScimDelete => {
+            let (status, body) = http_delete(
+                &app,
+                &format!("/scim/v2/Users/{}", owner.id),
+                &[("Authorization", &scim_bearer)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{case}: {body}");
+        }
+        OwnerOffboarding::ScimDeactivate => {
+            let patch = serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": "replace", "path": "active", "value": false}]
+            });
+            let (status, body) = http_request(
+                &app,
+                "PATCH",
+                &format!("/scim/v2/Users/{}", owner.id),
+                Some(patch.to_string()),
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Authorization", &scim_bearer),
+                ],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {body}");
+        }
+    }
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("offboarding never deletes the client");
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "{case}: the owner's registration access token must be revoked"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client.client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &bearer),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{case}: {method} with the offboarded owner's token: {}",
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{case}: {method}");
+        assert_invalid_token_challenge(&response);
+    }
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "{case}: a rejected RFC 7592 DELETE must not delete the client"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_owner_offboarding_revokes_registration_token_matrix() {
+    for offboarding in [
+        OwnerOffboarding::AdminRemove,
+        OwnerOffboarding::AdminDeactivate,
+        OwnerOffboarding::ScimDelete,
+        OwnerOffboarding::ScimDeactivate,
+    ] {
+        for kind in [
+            OwnedClientKind::Personal,
+            OwnedClientKind::OrgWithSuccessor,
+            OwnedClientKind::OrgWithoutSuccessor,
+        ] {
+            // The acting admin always inherits org clients, so an admin path
+            // has no "without successor" case.
+            if offboarding.by_admin() && matches!(kind, OwnedClientKind::OrgWithoutSuccessor) {
+                continue;
+            }
+            Box::pin(offboarding_revokes_registration_token(offboarding, kind)).await;
+        }
+    }
+}
+
+// An owner-less client is open registration only when it is `Public`. A
+// `Personal` or `Organization` client with no owner was unlinked from a
+// deleted user, so a token still stored on it (by a writer that forgot to
+// clear it) must not verify.
+#[tokio::test]
+async fn test_rfc7592_unlinked_non_public_client_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "rfc7592-unlinked@example.com").await;
+    let reg_token = "vouch_reg_unlinked_personal";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: db::AccessScope::Personal,
+            with_secret: false,
+            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Simulate a writer that unlinks without going through
+    // `reassign_client_owner`: the hash survives.
+    state
+        .store
+        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&client.app_id, |d| {
+            d.user_id = None;
+        })
+        .await
+        .expect("unlink");
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/register/{}", client.client_id),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+
+    // An unauthenticated registration is `Public` with no owner and keeps
+    // working.
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "open registration still works: {body}"
+    );
+}
+
 // =========================================================================
 // DELETE /oauth/register/:client_id — Delete Client Configuration
 // =========================================================================
@@ -4083,6 +4779,144 @@ async fn test_rfc7592_delete_loses_to_concurrent_delete() {
         .await
         .expect("query audit events");
     assert!(events.is_empty(), "the losing DELETE must not audit");
+}
+
+// RFC 7592 §2.3 DELETE consumes the registration access token in its own
+// committed write before `delete_oauth_client_and_revoke_sessions`, whose
+// steps commit separately. If a step fails after the consume but before the
+// row is removed, the client survives; without an undo it would have no
+// token and the owner could never retry. `set_delete_by_index_remaining_successes(0)`
+// makes the cascade's first store-level `delete_by_index` fail with a
+// non-retryable error after the consume committed.
+#[tokio::test]
+async fn test_rfc7592_delete_partial_failure_restores_token_for_retry() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_delete_by_index_remaining_successes(0);
+    })
+    .await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let presented_hash = crate::crypto::hash_token(&token);
+    let bearer = format!("Bearer {token}");
+    let path = format!("/oauth/register/{client_id}");
+
+    let (status, response) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a failed delete must surface as 500, not 204: {response}"
+    );
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(events.is_empty(), "a failed delete must not audit");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives a failed delete");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "the consume is undone so the owner can retry"
+    );
+    let (status, _body) =
+        http_request(&app, "GET", &path, None, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::OK, "the restored token works again");
+
+    // A retry authenticates again and reaches the delete, which fails again.
+    let (status, _body) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives the retried delete");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "every failed attempt undoes its own consume"
+    );
+}
+
+// The undo above must not reinstate a token revoked between the consume and
+// the failure. Here the owner is deleted inside the failing delete (after the
+// consume, before the step that fails): `delete_user` unlinks the client and
+// clears its hash, so "the hash is None" holds either way, and only the
+// version the consume committed shows that someone else wrote since.
+#[tokio::test]
+async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_deletion() {
+    use std::sync::{Arc, OnceLock};
+
+    let store_cell: Arc<OnceLock<crate::db::store::DocumentStore>> = Arc::new(OnceLock::new());
+    let owner_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let (hook_store, hook_owner) = (store_cell.clone(), owner_cell.clone());
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        store.set_delete_by_index_remaining_successes(0);
+        store.set_post_secret_revoke_test_hook(Arc::new(move |_client_id: &str| {
+            let store = hook_store.get().cloned();
+            let owner = hook_owner.get().cloned();
+            Box::pin(async move {
+                if let (Some(store), Some(owner)) = (store, owner) {
+                    assert!(
+                        db::delete_user(&store, &owner, db::LastAdminGuard::Enforce)
+                            .await
+                            .expect("delete owner mid-delete")
+                    );
+                }
+            })
+        }));
+    })
+    .await;
+
+    let owner = create_test_user(&state.store, "rfc7592-restore-race@example.com").await;
+    let reg_token = "vouch_reg_restore_after_owner_delete";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: db::AccessScope::Personal,
+            with_secret: false,
+            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Arm the hook only now, so setup runs without it.
+    assert!(
+        store_cell.set(state.store.clone()).is_ok(),
+        "store set once"
+    );
+    assert!(owner_cell.set(owner.id.clone()).is_ok(), "owner set once");
+
+    let path = format!("/oauth/register/{}", client.client_id);
+    let bearer = format!("Bearer {reg_token}");
+    let (status, body) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives the failed delete");
+    assert_eq!(
+        stored.user_id, None,
+        "the deleted owner's client is unlinked"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "the failed delete must not restore a token the owner's deletion revoked"
+    );
+    let response = http_get_full(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
 }
 
 // ========================================================================

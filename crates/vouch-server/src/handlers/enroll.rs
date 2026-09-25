@@ -847,8 +847,12 @@ pub(crate) async fn complete_enrollment_after_identity(
                 "Refusing IdP login: could not reassert the subject bound \
                  to the account with this email for this issuer"
             );
+            // The upstream IdP verified the email this account is keyed on;
+            // only the subject binding failed. The row stays on the targeted
+            // account so its owner and admins see the attempt. It is not a
+            // temporal-history kind, so it cannot feed a per-user policy.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::IdentityBindRefused,
                 success: false,
                 failure_reason: Some(
@@ -877,8 +881,10 @@ pub(crate) async fn complete_enrollment_after_identity(
                 email = %redact_email(&email),
                 "Refusing IdP login for deactivated account"
             );
+            // The upstream IdP verified this identity, so the refusal is
+            // attributed to the account.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::LoginFailed,
                 success: false,
                 failure_reason: Some("user_deactivated".to_string()),
@@ -924,7 +930,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         && let Some(ref upstream) = identity.upstream
     {
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::IdentityBound,
             success: true,
             idp_issuer: Some(upstream.issuer.clone()),
@@ -1124,7 +1130,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         // empty — distinguishing this from passkey logins. Fresh enrollees
         // are covered by the Enrollment event in browser_register_complete.
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::LoginSuccess,
             success: true,
             client: client_info,
@@ -1294,20 +1300,13 @@ pub(crate) async fn browser_register_start(
 
     let user_email = token.email.clone().unwrap_or_default();
 
-    // A deactivated user's surviving enrollment cookie must not begin new
-    // hardware-key registration. `extract_session_from_cookie` deliberately
-    // skips the `active` check, so this mutating endpoint carries its own
-    // guard (per-handler point-fix pattern).
-    let account = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
-    }
+    // A deactivated or deleted user's surviving enrollment cookie must not
+    // begin new hardware-key registration. `extract_session_from_cookie`
+    // deliberately skips the `active` check, so this mutating endpoint carries
+    // its own guard. It uses `load_active_user`, like `browser_register_complete`
+    // and the CLI `register_start`/`register_complete`, so a missing user
+    // (`Ok(None)`) is refused the same way as `active=false`.
+    super::session::load_active_user(&state, &token.sub).await?;
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
@@ -1493,18 +1492,18 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
 
-    // A user deactivated after obtaining the registration state (valid for
-    // five minutes) must not register a new hardware key.
-    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(ref account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
-    }
+    // A user deactivated — or hard-deleted — after obtaining the registration
+    // state (valid for five minutes) must not register a new hardware key. Like
+    // the CLI `register_complete`, this routes through `load_active_user`, which
+    // rejects both `Ok(None)` (deleted, the in-flight `delete_user` race) and
+    // `active=false` (deactivated, issue #846) and keeps the two halves of the
+    // enrollment flow consistent. The previous inline `if let Some(ref account)`
+    // guard only caught `Some(active=false)` and silently let `Ok(None)` through
+    // to the single-use consume and WebAuthn verification (and, for the browser
+    // path, on to `create_oauth_access_token`). The returned `User` is reused
+    // below for the org-domain snapshot, preserving the single-read semantics.
+    let account =
+        super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
 
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
@@ -1712,15 +1711,19 @@ pub(crate) async fn browser_register_complete(
             Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
-    let org_domain = match account.as_ref() {
-        Some(u) => match u.org_id.as_deref() {
-            Some(org_id) => {
-                db::get_user_org_domain(&state.store, &u.id, org_id, u.org_domain.as_deref())
-                    .await
-                    .map_err(snapshot_error)?
-            }
-            None => None,
-        },
+    // `load_active_user` returns an active `User` (not `Option<User>`), so the
+    // deleted-user (`Ok(None)`) arm that used to fall through to `None` here is
+    // no longer reachable — a vanished user is rejected above before this
+    // point.
+    let org_domain = match account.org_id.as_deref() {
+        Some(org_id) => db::get_user_org_domain(
+            &state.store,
+            &account.id,
+            org_id,
+            account.org_domain.as_deref(),
+        )
+        .await
+        .map_err(snapshot_error)?,
         None => None,
     };
 
@@ -1807,7 +1810,7 @@ async fn finalize_enrollment_audit_and_device_auth(
     // Log enrollment event — the authenticator is already committed, so this
     // row must be written before the fallible device-auth release below.
     let auth_event_params = AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
+        user_id: db::Principal::Verified(reg_state.user_id.to_string()),
         event_type: AuthEventType::Enrollment,
         authenticator_id: Some(authenticator_id.to_string()),
         success: true,
@@ -1853,7 +1856,7 @@ async fn finalize_enrollment_audit_and_device_auth(
         })?;
 
         let event = db::AuthEventParams {
-            user_id: reg_state.user_id.to_string(),
+            user_id: db::Principal::Verified(reg_state.user_id.to_string()),
             event_type: db::AuthEventType::DeviceAuthApproved,
             authenticator_id: Some(authenticator_id.to_string()),
             success: true,

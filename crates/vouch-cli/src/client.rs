@@ -112,7 +112,7 @@ impl VouchClient<ReqwestClient> {
     /// This is the standard pattern for credential commands that have already
     /// called `resolve_session()`.
     pub(crate) fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
-        let mut client = Self::unauthenticated(&session.server_url)?;
+        let mut client = Self::unauthenticated(session.server_url.as_str())?;
         client.token = Some(session.token.clone());
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
         client.fapi_key = vouch_cli::fapi::key_store::load_client_key();

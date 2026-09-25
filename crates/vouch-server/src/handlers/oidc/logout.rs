@@ -481,7 +481,7 @@ async fn clear_user_session(
             );
 
             let params = db::AuthEventParams {
-                user_id: session.user_id.clone(),
+                user_id: db::Principal::Verified(session.user_id.clone()),
                 event_type: db::AuthEventType::Logout,
                 success: true,
                 client_id: rp_client_id.map(str::to_string),
@@ -943,8 +943,14 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "rp-logout-expired@example.com").await;
 
-        let (token, token_hash) =
-            create_test_expired_session_row(&state, &user.id, &user.email, None).await;
+        let (token, token_hash) = create_test_expired_session_row(
+            &state,
+            &user.id,
+            &user.email,
+            None,
+            crate::db::SessionPurpose::OAuthAccessToken,
+        )
+        .await;
 
         // Sanity: the expiry-filtering lookup returns `None` — the
         // precondition the bug report describes.

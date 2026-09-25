@@ -17,6 +17,8 @@ pub struct CertificateMetadata {
     pub serial: u64,
     /// Principals (users) the certificate is valid for.
     pub principals: Vec<String>,
+    /// The certificate's key ID, `{email}@{rp_id}` for a Vouch-issued one.
+    pub key_id: String,
 }
 
 impl CertificateMetadata {
@@ -44,6 +46,7 @@ impl CertificateMetadata {
             expires_at,
             serial: cert.serial(),
             principals,
+            key_id: cert.key_id().to_string(),
         })
     }
 
@@ -171,6 +174,7 @@ mod tests {
             expires_at: future_expires,
             serial: 1,
             principals: vec!["user".to_string()],
+            key_id: "user@example.com@example.com".to_string(),
         };
 
         assert!(!metadata.is_expired());
@@ -185,6 +189,7 @@ mod tests {
             expires_at: past_expires,
             serial: 1,
             principals: vec!["user".to_string()],
+            key_id: "user@example.com@example.com".to_string(),
         };
 
         assert!(metadata.is_expired());

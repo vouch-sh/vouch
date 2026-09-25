@@ -16,6 +16,7 @@ use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse
 
 use crate::client::VouchClient;
 use crate::commands::credential::git_protocol::read_credential_input;
+use crate::server_url::{InsecureOptIn, ServerUrlError};
 use crate::session::resolve_session;
 
 /// Check if the host is a GitHub host.
@@ -45,9 +46,9 @@ fn extract_owner(path: Option<&str>) -> Option<String> {
 ///
 /// # Arguments
 /// * `operation` - The git credential operation ("get", "store", or "erase")
-pub(crate) async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str, opt_in: InsecureOptIn) -> Result<()> {
     match operation {
-        "get" => get_credential().await,
+        "get" => get_credential(opt_in).await,
         "store" | "erase" => {
             // These operations are no-ops for Vouch since we don't store credentials
             Ok(())
@@ -60,7 +61,7 @@ pub(crate) async fn run(operation: &str) -> Result<()> {
 }
 
 /// Handle the "get" operation - provide credentials to git.
-async fn get_credential() -> Result<()> {
+async fn get_credential(opt_in: InsecureOptIn) -> Result<()> {
     // Read credential request from stdin
     let input = read_credential_input()?;
 
@@ -74,8 +75,10 @@ async fn get_credential() -> Result<()> {
     }
 
     // Resolve session (tries agent first, then config)
-    let session = resolve_session().await.inspect_err(|_| {
-        vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
+    let session = resolve_session(opt_in).await.inspect_err(|e| {
+        if !ServerUrlError::is_in(e) {
+            vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
+        }
     })?;
 
     // Create authenticated client

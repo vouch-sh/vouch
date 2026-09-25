@@ -887,7 +887,7 @@ mod tests {
         // Without geo: identical to serde_json::to_value(AuthEventParams),
         // ClientInfo flattened, client_id/idp_issuer omitted when None.
         let params = AuthEventParams {
-            user_id: "u1".to_string(),
+            user_id: crate::db::Principal::Verified("u1".to_string()),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: Some("auth-1".to_string()),
             client: ClientInfo::for_test(

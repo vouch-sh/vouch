@@ -521,6 +521,10 @@ async fn test_fido2_token_authenticator_storage_fault_is_server_error() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "server_error", "{body}");
+
+    // A storage fault is not a login failure, so it leaves no row at all.
+    let rows = login_failed_rows(&state, None).await;
+    assert!(rows.is_empty(), "no login_failed row for a 5xx: {rows:?}");
 }
 
 /// Register an authenticator for `owner_id` and return its base64url
@@ -534,17 +538,15 @@ async fn owner_credential_id(state: &crate::AppState, owner_id: &str) -> String 
     URL_SAFE_NO_PAD.encode(&authenticator.credential_id)
 }
 
-/// The `login_failed` audit rows recorded for `user_id`.
+/// Every `login_failed` audit row, filtered to an email domain when given.
 async fn login_failed_rows(
     state: &crate::AppState,
-    user_id: &str,
     email_domains: Option<Vec<String>>,
 ) -> Vec<db::AuditEvent> {
     state
         .audit
         .query_events(&db::AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
-            user_id: Some(user_id.to_string()),
             email_domains,
             ..db::AuditEventFilter::default()
         })
@@ -552,19 +554,32 @@ async fn login_failed_rows(
         .expect("query audit events")
 }
 
+fn payload(row: &db::AuditEvent) -> serde_json::Value {
+    serde_json::from_str(&row.data).expect("event data JSON")
+}
+
 fn failure_reason(row: &db::AuditEvent) -> String {
-    let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
-    data["failure_reason"]
+    payload(row)["failure_reason"]
         .as_str()
         .expect("failure_reason is a string")
         .to_string()
 }
 
+/// Assert `row` names no user: a NULL `user_id` column (what per-user
+/// temporal policies such as `failed_login_burst` count) and no `user_id`
+/// payload key, with the request's `user_handle` kept as `asserted_user_id`.
+fn assert_unattributed(row: &db::AuditEvent, asserted: &str) {
+    assert_eq!(row.user_id, None, "row must not be attributed: {row:?}");
+    let data = payload(row);
+    assert!(data.get("user_id").is_none(), "{data}");
+    assert_eq!(data["asserted_user_id"].as_str(), Some(asserted), "{data}");
+}
+
 #[tokio::test]
 async fn test_fido2_token_deactivated_owner_is_audited_in_org_feed() {
-    // The CLI grant records the same refusal row as browser login. The
-    // assertion names the credential's owner, so the row carries the owner's
-    // domain and an org-scoped query finds it.
+    // The CLI grant records the same refusal row as browser login. The row
+    // carries the owner's domain, so an org-scoped query finds it, but no
+    // signature has been checked, so it is not attributed to the owner.
     let (app, state) = test_app().await;
     let owner = create_test_user(&state.store, "fido2-deactivated@example.com").await;
     let credential_id = owner_credential_id(&state, &owner.id).await;
@@ -587,17 +602,21 @@ async fn test_fido2_token_deactivated_owner_is_audited_in_org_feed() {
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_grant", "{body}");
 
-    let rows = login_failed_rows(&state, &owner.id, Some(vec!["example.com".to_string()])).await;
+    let rows = login_failed_rows(&state, Some(vec!["example.com".to_string()])).await;
     assert_eq!(rows.len(), 1, "one org-visible login_failed row: {rows:?}");
     let row = rows.first().expect("one row");
     assert_eq!(failure_reason(row), "user_deactivated");
     assert_eq!(row.email_domain.as_deref(), Some("example.com"));
+    assert_unattributed(row, &owner.id);
 }
 
 #[tokio::test]
-async fn test_fido2_token_owner_mismatch_is_audited_without_email() {
-    // The asserted user_handle is not the credential's owner and the
-    // assertion has not run, so the row names neither account's email.
+async fn test_fido2_token_owner_mismatch_is_audited_without_principal() {
+    // The asserted `user_handle` is not the credential's owner, and no
+    // signature has been checked. A credential ID is not a secret, so
+    // presenting one proves nothing about its owner either: the row names
+    // neither account, carries no email, and records which credential was
+    // presented.
     let (app, state) = test_app().await;
     let owner = create_test_user(&state.store, "fido2-mismatch-owner@example.com").await;
     let credential_id = owner_credential_id(&state, &owner.id).await;
@@ -613,15 +632,53 @@ async fn test_fido2_token_owner_mismatch_is_audited_without_email() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    let rows = login_failed_rows(&state, &asserted.to_string(), None).await;
+    let rows = login_failed_rows(&state, None).await;
     assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
     let row = rows.first().expect("one row");
     assert_eq!(failure_reason(row), "user_mismatch");
     assert_eq!(row.email_domain, None);
-    assert!(
-        login_failed_rows(&state, &owner.id, None).await.is_empty(),
-        "the refusal must not be attributed to the credential's owner"
+    assert_unattributed(row, &asserted.to_string());
+    let authenticator = db::get_authenticator_by_credential_id(
+        &state.store,
+        &URL_SAFE_NO_PAD.decode(&credential_id).expect("base64url"),
+    )
+    .await
+    .expect("load authenticator")
+    .expect("authenticator exists");
+    assert_eq!(
+        payload(row)["authenticator_id"].as_str(),
+        Some(authenticator.id.as_str()),
+        "the presented credential is recorded for forensics"
     );
+}
+
+#[tokio::test]
+async fn test_fido2_token_unknown_credential_writes_no_user_attributed_row() {
+    // A `credential_id` that names no stored credential is refused before any
+    // signature is checked, so the row must not count against the user the
+    // request's `user_handle` names.
+    let (app, state) = test_app().await;
+    let victim = create_test_user(&state.store, "fido2-unknown-cred@example.com").await;
+    let bogus = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    let asserted = uuid::Uuid::parse_str(&victim.id).expect("victim id is a uuid");
+
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-unknown-cred-client@example.com",
+        &bogus,
+        asserted,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "{body}");
+
+    let rows = login_failed_rows(&state, None).await;
+    assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+    let row = rows.first().expect("one row");
+    assert_eq!(failure_reason(row), "credential_not_found");
+    assert_unattributed(row, &victim.id);
 }
 
 #[tokio::test]
