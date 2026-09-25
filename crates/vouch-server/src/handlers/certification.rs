@@ -254,23 +254,14 @@ pub(crate) async fn complete_login(
 /// GET /certification/deny-login?pending_auth=<UUID>&token=<HMAC>
 ///
 /// Simulates user rejection for conformance testing. Consumes the pending
-/// authorization and returns an `access_denied` error to the client's callback
-/// URI, dispatching on `response_mode` (JARM JWT, Form Post HTML form, or
-/// query-string redirect).
+/// authorization and returns an `access_denied` error to the client's
+/// callback URI, dispatching on `response_mode` (JARM JWT, Form Post HTML
+/// form, or query-string redirect) via the shared `oauth_error_response`
+/// helper.
 ///
-/// Ordering mirrors production's `handle_pending_auth` (PR #1467): the
-/// single-use pending claim is spent as the **last** action before delivering
-/// `access_denied`, after every lookup that could fail. The client lookup is
-/// only needed to sign a JARM (`ResponseMode::Jwt`) response — `Query` and
-/// `FormPost` are built from `pending.redirect_uri` + issuer config and skip
-/// the lookup entirely — so a deleted client or a transient store read can no
-/// longer burn an already-consumed pending while an `access_denied` was fully
-/// deliverable from `pending.redirect_uri` already in hand (the hazard
-/// introduced when PR #986 hoisted the lookup out unconditionally). For `Jwt`,
-/// a client-lookup failure returns `500` with the pending **intact** — the
-/// spend has not happened yet — so a retry after store recovery (or a
-/// concurrent client recreate) can still deliver a conformant JARM
-/// `access_denied`.
+/// The pending is read, then the client looked up, and only then consumed,
+/// so a failed client lookup leaves the single-use claim intact and the same
+/// link retryable (the check-before-spend order of `handle_pending_auth`).
 pub(crate) async fn deny_login(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -291,12 +282,8 @@ pub(crate) async fn deny_login(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // Read the pending authorization WITHOUT spending it. Spending first — as
-    // this handler did before — meant any failure in the client lookup below
-    // burned the single-use claim, so a retry of the same resume link returned
-    // `404` instead of re-rendering the `access_denied` it could have
-    // delivered, and a transient store read destroyed it permanently. Same
-    // check-before-spend ordering as `handle_pending_auth` (#1467).
+    // Read the pending without spending it; the claim is consumed below, after
+    // the client lookup that can fail.
     let pending = match db::get_pending_oauth_authorization(
         &state.store,
         &query.pending_auth,
@@ -309,52 +296,17 @@ pub(crate) async fn deny_login(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    // Only the `Jwt` response mode needs the client record — JARM signs the
-    // error with the client's keys (`build_jarm_error_jwt`). `Query` and
-    // `FormPost` build the `access_denied` response from `pending.redirect_uri`
-    // + issuer config and never read the client, so the lookup is skipped for
-    // them; keeping it unconditional would expose those modes to a
-    // deleted-client or transient-read failure that destroys an already-spent
-    // claim while withholding the `access_denied` the lookup was never needed
-    // for (the bug introduced by PR #986's hoist).
-    //
-    // Done before the spend so a `Jwt` lookup failure leaves the pending
-    // intact and the same resume link retryable after store recovery.
-    let client = if pending.response_mode == db::ResponseMode::Jwt {
-        match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
-            Ok(Some(c)) => Some(c),
-            Ok(None) => {
-                tracing::warn!(
-                    pending_auth = %query.pending_auth,
-                    client_id = %pending.client_id,
-                    "Certification deny-login: client not found for JARM response; \
-                     pending left unconsumed"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            Err(e) => {
-                tracing::error!(
-                    pending_auth = %query.pending_auth,
-                    client_id = %pending.client_id,
-                    error = %e,
-                    "Certification deny-login: client lookup failed for JARM response; \
-                     pending left unconsumed"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        }
-    } else {
-        None
+    let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
+        Ok(Some(c)) => c,
+        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    // Spend the single-use pending claim only after every lookup that could
-    // fail has succeeded. A conformant `access_denied` is guaranteed to be
-    // delivered past this point, so consuming the claim is correct — the
-    // resume link is meant to be dead once the rejection has been
-    // communicated to the client. The `_claim` witness satisfies
-    // `#[must_use]`; downstream code reads `pending` directly (the consumed
-    // record carries the same fields; only `consumed_at` changes).
-    let (_consumed, _claim) = match db::consume_pending_oauth_authorization(
+    // Consume the pending authorization. The `_claim` witness is bound to
+    // satisfy `#[must_use]`; downstream code uses `pending` directly.
+    //
+    // A failure while building the response below (for example a JARM signing
+    // error) still returns 500 with the claim already spent.
+    let (pending, _claim) = match db::consume_pending_oauth_authorization(
         &state.store,
         &query.pending_auth,
         arrival.timestamp(),
@@ -368,57 +320,34 @@ pub(crate) async fn deny_login(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    // Build the access_denied error response, dispatching on response_mode:
+    // - Jwt:      JARM signed JWT delivered via the `response` query parameter.
+    // - FormPost: HTTP 200 with an auto-submitting HTML form (OAuth 2.0 Form
+    //   Post Response Mode); per RFC 6749 Section 4.1.2.1 errors MUST use the
+    //   same delivery mechanism as success responses, so a 302 redirect is
+    //   non-compliant here.
+    // - Query:    HTTP 302 redirect with `error`/`error_description` query
+    //   parameters (RFC 6749 Section 4.1.2.1).
+    //
+    // Reuses the shared `oauth_error_response` helper (the same one the
+    // authorize endpoint uses) so deny-login stays consistent with the rest
+    // of the authorization error paths, including the `iss` parameter
+    // (RFC 9207) in every mode.
     tracing::info!(
         pending_auth = %query.pending_auth,
         "Certification deny-login: returning access_denied"
     );
 
-    // Build the access_denied response, dispatching on response_mode:
-    // - Jwt:      JARM signed JWT delivered via the `response` query parameter
-    //             (needs `client`'s signing keys).
-    // - FormPost: HTTP 200 with an auto-submitting HTML form (OAuth 2.0 Form
-    //             Post Response Mode); per RFC 6749 §4.1.2.1 errors MUST use
-    //             the same delivery mechanism as success responses, so a 302
-    //             redirect is non-compliant here.
-    // - Query:    HTTP 302 redirect with `error`/`error_description` query
-    //             parameters (RFC 6749 §4.1.2.1).
-    //
-    // `iss` (RFC 9207) is included in every mode. The `Query`/`FormPost` arms
-    // go through `oauth_error_response_unsigned`, which never reads the
-    // client record, so `client` is bound only on the `Jwt` arm. Reusing the
-    // shared helpers keeps deny-login consistent with the authorize error
-    // paths and prevents the unsigned shape from drifting.
-    match pending.response_mode {
-        db::ResponseMode::Jwt => {
-            let Some(client) = client.as_ref() else {
-                // Unreachable: the Jwt arm loaded `client` above, gating the
-                // spend on its success; reaching here means a logic error in
-                // the lookup gate. Fail closed rather than emit an unsigned
-                // response a JARM client MUST discard.
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            };
-            crate::handlers::oidc::oauth_error_response(
-                &state,
-                client,
-                &pending.redirect_uri,
-                OAuthErrorCode::AccessDenied,
-                "User rejected authentication",
-                pending.state.as_deref(),
-                pending.response_mode,
-            )
-            .await
-        }
-        db::ResponseMode::FormPost | db::ResponseMode::Query => {
-            crate::handlers::oidc::oauth_error_response_unsigned(
-                &state,
-                &pending.redirect_uri,
-                OAuthErrorCode::AccessDenied,
-                "User rejected authentication",
-                pending.state.as_deref(),
-                pending.response_mode,
-            )
-        }
-    }
+    crate::handlers::oidc::oauth_error_response(
+        &state,
+        &client,
+        &pending.redirect_uri,
+        OAuthErrorCode::AccessDenied,
+        "User rejected authentication",
+        pending.state.as_deref(),
+        pending.response_mode,
+    )
+    .await
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
@@ -1317,397 +1246,48 @@ mod tests {
         );
     }
 
-    // ── deny-login check-before-spend tests (bug: PR #986 hoisted the
-    //     client lookup out unconditionally, so a deleted client or transient
-    //     read failure burned an already-consumed pending and returned a bare
-    //     500 instead of delivering access_denied for Query/FormPost, and an
-    //     unrecoverable 404 on retry for every mode) ───────────────────────
-
-    /// Extract the `pending_auth` id from a deny-login URL built by
-    /// `setup_deny_login_url`. Used to assert the pending survives a failed
-    /// client lookup.
-    fn pending_id_from_deny_url(deny_url: &str) -> String {
-        let parsed = url::Url::parse(&format!("http://localhost{deny_url}"))
-            .expect("deny-login URL must parse with a dummy base");
-        parsed
-            .query_pairs()
-            .find(|(k, _)| k == "pending_auth")
-            .map(|(_, v)| v.into_owned())
-            .expect("deny-login URL must carry pending_auth")
-    }
-
-    /// Decode the `response` JARM JWT carried on a deny-login redirect
-    /// `Location` and return its payload as JSON. Mirrors the happy-path
-    /// JARM test's decoding logic so the recovery test can inspect the same
-    /// claims without duplicating the base64 dance inline.
-    fn decode_jarm_payload_from_location(location: &str) -> serde_json::Value {
-        use base64::Engine;
-        let parsed = url::Url::parse(location).expect("JARM redirect Location must parse");
-        let jwt = parsed
-            .query_pairs()
-            .find(|(k, _)| k == "response")
-            .map(|(_, v)| v.into_owned())
-            .expect("JARM redirect must carry a `response` parameter");
-        let parts: Vec<&str> = jwt.split('.').collect();
-        assert_eq!(
-            parts.len(),
-            3,
-            "JARM response must be a compact JWT (header.payload.signature)"
-        );
-        let payload_segment = parts.get(1).expect("JWT has a payload segment");
-        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_segment)
-            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload_segment))
-            .expect("JARM payload must be valid base64");
-        serde_json::from_slice(&payload_bytes).expect("JARM payload must be valid JSON")
-    }
-
-    /// Re-insert a minimal `OAuthClient` document carrying `client_id`, so a
-    /// pending whose `client_id` pointed at a hard-deleted client can be
-    /// retried after the record is "restored". Only the fields JARM signing
-    /// (`select_alg` → `authorization_signed_response_alg`, defaulting to
-    /// ES256 via `state.oidc_key`) and `get_oauth_client_by_client_id` (the
-    /// `client_id` index + `active`) consult are set meaningfully; the rest
-    /// get open defaults. Returns the recreated doc's id.
-    async fn recreate_client_with_client_id(
-        state: &Arc<AppState>,
-        client_id: &str,
-        user_id: &str,
-    ) -> String {
-        use crate::crypto::alg::JwsAlgorithm;
-        use crate::db::documents::oauth::OAuthClientDoc;
-        use crate::db::{
-            AccessScope, FapiProfile, OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
-        };
-        let doc = OAuthClientDoc {
-            user_id: Some(user_id.to_string()),
-            client_id: client_id.to_string(),
-            name: "Recreated Cert Client".to_string(),
-            description: None,
-            application_type: OAuthClientType::Web,
-            redirect_uris: vec!["https://example.com/callback".to_string()],
-            active: true,
-            access_scope: AccessScope::Personal,
-            org_id: None,
-            resource_uris: vec![],
-            jwks: None,
-            jwks_uri: None,
-            token_endpoint_auth_method: TokenEndpointAuthMethod::None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            fapi_profile: FapiProfile::None,
-            dpop_bound_access_tokens: false,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: Some(RegistrationSource::Manual),
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Es256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: false,
-            // None ⇒ JARM defaults to ES256, signed with the server's ES256
-            // key (state.oidc_key), which the test app always has.
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
-            post_logout_redirect_uris: None,
-        };
-        state
-            .store
-            .insert(&doc)
-            .await
-            .expect("reinsert OAuth client doc")
-            .id
-    }
-
-    /// Query mode + hard-deleted client: the pre-fix handler spent the pending
-    /// first, then the gratuitous client lookup failed and returned a bare
-    /// `500` (no `access_denied` ever sent), with the retry hitting `404`
-    /// because the pending was already consumed. With the fix the lookup is
-    /// skipped (Query never reads the client), so the `access_denied` redirect
-    /// the code could always have built from `pending.redirect_uri` is actually
-    /// delivered; the spend happens only after the response is guaranteed.
+    /// A failed client lookup must leave the pending unconsumed, so the same
+    /// deny-login link is retryable rather than dead (404).
     #[tokio::test]
-    async fn test_deny_login_query_deleted_client_delivers_access_denied_then_404() {
+    async fn test_deny_login_client_lookup_failure_leaves_pending_unconsumed() {
         let (app, state) = crate::test_utils::test_app_with_certification().await;
-        let user = crate::test_utils::create_test_user(
-            &state.store,
-            "cert-deny-query-deleted@example.com",
-        )
-        .await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "cert-deny-lookup@example.com").await;
         let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-
         let url = setup_deny_login_url(
             &state,
             &client.client_id,
             crate::db::ResponseMode::Query,
-            Some("q-recover"),
+            Some("lookup-fails"),
         )
         .await;
-
-        // Hard-delete the client (removes row, secrets, JWKS — not the
-        // pending_oauth doc, which lives for 10 minutes).
-        crate::db::delete_oauth_client(&state.store, &client.app_id)
-            .await
-            .expect("delete OAuth client");
-
-        // First call MUST deliver the access_denied redirect — not a bare 500.
-        let resp1 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert!(
-            resp1.status.is_redirection(),
-            "Query deny-login with deleted client must deliver access_denied redirect, got {} body {}",
-            resp1.status,
-            resp1.body
-        );
-        let location = resp1
-            .headers
-            .get("location")
-            .expect("Query deny-login must redirect")
-            .to_str()
-            .expect("ascii Location")
-            .to_string();
-        let parsed = url::Url::parse(&location).expect("Location must be a valid URL");
-        let pairs: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
-        assert_eq!(parsed.host_str(), Some("example.com"));
-        assert_eq!(parsed.path(), "/callback");
-        assert!(
-            pairs.contains(&("error".to_string(), "access_denied".to_string())),
-            "must carry error=access_denied: {location}"
-        );
-        assert!(
-            pairs.contains(&(
-                "error_description".to_string(),
-                "User rejected authentication".to_string()
-            )),
-            "must carry error_description: {location}"
-        );
-        assert!(
-            pairs.contains(&("state".to_string(), "q-recover".to_string())),
-            "must echo state: {location}"
-        );
-        assert!(
-            pairs.contains(&("iss".to_string(), "https://test.example.com".to_string())),
-            "must include iss (RFC 9207): {location}"
-        );
-
-        // The first call legitimately consumed the pending after delivering a
-        // conformant access_denied, so the resume link is correctly dead: a
-        // retry returns 404 (this is the *fixed* behaviour — the spend is
-        // intentional once the rejection has been communicated, not a hazard).
-        let resp2 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp2.status,
-            axum::http::StatusCode::NOT_FOUND,
-            "retry after a delivered access_denied must 404, got {}",
-            resp2.status
-        );
-    }
-
-    /// FormPost mode + hard-deleted client: the pre-fix handler returned a bare
-    /// `500` and burned the pending. With the fix the FormPost access_denied
-    /// HTML form is delivered (no client lookup performed); the retry 404s.
-    #[tokio::test]
-    async fn test_deny_login_form_post_deleted_client_delivers_access_denied_then_404() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
-        let user = crate::test_utils::create_test_user(
-            &state.store,
-            "cert-deny-formpost-deleted@example.com",
-        )
-        .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-
-        let url = setup_deny_login_url(
-            &state,
-            &client.client_id,
-            crate::db::ResponseMode::FormPost,
-            Some("fp-recover"),
-        )
-        .await;
+        let pending_id = url::Url::parse(&format!("http://localhost{url}"))
+            .expect("deny-login URL parses")
+            .query_pairs()
+            .find(|(k, _)| k == "pending_auth")
+            .map(|(_, v)| v.into_owned())
+            .expect("deny-login URL carries pending_auth");
 
         crate::db::delete_oauth_client(&state.store, &client.app_id)
             .await
             .expect("delete OAuth client");
 
-        let resp1 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp1.status,
-            axum::http::StatusCode::OK,
-            "FormPost deny-login with deleted client must deliver the HTML form (not 500): {}",
-            resp1.body
-        );
-        assert!(
-            resp1.headers.get("location").is_none(),
-            "FormPost deny-login must not redirect"
-        );
-        assert!(
-            resp1.body.contains(r#"method="post""#),
-            "must contain a POST form: {}",
-            resp1.body
-        );
-        assert!(
-            resp1.body.contains("https://example.com/callback"),
-            "form must target the redirect_uri: {}",
-            resp1.body
-        );
-        assert!(
-            resp1.body.contains(r#"name="error""#) && resp1.body.contains("access_denied"),
-            "must carry error=access_denied: {}",
-            resp1.body
-        );
-        assert!(
-            resp1.body.contains(r#"name="error_description""#)
-                && resp1.body.contains("User rejected authentication"),
-            "must carry error_description: {}",
-            resp1.body
-        );
-        assert!(
-            resp1.body.contains(r#"name="iss""#),
-            "must include iss (RFC 9207): {}",
-            resp1.body
-        );
-        assert!(
-            resp1.body.contains("fp-recover"),
-            "must echo state: {}",
-            resp1.body
-        );
-        let content_type = resp1
-            .headers
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        assert!(
-            content_type.starts_with("text/html"),
-            "must be text/html, got: {content_type}"
-        );
-
-        let resp2 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp2.status,
-            axum::http::StatusCode::NOT_FOUND,
-            "retry after a delivered access_denied must 404, got {}",
-            resp2.status
-        );
-    }
-
-    /// Jwt mode + hard-deleted client: the lookup is required here (JARM needs
-    /// the client's signing material), so it cannot be skipped. With the fix
-    /// it happens BEFORE the spend, so:
-    ///   - first call returns 500 (no signing key exists for a deleted client)
-    ///     with the pending **intact** (not consumed);
-    ///   - a second call returns 500 again (NOT 404) — proving the spend did
-    ///     not happen on the first call;
-    ///   - after the client is recreated with the same `client_id`, the SAME
-    ///     resume link delivers the JARM `access_denied` (full recovery).
-    #[tokio::test]
-    async fn test_deny_login_jwt_deleted_client_returns_500_preserves_pending_then_recovers() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-jwt-recover@example.com")
-                .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-
-        let url = setup_deny_login_url(
-            &state,
-            &client.client_id,
-            crate::db::ResponseMode::Jwt,
-            Some("jwt-recover"),
-        )
-        .await;
-        let pending_id = pending_id_from_deny_url(&url);
-
-        crate::db::delete_oauth_client(&state.store, &client.app_id)
-            .await
-            .expect("delete OAuth client");
-
-        // First call: lookup fails BEFORE the spend → 500, pending NOT consumed.
-        let resp1 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp1.status,
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "Jwt deny-login with a deleted client must fail closed (no JARM signing material)"
-        );
-
-        // The pending is still readable — it was not burned by the failed
-        // lookup. This is the core check-before-spend guarantee.
-        let still_pending = crate::db::get_pending_oauth_authorization(
+        for attempt in 1..=2 {
+            let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+            assert_eq!(
+                resp.status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "attempt {attempt}: a failed lookup must be 500, not 404 from a burned claim"
+            );
+        }
+        let pending = crate::db::get_pending_oauth_authorization(
             &state.store,
             &pending_id,
-            jiff::Timestamp::now(),
+            crate::test_utils::test_arrival().timestamp(),
         )
         .await
-        .expect("db read of pending")
-        .expect("pending must be intact (not consumed) after a Jwt lookup failure");
-        assert_eq!(
-            still_pending.client_id, client.client_id,
-            "the surviving pending must still reference the original client_id"
-        );
-        assert_eq!(
-            still_pending.consumed_at, None,
-            "pending must report consumed_at = None"
-        );
-
-        // Second call: pending still unconsumed → lookup fails again → 500
-        // (NOT 404). A 404 here would mean the first call burned the claim.
-        let resp2 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp2.status,
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "retry must NOT 404 — the pending is intact; a 404 would mean the first call \
-             burned the claim"
-        );
-
-        // Recreate the client with the SAME client_id, then retry the SAME
-        // resume link: it now delivers the JARM access_denied. This proves the
-        // claim was not merely unburned but fully recoverable (the transient-
-        // store-error analogue: retry after the store recovers succeeds).
-        recreate_client_with_client_id(&state, &client.client_id, &user.id).await;
-        let resp3 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert!(
-            resp3.status.is_redirection(),
-            "recovered Jwt deny-login must redirect, got {} body {}",
-            resp3.status,
-            resp3.body
-        );
-        let location = resp3
-            .headers
-            .get("location")
-            .expect("recovered Jwt deny-login must redirect")
-            .to_str()
-            .expect("ascii Location")
-            .to_string();
-        let payload = decode_jarm_payload_from_location(&location);
-        assert_eq!(
-            payload.get("error").and_then(serde_json::Value::as_str),
-            Some("access_denied"),
-            "recovered JARM JWT must carry error=access_denied: {location}"
-        );
-        assert_eq!(
-            payload.get("state").and_then(serde_json::Value::as_str),
-            Some("jwt-recover"),
-            "recovered JARM JWT must echo state: {location}"
-        );
-        assert_eq!(
-            payload.get("aud").and_then(serde_json::Value::as_str),
-            Some(client.client_id.as_str()),
-            "recovered JARM JWT must be audience-bound to the original client_id: {location}"
-        );
-
-        // After the successful JARM delivery the pending IS consumed, so a
-        // fourth call 404s — the spend happens only after a conformant
-        // response is delivered.
-        let resp4 = crate::test_utils::http_get_full(&app, &url, &[]).await;
-        assert_eq!(
-            resp4.status,
-            axum::http::StatusCode::NOT_FOUND,
-            "after a delivered JARM access_denied the resume link must 404, got {}",
-            resp4.status
-        );
+        .expect("read pending")
+        .expect("pending survives a failed client lookup");
+        assert_eq!(pending.consumed_at, None);
     }
 }

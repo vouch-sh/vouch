@@ -26,18 +26,11 @@ fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> 
 
 /// Create an OAuth error response, dispatching on `response_mode`.
 ///
-/// - `Jwt`: wraps error in a JARM signed JWT (needs `client` for signing).
+/// - `Jwt`: wraps error in a JARM signed JWT.
 /// - `FormPost`: delivers error via HTML auto-submitting form.
 /// - `Query`: delivers via query-string redirect (RFC 6749).
 ///
 /// Includes the `iss` parameter per RFC 9207 in all modes.
-///
-/// The `FormPost` and `Query` arms never read `client` — the response is built
-/// from `redirect_uri` + issuer config — so they are routed through
-/// [`oauth_error_response_unsigned`], which a caller without a client record
-/// (certification `deny_login` after the client was hard-deleted mid-flow) can
-/// reach directly. Sharing the unsigned dispatcher keeps the two entry points
-/// from drifting on the unsigned response shape.
 pub(crate) async fn oauth_error_response(
     app_state: &Arc<AppState>,
     client: &OAuthClient,
@@ -59,44 +52,6 @@ pub(crate) async fn oauth_error_response(
             )
             .await
         }
-        ResponseMode::FormPost | ResponseMode::Query => oauth_error_response_unsigned(
-            app_state,
-            redirect_uri,
-            error,
-            description,
-            oauth_state,
-            response_mode,
-        ),
-    }
-}
-
-/// Build an OAuth error response for the **unsigned** response modes — `Query`
-/// (RFC 6749 §4.1.2.1 query redirect) and `FormPost` (OAuth 2.0 Form Post
-/// Response Mode). These modes need only `redirect_uri` + issuer config; the
-/// client record is *not* consulted, so a caller that has none can still
-/// deliver a conformant `access_denied` — certification `deny_login` after the
-/// client was hard-deleted within the pending TTL, or any flow where a client
-/// lookup would be gratuitous. (`oauth_error_response` delegates its
-/// `FormPost`/`Query` arms here for the same reason.)
-///
-/// Includes the `iss` parameter per RFC 9207 in both modes.
-///
-/// `ResponseMode::Jwt` has no conformant unsigned form — JARM §2.1 requires the
-/// JWT "even in case of an error response" and a client "MUST NOT" accept
-/// `alg: none` — so a Jwt-mode caller MUST use [`oauth_error_response`] with the
-/// client record. This entry point fail-closes with `500` on `Jwt` rather than
-/// emit parameters a JARM client is obliged to discard; no current caller reaches
-/// that branch (deny_login loads the client and routes the Jwt path through
-/// `oauth_error_response`), so it exists only as a programmer-error guardrail.
-pub(crate) fn oauth_error_response_unsigned(
-    app_state: &Arc<AppState>,
-    redirect_uri: &str,
-    error: OAuthErrorCode,
-    description: &str,
-    oauth_state: Option<&str>,
-    response_mode: ResponseMode,
-) -> Response {
-    match response_mode {
         ResponseMode::FormPost => {
             let mut params = vec![
                 ("error".to_string(), error.as_str().to_string()),
@@ -123,16 +78,6 @@ pub(crate) fn oauth_error_response_unsigned(
             }
             params.push(("iss", issuer));
             build_authorization_redirect(redirect_uri, &params)
-        }
-        ResponseMode::Jwt => {
-            // JARM has no unsigned form (JARM §2.1); fail closed rather than
-            // emit parameters a JARM client MUST discard. Unreachable by any
-            // current caller — see the doc above.
-            tracing::error!(
-                "oauth_error_response_unsigned called with ResponseMode::Jwt, \
-                 which has no conformant unsigned form; failing closed"
-            );
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
