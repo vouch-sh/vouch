@@ -52,107 +52,89 @@ pub(crate) struct AuthenticatorLookupResult {
 
 /// Error from [`lookup_and_verify_authenticator`].
 ///
-/// Refusals are separate variants so callers can audit each one. The audit
-/// principal is derived from the variant, never from the asserted
-/// `user_handle` (which is attacker-controlled and unverified at this stage):
-/// variants that loaded a credential row name its owner; the others name no
-/// principal. See [`record_lookup_failure`].
+/// Refusals are separate variants so callers can audit each one. The lookup
+/// runs before any assertion signature is checked, so no refusal proves who
+/// is asking: the `user_handle` and credential ID are request-supplied, and a
+/// credential ID is not a secret. WebAuthn Level 2 §14.6.3 (non-normative)
+/// notes that a non-empty `allowCredentials` "exposes the user’s credential
+/// IDs to an unauthenticated caller" (<https://www.w3.org/TR/webauthn-2/>). See
+/// [`record_lookup_failure`] for how each variant is audited.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LookupError {
-    /// Credential or owning user row not found. No row was loaded, so no
-    /// principal is proven — the audit row carries no `user_id`.
+    /// Credential or owning user row not found.
     #[error("not found: {0}")]
     NotFound(&'static str),
 
-    /// The asserted `user_handle` is not the credential's owner. The assertion
-    /// has not run, but the credential's owner IS the proven principal (their
-    /// credential was presented), so the refusal carries the owner's
-    /// `user_id` for audit attribution and names no email.
+    /// The asserted `user_handle` is not the credential's owner. Carries the
+    /// credential's authenticator id so the audit payload records which
+    /// credential was presented; the refusal names no account and no email.
     #[error("forbidden: user_mismatch")]
-    UserMismatch { owner_user_id: String },
+    UserMismatch { authenticator_id: String },
 
-    /// The credential's owner is deactivated. The assertion matched the owner,
-    /// so the owner is the proven principal. Carries the owner's `user_id` and
-    /// `email` so the refusal audit row lands in the owner's org-scoped feed.
+    /// The credential's owner is deactivated. Carries the owner's email so the
+    /// refusal audit row lands in the owner's org-scoped audit feed.
     #[error("forbidden: user_deactivated")]
     Deactivated {
-        owner_user_id: String,
+        authenticator_id: String,
         email: String,
     },
 
-    /// A storage or internal fault. No row was loaded, so no principal is
-    /// proven — like [`Self::NotFound`], the audit row carries no `user_id`.
-    /// Callers return it as a 5xx, not a refusal.
+    /// A storage or internal fault. Callers return it as a 5xx, not a refusal.
     #[error(transparent)]
     Service(#[from] ServiceError),
 }
 
 /// Record a `login_failed` audit event for a failed authenticator lookup.
 ///
-/// Attribution is derived entirely from the [`LookupError`] variant, which
-/// carries the credential's loaded owner when one was proven. The asserted
-/// `user_handle` is NOT used: it is attacker-controlled and unverified at
-/// this stage, so attributing a `login_failed` row to it would let an
-/// attacker pin lockout-driving audit events to a victim's UUID — a
-/// cross-org denial of service against any org with `failed_login_burst`
-/// enabled. Browser login and the FIDO2 assertion grant both call this,
-/// so a refusal leaves the same row on either path.
+/// `asserted` is the request's `user_handle`. Browser login and the FIDO2
+/// assertion grant both call this, so a refusal leaves the same row on
+/// either path.
 ///
-/// - [`LookupError::NotFound`] / [`LookupError::Service`]: no principal
-///   proven → the row carries a NULL `user_id`. Temporal-history replay
-///   (`fetch_user_history` → `history_event`) skips principal-less rows, so
-///   they can never drive a per-user lockout, but they remain in the audit
-///   trail for forensic visibility of bogus-credential probes.
-/// - [`LookupError::UserMismatch`] / [`LookupError::Deactivated`]: the
-///   credential's owner is the proven principal → the row is attributed to
-///   the owner's `user_id`. `Deactivated` additionally carries the owner's
-///   email so the row lands in the owner's org-scoped audit feed.
+/// No refusal here is attributed to a user: the row is written with
+/// [`db::Principal::Unverified`], so its `user_id` column is NULL and
+/// per-user temporal policies (`failed_login_burst`) never count it.
+/// Otherwise anyone who knows a user's id, or holds one of their credential
+/// IDs, could pin lockout-driving rows on them without a signature. The
+/// asserted id stays in the payload for forensics.
 ///
-/// Writes directly via `AuditStore::record_event` (not `db::record_auth_event`)
-/// because the principal-less variants require a NULL `user_id`, which
-/// `AuthEventParams.user_id: String` cannot express.
+/// [`LookupError::Service`] writes no row at all: a storage fault is an
+/// operational incident, not an authentication refusal, and the call sites
+/// log it at `error!`.
 pub(crate) async fn record_lookup_failure(
     audit: &db::audit::AuditStore,
     client: db::ClientInfo,
+    asserted: Uuid,
     error: &LookupError,
 ) {
-    let (reason, user_id, email) = match error {
+    let (reason, authenticator_id, email) = match error {
         LookupError::NotFound(entity) => (format!("{entity}_not_found"), None, None),
-        LookupError::UserMismatch { owner_user_id } => (
+        LookupError::UserMismatch { authenticator_id } => (
             "user_mismatch".to_string(),
-            Some(owner_user_id.clone()),
+            Some(authenticator_id.clone()),
             None,
         ),
         LookupError::Deactivated {
-            owner_user_id,
+            authenticator_id,
             email,
         } => (
             "user_deactivated".to_string(),
-            Some(owner_user_id.clone()),
+            Some(authenticator_id.clone()),
             Some(email.clone()),
         ),
-        LookupError::Service(_) => ("lookup_error".to_string(), None, None),
+        LookupError::Service(_) => return,
     };
     let params = db::AuthEventParams {
-        user_id: user_id.clone().unwrap_or_default(),
+        user_id: db::Principal::Unverified {
+            asserted: Some(asserted.to_string()),
+        },
         event_type: db::AuthEventType::LoginFailed,
+        authenticator_id,
         success: false,
         failure_reason: Some(reason),
         client,
         ..db::AuthEventParams::default()
     };
-    let data = crate::db::documents::audit::AuthEventData {
-        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip),
-        params: &params,
-    };
-    audit
-        .record_event(
-            params.event_type.kind(),
-            user_id.as_deref(),
-            email.as_deref(),
-            &data,
-        )
-        .await;
+    db::record_auth_event(audit, params, email).await;
 }
 
 /// Look up an authenticator and verify it belongs to the specified user.
@@ -161,9 +143,8 @@ pub(crate) async fn record_lookup_failure(
 ///
 /// Returns [`LookupError::NotFound`] if the credential or owning user is not
 /// found; [`LookupError::UserMismatch`] if the credential doesn't belong to
-/// the asserted user (carrying the loaded owner's `user_id` for audit); or
-/// [`LookupError::Deactivated`] if the credential's owner is deactivated
-/// (carrying the owner's `user_id` and email for audit attribution).
+/// the asserted user; or [`LookupError::Deactivated`] if the credential's
+/// owner is deactivated (carrying the owner's email for the org audit feed).
 pub(crate) async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
@@ -175,18 +156,16 @@ pub(crate) async fn lookup_and_verify_authenticator(
 
     let (authenticator, user) = (row.authenticator, row.user);
 
-    // Verify authenticator belongs to this user (from user_handle). The
-    // credential's owner is the proven principal here, so the refusal carries
-    // `authenticator.user_id` for audit — never the asserted `user_handle`.
+    // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != params.user_id.to_string() {
         return Err(LookupError::UserMismatch {
-            owner_user_id: authenticator.user_id.clone(),
+            authenticator_id: authenticator.id,
         });
     }
 
     if !user.active {
         return Err(LookupError::Deactivated {
-            owner_user_id: user.id.clone(),
+            authenticator_id: authenticator.id,
             email: user.email,
         });
     }

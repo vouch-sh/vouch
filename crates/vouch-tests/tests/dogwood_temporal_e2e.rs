@@ -391,76 +391,39 @@ async fn fido2_grant(
     client: &vouch_server::test_utils::TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
+    signed_grant(harness, device, user_id, client, pkcs8, false).await
+}
+
+/// Run the FIDO2 assertion grant with `device`'s assertion but the given
+/// `user_handle`, optionally corrupting the signature. The request is
+/// well-formed, so it reaches the authenticator lookup and, when that
+/// passes, signature verification.
+async fn signed_grant(
+    harness: &TestHarness,
+    device: &IntegrationMockDevice,
+    user_handle: &str,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+    tamper_signature: bool,
+) -> (u16, serde_json::Value) {
     let (challenge, state_jwt) = get_challenge(harness, client, pkcs8).await;
     let auth_result = device
         .authenticate("test.example.com", &challenge)
         .expect("Mock device authentication failed");
-    let user_handle = uuid::Uuid::parse_str(user_id)
-        .expect("user_id must be a UUID")
+    let user_handle = uuid::Uuid::parse_str(user_handle)
+        .expect("user_handle must be a UUID")
         .as_bytes()
         .to_vec();
+    let mut signature = auth_result.signature.as_bytes().to_vec();
+    if tamper_signature && let Some(last) = signature.last_mut() {
+        *last ^= 0x01;
+    }
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
         "credential_id": URL_SAFE_NO_PAD.encode(&auth_result.credential_id),
         "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_result.authenticator_data),
-        "signature": URL_SAFE_NO_PAD.encode(&auth_result.signature),
+        "signature": URL_SAFE_NO_PAD.encode(&signature),
         "client_data_json": URL_SAFE_NO_PAD.encode(&auth_result.client_data_json),
-        "user_handle": URL_SAFE_NO_PAD.encode(&user_handle),
-    });
-    let assertion =
-        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
-    let client_assertion = build_client_assertion(
-        &client.client_id,
-        "https://test.example.com/oauth/token",
-        pkcs8,
-        None,
-    );
-    let body = format!(
-        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
-         &assertion={assertion}\
-         &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
-         &client_assertion={client_assertion}"
-    );
-    let response = harness
-        .post_form("/oauth/token", &body)
-        .await
-        .expect("Failed to post token");
-    let status = response.status;
-    let json: serde_json::Value = response.json().unwrap_or(serde_json::Value::Null);
-    (status, json)
-}
-
-/// Post a FIDO2 assertion grant whose `credential_id` names no stored
-/// credential and whose `user_handle` is an arbitrary UUID (the victim's).
-///
-/// The assertion fields are well-formed enough to pass `Bounds` and reach
-/// `lookup_and_verify_authenticator`, which keys on `credential_id` alone and
-/// returns `LookupError::NotFound("credential")` before `user_handle` is ever
-/// cryptographically verified. This is the attacker-driven path: with the
-/// pre-fix code it wrote a `login_failed` row attributed to `user_handle`,
-/// so five such bogus grants locked the `user_handle`'s owner out via
-/// `failed_login_burst` — from any org. Post-fix, the row is principal-less.
-async fn bogus_fido2_grant(
-    harness: &TestHarness,
-    asserted_user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
-    pkcs8: &[u8],
-) -> (u16, serde_json::Value) {
-    let (_challenge, state_jwt) = get_challenge(harness, client, pkcs8).await;
-    let user_handle = uuid::Uuid::parse_str(asserted_user_id)
-        .expect("asserted user_id must be a UUID")
-        .as_bytes()
-        .to_vec();
-    // A 16-byte (MIN-length) credential_id that names no stored credential.
-    let bogus_credential_id = vec![0u8; 16];
-    let auth_data = vec![0u8; 37];
-    let one_byte = vec![0u8; 1];
-    let assertion_payload = serde_json::json!({
-        "state": state_jwt,
-        "credential_id": URL_SAFE_NO_PAD.encode(&bogus_credential_id),
-        "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
-        "signature": URL_SAFE_NO_PAD.encode(&one_byte),
-        "client_data_json": URL_SAFE_NO_PAD.encode(&one_byte),
         "user_handle": URL_SAFE_NO_PAD.encode(&user_handle),
     });
     let assertion =
@@ -498,7 +461,43 @@ async fn grant_scenario(
     vouch_server::test_utils::TestOAuthClient,
     Vec<u8>,
 ) {
-    let harness = TestHarness::new().await;
+    grant_scenario_on(TestHarness::new().await, slugs, domain, email).await
+}
+
+/// [`grant_scenario`] with the per-IP auth rate limiter off, for tests that
+/// drive more grants than its burst (8 requests, and each grant is two).
+///
+/// Setting `certification_test_token` is what disables the limiter in the
+/// router; neither the FIDO2 assertion grant nor the temporal policies read
+/// it, so it does not change the behaviour under test. Spacing requests out
+/// with sleeps instead would make the tests wait on the wall clock.
+async fn unthrottled_grant_scenario(
+    slugs: &[&str],
+    domain: &str,
+    email: &str,
+) -> (
+    TestHarness,
+    db::User,
+    IntegrationMockDevice,
+    vouch_server::test_utils::TestOAuthClient,
+    Vec<u8>,
+) {
+    let (_, state) = vouch_server::test_utils::test_app_with_certification().await;
+    grant_scenario_on(TestHarness::from_state(state), slugs, domain, email).await
+}
+
+async fn grant_scenario_on(
+    harness: TestHarness,
+    slugs: &[&str],
+    domain: &str,
+    email: &str,
+) -> (
+    TestHarness,
+    db::User,
+    IntegrationMockDevice,
+    vouch_server::test_utils::TestOAuthClient,
+    Vec<u8>,
+) {
     let org = harness.create_org(domain).await.expect("create org");
     let user = harness
         .create_user_in_org(email, &org.id, false)
@@ -650,107 +649,332 @@ async fn test_issuance_rate_limit_under_cap_allows_and_records() {
     );
 }
 
-/// Cross-org lockout regression: an attacker who knows a victim's user UUID
-/// and holds any FAPI client authorized for `fido2-assertion` must NOT be able
-/// to lock the victim out of token issuance by submitting five bogus
-/// `fido2-assertion` grants naming the victim's UUID as `user_handle` and a
-/// non-existent `credential_id`. Each bogus grant is correctly rejected as
-/// `invalid_grant`; pre-fix it also wrote a `login_failed` row attributed to
-/// the victim, so five such grants tripped `failed_login_burst` on the
-/// victim's next legitimate grant — from any org, since the policy history
-/// query is keyed by `user_id` only. Post-fix the row is principal-less, so
-/// `failed_login_burst` never sees it and the victim's legitimate grant
-/// succeeds.
-#[tokio::test]
-async fn test_failed_login_burst_not_triggered_by_bogus_fido2_assertion() {
-    let (harness, victim, device, vclient, vpkcs8) = grant_scenario(
+// ── failed_login_burst counts only verified principals ───────────────────
+//
+// A `login_failed` row feeds `failed_login_burst` through its `user_id`
+// column. The column may name a user only when the server verified that
+// user: a WebAuthn assertion whose signature checked out, or an IdP callback.
+// Everything the lookup and signature check see before that (the
+// `user_handle`, the credential ID) is request-supplied, and WebAuthn does
+// not treat credential IDs as secrets, so none of it may pin rows on a user.
+
+/// Every `login_failed` row, in insertion order.
+async fn all_login_failed(harness: &TestHarness) -> Vec<db::AuditEvent> {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit")
+}
+
+/// Setup shared by the unverified-refusal tests: a victim in an org with
+/// `failed_login_burst` active, and an attacker in another org with their
+/// own registered key and FAPI client.
+struct LockoutScenario {
+    harness: TestHarness,
+    victim: db::User,
+    victim_device: IntegrationMockDevice,
+    victim_client: vouch_server::test_utils::TestOAuthClient,
+    victim_pkcs8: Vec<u8>,
+    attacker: db::User,
+    attacker_device: IntegrationMockDevice,
+    attacker_client: vouch_server::test_utils::TestOAuthClient,
+    attacker_pkcs8: Vec<u8>,
+}
+
+async fn lockout_scenario(tag: &str) -> LockoutScenario {
+    let (harness, victim, victim_device, victim_client, victim_pkcs8) = unthrottled_grant_scenario(
         &["failed_login_burst"],
-        "lockout-victim.example.com",
-        "victim@example.com",
+        &format!("{tag}-victim.example.com"),
+        &format!("victim@{tag}-victim.example.com"),
     )
     .await;
-
-    // Attacker: separate org, separate user, separate FAPI client. The
-    // shared audit table is the only coupling — the attacker holds no
-    // membership in the victim's org.
     let attacker_org = harness
-        .create_org("lockout-attacker.example.com")
+        .create_org(&format!("{tag}-attacker.example.com"))
         .await
         .expect("attacker org");
     let attacker = harness
-        .create_user_in_org("attacker@example.com", &attacker_org.id, false)
+        .create_user_in_org(
+            &format!("attacker@{tag}-attacker.example.com"),
+            &attacker_org.id,
+            false,
+        )
         .await
         .expect("attacker user");
-    let (aclient, apkcs8) = create_jwt_client(&harness, &attacker.id).await;
+    let attacker_device = IntegrationMockDevice::new();
+    register_mock_device_in_db(&harness, &attacker.id, &attacker_device).await;
+    let (attacker_client, attacker_pkcs8) = create_jwt_client(&harness, &attacker.id).await;
+    LockoutScenario {
+        harness,
+        victim,
+        victim_device,
+        victim_client,
+        victim_pkcs8,
+        attacker,
+        attacker_device,
+        attacker_client,
+        attacker_pkcs8,
+    }
+}
 
-    // Five bogus grants: EACH must be rejected as `invalid_grant` (no such
-    // credential). Spaced 2.5s apart to stay under the shared per-IP auth
-    // rate limiter (burst 8, 1 req/2s); in production an attacker spreads
-    // five requests across the 10-minute window.
+/// How the attacker's grant is forged.
+#[derive(Debug, Clone, Copy)]
+enum Forgery {
+    /// A credential ID that names no stored credential, with the victim's
+    /// id as `user_handle`.
+    UnknownCredential,
+    /// The attacker's own registered credential with the victim's id as
+    /// `user_handle`.
+    ForgedUserHandle,
+    /// The victim's credential ID (not a secret) with the attacker's id as
+    /// `user_handle`.
+    VictimCredentialId,
+    /// The victim's credential ID and `user_handle` with a signature that
+    /// does not verify.
+    BadSignature,
+}
+
+/// Five forged grants of one kind must each be refused, leave no
+/// `login_failed` row naming anyone, and leave the victim able to log in.
+async fn assert_forgery_cannot_lock_out(forgery: Forgery, tag: &str) {
+    let sc = Box::pin(lockout_scenario(tag)).await;
+    let unregistered = IntegrationMockDevice::new();
     for i in 0..5 {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-        }
-        let (status, json) = bogus_fido2_grant(&harness, &victim.id, &aclient, &apkcs8).await;
+        let (status, json) = match forgery {
+            Forgery::UnknownCredential => {
+                signed_grant(
+                    &sc.harness,
+                    &unregistered,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::ForgedUserHandle => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.attacker_device,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::VictimCredentialId => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.victim_device,
+                    &sc.attacker.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::BadSignature => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.victim_device,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    true,
+                )
+                .await
+            }
+        };
         assert_eq!(
             status, 400,
-            "bogus assertion must be rejected as invalid_grant: {json}"
+            "{forgery:?} grant #{i} must be refused: {json}"
         );
         assert_eq!(
             json["error"].as_str().unwrap_or(""),
             "invalid_grant",
-            "bogus assertion must be invalid_grant: {json}"
+            "{forgery:?} grant #{i} must be invalid_grant: {json}"
         );
     }
 
-    // No `login_failed` row may be attributed to the victim's UUID. Pre-fix
-    // this count was 5; the cross-org lockout vector rode on it.
-    let victim_rows = harness
-        .state
-        .audit
-        .query_events(&db::AuditEventFilter {
-            event_types: Some(vec!["login_failed".to_string()]),
-            user_id: Some(victim.id.clone()),
-            ..db::AuditEventFilter::default()
-        })
-        .await
-        .expect("query audit");
-    assert!(
-        victim_rows.is_empty(),
-        "five attacker-driven bogus grants must write NO login_failed rows \
-         attributed to the victim; got {victim_rows:?}"
-    );
-
-    // The audit trail IS preserved — as five principal-less rows whose NULL
-    // `user_id` can never drive a per-user lockout (temporal history skips
-    // principal-less rows).
-    let all_failures = harness
-        .state
-        .audit
-        .query_events(&db::AuditEventFilter {
-            event_types: Some(vec!["login_failed".to_string()]),
-            ..db::AuditEventFilter::default()
-        })
-        .await
-        .expect("query audit");
-    let principal_less = all_failures.iter().filter(|r| r.user_id.is_none()).count();
+    // The refusals stay in the audit trail, but none names a user: the
+    // `user_id` column is what `failed_login_burst` counts.
+    let rows = all_login_failed(&sc.harness).await;
     assert_eq!(
-        principal_less, 5,
-        "five bogus grants must each leave a principal-less login_failed row; \
-         got {all_failures:?}"
+        rows.len(),
+        5,
+        "{forgery:?}: each refusal leaves one login_failed row: {rows:?}"
     );
+    assert!(
+        rows.iter().all(|r| r.user_id.is_none()),
+        "{forgery:?}: no refusal before a verified signature may be attributed: {rows:?}"
+    );
+    for row in &rows {
+        let data: serde_json::Value = serde_json::from_str(&row.data).expect("payload JSON");
+        assert!(
+            data.get("user_id").is_none(),
+            "{forgery:?}: the payload must not name an attributed user: {data}"
+        );
+        assert!(
+            data.get("asserted_user_id")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "{forgery:?}: the asserted user_handle is kept for forensics: {data}"
+        );
+    }
 
-    // The victim's legitimate FIDO2 grant succeeds — `failed_login_burst`
-    // sees zero failures for the victim and does not deny.
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-    let (status, json) = fido2_grant(&harness, &device, &victim.id, &vclient, &vpkcs8).await;
+    let (status, json) = fido2_grant(
+        &sc.harness,
+        &sc.victim_device,
+        &sc.victim.id,
+        &sc.victim_client,
+        &sc.victim_pkcs8,
+    )
+    .await;
     assert_eq!(
         status, 200,
-        "victim's legitimate grant must succeed after attacker-driven bogus \
-         grants (no lockout): {json}"
+        "{forgery:?}: five forged grants must not lock the victim out: {json}"
     );
     assert!(
         json.get("access_token").is_some(),
-        "victim's legitimate grant must issue a token: {json}"
+        "{forgery:?}: the victim's grant must issue a token: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_unknown_credential() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::UnknownCredential,
+        "unknown-cred",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_forged_user_handle() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::ForgedUserHandle,
+        "forged-handle",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_presented_victim_credential_id() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::VictimCredentialId,
+        "victim-cred",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_bad_signature() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::BadSignature,
+        "bad-sig",
+    ))
+    .await;
+}
+
+/// A storage fault during the authenticator lookup is a 5xx, not an
+/// authentication refusal: it writes no `login_failed` row, so five of them
+/// cannot deny the grant that follows the repair.
+#[tokio::test]
+async fn test_failed_login_burst_ignores_storage_faults() {
+    let (harness, user, device, client, pkcs8) = unthrottled_grant_scenario(
+        &["failed_login_burst"],
+        "storage-fault-burst.example.com",
+        "storage-fault-burst@storage-fault-burst.example.com",
+    )
+    .await;
+    let auth_id = db::get_authenticators_for_user(&harness.state.store, &user.id)
+        .await
+        .expect("list authenticators")
+        .first()
+        .expect("registered authenticator")
+        .id
+        .clone();
+
+    // Each grant's lookup now fails at the storage layer.
+    vouch_server::test_utils::corrupt_document(&harness.state.store, &auth_id).await;
+    for i in 0..5 {
+        let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+        assert_eq!(status, 500, "storage fault #{i} must be a 5xx: {json}");
+        assert_eq!(
+            json["error"].as_str().unwrap_or(""),
+            "server_error",
+            "storage fault #{i} must report server_error: {json}"
+        );
+    }
+    let rows = all_login_failed(&harness).await;
+    assert!(
+        rows.is_empty(),
+        "a storage fault must not be recorded as a login failure: {rows:?}"
+    );
+
+    // Repair the record; the next grant must not be denied.
+    vouch_server::test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_eq!(
+        status, 200,
+        "storage faults must not deny the next grant: {json}"
+    );
+}
+
+/// A refusal after the assertion verified is the user's own, so it stays
+/// attributed and counts: the posture denial `failed_login_burst` itself
+/// issues lands in the user's history as a sixth failure.
+#[tokio::test]
+async fn test_verified_policy_denial_is_attributed_to_the_user() {
+    let (harness, user, device, client, pkcs8) = grant_scenario(
+        &["failed_login_burst"],
+        "verified-denial.example.com",
+        "verified-denial@verified-denial.example.com",
+    )
+    .await;
+    for i in 0..5_i64 {
+        seed_event(
+            &harness,
+            AuditEventKind::LoginFailed,
+            &user.id,
+            120 + i,
+            "{}",
+        )
+        .await;
+    }
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_login_policy_denied(status, &json, "5 failed logins in 10m");
+
+    let rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit");
+    assert_eq!(
+        rows.len(),
+        6,
+        "the verified denial must be attributed to the user: {rows:?}"
+    );
+    let denial = rows
+        .iter()
+        .find(|r| r.data.contains("posture policy denied"))
+        .expect("posture denial row");
+    let data: serde_json::Value = serde_json::from_str(&denial.data).expect("payload JSON");
+    assert_eq!(data["user_id"].as_str(), Some(user.id.as_str()), "{data}");
+    assert_eq!(
+        denial.email_domain.as_deref(),
+        Some("verified-denial.example.com"),
+        "the verified denial lands in the user's org feed"
     );
 }

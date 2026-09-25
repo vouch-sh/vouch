@@ -537,16 +537,19 @@ pub(crate) async fn browser_login_start(
 /// Record a failed browser-login attempt. The email feeds the audit row's
 /// `email_domain`/`email_hmac` columns (never stored raw); without it the
 /// event is invisible to org-scoped audit queries, which filter on domain.
+///
+/// `principal` decides whether the row counts toward per-user temporal
+/// policies; see [`db::Principal`].
 async fn log_login_failure(
     audit: &db::audit::AuditStore,
     client: ClientInfo,
-    user_id: &str,
+    principal: db::Principal,
     email: Option<&str>,
     authenticator_id: Option<&str>,
     reason: &str,
 ) {
     let params = AuthEventParams {
-        user_id: user_id.to_string(),
+        user_id: principal,
         event_type: AuthEventType::LoginFailed,
         authenticator_id: authenticator_id.map(String::from),
         success: false,
@@ -620,8 +623,13 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            crate::services::auth::record_lookup_failure(&state.audit, client_info.clone(), &e)
-                .await;
+            crate::services::auth::record_lookup_failure(
+                &state.audit,
+                client_info.clone(),
+                user_id,
+                &e,
+            )
+            .await;
             return Err(match e {
                 // Return generic error to prevent credential enumeration
                 crate::services::auth::LookupError::NotFound(_)
@@ -665,10 +673,15 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
+            // The signature did not verify, so the `user_handle` and
+            // credential ID are still only request-supplied: the row must not
+            // count against the credential's owner.
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
-                &user.id,
+                db::Principal::Unverified {
+                    asserted: Some(user.id.clone()),
+                },
                 Some(&user.email),
                 Some(&authenticator.id),
                 &e.to_string(),
@@ -752,11 +765,13 @@ async fn finalize_login_session(
     if let Err(ref e) = result {
         // The assertion verified and the counter update may already have
         // committed, but a later step failed: leave a `LoginFailed` trace
-        // so the ceremony never vanishes from AuthEvents.
+        // so the ceremony never vanishes from AuthEvents. The failure is the
+        // server's, not the user's, so the row is not attributed to them and
+        // cannot feed `failed_login_burst`.
         log_login_failure(
             &state.audit,
             client_info,
-            &user_id,
+            db::Principal::ServerFault { verified: user_id },
             Some(&user_email),
             Some(&authenticator_id),
             &format!("post_verification: {e}"),
@@ -822,7 +837,7 @@ async fn finalize_login_session_inner(
             db::record_auth_event(
                 &state.audit,
                 AuthEventParams {
-                    user_id: user.id.clone(),
+                    user_id: db::Principal::Verified(user.id.clone()),
                     event_type: AuthEventType::DeviceAuthApproved,
                     authenticator_id: Some(authenticator.id.clone()),
                     success: true,
@@ -905,7 +920,7 @@ async fn finalize_login_session_inner(
 
     // Log successful login event (consistent with failure path)
     let auth_event_params = AuthEventParams {
-        user_id: user.id.clone(),
+        user_id: db::Principal::Verified(user.id.clone()),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
@@ -1789,6 +1804,43 @@ mod tests {
         reasons
     }
 
+    /// A `login_failed` row with no attributed user, as
+    /// (`failure_reason`, `asserted_user_id`, `email_domain`).
+    type Unattributed = (String, Option<String>, Option<String>);
+
+    /// Every `login_failed` row whose `user_id` column is NULL — rows that
+    /// per-user temporal policies such as `failed_login_burst` never count.
+    /// Asserts none of them carries a payload `user_id`.
+    async fn unattributed_failures(state: &crate::AppState) -> Vec<Unattributed> {
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        events
+            .into_iter()
+            .filter(|e| e.user_id.is_none())
+            .map(|e| {
+                let data: serde_json::Value =
+                    serde_json::from_str(&e.data).expect("event data JSON");
+                assert!(data.get("user_id").is_none(), "{data}");
+                let text = |k: &str| {
+                    data.get(k)
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from)
+                };
+                (
+                    text("failure_reason").unwrap_or_default(),
+                    text("asserted_user_id"),
+                    e.email_domain,
+                )
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn test_login_failed_audit_event_is_org_visible() {
         // Browser login audit events were inserted with a `None` email,
@@ -1814,7 +1866,6 @@ mod tests {
         let filter = crate::db::AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
             email_domains: Some(vec!["example.com".to_string()]),
-            user_id: Some(user.id.clone()),
             ..crate::db::AuditEventFilter::default()
         };
         let events = state
@@ -1829,6 +1880,14 @@ mod tests {
         );
         let event = events.first().expect("one event");
         assert_eq!(event.email_domain.as_deref(), Some("example.com"));
+
+        // No signature verified, so the row must not count against the
+        // credential's owner: its `user_id` column (what `failed_login_burst`
+        // replays) stays NULL, and the `user_handle` is kept as asserted.
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
+        let unattributed = unattributed_failures(&state).await;
+        let (_, asserted, _) = unattributed.first().expect("one unattributed row");
+        assert_eq!(asserted.as_deref(), Some(user.id.as_str()));
     }
 
     #[tokio::test]
@@ -1843,17 +1902,9 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
 
-        // A storage fault during the lookup proves no principal — the asserted
-        // `user_handle` is unverified — so the `login_failed` row must NOT be
-        // attributed to the asserted user. An attacker who can POST a bogus
-        // `user_handle` must not pin lockout-driving rows onto a victim.
-        assert!(
-            login_failure_reasons(&state, &user.id).await.is_empty(),
-            "a storage-fault login_failed row must not be attributed to the asserted user"
-        );
-
-        // The audit trail is preserved as a principal-less row.
-        let all_failures = state
+        // A storage fault is an operational incident, not a refusal: it
+        // writes no `login_failed` row, so it cannot feed `failed_login_burst`.
+        let rows = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
@@ -1861,22 +1912,9 @@ mod tests {
             })
             .await
             .expect("query audit events");
-        let reasons: Vec<String> = all_failures
-            .iter()
-            .filter(|r| r.user_id.is_none())
-            .map(|r| {
-                let data: serde_json::Value =
-                    serde_json::from_str(&r.data).expect("event data JSON");
-                data.get("failure_reason")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .collect();
         assert!(
-            reasons.contains(&"lookup_error".to_string()),
-            "a principal-less login_failed row with reason 'lookup_error' must be recorded: \
-             {all_failures:?}"
+            rows.is_empty(),
+            "a 5xx must not be a login failure: {rows:?}"
         );
     }
 
@@ -1898,16 +1936,19 @@ mod tests {
 
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
         assert!(resp_body.contains("auth_failed"), "{resp_body}");
-        assert_eq!(
-            login_failure_reasons(&state, &user.id).await,
-            ["user_deactivated"]
-        );
+        // The lookup runs before the signature check, so the refusal is
+        // recorded without attributing it to the owner.
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
+        let unattributed = unattributed_failures(&state).await;
+        let reasons: Vec<&str> = unattributed.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert_eq!(reasons, ["user_deactivated"]);
     }
 
     #[tokio::test]
     async fn test_deactivated_user_browser_login_failed_is_org_visible() {
-        // A deactivated owner is the one refusal that names an account, so
-        // its row carries the owner's domain and an org-scoped query finds it.
+        // A deactivated owner is the one lookup refusal that carries the
+        // owner's email, so its row lands in the org feed and an org-scoped
+        // query finds it. It is still not attributed to the owner.
         use crate::db::documents::user::UserDoc;
 
         let (app, state) = crate::test_utils::test_app().await;
@@ -1921,10 +1962,7 @@ mod tests {
 
         let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
-        assert_eq!(
-            login_failure_reasons(&state, &user.id).await,
-            ["user_deactivated"]
-        );
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
 
         // The org-scoped query that `/api/v1/org/audit-events` and `/admin/audit` run.
         let by_domain = state
@@ -1948,32 +1986,22 @@ mod tests {
              (email_domains) audit queries; got {by_domain:?}"
         );
 
-        let by_user = state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec!["login_failed".to_string()]),
-                user_id: Some(user.id.clone()),
-                ..crate::db::AuditEventFilter::default()
-            })
-            .await
-            .expect("query audit events");
-        let deact_row = by_user.first().expect("one login_failed row for the user");
+        let unattributed = unattributed_failures(&state).await;
+        let (_, _, email_domain) = unattributed.first().expect("one login_failed row");
         assert_eq!(
-            deact_row.email_domain,
-            Some("example.com".to_string()),
+            email_domain.as_deref(),
+            Some("example.com"),
             "deactivated-user login_failed row must carry the credential owner's domain"
         );
     }
 
     #[tokio::test]
     async fn test_browser_login_user_mismatch_failure_keeps_email_domain_null() {
-        // The asserted `user_handle` is not the credential's owner, but the
-        // owner IS the proven principal (their credential was presented), so
-        // the `login_failed` row is attributed to the owner — never to the
-        // attacker-supplied asserted `user_handle`. The assertion has not
-        // run, so the row names no email; it stays out of the owner's
-        // org-scoped audit feed (a holder of the credential_id, a secret,
-        // must not be able to feed rows into the owner's org feed).
+        // The asserted `user_handle` is not the credential's owner and no
+        // signature has been checked. A credential ID is not a secret, so
+        // presenting one proves nothing about its owner: the row is
+        // attributed to neither account and names no email, so it stays out
+        // of the owner's org-scoped audit feed.
         let (app, state) = crate::test_utils::test_app().await;
         let owner = crate::test_utils::create_test_user(&state.store, "owner@example.com").await;
         let attacker =
@@ -1986,48 +2014,12 @@ mod tests {
         let (status, resp_body) = post_complete(&app, &state, &attacker.id, &credential_id).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
 
-        // The asserted (attacker) user_handle is unverified, so NO row is
-        // attributed to it — the cross-org lockout vector the fix closes.
-        assert!(
-            login_failure_reasons(&state, &attacker.id).await.is_empty(),
-            "a user_mismatch login_failed row must not be attributed to the asserted user_handle"
-        );
-
-        // The row lands on the credential's loaded owner, with no email.
+        assert!(login_failure_reasons(&state, &attacker.id).await.is_empty());
+        assert!(login_failure_reasons(&state, &owner.id).await.is_empty());
         assert_eq!(
-            login_failure_reasons(&state, &owner.id).await,
-            ["user_mismatch"],
-            "a user_mismatch row must be attributed to the credential's owner"
-        );
-        let events = state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec!["login_failed".to_string()]),
-                user_id: Some(owner.id.clone()),
-                ..crate::db::AuditEventFilter::default()
-            })
-            .await
-            .expect("query audit events");
-        let row = events.first().expect("one login_failed row for the owner");
-        assert_eq!(
-            row.email_domain, None,
-            "user_mismatch must not carry the credential owner's domain"
-        );
-
-        // And it must NOT surface through the owner's domain-scoped query.
-        let owner_domain = state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec!["login_failed".to_string()]),
-                email_domains: Some(vec!["example.com".to_string()]),
-                user_id: Some(owner.id.clone()),
-                ..crate::db::AuditEventFilter::default()
-            })
-            .await
-            .expect("query audit events");
-        assert!(
-            owner_domain.is_empty(),
-            "user_mismatch row must not appear under the credential owner's domain-scoped query"
+            unattributed_failures(&state).await,
+            [("user_mismatch".to_string(), Some(attacker.id.clone()), None)],
+            "user_mismatch must be recorded unattributed, with no email domain"
         );
     }
 
@@ -2038,7 +2030,8 @@ mod tests {
     // way: `LoginSuccess` when the session is created, `LoginFailed` with a
     // `post_verification` reason when a later step errors — so a verified
     // hardware ceremony (whose counter update may already have committed)
-    // never vanishes from the audit log. The full handler path needs a real
+    // never vanishes from the audit log. The failure row is a server fault,
+    // so it is not attributed to the user. The full handler path needs a real
     // signed assertion, so these tests exercise the extracted tail directly.
 
     #[tokio::test]
@@ -2174,13 +2167,13 @@ mod tests {
             "device-auth release must fail when the row is missing"
         );
 
-        // THE BUG FIX: the failure leaves a LoginFailed audit trace instead
-        // of no AuthEvents row at all.
+        // The failure leaves a LoginFailed audit trace instead of no
+        // AuthEvents row at all.
         let failures = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
-                user_id: Some(user.id.clone()),
+                email_domains: Some(vec!["example.com".to_string()]),
                 ..Default::default()
             })
             .await
@@ -2197,6 +2190,15 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|r| r.starts_with("post_verification")),
             "failure_reason must identify the post-verification stage"
+        );
+        // The fault is the server's, not the user's: the row must not feed
+        // `failed_login_burst`, but the payload still names who it happened to.
+        assert_eq!(event.user_id, None, "a server fault must not be attributed");
+        assert!(data.get("user_id").is_none(), "{data}");
+        assert_eq!(
+            data.get("fault_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some(user.id.as_str())
         );
         let successes = state
             .audit

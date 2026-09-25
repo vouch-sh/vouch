@@ -24,7 +24,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
-use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::db::{self, AuthEventParams, AuthEventType, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
@@ -327,7 +327,7 @@ pub(crate) async fn exchange_fido2_assertion(
                 Ok(found) => return Ok(found),
                 Err(e) => e,
             };
-            record_lookup_failure(&state.audit, params.client_info.clone(), &e).await;
+            record_lookup_failure(&state.audit, params.client_info.clone(), user_id, &e).await;
             Err(match e {
                 // A storage fault says nothing about the grant, so it stays a 500.
                 LookupError::Service(err) => {
@@ -382,9 +382,13 @@ pub(crate) async fn exchange_fido2_assertion(
             );
             // A failed assertion — including clone detection (counter regression)
             // — is a high-signal security event. Record it in the audit trail with
-            // the credential and user IDs and the failure reason.
+            // the credential and user IDs and the failure reason. No signature
+            // verified, so the `user_handle` is still request-supplied: the row
+            // must not count against the credential's owner.
             let failure_event = AuthEventParams {
-                user_id: user.id.clone(),
+                user_id: Principal::Unverified {
+                    asserted: Some(user.id.clone()),
+                },
                 event_type: AuthEventType::LoginFailed,
                 authenticator_id: Some(authenticator.id.clone()),
                 success: false,
@@ -455,8 +459,10 @@ pub(crate) async fn exchange_fido2_assertion(
         )
         .await
     {
+        // The assertion verified, so this refusal is the user's own and
+        // counts toward per-user temporal policies.
         let failed_event = AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: Principal::Verified(user.id.clone()),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: Some(authenticator.id.clone()),
             success: false,
@@ -470,7 +476,7 @@ pub(crate) async fn exchange_fido2_assertion(
 
     // Log the successful auth event
     let auth_event_params = AuthEventParams {
-        user_id: user.id.clone(),
+        user_id: Principal::Verified(user.id.clone()),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,

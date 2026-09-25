@@ -481,7 +481,7 @@ async fn clear_user_session(
 
             let client_info = ClientInfo::from(headers);
             let params = db::AuthEventParams {
-                user_id: session.user_id.clone(),
+                user_id: db::Principal::Verified(session.user_id.clone()),
                 event_type: db::AuthEventType::Logout,
                 success: true,
                 client_id: rp_client_id.map(str::to_string),

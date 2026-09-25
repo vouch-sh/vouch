@@ -170,7 +170,7 @@ pub(crate) async fn logout(
 
                 // Best-effort logout audit event
                 let params = db::AuthEventParams {
-                    user_id: session.user_id.clone(),
+                    user_id: db::Principal::Verified(session.user_id.clone()),
                     event_type: db::AuthEventType::Logout,
                     success: true,
                     client: client_info,
