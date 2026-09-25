@@ -4084,3 +4084,106 @@ async fn test_rfc7592_delete_loses_to_concurrent_delete() {
         .expect("query audit events");
     assert!(events.is_empty(), "the losing DELETE must not audit");
 }
+
+// RFC 7592 §2.3 DELETE consumes the registration access token (clears its
+// hash) in its own committed transaction before the multi-step
+// `delete_oauth_client_and_revoke_sessions`, whose sub-steps each commit
+// independently. A non-retryable failure in any sub-step after the consume —
+// but before `delete_oauth_client` removes the row — used to strand the
+// client: still present, but with `registration_access_token_hash` permanently
+// `None`. Every RFC 7592 operation gates on the stored hash and there is no
+// reissue endpoint, so the owner was locked out of all RFC 7592 management
+// forever (an open-registration client, whose `user_id == None`, had no
+// admin-API recovery either). The fix reverses the consume on delete failure
+// so the owner's still-valid token works again on retry.
+//
+// This is the dynamic-registration twin of
+// `delete_application_api_failed_delete_writes_no_audit_event` and uses the
+// same fault-injection seam (`set_delete_by_index_remaining_successes(0)`):
+// `consume_registration_access_token` uses `compare_and_update` (not
+// `delete_by_index`), so it commits and clears the hash; the cascade's first
+// store-level `delete_by_index` (`delete_sessions_for_user`) then faults at
+// entry, before its transaction opens, with a non-retryable `anyhow` error
+// that `with_dsql_retry!` does not retry — exactly modeling a non-retryable
+// backend failure after the consume committed.
+#[tokio::test]
+async fn test_rfc7592_delete_partial_failure_restores_token_for_retry() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_delete_by_index_remaining_successes(0);
+    })
+    .await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let presented_hash = crate::crypto::hash_token(&token);
+    let bearer = format!("Bearer {token}");
+    let path = format!("/oauth/register/{client_id}");
+
+    // The first DELETE faults inside the cascade, after the consume committed.
+    // It must surface as 500 (a real failure the caller retries), NOT 204.
+    let (status, response) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a faulted delete must surface as 500, not 204: {response}"
+    );
+
+    // No `oauth_client_deleted` audit event — the delete did not commit, so
+    // the durable record must reflect only what actually persisted.
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        events.is_empty(),
+        "a faulted RFC 7592 delete must write no oauth_client_deleted event"
+    );
+
+    // The client row survives (the cascade faulted before `delete_oauth_client`).
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client must survive a faulted delete");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "the consume must be reversed on failure so the owner is not locked out"
+    );
+
+    // The owner's still-valid registration access token must work again — the
+    // lockout is fixed. Under the bug the hash was `None`, so this returned 401.
+    let (status, _body) =
+        http_request(&app, "GET", &path, None, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "RFC 7592 GET must succeed after the token is restored (no lockout)"
+    );
+
+    // A retried DELETE re-authenticates with the restored token and re-attempts
+    // the cascade, which faults again (the budget stays exhausted). Under the
+    // bug this returned 401 (auth failed because the hash was `None`); with
+    // the fix auth passes and the delete re-faults as 500, proving the retry
+    // reaches the delete instead of being rejected at the gate.
+    let (status, _body) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a retried DELETE must re-authenticate and re-attempt the delete, not 401"
+    );
+
+    // The restore is idempotent: the retried fault also reversed its consume,
+    // so the hash is back and the owner can keep retrying until the delete
+    // succeeds (e.g. once the transient backend failure clears).
+    let stored_after_retry = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client must still survive the retried faulted delete");
+    assert_eq!(
+        stored_after_retry.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "the consume must be reversed on every faulted attempt"
+    );
+}

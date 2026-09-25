@@ -1950,6 +1950,57 @@ pub async fn consume_registration_access_token(
     Ok(matches!(outcome, Transition::Applied(())))
 }
 
+/// Restore a registration access token hash that
+/// [`consume_registration_access_token`] cleared.
+///
+/// [`delete_client_configuration`](crate::services::oidc::registration::delete_client_configuration)
+/// consumes the hash (clears it to `None`) in its own committed transaction
+/// before running the multi-step
+/// [`delete_oauth_client_and_revoke_sessions`], whose sub-steps each commit
+/// independently with no outer transaction. A non-retryable failure in any of
+/// those sub-steps — after the consume committed but before
+/// [`delete_oauth_client`] removes the row — would strand the client: still
+/// present, but with its registration token permanently cleared. Every RFC
+/// 7592 operation gates on the stored hash and there is no reissue endpoint,
+/// so the owner would be locked out of all RFC 7592 management forever (an
+/// open-registration client, whose `user_id == None`, has no admin-API
+/// recovery either). This reverses the consume so the owner's still-valid
+/// token works again on retry; the delete's sub-steps are idempotent, so the
+/// retry converges.
+///
+/// The restore is conditioned on the stored hash still being `None` — the
+/// state the consume left — and is re-evaluated against the latest row on
+/// every OCC retry, so a concurrent writer that put the hash back to
+/// `Some(..)` wins and is not clobbered. A missing row (the client was
+/// deleted by a concurrent admin delete) is a no-op. Best-effort by
+/// construction: the caller has already failed the delete and surfaces that
+/// error; an error here is logged by the caller and does not mask it.
+pub async fn restore_registration_access_token(
+    store: &DocumentStore,
+    id: &str,
+    token_hash: &str,
+) -> Result<()> {
+    let outcome = store
+        .transition::<OAuthClientDoc, (), (), _>(id, |data| {
+            // Only undo the consume's `None`. A concurrent writer that set the
+            // hash back to `Some(..)` (e.g. a re-registration) wins; don't
+            // clobber it.
+            if data.registration_access_token_hash.is_some() {
+                return Err(());
+            }
+            data.registration_access_token_hash = Some(token_hash.to_string());
+            Ok(())
+        })
+        .await?;
+    // `Applied` — restored. `Rejected` — a concurrent writer set the hash,
+    // leave it. `NotFound` — the client is gone (concurrent delete), nothing
+    // to restore. All three are acceptable outcomes for a best-effort undo.
+    match outcome {
+        Transition::Applied(()) | Transition::Rejected(()) | Transition::NotFound => {}
+    }
+    Ok(())
+}
+
 /// Revoke whichever client holds `token_hash` as its registration access token.
 ///
 /// RFC 7592 §2.1/2.2/2.3: when a client configuration request names a

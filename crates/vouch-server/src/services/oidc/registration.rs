@@ -1716,16 +1716,13 @@ pub async fn delete_client_configuration(
     // racing a PUT that rotates the token, only the request that consumes it
     // proceeds; the rest hold a token that is no longer valid (RFC 7592
     // §2.3) and must not delete or audit.
-    let consumed = db::consume_registration_access_token(
-        &state.store,
-        &client.id,
-        &hash_token(registration_access_token),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to consume registration token for {client_id}: {e}");
-        ServiceError::Internal("Failed to delete client".to_string())
-    })?;
+    let presented_hash = hash_token(registration_access_token);
+    let consumed = db::consume_registration_access_token(&state.store, &client.id, &presented_hash)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to consume registration token for {client_id}: {e}");
+            ServiceError::Internal("Failed to delete client".to_string())
+        })?;
     if !consumed {
         tracing::debug!(
             "RFC 7592 DELETE for client_id {client_id} lost its registration access token \
@@ -1740,17 +1737,40 @@ pub async fn delete_client_configuration(
     // access tokens ... associated with this client" — without the session
     // delete, tokens issued to the deleted dynamically registered client
     // keep validating at resource endpoints until `exp`.
-    db::delete_oauth_client_and_revoke_sessions(
+    //
+    // The consume above committed `registration_access_token_hash = None` in
+    // its OWN transaction. `delete_oauth_client_and_revoke_sessions` commits
+    // each sub-step independently (no outer transaction), so a non-retryable
+    // failure after the consume — but before `delete_oauth_client` removes the
+    // row — would strand the client: still present, but with its registration
+    // token permanently cleared. Every RFC 7592 operation gates on the stored
+    // hash and there is no reissue endpoint, so the owner would be locked out
+    // of all RFC 7592 management forever (and an open-registration client, whose
+    // `user_id == None`, has no admin-API recovery either). Reverse the consume
+    // on failure so the owner's still-valid token works again on retry; the
+    // delete's sub-steps are idempotent, so a retry converges exactly as it
+    // did before the consume-first change.
+    if let Err(e) = db::delete_oauth_client_and_revoke_sessions(
         &state.store,
         &state.session_cache,
         &client.id,
         &client.client_id,
     )
     .await
-    .map_err(|e| {
+    {
+        if let Err(restore_err) =
+            db::restore_registration_access_token(&state.store, &client.id, &presented_hash).await
+        {
+            tracing::error!(
+                "Failed to restore registration access token for client {client_id} after a \
+                 failed delete; the owner may be locked out of RFC 7592 management: {restore_err}"
+            );
+        }
         tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
-        ServiceError::Internal("Failed to delete client".to_string())
-    })?;
+        return Err(ServiceError::Internal(
+            "Failed to delete client".to_string(),
+        ));
+    }
 
     // The client doc is already deleted above, so `Unresolved`'s client-org
     // fallback (a lookup by `client.id`) would always miss. `client.org_id`
