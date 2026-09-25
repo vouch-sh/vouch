@@ -194,10 +194,6 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
 pub(crate) async fn store_and_finalize(
     server: &str,
     token: &str,
-    #[cfg_attr(
-        not(unix),
-        expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
-    )]
     email: &str,
     expires_at_str: &str,
     expires_at_ts: Option<jiff::Timestamp>,
@@ -229,7 +225,7 @@ pub(crate) async fn store_and_finalize(
 
     // 3. Auto-provision SSH certificate + refresh CodeArtifact in parallel
     let (_, ()) = tokio::join!(
-        crate::commands::credential::ssh::auto_provision(server, expires_at_str, fapi_key,),
+        crate::commands::credential::ssh::auto_provision(server, email, expires_at_str, fapi_key),
         crate::commands::setup::codeartifact::auto_refresh_npmrc(server),
     );
 

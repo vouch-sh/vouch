@@ -145,14 +145,20 @@ fn format_duration(secs: u64) -> String {
     tr_args!("credential-ssh-duration", hours = hours, minutes = minutes)
 }
 
-/// Check if an existing certificate on disk is still valid with
-/// enough time remaining.
+/// Check if an existing certificate on disk was issued to `email` by
+/// `server` and is still valid with enough time remaining.
 ///
-/// Returns `Some(SshProvisionResult)` if the certificate exists, is
-/// not expired, and has more than `SSH_CERT_REFRESH_THRESHOLD_SECS`
-/// remaining. Returns `None` otherwise so the caller falls through
-/// to server issuance.
-fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
+/// Returns `Some(SshProvisionResult)` if the certificate exists, its key ID
+/// names `email` and `server`'s relying party, it is not expired, and it has
+/// more than `SSH_CERT_REFRESH_THRESHOLD_SECS` remaining. Returns `None`
+/// otherwise so the caller falls through to server issuance. The on-disk
+/// certificate outlives `vouch logout`, so without the key-ID check the next
+/// user to log in on this account would be handed the previous user's.
+fn check_existing_certificate(
+    key_path: &Path,
+    email: &str,
+    server: &str,
+) -> Option<SshProvisionResult> {
     // Verify the private key still exists — a cert without its key
     // is useless
     if !key_path.exists() {
@@ -163,6 +169,14 @@ fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
     let cert_path_str = format!("{}-cert.pub", key_path.display());
     let cert_data = std::fs::read_to_string(&cert_path_str).ok()?;
     let cert = Certificate::from_openssh(cert_data.trim()).ok()?;
+
+    if !vouch_common::ssh_cert_issued_to(cert.key_id(), email, Some(server)) {
+        tracing::debug!(
+            key_id = cert.key_id(),
+            "Cached SSH certificate was not issued to the current session"
+        );
+        return None;
+    }
 
     let valid_before = cert.valid_before();
     let valid_before_i64 = i64::try_from(valid_before).unwrap_or(i64::MAX);
@@ -208,11 +222,16 @@ fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
 /// Core provisioning: ensure keypair, request cert from server, write
 /// cert to disk. No stdout output — callers decide what to print.
 ///
+/// An existing on-disk certificate is reused only when `session_email` is
+/// known and the certificate was issued to it by `server`; with no known
+/// identity a certificate is always issued.
+///
 /// When `fapi_key` is provided, the client uses it directly for DPoP
 /// proof generation instead of reloading from the keychain. This avoids
 /// a storage round-trip that can fail on some platforms.
 pub(crate) async fn provision_ssh_certificate(
     server: &str,
+    session_email: Option<&str>,
     key_path: Option<&str>,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
     force: bool,
@@ -224,7 +243,10 @@ pub(crate) async fn provision_ssh_certificate(
     };
 
     // Check if existing certificate is still valid (skip server call)
-    if !force && let Some(cached) = check_existing_certificate(&key_path) {
+    if !force
+        && let Some(email) = session_email
+        && let Some(cached) = check_existing_certificate(&key_path, email, server)
+    {
         return Ok(cached);
     }
 
@@ -278,6 +300,7 @@ pub(crate) async fn provision_ssh_certificate(
 /// Returns `true` if provisioning succeeded.
 pub(crate) async fn auto_provision(
     server: &str,
+    email: &str,
     #[cfg_attr(
         not(unix),
         expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
@@ -285,7 +308,7 @@ pub(crate) async fn auto_provision(
     expires_at: &str,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
 ) -> bool {
-    match provision_ssh_certificate(server, None, fapi_key, false).await {
+    match provision_ssh_certificate(server, Some(email), None, fapi_key, false).await {
         Ok(result) => {
             // Store in agent with session linkage (Unix only)
             #[cfg(unix)]
@@ -342,6 +365,28 @@ pub(crate) async fn auto_provision(
     }
 }
 
+/// The email of the agent's live session, when that session is for
+/// `server`. `None` when the agent is not running, has no session, or holds
+/// one for another server, in which case no on-disk certificate is reused.
+async fn agent_session_email(
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
+    )]
+    server: &str,
+) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
+        let info = agent.get_session().await.ok()?;
+        (info.server_url.as_deref() == Some(server)).then_some(info.user_email)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// Run the SSH credential command.
 ///
 /// This command:
@@ -349,7 +394,9 @@ pub(crate) async fn auto_provision(
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
 pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Result<()> {
-    let result = provision_ssh_certificate(server, key_path, None, force).await?;
+    let session_email = agent_session_email(server).await;
+    let result =
+        provision_ssh_certificate(server, session_email.as_deref(), key_path, None, force).await?;
 
     if matches!(result.outcome, ProvisionOutcome::Cached) {
         // Ensure agent has credentials loaded even for a cached cert.
@@ -453,10 +500,26 @@ mod tests {
     use ssh_key::certificate::Builder;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Create a test certificate with the given validity window and
-    /// write it to `cert_path`. Also writes the private key to
-    /// `key_path`.
+    /// The session the tests reuse certificates for.
+    const EMAIL: &str = "alice@example.com";
+    const SERVER: &str = "https://vouch.example.com";
+
+    /// Create a test certificate issued to [`EMAIL`] by [`SERVER`] with the
+    /// given validity window and write it to `cert_path`. Also writes the
+    /// private key to `key_path`.
     fn write_test_cert(key_path: &Path, cert_path: &Path, valid_after: u64, valid_before: u64) {
+        let key_id = vouch_common::ssh_cert_key_id(EMAIL, "vouch.example.com");
+        write_test_cert_with_key_id(key_path, cert_path, valid_after, valid_before, &key_id);
+    }
+
+    /// As [`write_test_cert`], with the certificate key ID `key_id`.
+    fn write_test_cert_with_key_id(
+        key_path: &Path,
+        cert_path: &Path,
+        valid_after: u64,
+        valid_before: u64,
+        key_id: &str,
+    ) {
         let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
 
@@ -473,7 +536,7 @@ mod tests {
         )
         .unwrap();
         builder.serial(42).unwrap();
-        builder.key_id("test@example.com").unwrap();
+        builder.key_id(key_id).unwrap();
         builder.valid_principal("testuser").unwrap();
 
         let cert = builder.sign(&ca_key).unwrap();
@@ -500,7 +563,7 @@ mod tests {
         // threshold
         write_test_cert(&key_path, cert_path, now - 60, now + 8 * 3600);
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(result.is_some(), "expected cache hit for valid cert");
 
         let result = result.unwrap();
@@ -508,6 +571,35 @@ mod tests {
         assert_eq!(result.response.serial, 42);
         assert_eq!(result.response.principals, vec!["testuser"]);
         assert!(result.response.valid_for_seconds > 7 * 3600);
+    }
+
+    /// A certificate left on disk by another user's session, or minted by
+    /// another server, is never reused: `vouch logout` leaves it in place,
+    /// and the next login would otherwise push it into the agent.
+    #[test]
+    fn test_check_existing_certificate_other_session_not_reused() {
+        let now = now_unix();
+        for (case, key_id) in [
+            ("other user", "bob@example.com@vouch.example.com"),
+            ("other server", "alice@example.com@vouch.other.example"),
+            ("not a Vouch key ID", "test@example.com"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let key_path = dir.path().join("id_ed25519_vouch");
+            let cert_path_str = format!("{}-cert.pub", key_path.display());
+            write_test_cert_with_key_id(
+                &key_path,
+                Path::new(&cert_path_str),
+                now - 60,
+                now + 8 * 3600,
+                key_id,
+            );
+
+            assert!(
+                check_existing_certificate(&key_path, EMAIL, SERVER).is_none(),
+                "{case}: a certificate with key ID {key_id:?} must be re-issued"
+            );
+        }
     }
 
     #[test]
@@ -521,7 +613,7 @@ mod tests {
         // Certificate expired 10 minutes ago
         write_test_cert(&key_path, cert_path, now - 3600, now - 600);
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(result.is_none(), "expected None for expired cert");
     }
 
@@ -537,7 +629,7 @@ mod tests {
         // threshold
         write_test_cert(&key_path, cert_path, now - 3600, now + 30 * 60);
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(result.is_none(), "expected None when below threshold");
     }
 
@@ -553,7 +645,7 @@ mod tests {
         // (uses <=, so exactly-at-threshold should return None)
         write_test_cert(&key_path, cert_path, now - 3600, now + 3600);
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(
             result.is_none(),
             "expected None at exact threshold boundary"
@@ -584,7 +676,7 @@ mod tests {
         let cert = builder.sign(&ca_key).unwrap();
         std::fs::write(cert_path, cert.to_openssh().unwrap()).unwrap();
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(
             result.is_none(),
             "expected None when private key is missing"
@@ -601,7 +693,7 @@ mod tests {
         let key_str = user_key.to_openssh(LineEnding::LF).unwrap();
         std::fs::write(&key_path, key_str.as_bytes()).unwrap();
 
-        let result = check_existing_certificate(&key_path);
+        let result = check_existing_certificate(&key_path, EMAIL, SERVER);
         assert!(result.is_none(), "expected None when cert file is missing");
     }
 
