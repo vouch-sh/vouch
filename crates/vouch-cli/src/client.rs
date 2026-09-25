@@ -41,7 +41,7 @@ struct SignRequestParams<'a> {
 /// `Authorization: Bearer <token>` transparently.
 pub(crate) struct VouchClient<H: HttpClient = ReqwestClient> {
     http: H,
-    base_url: String,
+    base_url: ServerUrl,
     /// Authentication token. Set at construction for authenticated clients,
     /// `None` for unauthenticated clients (login/enroll flows).
     token: Option<SecretString>,
@@ -82,7 +82,7 @@ impl VouchClient<ReqwestClient> {
         let http = ReqwestClient::new()?;
         let mut client = Self {
             http,
-            base_url: base_url.as_str().to_string(),
+            base_url: base_url.clone(),
             token: Some(token),
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
@@ -105,7 +105,7 @@ impl VouchClient<ReqwestClient> {
         let http = ReqwestClient::new()?;
         Ok(Self {
             http,
-            base_url: base_url.as_str().to_string(),
+            base_url: base_url.clone(),
             token: None,
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
@@ -152,6 +152,11 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// Get the base URL.
     pub(crate) fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+
+    /// The validated server URL this client sends requests to.
+    pub(crate) fn server_url(&self) -> &ServerUrl {
         &self.base_url
     }
 
@@ -218,7 +223,7 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// Build the full URL for a path.
     fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+        format!("{}{}", self.base_url.as_str(), path)
     }
 
     /// Build RFC 9421 HTTP signature headers for a request.
@@ -742,45 +747,45 @@ mod tests {
 
     #[test]
     fn test_unauthenticated_trims_trailing_slash() {
-        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com/",
-        ))
+        let client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com/", false).unwrap(),
+        )
         .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_unauthenticated_trims_multiple_trailing_slashes() {
-        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com///",
-        ))
+        let client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com///", false).unwrap(),
+        )
         .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_unauthenticated_no_trailing_slash() {
-        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_token_returns_error_when_not_set() {
-        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         assert!(client.token().is_err());
     }
 
     #[test]
     fn test_set_token_makes_token_available() {
-        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let mut client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         client.token = Some(SecretString::from("test-token".to_string()));
         assert!(client.token().is_ok());
@@ -788,9 +793,9 @@ mod tests {
 
     #[test]
     fn test_base_url_returns_stored_url() {
-        let client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
@@ -977,9 +982,9 @@ mod tests {
 
     #[test]
     fn test_build_auth_without_fapi_key_returns_bearer() {
-        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let mut client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         client.token = Some(SecretString::from("my-token".to_string()));
         // No fapi_key set → always Bearer
@@ -994,9 +999,9 @@ mod tests {
     fn test_build_auth_with_fapi_key_returns_dpop() {
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let mut client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         client.token = Some(SecretString::from("my-dpop-token".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
@@ -1023,9 +1028,9 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated(&crate::server_url::ServerUrl::for_test(
-            "https://example.com",
-        ))
+        let mut client = VouchClient::unauthenticated(
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+        )
         .unwrap();
         client.token = Some(SecretString::from("access-token-abc".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());

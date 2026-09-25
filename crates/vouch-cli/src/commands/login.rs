@@ -478,7 +478,8 @@ async fn run_fapi_login_with_nonce(
 ///
 /// Returns the `client_id` on success.
 async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) -> Result<String> {
-    let base_url = client.base_url().to_string();
+    let server = client.server_url().clone();
+    let base_url = server.as_str().to_string();
 
     if let Ok(mut config) = Config::load() {
         config.set_server_url(&base_url);
@@ -522,6 +523,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                     // Check 3: is the registration still active?
                     match vouch_cli::fapi::registration::is_client_registered(
                         client.raw_client(),
+                        &server,
                         uri,
                         token.expose_secret(),
                     )
@@ -565,7 +567,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 
     let result = vouch_cli::fapi::registration::register_fapi_client(
         client.raw_client(),
-        &base_url,
+        &server,
         None,
         fapi_key,
     )

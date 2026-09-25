@@ -1782,7 +1782,7 @@ mod tests {
             std::env::set_var("CLAUDECODE", "1");
         }
         let result = get_idc_credentials(
-            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
             "111111111111",
             "Admin",
             None,
@@ -1823,7 +1823,7 @@ mod tests {
         };
         let result = obtain_identity_center_token(
             &http_client,
-            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
             MGMT1,
             &idc,
         )

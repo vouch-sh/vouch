@@ -22,6 +22,9 @@ use tracing_subscriber::EnvFilter;
 // and the bin) can reference them as `crate::tr!` regardless of compilation
 // context.
 pub(crate) use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
+// Validated server URLs live in the library so its FAPI helpers can require
+// them too; re-exported so `crate::server_url` paths resolve unchanged.
+pub(crate) use vouch_cli::server_url;
 
 mod client;
 mod commands;
@@ -36,7 +39,6 @@ mod fido2;
 mod git_config;
 mod install_path;
 mod integrations;
-mod server_url;
 mod session;
 mod style;
 mod utils;
