@@ -31,6 +31,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-19 | 3 | 3 | 0 | 3 | 3 | 1 of 3 | all 3 merged: #1476 (body note), #1477 as-is, #1475 amended with the sibling fix | 0 | `rule_879e9e96…` generated but **not pulled** (stale correct-pattern); replacement `rcr_2d2214db…` requested |
 | 2026-09-22 | 0 | 0 | 3 | 0 | 0 | 1 of 3 dead-code | #1482, #1483 merge as-is; #1481 rebuilt with signed commits (unsigned rustfmt follow-up) | 0 | `github-identity-credential-pair-consistency` (rcr from 09-19) verified against tree and pulled |
 | 2026-09-24 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1504 amended: comments trimmed, CLI-grant lookup refusals audited, five latent email siblings fixed | 0 (#1500 had no record) | 0 (instance) |
+| 2026-09-25 | 17 | 20 | 0 | 4 | 7 | 15 of 17 | proposed: #1549, #1532 as-is; 8 amend; #1541 and #1553 blocked; 7 superseded by class fixes (7592 token revocation, audit context, login-failure principal, helper URL); #1550 closed | not checkable (no records in container) | 0 (7 descriptions ready; `detail` CLI unavailable) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -648,3 +649,45 @@ it was fixed in #1504, per the fix-in-the-same-PR preference.
 When a fix changes which reason an audit row records, check the other
 columns of the same row too: email, authenticator, and client. #1500
 corrected the reason and left the attribution as it was.
+
+## 2026-09-25
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 138 | 16 | 194 | 70 | 47 |
+
+17 issues, 17 fix PRs (plus 3 Detail docs PRs). Two waves. The 05:05 wave
+(10) is backlog, introduced February–September. The 10:03 wave (7) blames only
+PRs merged on 09-24 (#1504, #1509, #1511, #1514), and each finding is in logic
+that PR added — the 09-12 → 09-19 self-caused pattern, back after two quiet
+passes.
+
+Classes confirmed by the sibling hunt: RFC 7592 registration token outlives
+the owner's authority (#1544, #1547, plus an unreported transfer-on-deactivation
+path); audit rows missing request context (#1526, #1528, plus 10 unreported
+sites); unverified or faulted input feeding `failed_login_burst` (#1543,
+#1548); empty secret treated as configured (#1529, plus an unreported empty
+`github_webhook_secret` accepting forged webhooks); whole-second ordering
+(#1531); cached credentials not bound to identity (#1527); raw server URL
+reaching a token-sending client (#1525).
+
+Review stopped two fixes. #1541 judged freshness by the session row's creation
+time, and the authorization_code grant mints rows carrying old ceremonies, so a
+one-hour-old `auth_time` passed `max_age=0` (reproduced; main refuses). #1553's
+compensating restore could reinstate a token that owner deletion had revoked.
+Only 2 of 17 PRs stand as written.
+
+### Process
+
+A fix that substitutes one instant for another — row creation for ceremony
+time — has to be checked against every writer of the substitute, not only the
+reader it fixes.
+
+A compensating write (restore after a failed multi-step delete) must be
+conditional on the state it compensates for being unchanged; `is_none()` cannot
+tell "I consumed it" from "someone revoked it".
+
+`detail-stats.py` runs in a cloud session only through a REST shim: GraphQL is
+refused there, and REST pagination links use `repositories/{id}` paths the
+proxy also refuses.
+
