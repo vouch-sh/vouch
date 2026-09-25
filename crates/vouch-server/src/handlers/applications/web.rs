@@ -505,6 +505,7 @@ pub(crate) async fn update_application_form(
 /// POST /applications/:id/delete
 pub(crate) async fn delete_application_form(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     session: SignedInSession,
     Path(app_id): Path<String>,
 ) -> Response {
@@ -582,8 +583,7 @@ pub(crate) async fn delete_application_form(
             oauth_client_id: &app_id,
             event_type: db::OAuthEventType::ClientDeleted,
             user_id: Some(user_id),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Application deleted via web UI"),
             org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
@@ -599,6 +599,7 @@ pub(crate) async fn delete_application_form(
 /// POST /applications/:id/secrets
 pub(crate) async fn add_secret_form(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     session: SignedInSession,
     Path(app_id): Path<String>,
 ) -> Response {
@@ -676,8 +677,7 @@ pub(crate) async fn add_secret_form(
             oauth_client_id: &app_id,
             event_type: db::OAuthEventType::SecretAdded,
             user_id: auth.user_id.as_deref(),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret added"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },
@@ -702,6 +702,7 @@ pub(crate) async fn add_secret_form(
 pub(crate) async fn delete_secret_form(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     session: SignedInSession,
     Path((app_id, secret_id)): Path<(String, String)>,
 ) -> Response {
@@ -792,8 +793,7 @@ pub(crate) async fn delete_secret_form(
             oauth_client_id: &app_id,
             event_type: db::OAuthEventType::SecretRevoked,
             user_id: Some(user_id),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret revoked"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },
@@ -2532,5 +2532,78 @@ mod tests {
             revoked.first().expect("one secret").revoked_at.is_some(),
             "the stranded secret must be revoked after the POST"
         );
+    }
+
+    // ========================================================================
+    // Transport metadata on the web-form audit rows
+    // ========================================================================
+
+    /// Adding a secret, revoking a secret, and deleting the application
+    /// through the web forms each record the requester's IP and User-Agent on
+    /// their audit row. Before the fix all three wrote `ip_address: None,
+    /// user_agent: None` although the handler had the request in hand.
+    #[tokio::test]
+    async fn test_web_forms_audit_rows_record_transport() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-audit-transport@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let ua = "vouch-web-audit/1.0";
+        let headers = [
+            ("Origin", "https://test.example.com"),
+            ("Cookie", cookie.as_str()),
+            ("User-Agent", ua),
+        ];
+        let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &headers,
+        )
+        .await;
+        assert!(status.is_success(), "add secret: {status} {body}");
+
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(secrets.len(), 2, "the form added a second secret");
+        let first_id = secrets.first().expect("one secret").id.clone();
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets/{first_id}/delete", client.app_id),
+            "",
+            &headers,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "revoke secret: {body}");
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/delete", client.app_id),
+            "",
+            &headers,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "delete application: {body}");
+
+        for event_type in [
+            "oauth_secret_added",
+            "oauth_secret_revoked",
+            "oauth_client_deleted",
+        ] {
+            assert_audit_rows_record_transport(&state, event_type, ua).await;
+        }
     }
 }

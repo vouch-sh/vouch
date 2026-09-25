@@ -107,7 +107,9 @@ pub(crate) async fn rename_key_form(
                 authenticator_id: Some(key_id.clone()),
                 success: true,
                 client: client_info,
-                ..Default::default()
+                failure_reason: None,
+                client_id: None,
+                idp_issuer: None,
             };
             db::record_auth_event(&state.audit, event, Some(user.email)).await;
             Redirect::to("/enroll/keys").into_response()
@@ -162,7 +164,9 @@ pub(crate) async fn delete_key(
         authenticator_id: Some(key_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, event, Some(user.email)).await;
 

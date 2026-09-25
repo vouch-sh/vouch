@@ -937,10 +937,10 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 
     let (stored, claim) = seed_and_consume_oidc_state(&state, "direct-web-state", None).await;
 
-    let client_info = ClientInfo {
-        client_ip: Some("203.0.113.7".parse().expect("valid IP")),
-        ..Default::default()
-    };
+    let client_info = ClientInfo::for_test(
+        Some("203.0.113.7".parse().expect("valid IP")),
+        &axum::http::HeaderMap::new(),
+    );
     let identity = IdentityResult {
         email: "returning@example.com".to_string(),
         domain: Some(test_domain("example.com")),

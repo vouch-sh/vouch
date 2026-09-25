@@ -408,7 +408,10 @@ pub async fn revoke_token(
             event_type: db::AuthEventType::Logout,
             success: true,
             client: client_info,
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
         db::record_auth_event(&state.audit, params, email.clone()).await;
 

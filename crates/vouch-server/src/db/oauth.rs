@@ -1594,8 +1594,10 @@ pub struct RecordOAuthEventParams<'a> {
     pub oauth_client_id: &'a str,
     pub event_type: OAuthEventType,
     pub user_id: Option<&'a str>,
-    pub ip_address: Option<std::net::IpAddr>,
-    pub user_agent: Option<&'a str>,
+    /// Transport metadata of the request that caused the event. Only the
+    /// `ClientInfo` extractor builds one, so every writer records the
+    /// resolved peer IP and `User-Agent` of the request in hand.
+    pub client: &'a super::ClientInfo,
     pub details: Option<&'a str>,
     pub org_domain: RecordedOrgDomain<'a>,
 }
@@ -1665,9 +1667,9 @@ pub async fn record_oauth_event(
     let data = OAuthUsageData {
         oauth_client_id: params.oauth_client_id.to_string(),
         details: params.details.map(String::from),
-        client_ip: params.ip_address.map(|ip| ip.to_string()),
-        user_agent: params.user_agent.map(String::from),
-        geo: crate::db::documents::audit::GeoFields::from_ip(params.ip_address),
+        client_ip: params.client.client_ip().map(|ip| ip.to_string()),
+        user_agent: params.client.user_agent().map(String::from),
+        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip()),
     };
     let org_domain = match params.org_domain {
         RecordedOrgDomain::Known(domain) => domain.map(String::from),
@@ -2996,8 +2998,7 @@ mod tests {
                     oauth_client_id: "oauth-client-1",
                     event_type,
                     user_id: Some("user-1"),
-                    ip_address: None,
-                    user_agent: None,
+                    client: &crate::db::ClientInfo::default(),
                     details: Some("coverage test"),
                     org_domain: RecordedOrgDomain::Unresolved,
                 },
@@ -3064,8 +3065,7 @@ mod tests {
                 oauth_client_id,
                 event_type: OAuthEventType::TokenIssued,
                 user_id: Some(user_id),
-                ip_address: None,
-                user_agent: None,
+                client: &crate::db::ClientInfo::default(),
                 details: None,
                 org_domain,
             },

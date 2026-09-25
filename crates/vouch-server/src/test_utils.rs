@@ -1754,6 +1754,43 @@ pub async fn create_test_expired_session_row(
     (token, token_hash)
 }
 
+/// Assert that every audit row of `event_type` records the test harness's
+/// peer IP and the given `User-Agent`, and that at least one such row exists.
+///
+/// The `http_*` helpers inject `ConnectInfo(127.0.0.1)` and `test_config()`
+/// sets no `trusted_proxies`, so the `ClientInfo` extractor resolves
+/// `127.0.0.1`. A row with a null `client_ip` or `user_agent` means the writer
+/// dropped the request's transport metadata.
+pub async fn assert_audit_rows_record_transport(
+    state: &AppState,
+    event_type: &str,
+    user_agent: &str,
+) {
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec![event_type.to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(!events.is_empty(), "expected at least one {event_type} row");
+    for event in &events {
+        let data: serde_json::Value =
+            serde_json::from_str(&event.data).expect("audit row data is valid JSON");
+        assert_eq!(
+            data.get("client_ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1"),
+            "{event_type} row must record the requester's IP: {data}"
+        );
+        assert_eq!(
+            data.get("user_agent").and_then(|v| v.as_str()),
+            Some(user_agent),
+            "{event_type} row must record the requester's User-Agent: {data}"
+        );
+    }
+}
+
 /// Create an org with an admin user, a FIDO2-verified session, and return
 /// the admin plus the session's raw access token.
 pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {

@@ -13,10 +13,8 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
-use crate::db::ClientInfo;
 use crate::error::ServiceError;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
-use crate::infra::rate_limit::resolve_client_ip;
 use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
@@ -263,74 +261,6 @@ where
     }
 }
 
-/// Maximum length for hostname values (RFC 1035: 253 chars).
-const MAX_HOSTNAME_LEN: usize = 253;
-/// Maximum length for other client metadata header values.
-const MAX_CLIENT_HEADER_LEN: usize = 256;
-
-impl FromRequestParts<Arc<AppState>> for ClientInfo {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let peer_ip = parts
-            .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_canonical());
-
-        let config = state.config.load();
-        let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);
-
-        let mut info = Self::from(&parts.headers);
-        info.client_ip = client_ip;
-        Ok(info)
-    }
-}
-
-impl From<&HeaderMap> for ClientInfo {
-    fn from(headers: &HeaderMap) -> Self {
-        let user_agent = headers
-            .get("user-agent")
-            .and_then(|h| h.to_str().ok())
-            .map(String::from);
-
-        let client_hostname =
-            extract_validated_header(headers, "vouch-client-hostname", MAX_HOSTNAME_LEN);
-        let client_os = extract_validated_header(headers, "vouch-client-os", MAX_CLIENT_HEADER_LEN);
-        let client_arch =
-            extract_validated_header(headers, "vouch-client-arch", MAX_CLIENT_HEADER_LEN);
-        let client_version =
-            extract_validated_header(headers, "vouch-client-version", MAX_CLIENT_HEADER_LEN);
-
-        Self {
-            client_ip: None,
-            user_agent,
-            client_hostname,
-            client_os,
-            client_arch,
-            client_version,
-        }
-    }
-}
-
-/// Extract and validate a client metadata header value.
-///
-/// Returns `None` if the header is missing, empty, exceeds `max_len`,
-/// or contains non-printable ASCII characters (control chars, null bytes).
-fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> Option<String> {
-    let value = headers.get(name).and_then(|h| h.to_str().ok())?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > max_len {
-        return None;
-    }
-    if !trimmed.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
 /// Optional client certificate extracted from mTLS connection.
 ///
 /// Reads the certificate from [`PeerClientCert`] injected via
@@ -534,139 +464,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
 )]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
-
-    // ========================================================================
-    // ClientInfo Header Extraction Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_user_agent() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "user-agent",
-            HeaderValue::from_static("vouch-cli/0.1.0 (macos; aarch64)"),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(
-            info.user_agent,
-            Some("vouch-cli/0.1.0 (macos; aarch64)".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_no_headers() {
-        let headers = HeaderMap::new();
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_ip, None);
-        assert_eq!(info.user_agent, None);
-        assert_eq!(info.client_hostname, None);
-        assert_eq!(info.client_os, None);
-        assert_eq!(info.client_arch, None);
-        assert_eq!(info.client_version, None);
-    }
-
-    // ========================================================================
-    // Vouch-Client-* Header Extraction Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_vouch_client_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_static("dev.local"),
-        );
-        headers.insert("vouch-client-os", HeaderValue::from_static("macos"));
-        headers.insert("vouch-client-arch", HeaderValue::from_static("aarch64"));
-        headers.insert("vouch-client-version", HeaderValue::from_static("1.2.3"));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_hostname.as_deref(), Some("dev.local"));
-        assert_eq!(info.client_os.as_deref(), Some("macos"));
-        assert_eq!(info.client_arch.as_deref(), Some("aarch64"));
-        assert_eq!(info.client_version.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_rejects_too_long() {
-        let mut headers = HeaderMap::new();
-        let long_value = "a".repeat(MAX_CLIENT_HEADER_LEN + 1);
-        headers.insert(
-            "vouch-client-os",
-            HeaderValue::from_str(&long_value).unwrap(),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_rejects_empty() {
-        let mut headers = HeaderMap::new();
-        headers.insert("vouch-client-os", HeaderValue::from_static(""));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_trims_whitespace() {
-        let mut headers = HeaderMap::new();
-        headers.insert("vouch-client-os", HeaderValue::from_static("  macos  "));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os.as_deref(), Some("macos"));
-    }
-
-    #[test]
-    fn test_extract_vouch_client_hostname_max_length() {
-        let mut headers = HeaderMap::new();
-        // Exactly at the 253-char limit should be accepted
-        let hostname = "a".repeat(MAX_HOSTNAME_LEN);
-        headers.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_str(&hostname).unwrap(),
-        );
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_hostname.as_deref(), Some(hostname.as_str()));
-
-        // One over should be rejected
-        let too_long = "a".repeat(MAX_HOSTNAME_LEN + 1);
-        let mut headers2 = HeaderMap::new();
-        headers2.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_str(&too_long).unwrap(),
-        );
-        let info2 = ClientInfo::from(&headers2);
-        assert_eq!(info2.client_hostname, None);
-    }
-
-    #[test]
-    fn test_extract_validated_header_rejects_control_chars() {
-        let mut headers = HeaderMap::new();
-        // Tab character (0x09) is a control character
-        headers.insert(
-            "vouch-client-os",
-            HeaderValue::from_bytes(b"mac\tos").unwrap(),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_validated_header_accepts_printable_ascii() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "vouch-client-version",
-            HeaderValue::from_static("1.2.3-beta+build.456"),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
-    }
 
     #[test]
     fn test_valid_uuid_accepts_valid() {

@@ -4302,3 +4302,62 @@ async fn delete_application_api_failed_delete_writes_no_audit_event() {
         "the application must still exist after a failed delete cascade"
     );
 }
+
+// ========================================================================
+// Transport metadata on the application API audit rows
+// ========================================================================
+
+/// Adding and revoking a secret, revoking all tokens, and deleting the
+/// application through the API each record the requester's IP and
+/// User-Agent on their audit row. Before the fix all four wrote
+/// `ip_address: None, user_agent: None` although the handler had the request
+/// in hand.
+#[tokio::test]
+async fn application_api_audit_rows_record_transport() {
+    let (app, state) = test_app().await;
+    let (app_id, token) = setup_user_with_app(&state, "api-audit-transport@example.com").await;
+    let auth = bearer(&token);
+    let ua = "vouch-applications-audit/1.0";
+    let headers = [("Authorization", auth.as_str()), ("User-Agent", ua)];
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        "{}",
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "add secret: {body}");
+    let added: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let secret_id = added["secret_id"].as_str().unwrap();
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "delete secret: {body}");
+
+    let (status, body) = http_post_json(
+        &app,
+        &format!("/api/v1/applications/{app_id}/revoke"),
+        "{}",
+        &headers,
+    )
+    .await;
+    assert!(status.is_success(), "revoke tokens: {status} {body}");
+
+    let (status, body) =
+        http_delete(&app, &format!("/api/v1/applications/{app_id}"), &headers).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "delete application: {body}");
+
+    for event_type in [
+        "oauth_secret_added",
+        "oauth_secret_revoked",
+        "oauth_token_revoked",
+        "oauth_client_deleted",
+    ] {
+        assert_audit_rows_record_transport(&state, event_type, ua).await;
+    }
+}

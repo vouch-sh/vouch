@@ -809,8 +809,7 @@ async fn handle_authorization_code_grant(
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         resource: params.resource.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
-        client_ip: client_info.client_ip,
-        user_agent: client_info.user_agent.as_deref(),
+        client_info: &client_info,
     };
 
     match exchange_authorization_code(
@@ -988,8 +987,7 @@ async fn handle_client_credentials_grant(
                     oauth_client_id: &authenticated_client.id,
                     event_type: crate::db::OAuthEventType::TokenIssued,
                     user_id: None,
-                    ip_address: client_info.client_ip,
-                    user_agent: client_info.user_agent.as_deref(),
+                    client: &client_info,
                     details: Some("grant_type=client_credentials"),
                     org_domain: crate::db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
                 },
@@ -1314,7 +1312,7 @@ async fn handle_token_exchange_grant(
         client: &authenticated_client,
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         authorization_details: params.authorization_details.as_deref(),
-        client_ip: client_info.client_ip,
+        client_ip: client_info.client_ip(),
     };
 
     // Token exchange does not mandate confidential clients (RFC 8693), so a

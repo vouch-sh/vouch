@@ -552,7 +552,8 @@ async fn log_login_failure(
         success: false,
         failure_reason: Some(reason.to_string()),
         client,
-        ..AuthEventParams::default()
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(audit, params, email.map(String::from)).await;
 }
@@ -832,7 +833,9 @@ async fn finalize_login_session_inner(
                     authenticator_id: Some(authenticator.id.clone()),
                     success: true,
                     client: client_info.clone(),
-                    ..AuthEventParams::default()
+                    failure_reason: None,
+                    client_id: None,
+                    idp_issuer: None,
                 },
                 Some(user.email.clone()),
             )
@@ -915,7 +918,9 @@ async fn finalize_login_session_inner(
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
         client: client_info,
-        ..AuthEventParams::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 

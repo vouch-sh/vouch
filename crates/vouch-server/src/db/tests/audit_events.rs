@@ -28,11 +28,13 @@ async fn test_auth_event_logging() {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginSuccess,
             authenticator_id: Some("auth-123".to_string()),
-            client: ClientInfo {
-                client_ip: Some("192.168.1.1".parse().unwrap()),
-                user_agent: Some("Mozilla/5.0".to_string()),
-                ..Default::default()
-            },
+            client: ClientInfo::for_test(
+                Some("192.168.1.1".parse().unwrap()),
+                &axum::http::HeaderMap::from_iter([(
+                    axum::http::header::USER_AGENT,
+                    axum::http::HeaderValue::from_static("Mozilla/5.0"),
+                )]),
+            ),
             success: true,
             ..Default::default()
         },
@@ -46,10 +48,10 @@ async fn test_auth_event_logging() {
         AuthEventParams {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginFailed,
-            client: ClientInfo {
-                client_ip: Some("192.168.1.1".parse().unwrap()),
-                ..Default::default()
-            },
+            client: ClientInfo::for_test(
+                Some("192.168.1.1".parse().unwrap()),
+                &axum::http::HeaderMap::new(),
+            ),
             success: false,
             failure_reason: Some("Invalid credential".to_string()),
             ..Default::default()

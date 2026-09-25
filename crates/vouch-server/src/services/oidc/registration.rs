@@ -434,6 +434,7 @@ pub async fn register_client(
     state: &Arc<AppState>,
     mut request: RegistrationRequest,
     authenticated_user_id: Option<&str>,
+    client_info: &db::ClientInfo,
 ) -> Result<RegistrationResponse, ServiceError> {
     // 1. Validate grant/response types, apply defaults, check consistency
     let validated = validate_grant_and_response_types(&mut request)?;
@@ -625,8 +626,7 @@ pub async fn register_client(
             oauth_client_id: &client.id,
             event_type: OAuthEventType::ClientRegistered,
             user_id: authenticated_user_id,
-            ip_address: None,
-            user_agent: None,
+            client: client_info,
             details: Some("RFC 7591 dynamic registration"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },
@@ -1708,6 +1708,7 @@ pub async fn delete_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
     registration_access_token: &str,
+    client_info: &db::ClientInfo,
 ) -> Result<(), ServiceError> {
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
@@ -1784,8 +1785,7 @@ pub async fn delete_client_configuration(
             oauth_client_id: &client.id,
             event_type: OAuthEventType::ClientDeleted,
             user_id: client.user_id.as_deref(),
-            ip_address: None,
-            user_agent: None,
+            client: client_info,
             details: Some("RFC 7592 client configuration DELETE"),
             org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
@@ -1819,6 +1819,7 @@ pub async fn update_client_configuration(
     client_id: &str,
     registration_access_token: &str,
     request: RegistrationRequest,
+    client_info: &db::ClientInfo,
 ) -> Result<RegistrationResponse, ServiceError> {
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
@@ -2053,8 +2054,7 @@ pub async fn update_client_configuration(
             oauth_client_id: &client.id,
             event_type: OAuthEventType::ClientUpdated,
             user_id: client.user_id.as_deref(),
-            ip_address: None,
-            user_agent: None,
+            client: client_info,
             details: Some("RFC 7592 client configuration PUT"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },

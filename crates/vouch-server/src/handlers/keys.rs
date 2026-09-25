@@ -412,7 +412,9 @@ pub(crate) async fn register_complete(
         authenticator_id: Some(device_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, event, Some(reg_state.user_name.clone())).await;
 
@@ -483,7 +485,9 @@ pub(crate) async fn rename_key(
         authenticator_id: Some(key_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
@@ -530,7 +534,9 @@ pub(crate) async fn delete_key(
         authenticator_id: Some(key_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
