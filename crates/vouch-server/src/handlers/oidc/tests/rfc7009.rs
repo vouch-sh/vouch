@@ -336,9 +336,14 @@ async fn test_rfc7009_revoke_expired_row_records_logout() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "revoke-expired@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let (token, token_hash) =
-        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client.client_id))
-            .await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &user.id,
+        &user.email,
+        Some(&client.client_id),
+        db::SessionPurpose::OAuthAccessToken,
+    )
+    .await;
 
     assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
 
@@ -397,9 +402,14 @@ async fn test_rfc7009_revoke_expired_row_of_another_client_is_refused() {
     let user = create_test_user(&state.store, "revoke-expired-cross@example.com").await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let (token, token_hash) =
-        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client_a.client_id))
-            .await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &user.id,
+        &user.email,
+        Some(&client_a.client_id),
+        db::SessionPurpose::OAuthAccessToken,
+    )
+    .await;
 
     assert_eq!(
         revoke(&app, &client_b, &token).await,
@@ -920,5 +930,227 @@ async fn test_rfc7009_revoke_jti_replay_does_not_revoke_sessions_before_reject()
         "replayed JTI must NOT delete the victim's session before the replay \
          is rejected — the second token must still work after the 401 replay \
          (got {status}: {body})"
+    );
+}
+
+// ========================================================================
+// Audit categorization for M2M (`client_credentials`) revocation
+// ========================================================================
+//
+// Bug: revoking an M2M / `client_credentials` access token — live or expired —
+// recorded an auth-family `Logout` audit event whose `user_id` was the OAuth
+// `client_id` (a client, not a user) and whose `email_domain` was NULL, making
+// the row invisible in every org-scoped audit consumer (SIEM API + admin UI,
+// which filter by `email_domains`). The correct event is the OAuth-family
+// `OauthTokenRevoked` with `user_id = None`, mirroring M2M *issuance*
+// (`OauthTokenIssued` with `user_id = None`) and the admin "revoke all tokens"
+// path. The row was also retained 90 days (auth retention) instead of 30
+// (oauth retention) and misclassified to OCSF class Authentication/LOGOFF
+// instead of AuthorizeSession/OAUTH_TOKEN_REVOKED.
+//
+// Introduced by 1eb0b5c4: the rewritten audit block kept `AuthEventType::
+// Logout` as the only event type regardless of token kind, and read `user_id`
+// from `sub` / `deleted_row.user_id` — both of which hold `client_id` for M2M
+// tokens. The `is_m2m` flag computed from the decoded JWT gated only the email
+// lookup, never the event type, and the new `deleted_row` fallback path had
+// no M2M detection at all.
+
+/// Query `OauthTokenRevoked` audit rows matching an optional filter.
+async fn oauth_token_revoked_events(
+    state: &crate::AppState,
+    filter: db::AuditEventFilter,
+) -> Vec<db::AuditEvent> {
+    state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::OauthTokenRevoked.as_str().to_string(),
+            ]),
+            ..filter
+        })
+        .await
+        .expect("query audit events")
+}
+
+/// Build a test client authorized for the `client_credentials` grant.
+async fn create_test_m2m_client(
+    state: &std::sync::Arc<crate::AppState>,
+    owner: &crate::db::User,
+    spec: TestClientSpec,
+) -> TestOAuthClient {
+    create_test_client(&state.store, &owner.id, spec).await
+}
+
+/// A live M2M access token revoked via `/oauth/revoke` records an
+/// OAuth-family `OauthTokenRevoked` audit event with `user_id = None` (the
+/// `client_id` is NOT stored in the `user_id` column), and records NO
+/// auth-family `Logout` event for the `client_id`.
+///
+/// Before the fix this wrote a `Logout` row with `user_id = client_id` and no
+/// `OauthTokenRevoked` row at all.
+#[tokio::test]
+async fn repro_m2m_revoke_records_oauth_token_revoked_not_logout() {
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "m2m-revoke-audit@example.com").await;
+    let client = create_test_m2m_client(
+        &state,
+        &owner,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token = issue_m2m_token(&app, &client).await;
+    assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
+
+    // No auth-family `Logout` event is attributed to the client_id. Before
+    // the fix this was 1 — the row that made M2M revocations appear as human
+    // logoffs attributed to the client.
+    assert_eq!(
+        logout_events(&state, &client.client_id).await,
+        0,
+        "M2M revocation must NOT record a Logout event for the client_id"
+    );
+
+    // The revocation is recorded as an OAuth-family event with `user_id`
+    // absent — the `client_id` is not a user.
+    let events = oauth_token_revoked_events(&state, db::AuditEventFilter::default()).await;
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one OauthTokenRevoked event for a live M2M revocation: {events:?}"
+    );
+    assert!(
+        events[0].user_id.is_none(),
+        "user_id must be None for M2M revocation: {:?}",
+        events[0]
+    );
+
+    // The audit identifier matches the application's document id (the value
+    // issuance and the admin revocation path stamp), so per-application usage
+    // stats — which filter `data.oauth_client_id == app_id` — count
+    // per-token revocations too.
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("valid JSON data");
+    assert_eq!(
+        data["oauth_client_id"], client.app_id,
+        "oauth_client_id must be the app's document id (consistent with issuance \
+         and the admin revoke-all-tokens path): {data}"
+    );
+}
+
+/// A revocation of an expired M2M session row (whose token no longer decodes)
+/// records the same OAuth-family `OauthTokenRevoked` event with `user_id =
+/// None`, not a `Logout` attributed to the client_id.
+///
+/// This is the regression path added by 1eb0b5c4: the expired row's `user_id`
+/// is `client_id`, and the rewritten audit block read it directly into the
+/// `Logout` event. The extended `is_m2m` detection (from the deleted row's
+/// `session_type == M2MAccessToken`) is what routes it to the OAuth event.
+#[tokio::test]
+async fn repro_m2m_revoke_expired_row_records_oauth_token_revoked() {
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "m2m-revoke-expired@example.com").await;
+    let client = create_test_m2m_client(
+        &state,
+        &owner,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Seed an expired (non-decoding) M2M session row keyed by an opaque
+    // cookie, matching the shape a reaper has not yet cleaned up.
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &client.client_id,
+        "",
+        Some(&client.client_id),
+        db::SessionPurpose::M2MAccessToken,
+    )
+    .await;
+
+    assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
+    assert!(
+        db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("find")
+            .is_none(),
+        "the expired M2M row is deleted by revocation"
+    );
+
+    assert_eq!(
+        logout_events(&state, &client.client_id).await,
+        0,
+        "expired M2M revocation must NOT record a Logout event for the client_id"
+    );
+
+    let events = oauth_token_revoked_events(&state, db::AuditEventFilter::default()).await;
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one OauthTokenRevoked event for an expired M2M revocation: {events:?}"
+    );
+    assert!(
+        events[0].user_id.is_none(),
+        "user_id must be None for expired M2M revocation: {:?}",
+        events[0]
+    );
+}
+
+/// An M2M token issued to an org-scoped client records an `OauthTokenRevoked`
+/// event whose `email_domain` is the client's own org domain, so the row
+/// appears in the org-scoped audit feed (SIEM API + admin UI), which filter
+/// by `email_domains`.
+///
+/// Before the fix the `Logout` row had a NULL `email_domain` (no human email
+/// for M2M) and was therefore invisible in every org-scoped consumer.
+#[tokio::test]
+async fn repro_m2m_revoke_org_scoped_event_appears_in_org_feed() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "m2m-revoke-org.example.com").await;
+    let owner = create_test_user(&state.store, "m2m-revoke-org@example.com").await;
+    let client = create_test_m2m_client(
+        &state,
+        &owner,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            org_id: Some(org.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token = issue_m2m_token(&app, &client).await;
+    assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
+
+    // An org-scoped audit query (the SIEM API / admin UI shape) — filtering by
+    // `email_domains = [org_domain]` — must find the `OauthTokenRevoked` row.
+    let events = oauth_token_revoked_events(
+        &state,
+        db::AuditEventFilter {
+            email_domains: Some(vec!["m2m-revoke-org.example.com".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        events.len(),
+        1,
+        "org-scoped audit feed must surface the M2M OauthTokenRevoked event: {events:?}"
+    );
+    assert!(
+        events[0].user_id.is_none(),
+        "user_id must be None for M2M revocation: {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("m2m-revoke-org.example.com"),
+        "email_domain must be the client's own org domain: {:?}",
+        events[0]
     );
 }
