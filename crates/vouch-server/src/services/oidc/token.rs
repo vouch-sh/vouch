@@ -1351,12 +1351,9 @@ pub struct OidcValidatedSession {
     ///
     /// Distinct from [`Self::auth_time`]: `auth_time` is the integer-second
     /// ceremony instant the issued code reports, while this is the row's
-    /// creation instant. The pending-auth resume path uses it to decide
-    /// whether the user freshly re-authenticated *for this request* — a
-    /// session row created after the pending record was stored means a
-    /// ceremony just happened for this authorization — which the floored
-    /// `auth_time` claim cannot answer when two ceremonies land in the same
-    /// Unix second.
+    /// creation instant. A new row does not imply a new ceremony — the
+    /// authorization_code grant mints one carrying an older `auth_time` — so
+    /// callers must never read this as an authentication time on its own.
     pub session_created_at: jiff::Timestamp,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,

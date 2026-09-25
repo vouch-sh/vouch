@@ -531,14 +531,11 @@ pub enum AuthorizationSessionState {
         /// When the server-side session row was created, at full sub-second
         /// precision.
         ///
-        /// The pending-auth resume path uses this — not the integer-second
-        /// `auth_time` — to tell a session freshly minted by re-authenticating
-        /// for this request (row created *after* the pending record) from a
-        /// pre-existing session that a stale-ceremony reuse would carry (row
-        /// created *before* the pending). The floored `auth_time` claim
-        /// cannot make that distinction when two ceremonies floor to the same
-        /// Unix second, which is the `max_age=0` (= `prompt=login`) bypass
-        /// (OIDC Core §3.1.2.1).
+        /// The pending-auth resume path treats a session as fresh for that
+        /// request only when this is after the pending record *and*
+        /// `auth_time` is no earlier than the pending's second. Row creation
+        /// alone is not authentication: the authorization_code grant writes a
+        /// new row carrying an older ceremony's `auth_time`.
         session_created_at: Timestamp,
     },
     /// User needs to authenticate.

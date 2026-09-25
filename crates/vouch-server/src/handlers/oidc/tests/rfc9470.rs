@@ -1519,148 +1519,218 @@ async fn test_rfc9470_max_age_completion_rejects_session_just_over_max_age() {
     );
 }
 
+/// Resume a stored pending authorization with `cookie` and return the
+/// redirect `Location`.
+async fn resume_pending(app: &axum::Router, pending_id: &str, cookie: &str) -> String {
+    let completion = http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(pending_id)
+        ),
+        &[("Cookie", cookie)],
+    )
+    .await;
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "completion must redirect, got {} body: {}",
+        completion.status,
+        completion.body
+    );
+    completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8")
+        .to_string()
+}
+
 #[tokio::test]
 async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_second() {
-    // OIDC Core §3.1.2.1: max_age=0 is equivalent to prompt=login — the OP must
-    // ensure a fresh authenticator interaction for *this* authorization. The
-    // pending-resume `max_age` guard must not let a ceremony performed for a
-    // *different* request satisfy max_age=0 for the current one.
+    // OIDC Core 3.1.2.1: "Note that "max_age=0" is equivalent to
+    // "prompt=login"." A ceremony performed for an earlier request must not
+    // satisfy max_age=0 for this one, even when it lands in the same integer
+    // second as the pending record (so `auth_time` floors equal to it).
     //
-    // `auth_time` (the access token claim) is an integer Unix second (OIDC
-    // Core §2) and the pending record's `created_at` is a full-precision
-    // `Timestamp`. When a prior ceremony and this authorize request both
-    // floor to the same whole second N, `auth_time == pending.created_at
-    // .as_second()`, and a guard keyed on that floored comparison
-    // (`auth_time < pending.created_at.as_second()`) is false — it skips the
-    // max_age block entirely and issues a code backed by the older ceremony.
-    // The guard instead compares the server-side session row's full-precision
-    // `created_at` to the pending's `created_at`: this session row was
-    // created (the ceremony for a prior request) *before* the pending was
-    // stored, so the guard runs and max_age=0 rejects it.
-    //
-    // The session is minted at the start of a fresh second N so its
-    // `auth_time` floors to N and its row's `created_at` (N + ε1) precedes
-    // the pending's `created_at` (N + ε2 > ε1) — the same-second boundary the
-    // floored guard could not disambiguate. Resuming with that same
-    // (pre-pending) session must yield error=login_required, not a code. The
-    // attempt retries on a fresh second when a boundary slip would land the
-    // pending outside second N (where both fixes agree and the bug would not
-    // manifest), so the assertions run only when the resume is provably at the
-    // equality boundary.
+    // The instants are placed, not waited for: ceremony second T, session row
+    // at T + 100ms, pending at T + 200ms. The session row precedes the
+    // pending, so the session is not fresh for this request.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "maxage-same-second@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    let challenge = sha256_base64url(verifier);
-    let state_param = "maxage-same-second";
-
-    const MAX_ATTEMPTS: u32 = 5;
-
-    let mut landed = false;
-    for _ in 0..MAX_ATTEMPTS {
-        // Start of a fresh integer second N. The session is minted now so its
-        // `auth_time` floors to N and its row's `created_at` is N + ε1.
-        let n = wait_for_fresh_second().await;
-        let session = create_test_session_with(
-            &state,
-            TestSessionSpec {
-                user_id: &user.id,
-                email: &user.email,
-                auth_id: Some(&auth_id),
-                ..Default::default()
+    let arrival = test_arrival();
+    let ceremony_second = arrival.as_second() - 10;
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(ceremony_second),
             },
-        )
-        .await;
-        let cookie = format!("__Host-vouch_session={session}");
+            ..Default::default()
+        },
+    )
+    .await;
+    let session_row = crate::db::get_session_by_token_hash(
+        &state.store,
+        &crate::crypto::hash_token(&session),
+        arrival.timestamp(),
+    )
+    .await
+    .expect("session lookup")
+    .expect("session row exists");
 
-        // Fire the max_age=0 authorize request inside second N so the pending
-        // record's `created_at` also floors to N (N + ε2, with ε2 > ε1 since
-        // this request follows session creation). The direct path measures the
-        // session age at full precision (ε2 > 0), re-authenticates, and stores
-        // the pending.
-        let before = jiff::Timestamp::now().as_second();
-        let response = http_get_full(
-            &app,
-            &format!(
-                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
-                 &code_challenge={}&code_challenge_method=S256&max_age=0&state={}",
-                client.client_id,
-                urlencoding::encode("https://example.com/callback"),
-                challenge,
-                state_param,
-            ),
-            &[("Cookie", &cookie)],
-        )
-        .await;
-        let after = jiff::Timestamp::now().as_second();
-        if before != n || after != n {
-            // The authorize request straddled a second boundary, so the
-            // pending's floored second would differ from the session's
-            // `auth_time`, exercising the strictly-less branch both the fix
-            // and the bug agree on. Retry in a fresh second.
-            continue;
-        }
+    let state_param = "maxage-same-second";
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            max_age: Some(0),
+            state: Some(state_param),
+            ..Default::default()
+        },
+    )
+    .await;
 
-        let Some(pending_id) = pending_id_from_login_redirect(&response) else {
-            // The direct path re-auths whenever the true age exceeds max_age;
-            // a boundary slip could mean the pending landed outside second N.
-            // Retry.
-            continue;
-        };
-
-        // Resume with the SAME pre-pending session — the ceremony happened
-        // before this request, in the same integer second. The full-precision
-        // row-vs-pending guard runs the max_age check, and max_age=0 rejects a
-        // session whose ceremony preceded the pending.
-        let completion = http_get_full(
-            &app,
-            &format!(
-                "/oauth/authorize?pending_auth={}",
-                urlencoding::encode(&pending_id)
-            ),
-            &[("Cookie", &cookie)],
-        )
-        .await;
-
-        assert!(
-            completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
-            "completion must redirect, got {} body: {}",
-            completion.status,
-            completion.body
-        );
-
-        let location = completion
-            .headers
-            .get("Location")
-            .expect("completion must have Location header")
-            .to_str()
-            .expect("Valid UTF-8");
-
-        assert!(
-            location.contains("error=login_required"),
-            "a session whose ceremony preceded the max_age=0 request must be rejected on the \
-             pending-resume path even when both floor to the same second: {location}"
-        );
-        assert!(
-            !location.contains("code="),
-            "the pending-resume path must NOT issue a code for a stale session that floors to \
-             the same second as the pending: {location}"
-        );
-        assert!(
-            location.contains(&format!("state={state_param}")),
-            "error redirect must echo state parameter: {location}"
-        );
-        landed = true;
-        break;
+    let second_start = jiff::Timestamp::from_second(ceremony_second).expect("valid second");
+    for (id, offset_ms) in [(&session_row.id, 100), (&pending_id, 200)] {
+        let at = second_start
+            .checked_add(jiff::SignedDuration::from_millis(offset_ms))
+            .expect("in range");
+        state
+            .store
+            .set_created_at_for_test(id, at)
+            .await
+            .expect("place row");
     }
 
+    let location = resume_pending(
+        &app,
+        &pending_id,
+        &format!("__Host-vouch_session={session}"),
+    )
+    .await;
     assert!(
-        landed,
-        "could not land the authorize request inside the session's second after \
-         {MAX_ATTEMPTS} attempts"
+        location.contains("error=login_required"),
+        "a session whose ceremony and row preceded the max_age=0 request must be rejected on \
+         the pending-resume path even when both floor to the same second: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "no code for a stale session: {location}"
+    );
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "error redirect must echo state parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_with_old_auth_time() {
+    // OIDC Core 3.1.2.1: "If the elapsed time is greater than this value, the
+    // OP MUST attempt to actively re-authenticate the End-User." and
+    // "max_age=0" is equivalent to "prompt=login".
+    //
+    // The authorization_code grant mints a new session row that carries the
+    // ceremony's original `auth_time`. A row created after the pending is
+    // therefore not evidence of a fresh ceremony: here an hour-old
+    // authentication obtains a code, exchanges it after the max_age=0 pending
+    // was stored, and resumes the pending with the new token.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "maxage-code-grant@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let old = test_arrival().as_second() - 3600;
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: Some(old),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session}");
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let authorize = |extra: &str| {
+        format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={challenge}&code_challenge_method=S256{extra}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        )
+    };
+
+    // 1. max_age=0 with the hour-old session: pending stored, sent to /login.
+    let first = http_get_full(
+        &app,
+        &authorize("&max_age=0&state=s1"),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    let pending_id =
+        pending_id_from_login_redirect(&first).expect("max_age=0 must redirect to /login");
+
+    // 2. Same session, no max_age: a code is issued.
+    let second = http_get_full(&app, &authorize("&state=s2"), &[("Cookie", &cookie)]).await;
+    let location = second
+        .headers
+        .get("Location")
+        .expect("Location")
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    let code = url::Url::parse(&location)
+        .expect("absolute redirect")
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("a session with no max_age must be issued a code");
+
+    // 3. Exchange it: a new session row, created after the pending, carrying
+    //    the hour-old auth_time.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback&code_verifier={verifier}"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let access_token = json["access_token"].as_str().expect("access_token");
+    assert_eq!(
+        decode_jwt_payload(access_token)["auth_time"].as_i64(),
+        Some(old),
+        "the code grant must carry the original ceremony time"
+    );
+
+    // 4. Resume the max_age=0 pending with the new token.
+    let location = resume_pending(
+        &app,
+        &pending_id,
+        &format!("__Host-vouch_session={access_token}"),
+    )
+    .await;
+    assert!(
+        location.contains("error=login_required"),
+        "an hour-old authentication must not satisfy max_age=0 through a code-grant row: \
+         {location}"
     );
 }
 
