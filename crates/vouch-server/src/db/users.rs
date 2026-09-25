@@ -322,6 +322,16 @@ pub(super) async fn transfer_org_clients(
         }
         let mut data = client.data;
         data.user_id = Some(successor.clone());
+        // Revoke the departing owner's RFC 7592 registration access token on
+        // the same write that reassigns the client. The token is bound to the
+        // client doc, not to its owner, so without this the deleted user's
+        // token would still verify against the untouched hash after the
+        // transfer — the successor never received it — and an attacker who
+        // exfiltrated it would keep managing the client. Clearing the hash
+        // makes `lookup_and_verify_registration_token` reject the prior
+        // token with `invalid_token` until the successor obtains a fresh one
+        // through the normal RFC 7591/7592 flow.
+        data.registration_access_token_hash = None;
         if !tx
             .compare_and_update(&client.id, client.version, &data)
             .await?
@@ -666,9 +676,20 @@ pub async fn delete_user(
         }
         // Whatever the user still owns (personal and public clients, and
         // org-scoped ones when no other admin exists) has no other legitimate
-        // owner and is unlinked.
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| d.user_id = None)
-            .await?;
+        // owner and is unlinked. Clearing `registration_access_token_hash` at
+        // the same time revokes the deleted owner's RFC 7592 registration
+        // access token: management is creator-only, and the unlinked client no
+        // longer has one, so `lookup_and_verify_registration_token` rejects
+        // any presented token with `invalid_token`. Without this the stored
+        // hash survives deletion unchanged and the deleted owner's token
+        // keeps authorizing GET/PUT/DELETE indefinitely (the owner-active guard
+        // is keyed on `client.user_id`, so `None` skips it as if the client
+        // were open-registration).
+        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
+            d.user_id = None;
+            d.registration_access_token_hash = None;
+        })
+        .await?;
 
         // Serialize deletions within an organization on the org row.
         //
