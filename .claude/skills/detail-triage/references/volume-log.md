@@ -690,4 +690,3 @@ tell "I consumed it" from "someone revoked it".
 `detail-stats.py` runs in a cloud session only through a REST shim: GraphQL is
 refused there, and REST pagination links use `repositories/{id}` paths the
 proxy also refuses.
-

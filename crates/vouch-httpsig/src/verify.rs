@@ -3,6 +3,7 @@
 
 use crate::algorithm::VerifyingAlgorithm;
 use crate::component::ComponentIdentifier;
+use crate::digest;
 use crate::error::HttpSigError;
 use crate::sfv::parse::parse_dictionary;
 use crate::sfv::serialize::serialize_inner_list_to_string;
@@ -130,7 +131,7 @@ impl CoverageChecked {
             .to_str()
             .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest: {e}")))?;
 
-        crate::digest::verify_content_digest(header, body)?;
+        digest::verify_content_digest(header, body)?;
 
         Ok(DigestEnforced {
             params: self.params,
@@ -359,6 +360,7 @@ mod tests {
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;
     use crate::algorithm::ed25519::Ed25519Signer;
     use crate::algorithm::hmac_sha256::HmacSha256Key;
+    use crate::digest::DigestAlgorithm;
     use crate::sfv::parse::parse_inner_list;
     use crate::sfv::serialize::{serialize_dictionary, serialize_inner_list_to_string};
     use crate::sfv::types::{SfvDictionary, SfvItem, SfvParams};
@@ -653,11 +655,11 @@ mod tests {
     // RFC 9421 §3.2.1: the verifier enforces its own required-component list.
     #[test]
     fn test_validate_coverage_passes() {
-        let params = crate::SignatureParams {
+        let params = SignatureParams {
             components: vec![
-                crate::ComponentIdentifier::method(),
-                crate::ComponentIdentifier::authority(),
-                crate::ComponentIdentifier::field("content-type"),
+                ComponentIdentifier::method(),
+                ComponentIdentifier::authority(),
+                ComponentIdentifier::field("content-type"),
             ],
             alg: None,
             keyid: None,
@@ -679,8 +681,8 @@ mod tests {
     // RFC 9421 §7.2.1: a signature that omits a required component is insufficient coverage.
     #[test]
     fn test_validate_coverage_rejects_missing() {
-        let params = crate::SignatureParams {
-            components: vec![crate::ComponentIdentifier::method()],
+        let params = SignatureParams {
+            components: vec![ComponentIdentifier::method()],
             alg: None,
             keyid: None,
             created: None,
@@ -701,7 +703,7 @@ mod tests {
     // RFC 9421 §3.2.1: an empty requirement list imposes no coverage constraint.
     #[test]
     fn test_validate_coverage_empty_required() {
-        let params = crate::SignatureParams {
+        let params = SignatureParams {
             components: vec![],
             alg: None,
             keyid: None,
@@ -735,7 +737,7 @@ mod tests {
     }
 
     fn digest_header(body: &[u8]) -> http::HeaderValue {
-        crate::digest::content_digest(body, crate::digest::DigestAlgorithm::Sha256)
+        digest::content_digest(body, DigestAlgorithm::Sha256)
             .parse()
             .unwrap()
     }
@@ -756,8 +758,8 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(body));
         coverage_checked(vec![
-            crate::ComponentIdentifier::method(),
-            crate::ComponentIdentifier::field("content-digest"),
+            ComponentIdentifier::method(),
+            ComponentIdentifier::field("content-digest"),
         ])
         .enforce_body_digest(&headers, body)
         .unwrap();
@@ -769,7 +771,7 @@ mod tests {
         let body = b"body";
         let headers = http::HeaderMap::new();
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+            coverage_checked(vec![ComponentIdentifier::field("content-digest")])
                 .enforce_body_digest(&headers, body),
             Err(HttpSigError::MissingDigest)
         ));
@@ -782,7 +784,7 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(body));
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::method()])
+            coverage_checked(vec![ComponentIdentifier::method()])
                 .enforce_body_digest(&headers, body),
             Err(HttpSigError::MissingDigest)
         ));
@@ -794,7 +796,7 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(b"other body"));
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+            coverage_checked(vec![ComponentIdentifier::field("content-digest")])
                 .enforce_body_digest(&headers, b"body"),
             Err(HttpSigError::DigestMismatch(_))
         ));

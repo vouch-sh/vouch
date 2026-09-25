@@ -640,6 +640,7 @@ pub struct GitHubAccountStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{CLIENT_ASSERTION_TYPE_JWT_BEARER, GRANT_TYPE_DEVICE_CODE};
 
     /// The OIDC ID token is a bearer credential for cloud identity
     /// federation and must never appear in `{:?}` output.
@@ -667,12 +668,10 @@ mod tests {
     )]
     fn test_device_requests_serialize_client_assertion_parameters() {
         let with_assertion = DeviceTokenRequest {
-            grant_type: crate::protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
+            grant_type: GRANT_TYPE_DEVICE_CODE.to_string(),
             device_code: "code".to_string(),
             client_assertion: Some("header.payload.signature".into()),
-            client_assertion_type: Some(
-                crate::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
-            ),
+            client_assertion_type: Some(CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string()),
         };
         let value = serde_json::to_value(&with_assertion).expect("serialize");
         assert_eq!(value["client_assertion"], "header.payload.signature");

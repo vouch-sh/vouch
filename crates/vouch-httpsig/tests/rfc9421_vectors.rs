@@ -4,6 +4,8 @@
 //! These tests verify signature base construction and signature verification
 //! against the exact examples from RFC 9421 Appendix B.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 #![expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,
@@ -13,6 +15,10 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
+use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier;
+use vouch_httpsig::algorithm::ed25519::{Ed25519Signer, Ed25519Verifier};
+use vouch_httpsig::algorithm::hmac_sha256::HmacSha256Key;
+use vouch_httpsig::algorithm::{SigningAlgorithm, VerifyingAlgorithm};
 use vouch_httpsig::component::ComponentIdentifier;
 use vouch_httpsig::signature_base::build_request_base_with_params_str;
 use vouch_httpsig::signature_base::build_response_base_with_params_str;
@@ -262,7 +268,7 @@ fn test_b24_verify_ecdsa_signature() {
     assert_eq!(pub_key_bytes.len(), 65);
     assert_eq!(pub_key_bytes[0], 0x04);
 
-    let verifier = vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier::new(pub_key_bytes);
+    let verifier = EcdsaP256Verifier::new(pub_key_bytes);
 
     // RFC signature: sig-b24
     let sig_b64 =
@@ -285,7 +291,7 @@ fn test_b24_verify_ecdsa_signature() {
         return;
     }
 
-    vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
+    VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -345,11 +351,10 @@ fn test_b25_hmac_verify_signature() {
     let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
 
     let secret = STANDARD.decode(HMAC_SHARED_SECRET_B64).unwrap();
-    let key =
-        vouch_httpsig::algorithm::hmac_sha256::HmacSha256Key::new(&secret, "test-shared-secret");
+    let key = HmacSha256Key::new(&secret, "test-shared-secret");
 
     // Sign and verify the expected signature matches the RFC value
-    let sig = vouch_httpsig::algorithm::SigningAlgorithm::sign(&key, &base).unwrap();
+    let sig = SigningAlgorithm::sign(&key, &base).unwrap();
     let sig_b64 = STANDARD.encode(&sig);
 
     // RFC expected signature for sig-b25
@@ -361,7 +366,7 @@ fn test_b25_hmac_verify_signature() {
 
     // Also verify the verify path works
     let expected_sig_bytes = STANDARD.decode(expected_sig).unwrap();
-    vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&key, &base, &expected_sig_bytes).unwrap();
+    VerifyingAlgorithm::verify(&key, &base, &expected_sig_bytes).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -436,14 +441,10 @@ fn test_b26_ed25519_verify_signature() {
         .collect::<String>();
     let pkcs8_der = STANDARD.decode(&pem_body).unwrap();
 
-    let signer = vouch_httpsig::algorithm::ed25519::Ed25519Signer::from_pkcs8(
-        &pkcs8_der,
-        "test-key-ed25519",
-    )
-    .unwrap();
+    let signer = Ed25519Signer::from_pkcs8(&pkcs8_der, "test-key-ed25519").unwrap();
 
     // Ed25519 is deterministic — our signature should match the RFC
-    let sig = vouch_httpsig::algorithm::SigningAlgorithm::sign(&signer, &base).unwrap();
+    let sig = SigningAlgorithm::sign(&signer, &base).unwrap();
     let sig_b64 = STANDARD.encode(&sig);
 
     let expected_sig =
@@ -463,11 +464,10 @@ fn test_b26_ed25519_verify_signature() {
     let pub_key_bytes = &pub_spki_der[12..];
     assert_eq!(pub_key_bytes.len(), 32);
 
-    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
+    let verifier = Ed25519Verifier::new(pub_key_bytes);
 
     let expected_sig_bytes = STANDARD.decode(expected_sig).unwrap();
-    vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&verifier, &base, &expected_sig_bytes)
-        .unwrap();
+    VerifyingAlgorithm::verify(&verifier, &base, &expected_sig_bytes).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -555,13 +555,13 @@ fn test_b4_transform_verify_ed25519_signature() {
     let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
     let pub_key_bytes = &pub_spki_der[12..];
 
-    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
+    let verifier = Ed25519Verifier::new(pub_key_bytes);
 
     let sig_b64 =
         "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
     let sig_bytes = STANDARD.decode(sig_b64).unwrap();
 
-    vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
+    VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
 }
 
 // Verify that modifying the method/authority invalidates the signature (B.4)
@@ -603,14 +603,14 @@ fn test_b4_transform_modified_method_fails() {
     let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
     let pub_key_bytes = &pub_spki_der[12..];
 
-    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
+    let verifier = Ed25519Verifier::new(pub_key_bytes);
 
     let sig_b64 =
         "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
     let sig_bytes = STANDARD.decode(sig_b64).unwrap();
 
     // This MUST fail since method and authority changed
-    let result = vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes);
+    let result = VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes);
     assert!(
         result.is_err(),
         "modified method/authority must invalidate signature"

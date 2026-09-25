@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::error::HttpSigError;
 use crate::sfv::types::{SfvBareItem, SfvDictMember, SfvItem, SfvParams};
+use crate::sfv::{parse, serialize};
 
 /// Derived components (Section 2.2 of RFC 9421).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,7 +430,7 @@ impl ComponentIdentifier {
     /// the signature base (the left side of the `:` line).
     #[must_use]
     pub fn serialize_id(&self) -> String {
-        crate::sfv::serialize::serialize_item(&self.to_sfv_item())
+        serialize::serialize_item(&self.to_sfv_item())
     }
 
     /// A canonical, order-insensitive key for RFC 9421 §2 component-identifier
@@ -725,7 +726,7 @@ fn resolve_field_sf(
 
     if let Some(key) = params.key() {
         // §2.1.2: Parse as Dictionary, extract member by key
-        let dict = crate::sfv::parse::parse_dictionary(&raw).map_err(|e| {
+        let dict = parse::parse_dictionary(&raw).map_err(|e| {
             HttpSigError::InvalidComponent(format!(
                 "failed to parse '{lower_name}' as SFV Dictionary for ;key=\"{key}\": {e}"
             ))
@@ -741,14 +742,14 @@ fn resolve_field_sf(
     } else {
         // §2.1.1: Parse as SFV and re-serialize for canonicalization.
         // Try Dictionary first, then List, then Item.
-        if let Ok(dict) = crate::sfv::parse::parse_dictionary(&raw) {
-            return Ok(crate::sfv::serialize::serialize_dictionary(&dict));
+        if let Ok(dict) = parse::parse_dictionary(&raw) {
+            return Ok(serialize::serialize_dictionary(&dict));
         }
-        if let Ok(list) = crate::sfv::parse::parse_list(&raw) {
-            return Ok(crate::sfv::serialize::serialize_list(&list));
+        if let Ok(list) = parse::parse_list(&raw) {
+            return Ok(serialize::serialize_list(&list));
         }
-        if let Ok(item) = crate::sfv::parse::parse_item(&raw) {
-            return Ok(crate::sfv::serialize::serialize_item(&item));
+        if let Ok(item) = parse::parse_item(&raw) {
+            return Ok(serialize::serialize_item(&item));
         }
 
         Err(HttpSigError::InvalidComponent(format!(
@@ -760,10 +761,8 @@ fn resolve_field_sf(
 /// Serialize an SFV dictionary member value (Item or Inner List) to a string.
 fn serialize_dict_member_value(member: &SfvDictMember) -> String {
     match member {
-        SfvDictMember::Item(item) => crate::sfv::serialize::serialize_item(item),
-        SfvDictMember::InnerList(list) => {
-            crate::sfv::serialize::serialize_inner_list_to_string(list)
-        }
+        SfvDictMember::Item(item) => serialize::serialize_item(item),
+        SfvDictMember::InnerList(list) => serialize::serialize_inner_list_to_string(list),
     }
 }
 
@@ -1415,7 +1414,7 @@ mod tests {
     // identifier without ;name cannot be parsed.
     #[test]
     fn test_query_param_requires_name_parameter() {
-        let item = crate::sfv::parse::parse_item("\"@query-param\"").unwrap();
+        let item = parse::parse_item("\"@query-param\"").unwrap();
         assert!(ComponentIdentifier::from_sfv_item(&item).is_err());
     }
 
@@ -1736,7 +1735,7 @@ mod tests {
     // component parameter validation
 
     fn parse_identifier(input: &str) -> Result<ComponentIdentifier, HttpSigError> {
-        ComponentIdentifier::from_sfv_item(&crate::sfv::parse::parse_item(input)?)
+        ComponentIdentifier::from_sfv_item(&parse::parse_item(input)?)
     }
 
     // RFC 9421 §2.5: "If the component identifier has a parameter that is not

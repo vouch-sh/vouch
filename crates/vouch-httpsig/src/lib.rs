@@ -11,6 +11,9 @@
 //! - `ed25519` — Ed25519 (raw 64-byte signatures)
 //! - `hmac-sha256` — HMAC with SHA-256
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 pub mod algorithm;
 pub mod component;
 pub mod digest;

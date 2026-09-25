@@ -4,8 +4,8 @@
 use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
-    CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method, Request, Response,
-    StoreSessionParams, StoreSshCredentialsParams,
+    CacheCredentialParams, GetCachedCredentialParams, INTERNAL_ERROR, JSONRPC_VERSION, Method,
+    PARSE_ERROR, Request, Response, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::SshCredentials;
@@ -23,6 +23,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
+use vouch_common::UrlSecurity;
 
 /// Maximum number of concurrent IPC connections.
 const MAX_CONNECTIONS: usize = 64;
@@ -196,7 +197,7 @@ async fn handle_connection(
             Ok(req) => req,
             Err(e) => {
                 warn!("Invalid request: {e}");
-                let response = Response::error(0, crate::protocol::PARSE_ERROR, "parse error");
+                let response = Response::error(0, PARSE_ERROR, "parse error");
                 send_response(&mut stream, &response).await?;
                 continue;
             }
@@ -237,7 +238,7 @@ fn success_or_internal_error(
 ) -> Response {
     result.unwrap_or_else(|e| {
         error!("Failed to serialize response: {e}");
-        Response::error(id, crate::protocol::INTERNAL_ERROR, "serialization failed")
+        Response::error(id, INTERNAL_ERROR, "serialization failed")
     })
 }
 
@@ -311,8 +312,8 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
         Some(url) => match url::Url::parse(&url) {
             Ok(parsed) if parsed.scheme() == "https" || parsed.scheme() == "http" => {
                 match vouch_common::check_url_security(&url) {
-                    vouch_common::UrlSecurity::Secure => Some(url),
-                    vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
+                    UrlSecurity::Secure => Some(url),
+                    UrlSecurity::InsecureHttp { url: insecure_url } => {
                         if allow_insecure() {
                             warn!(
                                 "Using insecure HTTP server URL: {insecure_url}. VOUCH_ALLOW_INSECURE is set."
@@ -398,11 +399,7 @@ async fn handle_store_ssh_credentials(request: &Request, state: &Arc<AgentState>
             match state.store_ssh_credentials(creds).await {
                 Ok(()) => {}
                 Err(SshStoreRefusal::NoSession) => {
-                    return Response::error(
-                        request.id,
-                        crate::protocol::INTERNAL_ERROR,
-                        "no active session",
-                    );
+                    return Response::error(request.id, INTERNAL_ERROR, "no active session");
                 }
                 Err(SshStoreRefusal::NotIssuedToSession) => {
                     return Response::invalid_params(
@@ -533,6 +530,7 @@ async fn drain_connections(tasks: &mut JoinSet<()>) {
 )]
 mod tests {
     use super::*;
+    use crate::protocol::{INVALID_PARAMS, NOT_AUTHENTICATED};
     use crate::state::AgentState;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -753,7 +751,7 @@ mod tests {
             .error
             .as_ref()
             .expect("oversized key should produce an error response");
-        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert_eq!(error.code, INVALID_PARAMS);
         assert!(
             response.result.is_none(),
             "rejected credential must not return a result"
@@ -847,7 +845,7 @@ mod tests {
             .error
             .as_ref()
             .expect("oversized key should produce an error response");
-        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert_eq!(error.code, INVALID_PARAMS);
         assert!(reject_response.result.is_none());
         assert!(reject_cached.is_none(), "oversized key must not be cached");
 
@@ -905,7 +903,7 @@ mod tests {
         let response = handle_request(&request, &state).await;
 
         let error = response.error.expect("refused without a session");
-        assert_eq!(error.code, crate::protocol::NOT_AUTHENTICATED);
+        assert_eq!(error.code, NOT_AUTHENTICATED);
         state.store_session(live_session(), None).await;
         assert!(state.get_cached_credential("aws:role").await.is_none());
     }
@@ -994,7 +992,7 @@ mod tests {
         let error = dev
             .error
             .expect("a refused URL must be an error, not success");
-        assert_eq!(error.code, crate::protocol::INVALID_PARAMS);
+        assert_eq!(error.code, INVALID_PARAMS);
         assert!(
             session_after.is_none(),
             "no session is kept after the refusal"

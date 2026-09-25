@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
+use vouch_common::paths;
 
 /// Read-only view of the Vouch CLI configuration.
 ///
@@ -107,7 +108,7 @@ impl VouchConfig {
 
 /// Get the path to the config file (`$XDG_CONFIG_HOME/vouch/config.json`).
 fn config_path() -> Result<PathBuf> {
-    vouch_common::paths::config_file().context("could not determine config directory")
+    paths::config_file().context("could not determine config directory")
 }
 
 /// Read the config file from disk.
