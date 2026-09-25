@@ -749,12 +749,16 @@ pub(crate) async fn delete_secret_form(
         .count();
 
     // The floor protects a usable credential; a dead secret stays deletable.
-    // The authoritative check is the same one inside
+    // The floor fires only when revoking the target would actually reduce the
+    // active count to zero — i.e. when the target itself is still an active
+    // credential.  The authoritative check is the same one inside
     // `revoke_oauth_client_secret`'s transaction.
+    let target_active = secret.is_valid(&now);
     if other_active == 0
         && client
             .token_endpoint_auth_method
             .secret_is_credential(client.fapi_profile)
+        && target_active
     {
         return error_page(
             Tr::new("apps-error-title-error"),
@@ -2531,6 +2535,90 @@ mod tests {
         assert!(
             revoked.first().expect("one secret").revoked_at.is_some(),
             "the stranded secret must be revoked after the POST"
+        );
+    }
+
+    // Revoking the *sole* expired-but-unrevoked secret of a credential client
+    // must succeed at the web layer: the target is already dead, so the revoke
+    // does not reduce the active count (it stays at zero) and the floor guard
+    // must not fire.  Before the fix the web `delete_secret_form` rendered the
+    // `apps-error-secret-last-active` error page for this case.  Regression for
+    // the missing `target_active` condition in the web pre-flight check.
+    #[tokio::test]
+    async fn test_web_delete_sole_expired_secret_allowed() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-sole-expired@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        // Credential client (default client_secret_basic) with NO initial secret.
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let app_id = client.app_id;
+
+        // The client's only secret, already expired (but not revoked).
+        let past: jiff::Timestamp = "2020-01-01T00:00:00Z"
+            .parse()
+            .expect("static past timestamp parses");
+        let expired = crate::db::create_oauth_client_secret(
+            &state.store,
+            &app_id,
+            &super::hash_token("web-sole-expired-secret"),
+            None,
+            Some(past),
+        )
+        .await
+        .expect("create sole expired secret");
+        let secret_id = expired.id.clone();
+
+        // Before the fix this rendered the `apps-error-secret-last-active` error
+        // page (non-redirection); it must now redirect on success because
+        // revoking a dead row leaves the active count unchanged at zero.
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{app_id}/secrets/{secret_id}/delete"),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert!(
+            status.is_redirection(),
+            "revoking the sole expired secret must redirect on success, got {status}: {body}"
+        );
+
+        // The row is soft-deleted and the client remains at zero active secrets.
+        let now = jiff::Timestamp::now();
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+            .await
+            .expect("db query ok");
+        let revoked = secrets
+            .iter()
+            .find(|s| s.id == secret_id)
+            .expect("the revoked row must still be present");
+        assert!(
+            revoked.revoked_at.is_some(),
+            "the target secret must be marked revoked; got {revoked:?}"
+        );
+        assert!(
+            secrets.iter().all(|s| !s.is_valid(&now)),
+            "the client must remain at zero active secrets; got {secrets:?}"
         );
     }
 }

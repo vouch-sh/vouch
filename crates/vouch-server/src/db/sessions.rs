@@ -153,8 +153,8 @@ pub async fn find_session_by_token_hash(
     Ok(doc.map(Session::from))
 }
 
-/// Delete the session row for `token_hash`, whatever its expiry, and return
-/// it; `None` when no row exists.
+/// Delete the session row(s) for `token_hash`, whatever their expiry, and
+/// return one that this call removed; `None` when this call removed no row.
 ///
 /// The row is read and deleted in one transaction. Every path that deletes a
 /// session by hash (`POST /logout`, RP-initiated logout, `/oauth/revoke`)
@@ -162,6 +162,13 @@ pub async fn find_session_by_token_hash(
 /// be recorded whenever the row actually existed, including an expired row the
 /// cleanup task has not reaped yet. Returning the row gives each caller the
 /// `user_id` and `user_email` for it.
+///
+/// The return is driven off `StoreTransaction::delete`'s row count, not the
+/// pre-delete read: of two concurrent revokes of the same `token_hash` only
+/// the transaction that physically deletes the row returns `Some`, so exactly
+/// one of them records the `Logout` audit event. A loser that read the row but
+/// deleted nothing returns `None`, matching `delete_scim_token`,
+/// `delete_custom_policy`, `delete_scim_group`, and `delete_user`.
 pub async fn delete_session_by_token_hash(
     store: &DocumentStore,
     token_hash: &str,
@@ -169,11 +176,14 @@ pub async fn delete_session_by_token_hash(
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
         let docs = tx.find_all::<SessionDoc>("token_hash", token_hash).await?;
-        for doc in &docs {
-            tx.delete(&doc.id).await?;
+        let mut deleted = None;
+        for doc in docs {
+            if tx.delete(&doc.id).await? {
+                deleted = Some(Session::from(doc));
+            }
         }
         tx.commit().await?;
-        Ok(docs.into_iter().next().map(Session::from))
+        Ok(deleted)
     })
 }
 
