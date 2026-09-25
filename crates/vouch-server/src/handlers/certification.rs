@@ -88,10 +88,16 @@ pub(crate) async fn complete_login(
 ) -> Response {
     // ── 1. Token validation ───────────────────────────────────────────────
     let config = state.config();
+    // Defense-in-depth: treat a `Some("")` certification token as disabled
+    // (returning `NOT_FOUND`, matching the `None` arm) so an empty secret is
+    // inert even if the config-layer `non_empty` guard is ever bypassed (e.g.
+    // S3 config or programmatic construction). The empty HMAC key is a
+    // publicly-known constant, so accepting it would let an attacker forge
+    // `HMAC_SHA256("", pending_auth)` and mint a session.
     let secret = match config.certification_test_token.as_ref() {
-        Some(s) => s,
-        None => {
-            tracing::error!("Certification endpoint called but token not configured");
+        Some(s) if !s.expose_secret().is_empty() => s,
+        _ => {
+            tracing::error!("Certification endpoint called but token not configured or is empty");
             return StatusCode::NOT_FOUND.into_response();
         }
     };
@@ -265,9 +271,12 @@ pub(crate) async fn deny_login(
 ) -> Response {
     // Validate HMAC token.
     let config = state.config();
+    // Defense-in-depth: treat a `Some("")` certification token as disabled
+    // (returning `NOT_FOUND`, matching the `None` arm). See `complete_login`
+    // for the rationale: an empty HMAC key is a publicly-known constant.
     let secret = match config.certification_test_token.as_ref() {
-        Some(s) => s,
-        None => return StatusCode::NOT_FOUND.into_response(),
+        Some(s) if !s.expose_secret().is_empty() => s,
+        _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
     let token_valid: bool = expected
@@ -529,6 +538,67 @@ mod tests {
         .await;
 
         assert_eq!(resp.status, axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_complete_login_empty_secret_returns_not_found() {
+        // Defense-in-depth: even if `Some(SecretString::from(""))` ever reaches
+        // the handler (the `from_args` `non_empty` guard prevents it from env/
+        // CLI, but S3 config or programmatic construction could), the empty
+        // HMAC key is a publicly-known constant. An attacker who knows
+        // `pending_auth` can compute `HMAC_SHA256("", pending_auth)` and forge
+        // a matching token. The handler MUST treat an empty secret as
+        // disabled (`NOT_FOUND`, matching the `None` arm) instead of feeding
+        // it into HMAC-SHA256.
+        let (app, state) = crate::test_utils::test_app_with_empty_certification().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "cert-empty-secret@example.com")
+                .await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: Some("state123"),
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: None,
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: Default::default(),
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        // Forge the token with the empty key — the publicly-known constant.
+        let forged_token = hmac_sha256_base64url("", &pending_id);
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!(
+                "/certification/complete-login?pending_auth={pending_id}&token={forged_token}"
+            ),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::NOT_FOUND,
+            "empty certification secret must disable the endpoint (404), not \
+             accept a forged empty-key HMAC (got {})",
+            resp.status
+        );
     }
 
     #[tokio::test]
@@ -918,6 +988,61 @@ mod tests {
             resp.status,
             axum::http::StatusCode::FORBIDDEN,
             "wrong HMAC token must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deny_login_empty_secret_returns_not_found() {
+        // Defense-in-depth for deny-login: a `Some("")` certification token
+        // must be treated as disabled (`NOT_FOUND`), mirroring complete_login.
+        // deny-login consumes the pending auth on success, so accepting a
+        // forged empty-key HMAC would let an attacker force a user-facing
+        // `access_denied` error on any pending authorization.
+        let (app, state) = crate::test_utils::test_app_with_empty_certification().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "cert-deny-empty@example.com").await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: Some("mystate"),
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: None,
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: crate::db::ResponseMode::Query,
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        // Forge the token with the empty key — the publicly-known constant.
+        let forged_token = hmac_sha256_base64url("", &pending_id);
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/certification/deny-login?pending_auth={pending_id}&token={forged_token}"),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::NOT_FOUND,
+            "empty certification secret must disable deny-login (404), not \
+             accept a forged empty-key HMAC (got {})",
+            resp.status
         );
     }
 

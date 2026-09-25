@@ -1059,8 +1059,27 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
-            metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
-            certification_test_token: args.certification_test_token.map(SecretString::from),
+            // Filter empty values so `VOUCH_METRICS_BEARER_TOKEN=""` is treated
+            // as unset, matching the codebase-wide `non_empty` convention. An
+            // empty bearer token would otherwise register `/metrics` under a
+            // publicly-known key; the handler's `extract_bearer_token` guard
+            // prevents a forgeable endpoint, but `None` (route not registered)
+            // is the intended disabled state and stays consistent with every
+            // other env-driven field where emptiness is harmful.
+            metrics_bearer_token: vouch_common::env::non_empty(args.metrics_bearer_token)
+                .map(SecretString::from),
+            // Filter empty values so `VOUCH_CERTIFICATION_TEST_TOKEN=""` is
+            // treated as unset. Without this guard the empty string becomes
+            // `Some(SecretString::from(""))`, which — uniquely among the
+            // `Option<SecretString>` config fields — silently activates a
+            // login-bypass endpoint (`GET /certification/complete-login`)
+            // under a publicly-known (empty) HMAC key instead of failing
+            // operationally. The handler additionally treats `Some("")` as
+            // disabled (defense-in-depth), but the construction-site guard is
+            // the primary fix: it keeps the route unregistered, keeps rate
+            // limiting enabled, and keeps the upstream-IdP requirement intact.
+            certification_test_token: vouch_common::env::non_empty(args.certification_test_token)
+                .map(SecretString::from),
             extra_ca_certs: args.extra_ca_certs,
             mtls_client_ca_certs: args.mtls_client_ca_certs,
             pool_config: crate::db::pool::PoolConfig {
@@ -1354,7 +1373,7 @@ mod tests {
     };
     use crate::test_utils::test_config;
     use clap::{CommandFactory, Parser};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, HashMap};
 
     fn saml_provider_for_tests() -> SamlProviderConfig {
@@ -1888,6 +1907,85 @@ mod tests {
             config.aws_use_fips_endpoint.is_none(),
             "empty CLI aws_use_fips_endpoint must be None, got {:?}",
             config.aws_use_fips_endpoint
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — security-sensitive Option<SecretString>
+    // empty-string handling
+    //
+    // `certification_test_token` and `metrics_bearer_token` are built from
+    // `Option<String>` CLI/env values. Clap populates the field as `Some("")`
+    // when the var/flag is set to the empty string; without a `non_empty`
+    // filter that would become `Some(SecretString::from(""))` instead of
+    // `None`. For `certification_test_token` an empty secret silently
+    // activates a login-bypass endpoint under a publicly-known HMAC key, so
+    // the empty value MUST become `None` (route not registered, rate limiting
+    // enabled, upstream-IdP requirement intact).
+    //
+    // The env-var path is not exercised here because `std::env::set_var` is
+    // `unsafe` under edition 2024 and `unsafe_code` is denied workspace-wide
+    // (see the note above the "ServerConfig::from_args" section). Clap's
+    // `#[arg(env = ...)]` resolution populates the same `Option<String>`
+    // field whether the value came from the CLI or the environment, so the
+    // CLI case covers both.
+    // ========================================================================
+
+    #[test]
+    fn from_args_empty_certification_test_token_yields_none() {
+        // An empty CLI/env value must become `None` so the certification
+        // login-bypass endpoint is NOT registered, global rate limiting stays
+        // enabled, and `validate()`'s upstream-IdP requirement is not relaxed.
+        // `Some(SecretString::from(""))` would activate every `is_some()` gate
+        // under a publicly-known (empty) HMAC key — a forgeable bypass.
+        let args = Args::try_parse_from(["vouch-server", "--certification-test-token="])
+            .expect("parse with empty --certification-test-token");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.certification_test_token.is_none(),
+            "empty CLI certification_test_token must be None, got {:?}",
+            config.certification_test_token
+        );
+    }
+
+    #[test]
+    fn from_args_non_empty_certification_test_token_is_preserved() {
+        // A non-empty value must pass through `non_empty` unchanged so the
+        // conformance suite can still drive the bypass endpoint.
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--certification-test-token=test-cert-token-32bytes-padding!!",
+        ])
+        .expect("parse with non-empty --certification-test-token");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.certification_test_token.is_some(),
+            "non-empty CLI certification_test_token must be Some, got None"
+        );
+        assert_eq!(
+            config
+                .certification_test_token
+                .as_ref()
+                .expect("token present")
+                .expose_secret(),
+            "test-cert-token-32bytes-padding!!"
+        );
+    }
+
+    #[test]
+    fn from_args_empty_metrics_bearer_token_yields_none() {
+        // An empty CLI/env value must become `None` so the `/metrics` route is
+        // not registered under an empty bearer token. The handler's
+        // `extract_bearer_token` guard already prevents a forgeable endpoint,
+        // but `None` is the intended disabled state and matches the codebase
+        // `non_empty` convention applied to every other env-driven field.
+        let args = Args::try_parse_from(["vouch-server", "--metrics-bearer-token="])
+            .expect("parse with empty --metrics-bearer-token");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.metrics_bearer_token.is_none(),
+            "empty CLI metrics_bearer_token must be None, got {:?}",
+            config.metrics_bearer_token
         );
     }
 
