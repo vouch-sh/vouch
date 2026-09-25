@@ -258,6 +258,10 @@ pub(crate) async fn complete_login(
 /// callback URI, dispatching on `response_mode` (JARM JWT, Form Post HTML
 /// form, or query-string redirect) via the shared `oauth_error_response`
 /// helper.
+///
+/// The pending is read, then the client looked up, and only then consumed,
+/// so a failed client lookup leaves the single-use claim intact and the same
+/// link retryable (the check-before-spend order of `handle_pending_auth`).
 pub(crate) async fn deny_login(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -278,8 +282,30 @@ pub(crate) async fn deny_login(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // Consume pending authorization. The `_claim` witness is bound to
+    // Read the pending without spending it; the claim is consumed below, after
+    // the client lookup that can fail.
+    let pending = match db::get_pending_oauth_authorization(
+        &state.store,
+        &query.pending_auth,
+        arrival.timestamp(),
+    )
+    .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
+        Ok(Some(c)) => c,
+        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    // Consume the pending authorization. The `_claim` witness is bound to
     // satisfy `#[must_use]`; downstream code uses `pending` directly.
+    //
+    // A failure while building the response below (for example a JARM signing
+    // error) still returns 500 with the claim already spent.
     let (pending, _claim) = match db::consume_pending_oauth_authorization(
         &state.store,
         &query.pending_auth,
@@ -307,11 +333,6 @@ pub(crate) async fn deny_login(
     // authorize endpoint uses) so deny-login stays consistent with the rest
     // of the authorization error paths, including the `iss` parameter
     // (RFC 9207) in every mode.
-    let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
-        Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
     tracing::info!(
         pending_auth = %query.pending_auth,
         "Certification deny-login: returning access_denied"
@@ -1223,5 +1244,50 @@ mod tests {
             Some(client.client_id.as_str()),
             "JARM JWT must be audience-bound to the client"
         );
+    }
+
+    /// A failed client lookup must leave the pending unconsumed, so the same
+    /// deny-login link is retryable rather than dead (404).
+    #[tokio::test]
+    async fn test_deny_login_client_lookup_failure_leaves_pending_unconsumed() {
+        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let user =
+            crate::test_utils::create_test_user(&state.store, "cert-deny-lookup@example.com").await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let url = setup_deny_login_url(
+            &state,
+            &client.client_id,
+            crate::db::ResponseMode::Query,
+            Some("lookup-fails"),
+        )
+        .await;
+        let pending_id = url::Url::parse(&format!("http://localhost{url}"))
+            .expect("deny-login URL parses")
+            .query_pairs()
+            .find(|(k, _)| k == "pending_auth")
+            .map(|(_, v)| v.into_owned())
+            .expect("deny-login URL carries pending_auth");
+
+        crate::db::delete_oauth_client(&state.store, &client.app_id)
+            .await
+            .expect("delete OAuth client");
+
+        for attempt in 1..=2 {
+            let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+            assert_eq!(
+                resp.status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "attempt {attempt}: a failed lookup must be 500, not 404 from a burned claim"
+            );
+        }
+        let pending = crate::db::get_pending_oauth_authorization(
+            &state.store,
+            &pending_id,
+            crate::test_utils::test_arrival().timestamp(),
+        )
+        .await
+        .expect("read pending")
+        .expect("pending survives a failed client lookup");
+        assert_eq!(pending.consumed_at, None);
     }
 }
