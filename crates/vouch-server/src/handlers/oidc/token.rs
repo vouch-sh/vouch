@@ -1312,7 +1312,7 @@ async fn handle_token_exchange_grant(
         client: &authenticated_client,
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         authorization_details: params.authorization_details.as_deref(),
-        client_ip: client_info.client_ip(),
+        client_info: &client_info,
     };
 
     // Token exchange does not mandate confidential clients (RFC 8693), so a

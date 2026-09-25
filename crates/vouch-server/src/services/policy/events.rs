@@ -138,8 +138,9 @@ pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option
             ],
         ),
         AuditEventKind::OauthTokenRevoked => ("Vouch::Action::RevokeToken", Vec::new()),
-        // Payload is `TokenExchangeDetails`: `client_id` / `audience`, and
-        // no client address (the exchange audit record carries none).
+        // Payload is the credential envelope (`client_ip`, recorded from the
+        // exchange request's `ClientInfo`) flattened with
+        // `TokenExchangeDetails` (`client_id` / `audience`).
         AuditEventKind::TokenExchange => (
             "Vouch::Action::ExchangeToken",
             vec![
