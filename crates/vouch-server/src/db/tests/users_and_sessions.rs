@@ -1061,7 +1061,7 @@ async fn test_logout_audit_duplicated_when_revocation_loses_race() {
     record_auth_event(
         &audit,
         AuthEventParams {
-            user_id: user_id.clone(),
+            user_id: Principal::Verified(user_id.clone()),
             event_type: AuthEventType::Logout,
             success: true,
             ..Default::default()
@@ -1088,7 +1088,7 @@ async fn test_logout_audit_duplicated_when_revocation_loses_race() {
         record_auth_event(
             &audit,
             AuthEventParams {
-                user_id: session.user_id.clone(),
+                user_id: Principal::Verified(session.user_id.clone()),
                 event_type: AuthEventType::Logout,
                 success: true,
                 ..Default::default()
