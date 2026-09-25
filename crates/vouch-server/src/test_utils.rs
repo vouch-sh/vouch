@@ -335,7 +335,8 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
     ));
     config.github_app_name = Some("vouch-test".to_string());
     config.github_app_client_id = Some("Iv1.test-client".to_string());
-    config.github_app_client_secret = Some(SecretString::from("test-client-secret".to_string()));
+    config.github_app_client_secret =
+        crate::config::NonEmptySecret::new(SecretString::from("test-client-secret"));
 
     let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)

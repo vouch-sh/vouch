@@ -192,7 +192,8 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("github-client-id".to_string());
-        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+        config.github_app_client_secret =
+            crate::config::NonEmptySecret::new(SecretString::from("shh"));
 
         let service = GitHubService::new(
             &state.store,
@@ -225,7 +226,8 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("github-client-id".to_string());
-        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+        config.github_app_client_secret =
+            crate::config::NonEmptySecret::new(SecretString::from("shh"));
 
         let service = GitHubService::new(
             &state.store,
