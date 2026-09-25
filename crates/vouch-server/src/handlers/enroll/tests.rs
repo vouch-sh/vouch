@@ -7,15 +7,18 @@
 )]
 
 use super::*;
+use crate::db::store::GetUserByIdTestHook;
 use crate::test_utils::test_arrival;
 use crate::test_utils::{
     TestSessionSpec, build_test_app_state, create_test_authenticator, create_test_session_with,
     create_test_user, http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
-    test_config, test_domain,
+    test_app_with_modify_hook, test_config, test_domain,
 };
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Build a valid `BrowserRegistrationState` JWT using the test signer.
@@ -2301,10 +2304,165 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
         ],
     )
     .await;
+    // After the `load_active_user` fix, a deactivated user is rejected with
+    // the same shape every other authed handler returns: 401 "User account
+    // is deactivated", not the legacy 403 "user_deactivated".
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "deactivated user must not complete key registration: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+// ── browser_register_complete — deleted user (in-flight delete_user race) ──
+//
+// A user hard-deleted in the window between `browser_register_start` (which
+// issued the state, valid for five minutes) and this completion must be
+// rejected — not proceed to the single-use consume and WebAuthn
+// verification. The `extract_session_from_cookie` extractor validates the
+// session via `session_cache.get_session_by_token_hash` and does NOT call
+// `get_user_by_id`; the handler's `load_active_user` read is the ONLY
+// `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
+// `handlers/applications/web.rs`, fixed via the same
+// `get_user_by_id_test_hook` seam, and the CLI sibling regression test
+// `test_register_complete_refuses_vanished_user`). Before the
+// `load_active_user` fix the inline `if let Some(ref account) = account`
+// guard admitted `Ok(None)` and the request reached WebAuthn, returning
+// 400 invalid_attestation — the smoking gun that a deleted user was being
+// treated like an active user.
+
+/// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the "user
+/// vanished mid-request" outcome) for `target` once it has been set. While
+/// `target` is `None` (during test setup) every read runs for real, so
+/// `create_test_user` / `create_test_session_with` work normally. Returns a
+/// counter that is bumped on each forced read so the test can assert the
+/// forced `Ok(None)` landed on the handler's read (the cookie extractor
+/// makes no `get_user_by_id` call on this path, so the count must be exactly
+/// one).
+fn install_user_vanish_hook(
+    target: Arc<Mutex<Option<String>>>,
+) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
+    let calls = Arc::new(AtomicU32::new(0));
+    let calls_for_hook = calls.clone();
+    let hook: GetUserByIdTestHook = Arc::new(move |uid: &str| {
+        let active = target.lock().expect("hook target lock poisoned").as_deref() == Some(uid);
+        if !active {
+            return false;
+        }
+        calls_for_hook.fetch_add(1, Ordering::SeqCst);
+        // Every handler-path read for the target user is forced to `Ok(None)`.
+        // The browser completion path's `load_active_user` makes exactly one
+        // `get_user_by_id` read, so this forces it on the first (and only)
+        // call.
+        true
+    });
+    (calls, hook)
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_refuses_vanished_user() {
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let target_for_hook = target.clone();
+    let (calls, hook) = install_user_vanish_hook(target_for_hook);
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_get_user_by_id_test_hook(hook);
+    })
+    .await;
+
+    let user = create_test_user(&state.store, "vanished-browser-complete@example.com").await;
+    // The session is minted BEFORE the user vanishes; the cookie still
+    // extracts a token whose `sub` matches the state JWT — the caller-binding
+    // check passes, and the active-user guard fires as it does for the
+    // deactivated case.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
+    let state_jwt = reg_state
+        .encode(&state.state_signer)
+        .await
+        .expect("encode state");
+
+    // Activate the hook only now — every `get_user_by_id` during setup ran
+    // with the target unset and so was a no-op.
+    *target.lock().expect("activate hook") = Some(user.id.clone());
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let cookie = session_cookie_header(&token);
+    let (status, resp) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+
+    // The deleted user must be rejected — reaching WebAuthn (400
+    // invalid_attestation) is the bug, not the fix.
+    assert_ne!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleted user must NOT reach the WebAuthn-verification / \
+         state-consume stage; the active-user guard must reject `Ok(None)` \
+         the way it rejects `active=false`. Got {status} {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_ne!(
+        json["code"], "invalid_attestation",
+        "deleted user must not reach WebAuthn verification: {json}"
+    );
+    // `load_active_user` rejects `Ok(None)` with 401 "User not found".
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deleted user rejected: {resp}"
+    );
+    assert_eq!(json["code"], "unauthorized");
+    assert_eq!(json["message"], "User not found");
+
+    // The handler's `load_active_user` read is the ONLY `get_user_by_id` on
+    // this path, so the forced `Ok(None)` must have landed exactly there —
+    // proving the rejection came from the handler's guard, not a too-early
+    // fire that some other layer caught.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "expected exactly one get_user_by_id call (the handler's load_active_user read)"
     );
 }
 
