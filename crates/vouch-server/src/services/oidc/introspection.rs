@@ -462,7 +462,7 @@ pub async fn revoke_token(
 
         // Best-effort logout audit event
         let params = db::AuthEventParams {
-            user_id,
+            user_id: db::Principal::Verified(user_id),
             event_type: db::AuthEventType::Logout,
             success: true,
             client: client_info,

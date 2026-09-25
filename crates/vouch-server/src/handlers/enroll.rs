@@ -847,8 +847,12 @@ pub(crate) async fn complete_enrollment_after_identity(
                 "Refusing IdP login: could not reassert the subject bound \
                  to the account with this email for this issuer"
             );
+            // The upstream IdP verified the email this account is keyed on;
+            // only the subject binding failed. The row stays on the targeted
+            // account so its owner and admins see the attempt. It is not a
+            // temporal-history kind, so it cannot feed a per-user policy.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::IdentityBindRefused,
                 success: false,
                 failure_reason: Some(
@@ -876,8 +880,10 @@ pub(crate) async fn complete_enrollment_after_identity(
                 email = %redact_email(&email),
                 "Refusing IdP login for deactivated account"
             );
+            // The upstream IdP verified this identity, so the refusal is
+            // attributed to the account.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::LoginFailed,
                 success: false,
                 failure_reason: Some("user_deactivated".to_string()),
@@ -921,7 +927,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         && let Some(ref upstream) = identity.upstream
     {
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::IdentityBound,
             success: true,
             idp_issuer: Some(upstream.issuer.clone()),
@@ -1119,7 +1125,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         // empty — distinguishing this from passkey logins. Fresh enrollees
         // are covered by the Enrollment event in browser_register_complete.
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::LoginSuccess,
             success: true,
             client: client_info,
@@ -1796,7 +1802,7 @@ async fn finalize_enrollment_audit_and_device_auth(
     // Log enrollment event — the authenticator is already committed, so this
     // row must be written before the fallible device-auth release below.
     let auth_event_params = AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
+        user_id: db::Principal::Verified(reg_state.user_id.to_string()),
         event_type: AuthEventType::Enrollment,
         authenticator_id: Some(authenticator_id.to_string()),
         success: true,
@@ -1840,7 +1846,7 @@ async fn finalize_enrollment_audit_and_device_auth(
         })?;
 
         let event = db::AuthEventParams {
-            user_id: reg_state.user_id.to_string(),
+            user_id: db::Principal::Verified(reg_state.user_id.to_string()),
             event_type: db::AuthEventType::DeviceAuthApproved,
             authenticator_id: Some(authenticator_id.to_string()),
             success: true,

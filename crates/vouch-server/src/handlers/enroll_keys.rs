@@ -102,7 +102,7 @@ pub(crate) async fn rename_key_form(
     match key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await {
         Ok(_) => {
             let event = db::AuthEventParams {
-                user_id: token.sub.clone(),
+                user_id: db::Principal::Verified(token.sub.clone()),
                 event_type: db::AuthEventType::KeyRenamed,
                 authenticator_id: Some(key_id.clone()),
                 success: true,
@@ -157,7 +157,7 @@ pub(crate) async fn delete_key(
     state.session_cache.invalidate_for_user(&token.sub);
 
     let event = db::AuthEventParams {
-        user_id: token.sub.clone(),
+        user_id: db::Principal::Verified(token.sub.clone()),
         event_type: db::AuthEventType::KeyRemoved,
         authenticator_id: Some(key_id.clone()),
         success: true,

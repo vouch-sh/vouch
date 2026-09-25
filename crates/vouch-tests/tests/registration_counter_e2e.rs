@@ -202,17 +202,40 @@ async fn exchange_fido2_assertion(
 }
 
 /// Fetch the `login_failed` audit events for `user_id`.
+/// `login_failed` rows recorded for an assertion that claimed `user_id`.
+///
+/// The counter check runs before the signature check, so a counter-regression
+/// rejection proves nothing about who sent the assertion: anyone holding the
+/// credential ID can trigger it. The row therefore names no principal (NULL
+/// `user_id`, so it never feeds per-user policies such as
+/// `failed_login_burst`) and carries the claimed user as `asserted_user_id` in
+/// its payload. This asserts both halves.
 async fn login_failed_audit_events(harness: &TestHarness, user_id: &str) -> Vec<db::AuditEvent> {
-    harness
+    let rows: Vec<db::AuditEvent> = harness
         .state
         .audit
         .query_events(&db::AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
-            user_id: Some(user_id.to_string()),
             ..db::AuditEventFilter::default()
         })
         .await
         .expect("query audit events")
+        .into_iter()
+        .filter(|ev| {
+            serde_json::from_str::<serde_json::Value>(&ev.data)
+                .ok()
+                .and_then(|data| data.get("asserted_user_id").cloned())
+                .is_some_and(|asserted| asserted == user_id)
+        })
+        .collect();
+    for ev in &rows {
+        assert_eq!(
+            ev.user_id, None,
+            "an assertion rejected before its signature verified must not be \
+             attributed to the claimed user: {ev:?}"
+        );
+    }
+    rows
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
