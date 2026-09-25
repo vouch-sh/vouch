@@ -1927,19 +1927,31 @@ fn registration_token_is(data: &OAuthClientDoc, token_hash: &str) -> bool {
         .is_some_and(|stored| bool::from(stored.as_bytes().ct_eq(token_hash.as_bytes())))
 }
 
+/// Proof that [`consume_registration_access_token`] cleared a client's
+/// registration access token, carrying what
+/// [`restore_registration_access_token`] needs to undo exactly that write.
+#[derive(Debug)]
+#[must_use = "a consumed registration token must be either spent or restored"]
+pub struct ConsumedRegistrationToken {
+    id: String,
+    token_hash: String,
+    /// The client document's version after the consume committed.
+    version: i32,
+}
+
 /// Consume a client's registration access token for an RFC 7592 DELETE.
 ///
 /// Clears the stored hash only while the client is active and still holds
 /// `token_hash`. Of concurrent DELETEs, and of a DELETE racing a PUT that
-/// rotates the token, exactly one caller sees `true`; the rest hold a token
-/// that is no longer valid. The caller deletes the client only on `true`.
+/// rotates the token, exactly one caller sees `Some`; the rest hold a token
+/// that is no longer valid. The caller deletes the client only on `Some`.
 pub async fn consume_registration_access_token(
     store: &DocumentStore,
     id: &str,
     token_hash: &str,
-) -> Result<bool> {
+) -> Result<Option<ConsumedRegistrationToken>> {
     let outcome = store
-        .transition::<OAuthClientDoc, (), (), _>(id, |data| {
+        .transition_versioned::<OAuthClientDoc, (), (), _>(id, |data| {
             if !data.active || !registration_token_is(data, token_hash) {
                 return Err(());
             }
@@ -1947,7 +1959,54 @@ pub async fn consume_registration_access_token(
             Ok(())
         })
         .await?;
-    Ok(matches!(outcome, Transition::Applied(())))
+    Ok(match outcome {
+        Transition::Applied(((), version)) => Some(ConsumedRegistrationToken {
+            id: id.to_string(),
+            token_hash: token_hash.to_string(),
+            version,
+        }),
+        Transition::Rejected(()) | Transition::NotFound => None,
+    })
+}
+
+/// Undo [`consume_registration_access_token`] after the RFC 7592 DELETE that
+/// consumed the token failed to delete the client.
+///
+/// The DELETE consumes the token in its own committed write and then runs
+/// [`delete_oauth_client_and_revoke_sessions`], whose steps commit
+/// separately. A failure after the consume but before the row is removed
+/// would otherwise leave the client in place with no registration access
+/// token and no way to get one back, so the owner could never retry the
+/// delete.
+///
+/// The restore is a single compare-and-set against the version the consume
+/// committed. Any write to the client since then wins and the token stays
+/// consumed. That matters because "the hash is `None`" cannot tell this
+/// consume apart from a revocation that happened after it: deleting,
+/// deactivating, or transferring away from the owner writes every client the
+/// owner holds (`revoke_owner_registration_tokens`, `reassign_client_owner`),
+/// so those revocations always move the version and a failed delete cannot
+/// put a revoked token back. The cost is that an unrelated concurrent write
+/// (an admin edit to the client in the same instant) also leaves the token
+/// consumed; that fails closed, and the owner registers again.
+///
+/// Returns whether the token was restored. Best-effort by construction: the
+/// caller has already failed the delete and reports that error.
+pub async fn restore_registration_access_token(
+    store: &DocumentStore,
+    consumed: ConsumedRegistrationToken,
+) -> Result<bool> {
+    let Some(doc) = store.get::<OAuthClientDoc>(&consumed.id).await? else {
+        return Ok(false);
+    };
+    if doc.version != consumed.version || doc.data.registration_access_token_hash.is_some() {
+        return Ok(false);
+    }
+    let mut data = doc.data;
+    data.registration_access_token_hash = Some(consumed.token_hash);
+    store
+        .compare_and_update(&consumed.id, consumed.version, &data)
+        .await
 }
 
 /// Revoke whichever client holds `token_hash` as its registration access token.
