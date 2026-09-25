@@ -620,17 +620,12 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            crate::services::auth::record_lookup_failure(
-                &state.audit,
-                client_info.clone(),
-                user_id,
-                &e,
-            )
-            .await;
+            crate::services::auth::record_lookup_failure(&state.audit, client_info.clone(), &e)
+                .await;
             return Err(match e {
                 // Return generic error to prevent credential enumeration
                 crate::services::auth::LookupError::NotFound(_)
-                | crate::services::auth::LookupError::UserMismatch
+                | crate::services::auth::LookupError::UserMismatch { .. }
                 | crate::services::auth::LookupError::Deactivated { .. } => ServiceError::api(
                     StatusCode::UNAUTHORIZED,
                     "auth_failed",
@@ -1847,9 +1842,41 @@ mod tests {
         let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
-        assert_eq!(
-            login_failure_reasons(&state, &user.id).await,
-            ["lookup_error"]
+
+        // A storage fault during the lookup proves no principal — the asserted
+        // `user_handle` is unverified — so the `login_failed` row must NOT be
+        // attributed to the asserted user. An attacker who can POST a bogus
+        // `user_handle` must not pin lockout-driving rows onto a victim.
+        assert!(
+            login_failure_reasons(&state, &user.id).await.is_empty(),
+            "a storage-fault login_failed row must not be attributed to the asserted user"
+        );
+
+        // The audit trail is preserved as a principal-less row.
+        let all_failures = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let reasons: Vec<String> = all_failures
+            .iter()
+            .filter(|r| r.user_id.is_none())
+            .map(|r| {
+                let data: serde_json::Value =
+                    serde_json::from_str(&r.data).expect("event data JSON");
+                data.get("failure_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            reasons.contains(&"lookup_error".to_string()),
+            "a principal-less login_failed row with reason 'lookup_error' must be recorded: \
+             {all_failures:?}"
         );
     }
 
@@ -1940,8 +1967,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_browser_login_user_mismatch_failure_keeps_email_domain_null() {
-        // The asserted user_handle is not the credential's owner and the
-        // assertion has not run, so the row names neither account's email.
+        // The asserted `user_handle` is not the credential's owner, but the
+        // owner IS the proven principal (their credential was presented), so
+        // the `login_failed` row is attributed to the owner — never to the
+        // attacker-supplied asserted `user_handle`. The assertion has not
+        // run, so the row names no email; it stays out of the owner's
+        // org-scoped audit feed (a holder of the credential_id, a secret,
+        // must not be able to feed rows into the owner's org feed).
         let (app, state) = crate::test_utils::test_app().await;
         let owner = crate::test_utils::create_test_user(&state.store, "owner@example.com").await;
         let attacker =
@@ -1953,26 +1985,33 @@ mod tests {
         // asserted user_handle (attacker) -> user_mismatch.
         let (status, resp_body) = post_complete(&app, &state, &attacker.id, &credential_id).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
-        assert_eq!(
-            login_failure_reasons(&state, &attacker.id).await,
-            ["user_mismatch"]
+
+        // The asserted (attacker) user_handle is unverified, so NO row is
+        // attributed to it — the cross-org lockout vector the fix closes.
+        assert!(
+            login_failure_reasons(&state, &attacker.id).await.is_empty(),
+            "a user_mismatch login_failed row must not be attributed to the asserted user_handle"
         );
 
+        // The row lands on the credential's loaded owner, with no email.
+        assert_eq!(
+            login_failure_reasons(&state, &owner.id).await,
+            ["user_mismatch"],
+            "a user_mismatch row must be attributed to the credential's owner"
+        );
         let events = state
             .audit
             .query_events(&crate::db::AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
-                user_id: Some(attacker.id.clone()),
+                user_id: Some(owner.id.clone()),
                 ..crate::db::AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
-        let row = events
-            .first()
-            .expect("one login_failed row for the attacker");
+        let row = events.first().expect("one login_failed row for the owner");
         assert_eq!(
             row.email_domain, None,
-            "user_mismatch must not be attributed to the credential owner's domain"
+            "user_mismatch must not carry the credential owner's domain"
         );
 
         // And it must NOT surface through the owner's domain-scoped query.
@@ -1981,7 +2020,7 @@ mod tests {
             .query_events(&crate::db::AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
                 email_domains: Some(vec!["example.com".to_string()]),
-                user_id: Some(attacker.id.clone()),
+                user_id: Some(owner.id.clone()),
                 ..crate::db::AuditEventFilter::default()
             })
             .await

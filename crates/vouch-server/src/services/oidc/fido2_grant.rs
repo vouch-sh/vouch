@@ -327,7 +327,7 @@ pub(crate) async fn exchange_fido2_assertion(
                 Ok(found) => return Ok(found),
                 Err(e) => e,
             };
-            record_lookup_failure(&state.audit, params.client_info.clone(), user_id, &e).await;
+            record_lookup_failure(&state.audit, params.client_info.clone(), &e).await;
             Err(match e {
                 // A storage fault says nothing about the grant, so it stays a 500.
                 LookupError::Service(err) => {
@@ -336,7 +336,7 @@ pub(crate) async fn exchange_fido2_assertion(
                 }
                 // Generic invalid_grant: the response does not say which refusal applied.
                 refusal @ (LookupError::NotFound(_)
-                | LookupError::UserMismatch
+                | LookupError::UserMismatch { .. }
                 | LookupError::Deactivated { .. }) => {
                     tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {refusal}");
                     ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")

@@ -430,6 +430,62 @@ async fn fido2_grant(
     (status, json)
 }
 
+/// Post a FIDO2 assertion grant whose `credential_id` names no stored
+/// credential and whose `user_handle` is an arbitrary UUID (the victim's).
+///
+/// The assertion fields are well-formed enough to pass `Bounds` and reach
+/// `lookup_and_verify_authenticator`, which keys on `credential_id` alone and
+/// returns `LookupError::NotFound("credential")` before `user_handle` is ever
+/// cryptographically verified. This is the attacker-driven path: with the
+/// pre-fix code it wrote a `login_failed` row attributed to `user_handle`,
+/// so five such bogus grants locked the `user_handle`'s owner out via
+/// `failed_login_burst` — from any org. Post-fix, the row is principal-less.
+async fn bogus_fido2_grant(
+    harness: &TestHarness,
+    asserted_user_id: &str,
+    client: &vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &[u8],
+) -> (u16, serde_json::Value) {
+    let (_challenge, state_jwt) = get_challenge(harness, client, pkcs8).await;
+    let user_handle = uuid::Uuid::parse_str(asserted_user_id)
+        .expect("asserted user_id must be a UUID")
+        .as_bytes()
+        .to_vec();
+    // A 16-byte (MIN-length) credential_id that names no stored credential.
+    let bogus_credential_id = vec![0u8; 16];
+    let auth_data = vec![0u8; 37];
+    let one_byte = vec![0u8; 1];
+    let assertion_payload = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": URL_SAFE_NO_PAD.encode(&bogus_credential_id),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
+        "signature": URL_SAFE_NO_PAD.encode(&one_byte),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&one_byte),
+        "user_handle": URL_SAFE_NO_PAD.encode(&user_handle),
+    });
+    let assertion =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+         &assertion={assertion}\
+         &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
+    let response = harness
+        .post_form("/oauth/token", &body)
+        .await
+        .expect("Failed to post token");
+    let status = response.status;
+    let json: serde_json::Value = response.json().unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
 /// Full FIDO2-grant scenario setup for aggregation policies.
 async fn grant_scenario(
     slugs: &[&str],
@@ -591,5 +647,110 @@ async fn test_issuance_rate_limit_under_cap_allows_and_records() {
         rows.len(),
         10,
         "the FIDO2 grant must write an oauth_token_issued audit row"
+    );
+}
+
+/// Cross-org lockout regression: an attacker who knows a victim's user UUID
+/// and holds any FAPI client authorized for `fido2-assertion` must NOT be able
+/// to lock the victim out of token issuance by submitting five bogus
+/// `fido2-assertion` grants naming the victim's UUID as `user_handle` and a
+/// non-existent `credential_id`. Each bogus grant is correctly rejected as
+/// `invalid_grant`; pre-fix it also wrote a `login_failed` row attributed to
+/// the victim, so five such grants tripped `failed_login_burst` on the
+/// victim's next legitimate grant — from any org, since the policy history
+/// query is keyed by `user_id` only. Post-fix the row is principal-less, so
+/// `failed_login_burst` never sees it and the victim's legitimate grant
+/// succeeds.
+#[tokio::test]
+async fn test_failed_login_burst_not_triggered_by_bogus_fido2_assertion() {
+    let (harness, victim, device, vclient, vpkcs8) = grant_scenario(
+        &["failed_login_burst"],
+        "lockout-victim.example.com",
+        "victim@example.com",
+    )
+    .await;
+
+    // Attacker: separate org, separate user, separate FAPI client. The
+    // shared audit table is the only coupling — the attacker holds no
+    // membership in the victim's org.
+    let attacker_org = harness
+        .create_org("lockout-attacker.example.com")
+        .await
+        .expect("attacker org");
+    let attacker = harness
+        .create_user_in_org("attacker@example.com", &attacker_org.id, false)
+        .await
+        .expect("attacker user");
+    let (aclient, apkcs8) = create_jwt_client(&harness, &attacker.id).await;
+
+    // Five bogus grants: EACH must be rejected as `invalid_grant` (no such
+    // credential). Spaced 2.5s apart to stay under the shared per-IP auth
+    // rate limiter (burst 8, 1 req/2s); in production an attacker spreads
+    // five requests across the 10-minute window.
+    for i in 0..5 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        }
+        let (status, json) = bogus_fido2_grant(&harness, &victim.id, &aclient, &apkcs8).await;
+        assert_eq!(
+            status, 400,
+            "bogus assertion must be rejected as invalid_grant: {json}"
+        );
+        assert_eq!(
+            json["error"].as_str().unwrap_or(""),
+            "invalid_grant",
+            "bogus assertion must be invalid_grant: {json}"
+        );
+    }
+
+    // No `login_failed` row may be attributed to the victim's UUID. Pre-fix
+    // this count was 5; the cross-org lockout vector rode on it.
+    let victim_rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            user_id: Some(victim.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit");
+    assert!(
+        victim_rows.is_empty(),
+        "five attacker-driven bogus grants must write NO login_failed rows \
+         attributed to the victim; got {victim_rows:?}"
+    );
+
+    // The audit trail IS preserved — as five principal-less rows whose NULL
+    // `user_id` can never drive a per-user lockout (temporal history skips
+    // principal-less rows).
+    let all_failures = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit");
+    let principal_less = all_failures.iter().filter(|r| r.user_id.is_none()).count();
+    assert_eq!(
+        principal_less, 5,
+        "five bogus grants must each leave a principal-less login_failed row; \
+         got {all_failures:?}"
+    );
+
+    // The victim's legitimate FIDO2 grant succeeds — `failed_login_burst`
+    // sees zero failures for the victim and does not deny.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let (status, json) = fido2_grant(&harness, &device, &victim.id, &vclient, &vpkcs8).await;
+    assert_eq!(
+        status, 200,
+        "victim's legitimate grant must succeed after attacker-driven bogus \
+         grants (no lockout): {json}"
+    );
+    assert!(
+        json.get("access_token").is_some(),
+        "victim's legitimate grant must issue a token: {json}"
     );
 }

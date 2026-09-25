@@ -595,9 +595,12 @@ async fn test_fido2_token_deactivated_owner_is_audited_in_org_feed() {
 }
 
 #[tokio::test]
-async fn test_fido2_token_owner_mismatch_is_audited_without_email() {
-    // The asserted user_handle is not the credential's owner and the
-    // assertion has not run, so the row names neither account's email.
+async fn test_fido2_token_owner_mismatch_is_audited_to_owner_without_email() {
+    // The asserted `user_handle` is not the credential's owner. The owner IS
+    // the proven principal (their credential was presented), so the
+    // `login_failed` row is attributed to the owner — never to the
+    // attacker-supplied asserted `user_handle`. The assertion has not run,
+    // so the row carries no email (NULL `email_domain`).
     let (app, state) = test_app().await;
     let owner = create_test_user(&state.store, "fido2-mismatch-owner@example.com").await;
     let credential_id = owner_credential_id(&state, &owner.id).await;
@@ -613,14 +616,76 @@ async fn test_fido2_token_owner_mismatch_is_audited_without_email() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    let rows = login_failed_rows(&state, &asserted.to_string(), None).await;
-    assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+    // The asserted (attacker-supplied) UUID is unverified, so NO row is
+    // attributed to it — the cross-org lockout vector this fix closes.
+    assert!(
+        login_failed_rows(&state, &asserted.to_string(), None)
+            .await
+            .is_empty(),
+        "a user_mismatch refusal must not be attributed to the asserted user_handle: {asserted}"
+    );
+
+    // The row lands on the credential's loaded owner, with no email.
+    let rows = login_failed_rows(&state, &owner.id, None).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one login_failed row attributed to the owner: {rows:?}"
+    );
     let row = rows.first().expect("one row");
     assert_eq!(failure_reason(row), "user_mismatch");
     assert_eq!(row.email_domain, None);
+}
+
+#[tokio::test]
+async fn test_fido2_token_unknown_credential_writes_no_user_attributed_row() {
+    // The attacker-driven path: a `credential_id` that names no stored
+    // credential returns `LookupError::NotFound` before the asserted
+    // `user_handle` is ever cryptographically verified. The bogus grant is
+    // rejected as `invalid_grant`, and NO `login_failed` row may be
+    // attributed to the asserted `user_handle` — otherwise an attacker who
+    // knows a victim's UUID could pin five rows on the victim and trip
+    // `failed_login_burst` from a different org.
+    let (app, state) = test_app().await;
+    let victim = create_test_user(&state.store, "fido2-unknown-cred@example.com").await;
+    let bogus = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    let asserted = uuid::Uuid::parse_str(&victim.id).expect("victim id is a uuid");
+
+    let (_, status, body) = post_assertion_with_credential_id(
+        &app,
+        &state,
+        "fido2-unknown-cred-client@example.com",
+        &bogus,
+        asserted,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "{body}");
+
+    // No row attributed to the victim's UUID.
     assert!(
-        login_failed_rows(&state, &owner.id, None).await.is_empty(),
-        "the refusal must not be attributed to the credential's owner"
+        login_failed_rows(&state, &victim.id, None).await.is_empty(),
+        "a NotFound refusal must not be attributed to the asserted user_handle"
+    );
+
+    // The audit trail is preserved as a principal-less row whose NULL
+    // `user_id` can never drive a per-user lockout (temporal history skips
+    // principal-less rows).
+    let all_failures = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        all_failures
+            .iter()
+            .any(|r| r.user_id.is_none() && failure_reason(r) == "credential_not_found"),
+        "a principal-less login_failed row with reason 'credential_not_found' must be recorded: \
+         {all_failures:?}"
     );
 }
 
