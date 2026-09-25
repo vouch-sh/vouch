@@ -23,6 +23,8 @@ Any handler or service that issues or accepts credentials without reading `user.
 - **Authorization code exchange** (`services/oidc/token.rs`): must check authenticator still exists.
 - **OIDC introspection** (`services/oidc/introspection.rs`): must return `inactive()` when `!user.active` — skip for `M2MAccessToken` session types.
 - **CLI key registration complete** (`handlers/keys.rs`): must check `account.active` before registering.
+- **RFC 7591 dynamic client registration with Bearer** (`handlers/oidc/register.rs`): must `load_active_user` on the Bearer token's `sub` before letting it own a newly registered client; a deactivated user's still-live token is `invalid_token` (RFC 6750 §3.1), and open registration (no Bearer) is unaffected.
+- **RFC 7592 registration access token lookup** (`services/oidc/registration.rs → lookup_and_verify_registration_token`): for clients with a `user_id`, must check `owner.active` after `db::get_user_by_id`; a deactivated or deleted owner is `invalid_token`, a DB error stays 500, and open-registration clients (no owner) are unaffected.
 - **SSO/OIDC enrollment** (`db/enrollment.rs → resolve_user`): must return `EnrollUserError::Deactivated` before any identity-binding side effect.
 - **Kubernetes/AWS/GitHub credential minting** (`services/integrations/`): must check `user.active`.
 
@@ -249,13 +251,14 @@ All files under `crates/vouch-server/src/` in these directories:
 - `handlers/keys.rs` — register_complete
 - `handlers/applications/mod.rs` — revoke_tokens_api
 - `handlers/oidc/introspect.rs` — JTI commit after private_key_jwt auth
+- `handlers/oidc/register.rs` — register (RFC 7591 active-owner check on Bearer token)
 - `services/auth.rs` — revoke_user_access, revoke_then_persist, exchange_jwt_bearer_grant
 - `services/oidc/token.rs` — exchange_authorization_code (authenticator existence check)
 - `services/oidc/fido2_grant.rs` — exchange_fido2_assertion
 - `services/oidc/exchange.rs` — exchange_token (subject and actor active checks)
 - `services/oidc/introspection.rs` — introspect_token, revoke_token
 - `services/oidc/authorization.rs` — replay revocation scope
-- `services/oidc/registration.rs` — misdirected-token revocation ownership
+- `services/oidc/registration.rs` — misdirected-token revocation ownership; `lookup_and_verify_registration_token` (RFC 7592 active-owner check)
 - `services/integrations/kubernetes.rs`, `aws.rs`, `github/` — credential minting
 - `db/enrollment.rs` — enroll_user_with_org (SSO deactivation gate)
 - `db/credentials.rs` — revoke_all_ssh_certificates_for_user (serial matching)
