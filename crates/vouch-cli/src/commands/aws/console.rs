@@ -300,7 +300,7 @@ mod tests {
             idc_application: None,
         };
         let result = get_idc_console_creds(
-            &crate::server_url::ServerUrl::for_test("https://example.com"),
+            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
             &args,
         )
         .await;

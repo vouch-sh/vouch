@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::key::ClientKey;
+use crate::server_url::ServerUrl;
 use vouch_common::protocol;
 
 /// RFC 7591 client registration request body.
@@ -104,7 +105,7 @@ const REGISTERED_GRANT_TYPES: &[&str] = &[
 /// # Arguments
 ///
 /// * `http_client` - The raw reqwest client for making the HTTP request.
-/// * `base_url` - The server base URL (e.g., `https://us.vouch.sh`).
+/// * `base_url` - The validated server base URL (e.g., `https://us.vouch.sh`).
 /// * `token` - Optional Bearer token. Pass `None` for open registration.
 /// * `key` - The generated ES256 client key.
 ///
@@ -114,7 +115,7 @@ const REGISTERED_GRANT_TYPES: &[&str] = &[
 /// cannot be parsed.
 pub async fn register_fapi_client(
     http_client: &reqwest::Client,
-    base_url: &str,
+    base_url: &ServerUrl,
     token: Option<&str>,
     key: &ClientKey,
 ) -> Result<RegistrationResult> {
@@ -144,7 +145,7 @@ pub async fn register_fapi_client(
         software_version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    let url = format!("{base_url}/oauth/register");
+    let url = format!("{}/oauth/register", base_url.as_str());
 
     // Build request — add Bearer auth only when a token is provided
     let mut builder = http_client.post(&url).json(&request);
@@ -195,11 +196,20 @@ pub async fn register_fapi_client(
 ///
 /// Callers should re-register on `Ok(false)` and gracefully degrade on
 /// `Err` (the subsequent login will fail with a clearer message anyway).
+///
+/// `registration_client_uri` came from the server's registration response
+/// and was stored in config; the token is sent to it only when it lies on
+/// `server`. Any other URI is reported as not registered, which makes the
+/// caller register again instead of sending the token elsewhere.
 pub async fn is_client_registered(
     http_client: &reqwest::Client,
+    server: &ServerUrl,
     registration_client_uri: &str,
     registration_access_token: &str,
 ) -> Result<bool, reqwest::Error> {
+    if !server.contains(registration_client_uri) {
+        return Ok(false);
+    }
     let response = http_client
         .get(registration_client_uri)
         .bearer_auth(registration_access_token)
@@ -237,6 +247,26 @@ impl std::fmt::Debug for RegistrationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registration access token goes only to a `registration_client_uri`
+    /// on the validated server. A URI elsewhere (for example, one edited into
+    /// config) is reported as not registered before any request is sent, so
+    /// the caller registers again instead of leaking the token. The port is
+    /// closed, so reaching the network would yield `Err`, not `Ok(false)`.
+    #[tokio::test]
+    #[expect(clippy::expect_used, reason = "test fixture URL literal is valid")]
+    async fn is_client_registered_does_not_send_the_token_off_server() {
+        let server =
+            ServerUrl::parse("https://vouch.example.com", false).expect("valid server URL");
+        let result = is_client_registered(
+            &reqwest::Client::new(),
+            &server,
+            "https://127.0.0.1:9/oauth/register/abc",
+            "registration-access-token",
+        )
+        .await;
+        assert!(matches!(result, Ok(false)), "got {result:?}");
+    }
 
     /// The CLI authenticates as a single registered FAPI client for every
     /// grant it exercises, so the server's RFC 6749 §5.2 `unauthorized_client`

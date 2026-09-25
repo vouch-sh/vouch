@@ -15,6 +15,7 @@ pub mod fido2;
 pub mod http;
 pub mod i18n;
 pub mod posture;
+pub mod server_url;
 
 // Re-export commonly used types
 pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult};

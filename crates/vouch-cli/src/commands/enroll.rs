@@ -56,7 +56,7 @@ pub(crate) async fn run(server: &crate::server_url::ServerUrl) -> Result<()> {
     // `/v1/keys/register/*` calls are signed and the server can only verify
     // them against the JWKS we register here.
     let pre_registered_client_id =
-        register_fapi_client_open(client.raw_client(), server.as_str(), &fapi_key).await?;
+        register_fapi_client_open(client.raw_client(), server, &fapi_key).await?;
 
     // Step 3: Request device code (RFC 8628 Section 3.1).
     let (device_response, client_id) = request_device_code(
@@ -196,7 +196,10 @@ async fn request_device_code(
             }
 
             let new_client_id = if let Some(key) = fapi_key {
-                Some(register_fapi_client_open(client.raw_client(), server, key).await?)
+                Some(
+                    register_fapi_client_open(client.raw_client(), client.server_url(), key)
+                        .await?,
+                )
             } else {
                 None
             };
@@ -239,7 +242,7 @@ async fn request_device_code(
 /// enrollment, so any failure is returned as an error.
 async fn register_fapi_client_open(
     http_client: &reqwest::Client,
-    base_url: &str,
+    base_url: &crate::server_url::ServerUrl,
     key: &vouch_cli::fapi::ClientKey,
 ) -> Result<String> {
     // Reuse the cached client_id only when it was registered with the *current*
@@ -248,7 +251,7 @@ async fn register_fapi_client_open(
     // signed `/v1/*` request would fail verification. In that case fall through
     // and re-register so the token binds to the key we actually sign with.
     if let Ok(mut config) = Config::load() {
-        config.set_server_url(base_url);
+        config.set_server_url(base_url.as_str());
         if let Some(id) = config.client_id() {
             let key_matches = config
                 .dpop_key_id()
