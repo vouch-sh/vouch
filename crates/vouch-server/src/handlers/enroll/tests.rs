@@ -2235,8 +2235,47 @@ async fn test_browser_register_start_refuses_deactivated_user() {
     .await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "deactivated user must not start key registration: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+#[tokio::test]
+async fn test_browser_register_start_refuses_vanished_user() {
+    // A user hard-deleted while their enrollment cookie survives must not
+    // begin key registration: the start guard rejects `Ok(None)` the same way
+    // it rejects `active=false`, matching the completion handler.
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (calls, hook) = install_user_vanish_hook(target.clone());
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_get_user_by_id_test_hook(hook);
+    })
+    .await;
+    let (user, cookie) = browser_user_session(&state, "vanished-start@example.com").await;
+    *target.lock().expect("activate hook") = Some(user.id.clone());
+
+    let (status, body) = http_post_json(
+        &app,
+        "/enroll/webauthn/start",
+        "{}",
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deleted user must not start key registration: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(error["message"], "User not found");
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the forced Ok(None) must have reached the handler's user read"
     );
 }
 

@@ -1286,20 +1286,13 @@ pub(crate) async fn browser_register_start(
 
     let user_email = token.email.clone().unwrap_or_default();
 
-    // A deactivated user's surviving enrollment cookie must not begin new
-    // hardware-key registration. `extract_session_from_cookie` deliberately
-    // skips the `active` check, so this mutating endpoint carries its own
-    // guard (per-handler point-fix pattern).
-    let account = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
-    }
+    // A deactivated or deleted user's surviving enrollment cookie must not
+    // begin new hardware-key registration. `extract_session_from_cookie`
+    // deliberately skips the `active` check, so this mutating endpoint carries
+    // its own guard. It uses `load_active_user`, like `browser_register_complete`
+    // and the CLI `register_start`/`register_complete`, so a missing user
+    // (`Ok(None)`) is refused the same way as `active=false`.
+    super::session::load_active_user(&state, &token.sub).await?;
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
