@@ -22,6 +22,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
+use crate::config::NonEmptySecret;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
 use crate::crypto::webauthn_verify::AuthTime;
@@ -67,9 +68,12 @@ use vouch_common::{
 /// Compute an HMAC-SHA256 tag over `message` using `secret`, returning the
 /// result base64url-encoded (no padding). Used by the certification test-mode
 /// login link to bind the link to a specific pending authorization ID.
-pub(crate) fn hmac_sha256_base64url(secret: &str, message: &str) -> String {
+///
+/// Takes a [`NonEmptySecret`] so the tag can never be keyed by the empty
+/// string, which anyone could reproduce.
+pub(crate) fn hmac_sha256_base64url(secret: &NonEmptySecret, message: &str) -> String {
     use aws_lc_rs::hmac;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.expose_secret().as_bytes());
     let tag = hmac::sign(&key, message.as_bytes());
     URL_SAFE_NO_PAD.encode(tag.as_ref())
 }
@@ -429,7 +433,7 @@ pub(crate) async fn login_page(
         &query.pending_auth,
     ) {
         (Some(secret), Some(pending_id)) => {
-            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let token = hmac_sha256_base64url(secret, pending_id);
             let encoded_pending_id = urlencoding::encode(pending_id);
             let encoded_token = urlencoding::encode(&token);
             Some(format!(
@@ -444,7 +448,7 @@ pub(crate) async fn login_page(
         &query.pending_auth,
     ) {
         (Some(secret), Some(pending_id)) => {
-            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let token = hmac_sha256_base64url(secret, pending_id);
             let encoded_pending_id = urlencoding::encode(pending_id);
             let encoded_token = urlencoding::encode(&token);
             Some(format!(

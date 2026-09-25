@@ -960,6 +960,32 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn test_webhook_empty_secret_refuses_empty_key_signature() {
+        // `VOUCH_GITHUB_WEBHOOK_SECRET=""` must leave webhook verification
+        // unconfigured. Were it loaded as an empty HMAC key, anyone could sign
+        // a payload with HMAC-SHA256("", body) and have it accepted.
+        let (app, state) = test_app().await;
+        let mut config = (**state.config()).clone();
+        config.github_webhook_secret = crate::config::NonEmptySecret::from_arg(Some(String::new()));
+        assert!(config.github_webhook_secret.is_none());
+        state.config.store(Arc::new(config));
+
+        let body = "{}";
+        let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, b"");
+        let forged = hex::encode(aws_lc_rs::hmac::sign(&key, body.as_bytes()).as_ref());
+        let header = format!("sha256={forged}");
+        let (status, _body) = http_request(
+            &app,
+            "POST",
+            "/api/webhooks/github",
+            Some(body.to_string()),
+            &[("X-Hub-Signature-256", &header), ("X-GitHub-Event", "ping")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
     // ========================================================================
     // Connect page tests
     // ========================================================================

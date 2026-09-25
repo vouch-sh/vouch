@@ -114,7 +114,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
                 tracing::info!("Prometheus metrics enabled at /metrics (bearer token required)");
                 let metrics_state = Arc::new(metrics::MetricsState {
                     handle,
-                    bearer_token: token.clone(),
+                    bearer_token: token.as_secret().clone(),
                 });
                 Router::new().route(
                     "/metrics",

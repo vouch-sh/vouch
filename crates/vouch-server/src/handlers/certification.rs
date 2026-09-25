@@ -88,6 +88,8 @@ pub(crate) async fn complete_login(
 ) -> Response {
     // ── 1. Token validation ───────────────────────────────────────────────
     let config = state.config();
+    // `NonEmptySecret` cannot hold "", so an HMAC keyed by the publicly-known
+    // empty string never reaches the comparison below.
     let secret = match config.certification_test_token.as_ref() {
         Some(s) => s,
         None => {
@@ -96,7 +98,7 @@ pub(crate) async fn complete_login(
         }
     };
 
-    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
+    let expected = hmac_sha256_base64url(secret, &query.pending_auth);
 
     let token_valid: bool = expected
         .as_bytes()
@@ -273,7 +275,7 @@ pub(crate) async fn deny_login(
         Some(s) => s,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let expected = hmac_sha256_base64url(secret.expose_secret(), &query.pending_auth);
+    let expected = hmac_sha256_base64url(secret, &query.pending_auth);
     let token_valid: bool = expected
         .as_bytes()
         .ct_eq(query.token.expose_secret().as_bytes())
@@ -443,12 +445,17 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::handlers::browser_login::hmac_sha256_base64url;
+
+    fn key(secret: &str) -> NonEmptySecret {
+        NonEmptySecret::new(secret.to_string().into()).expect("non-empty test key")
+    }
     use crate::handlers::oidc::build_authorization_success_redirect_url;
 
     #[test]
     fn test_hmac_valid_token_accepted() {
-        let secret = "test-secret-123";
+        let secret = &key("test-secret-123");
         let pending_auth = "aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee";
         let token = hmac_sha256_base64url(secret, pending_auth);
         let valid: bool = token.as_bytes().ct_eq(token.as_bytes()).into();
@@ -458,8 +465,8 @@ mod tests {
     #[test]
     fn test_hmac_wrong_secret_rejected() {
         let pending_auth = "aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee";
-        let token = hmac_sha256_base64url("correct-secret", pending_auth);
-        let expected = hmac_sha256_base64url("wrong-secret", pending_auth);
+        let token = hmac_sha256_base64url(&key("correct-secret"), pending_auth);
+        let expected = hmac_sha256_base64url(&key("wrong-secret"), pending_auth);
 
         let valid: bool = expected.as_bytes().ct_eq(token.as_bytes()).into();
         assert!(!valid, "Different secret must not match");
@@ -467,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_hmac_wrong_message_rejected() {
-        let secret = "test-secret-123";
+        let secret = &key("test-secret-123");
         let token = hmac_sha256_base64url(secret, "pending-auth-1");
         let expected = hmac_sha256_base64url(secret, "pending-auth-2");
 
@@ -589,8 +596,7 @@ mod tests {
             .certification_test_token
             .as_ref()
             .expect("token must be set")
-            .expose_secret()
-            .to_string();
+            .clone();
         let token = hmac_sha256_base64url(&secret, &pending_id);
 
         let resp = crate::test_utils::http_get_full(
@@ -676,8 +682,7 @@ mod tests {
             .certification_test_token
             .as_ref()
             .expect("cert token set")
-            .expose_secret()
-            .to_string();
+            .clone();
         let token = hmac_sha256_base64url(&secret, pending_id);
         let resp = crate::test_utils::http_get_full(
             app,
@@ -888,8 +893,7 @@ mod tests {
             .certification_test_token
             .as_ref()
             .expect("token must be set")
-            .expose_secret()
-            .to_string();
+            .clone();
         let token = hmac_sha256_base64url(&secret, &pending_id);
         format!("/certification/deny-login?pending_auth={pending_id}&token={token}")
     }
