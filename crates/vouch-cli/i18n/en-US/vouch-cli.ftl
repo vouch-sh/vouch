@@ -1154,15 +1154,12 @@ setup-aws-added-profile-block =
       https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-idc-existing-verified = Profile [{ $profile }] → assumable through AWS IAM Identity Center ({ $account } / { $permission_set })
-# Both the preferred profile name and its account-id-suffixed fallback are
-# already occupied by profiles vending *other* assignments, so discovery
-# could not write a profile for this assignment without overwriting another
-# account's working profile. Distinct from `setup-aws-sweep-assignment-missing`
-# (no profile at all exists for an assignment) and `setup-aws-idc-existing-
-# verified` (the existing profile vends this exact assignment).
-setup-aws-idc-name-taken = Skipped Identity Center assignment ({ $account } / { $permission_set }) — profile name [{ $profile }] and its account-id-suffixed fallback are already in use by profiles vending other accounts. Rename or remove a conflicting profile and re-run '{ -cmd } setup aws --discover' to configure this assignment.
+# Every candidate name for this assignment (the preferred name, then the
+# account-id and permission-set-hash suffixed fallbacks) is held by a profile
+# vending something else, so discovery did not overwrite it.
+setup-aws-idc-name-taken = Skipped Identity Center assignment ({ $account } / { $permission_set }) — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. Rename or remove a conflicting profile and re-run '{ -cmd } setup aws --discover' to configure this assignment.
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
-setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
+setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. The entitlement was NOT configured; rename or remove a conflicting profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
 setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (assumable)
 setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } exists and is assumable
@@ -1181,14 +1178,6 @@ setup-aws-entitlements-trust-remediation =
     AWS returns the same denial when the role does not currently exist (for example, infrastructure that is provisioned on demand).
 setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
 setup-aws-sweep-assignment-stale = Profile [{ $profile }] — its Identity Center assignment ({ $account } / { $permission_set }) no longer exists. The profile was kept; remove it manually if unwanted.
-# The portal returned an Identity Center assignment this run, but no
-# Vouch-managed profile (written this run or pre-existing) vends it. The
-# disambiguation guard in `plan_idc_write` should prevent name-collision
-# drops, so a message here is a real anomaly — every name candidate was
-# occupied by a profile vending a different account. Pair with the stale
-# check above: stale flags a profile the portal stopped returning; missing
-# flags an assignment the portal returned that has no profile.
-setup-aws-sweep-assignment-missing = No profile vends Identity Center assignment ({ $account } / { $permission_set }) returned by discovery — every name candidate was occupied by a profile vending a different account. Rename or remove a conflicting profile and re-run '{ -cmd } setup aws --discover' to configure it.
 setup-aws-sweep-summary = Checked { $checked } existing profiles; { $issues } not currently usable.
 # The existing-profile sweep found a `--role` (optionally `--via`) profile whose
 # target account no single configured organization covers, or which is
