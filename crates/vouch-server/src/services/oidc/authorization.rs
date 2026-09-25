@@ -528,6 +528,15 @@ pub enum AuthorizationSessionState {
         /// was recorded. It stays `None` all the way to the claim: row
         /// creation and code issuance are not authentication.
         auth_time: Option<i64>,
+        /// When the server-side session row was created, at full sub-second
+        /// precision.
+        ///
+        /// The pending-auth resume path treats a session as fresh for that
+        /// request only when this is after the pending record *and*
+        /// `auth_time` is no earlier than the pending's second. Row creation
+        /// alone is not authentication: the authorization_code grant writes a
+        /// new row carrying an older ceremony's `auth_time`.
+        session_created_at: Timestamp,
     },
     /// User needs to authenticate.
     NeedsAuth,
@@ -894,6 +903,7 @@ pub async fn check_session_for_authorization(
                 user: Box::new(validated.user),
                 authenticator: Box::new(authenticator),
                 auth_time: validated.auth_time,
+                session_created_at: validated.session_created_at,
             })
         }
         None => Ok(AuthorizationSessionState::NeedsAuth),

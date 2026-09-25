@@ -440,6 +440,9 @@ async fn check_session_and_authorize(
             user,
             authenticator,
             auth_time: session_auth_time,
+            // The direct path enforces max_age unconditionally (no freshness
+            // guard), so the session row's creation instant is not needed here.
+            session_created_at: _,
         }) => {
             authorize_authenticated_user(
                 state,
@@ -1273,6 +1276,7 @@ async fn handle_pending_auth(
             user,
             authenticator,
             auth_time: session_auth_time,
+            session_created_at,
         }) => {
             // The single-use pending claim is spent inside
             // `complete_pending_auth`, after the post-login validations
@@ -1287,6 +1291,7 @@ async fn handle_pending_auth(
                 &pending,
                 &user,
                 session_auth_time,
+                session_created_at,
                 &authenticator,
                 auth_code_lifetime,
                 arrival,
@@ -1342,6 +1347,7 @@ async fn complete_pending_auth(
     pending: &db::PendingOAuthAuthorization,
     user: &User,
     session_auth_time: Option<i64>,
+    session_created_at: jiff::Timestamp,
     authenticator: &Authenticator,
     auth_code_lifetime: i64,
     arrival: ArrivalTime,
@@ -1356,26 +1362,37 @@ async fn complete_pending_auth(
         .into_response();
     }
 
-    // Validate max_age: if the pending request specified max_age,
-    // verify the session is not older than that threshold (RFC 9470).
+    // Validate max_age. OIDC Core 3.1.2.1: "If the elapsed time is greater
+    // than this value, the OP MUST attempt to actively re-authenticate the
+    // End-User." and "Note that "max_age=0" is equivalent to "prompt=login"."
     //
-    // A user who authenticated after this authorization request began did so
-    // *for this request*, which satisfies any max_age (including 0) by
-    // definition — no elapsed-seconds arithmetic can say otherwise. Checking
-    // timestamps directly keeps the outcome independent of how long the
-    // post-login browser navigation took: with max_age=0, a wall-clock age
-    // check alone would fail again whenever that round trip crosses an
-    // integer-second boundary.
+    // A session is *fresh for this request* only when both hold:
     //
-    // Both the comparison and the age measure from the ceremony rather than
-    // from session-row creation, since max_age is an authentication age
-    // (OIDC Core §2). They coincide for a session minted in the same request
-    // as its ceremony; measuring from the row would let a session written
-    // during this request on the strength of an older ceremony skip the
-    // check.
+    // - its row was created after the pending record, and
+    // - its ceremony (`auth_time`) is no earlier than the pending's second.
+    //
+    // Neither alone is enough. The row alone is not: the authorization_code
+    // grant mints a new row that carries the *old* ceremony's `auth_time`, so
+    // a code obtained with an hour-old session and exchanged after the
+    // pending was stored yields a row newer than the pending. `auth_time`
+    // alone is not: it is an integer second, so a ceremony for an earlier
+    // request in the same second as the pending would floor equal to it. A
+    // fresh session satisfies any max_age (including 0) by definition, and
+    // skipping the elapsed check for it keeps max_age=0 completable however
+    // long the post-login navigation took.
+    //
+    // Every other session is checked by elapsed time from `auth_time`, which
+    // is an authentication age and so measures from the ceremony, not from
+    // row creation.
+    //
+    // Known gap: a ceremony in the same second as the pending but before it,
+    // followed by a code-grant mint after it, still reads as fresh. Closing
+    // it needs a sub-second ceremony instant, which the session does not
+    // record.
     //
     // A session with no recorded ceremony instant — written before the field
-    // existed — cannot answer "how long ago", so a request that asks the
+    // existed, or one whose verification was inherited through RFC 8693
+    // exchange — cannot answer "how long ago", so a request that asks the
     // question gets re-authentication rather than a substituted value.
     if pending.max_age.is_some() && session_auth_time.is_none() {
         return resolved
@@ -1389,14 +1406,14 @@ async fn complete_pending_auth(
     }
     if let Some(max_age) = pending.max_age
         && let Some(session_auth_time) = session_auth_time
-        && session_auth_time < pending.created_at.as_second()
+        && !(session_created_at > pending.created_at
+            && session_auth_time >= pending.created_at.as_second())
     {
         // Reject only when the session age *exceeds* max_age (strict `>`).
-        // A session exactly at the threshold (age == max_age) satisfies the
-        // requirement: it is "not older than" the threshold. Using `>=`
-        // here would reject the boundary and make max_age=0 impossible to
-        // complete even for a session created during this request. This is
-        // consistent with the established pattern in keys.rs and dpop.rs.
+        // A session exactly at the threshold (age == max_age) is "not older
+        // than" it and satisfies the requirement; using `>=` would reject the
+        // boundary. This is consistent with the established pattern in
+        // keys.rs and dpop.rs.
         //
         // The elapsed time is compared at full precision, matching the
         // direct `authorize_authenticated_user` path. Truncating "now" to

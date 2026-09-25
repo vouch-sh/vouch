@@ -864,6 +864,30 @@ impl DocumentStore {
         &self.pool
     }
 
+    /// Test-only: overwrite a document's `created_at` stamp.
+    ///
+    /// Rows are stamped from the ambient clock, so a test that needs two rows
+    /// in a chosen order within one second places them with this rather than
+    /// waiting on the wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(test)]
+    pub(crate) async fn set_created_at_for_test(
+        &self,
+        id: &str,
+        created_at: Timestamp,
+    ) -> Result<u64> {
+        let stmt = Query::update()
+            .table(Documents::Table)
+            .value(Documents::CreatedAt, created_at.to_string())
+            .and_where(Expr::col(Documents::Id).eq(id))
+            .to_owned();
+        let result = crate::db_execute!(&self.pool, stmt)?;
+        Ok(result.rows_affected())
+    }
+
     /// Whether documents are encrypted at rest (vs. the dev plaintext mode).
     ///
     /// Per-org issuer signing keys are only created when this is `true`, so a
