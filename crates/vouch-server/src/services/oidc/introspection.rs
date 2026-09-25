@@ -388,19 +388,16 @@ pub async fn revoke_token(
             // M2M revocation records an OAuth-family `OauthTokenRevoked`
             // event, not an auth-family `Logout`. The JWT `sub` (and, for an
             // expired row, the session's `user_id`) is the OAuth `client_id`,
-            // not a user, and there is no human email — mirroring M2M
-            // issuance, which records `OauthTokenIssued` with `user_id =
-            // None`. `user_id = None` keeps the `client_id` out of the
-            // `user_id` column (the admin "revoke all tokens" path and
-            // `get_oauth_usage_stats` expect `user_id = None` for client
-            // events), and resolving the client's own org domain for
-            // `email_domain` keeps the row in the org-scoped audit feed —
-            // the `Logout` row this replaces had a NULL `email_domain` and
-            // was filtered out of every org-scoped consumer (SIEM API +
-            // admin UI). The audit identifier is the application's document
-            // id (the same value issuance and the admin revocation path
-            // stamp), so per-application usage stats — which filter by
-            // `oauth_client_id == app_id` — count per-token revocations.
+            // not a user, and there is no human email, so the event carries
+            // `user_id = None`, mirroring M2M issuance, which records
+            // `OauthTokenIssued` the same way. Resolving the client's own org
+            // domain for `email_domain` keeps the row in the org-scoped audit
+            // feed (SIEM API + admin UI); the `Logout` row this replaces had
+            // a NULL `email_domain` and was filtered out of both. The audit
+            // identifier is the application's document id (the value
+            // issuance and the admin revocation path stamp), so per-
+            // application usage stats, which filter only on
+            // `oauth_client_id`, count per-token revocations.
             let (oauth_client_id, audit_org_domain): (String, Option<String>) =
                 match db::get_oauth_client_by_client_id(&state.store, caller_client_id).await {
                     Ok(Some(client)) => {

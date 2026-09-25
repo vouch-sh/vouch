@@ -336,9 +336,14 @@ async fn test_rfc7009_revoke_expired_row_records_logout() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "revoke-expired@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let (token, token_hash) =
-        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client.client_id))
-            .await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &user.id,
+        &user.email,
+        Some(&client.client_id),
+        db::SessionPurpose::OAuthAccessToken,
+    )
+    .await;
 
     assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
 
@@ -397,9 +402,14 @@ async fn test_rfc7009_revoke_expired_row_of_another_client_is_refused() {
     let user = create_test_user(&state.store, "revoke-expired-cross@example.com").await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let (token, token_hash) =
-        create_test_expired_session_row(&state, &user.id, &user.email, Some(&client_a.client_id))
-            .await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &user.id,
+        &user.email,
+        Some(&client_a.client_id),
+        db::SessionPurpose::OAuthAccessToken,
+    )
+    .await;
 
     assert_eq!(
         revoke(&app, &client_b, &token).await,
@@ -1054,7 +1064,14 @@ async fn repro_m2m_revoke_expired_row_records_oauth_token_revoked() {
 
     // Seed an expired (non-decoding) M2M session row keyed by an opaque
     // cookie, matching the shape a reaper has not yet cleaned up.
-    let (token, token_hash) = create_test_expired_m2m_session_row(&state, &client.client_id).await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &client.client_id,
+        "",
+        Some(&client.client_id),
+        db::SessionPurpose::M2MAccessToken,
+    )
+    .await;
 
     assert_eq!(revoke(&app, &client, &token).await, StatusCode::OK);
     assert!(
